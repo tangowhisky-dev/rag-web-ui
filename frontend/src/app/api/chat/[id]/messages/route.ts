@@ -38,8 +38,6 @@ export async function POST(
       "Cache-Control": "no-cache, no-transform",
       // Tell any intermediate proxies/nginx not to buffer
       "X-Accel-Buffering": "no",
-      // Required by the Vercel AI SDK useChat hook
-      "x-vercel-ai-data-stream": "v1",
     },
   });
 }
