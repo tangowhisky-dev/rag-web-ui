@@ -3,9 +3,12 @@ import React, {
   useMemo,
   useEffect,
   useState,
+  useRef,
+  useCallback,
   ClassAttributes,
 } from "react";
 import { AnchorHTMLAttributes } from "react";
+import { ChevronDown, ChevronRight, Brain } from "lucide-react";
 import {
   Popover,
   PopoverContent,
@@ -34,6 +37,80 @@ const useDebouncedValue = <T,>(value: T, delay: number): T => {
   }, [value, delay]);
 
   return debouncedValue;
+};
+
+const ThinkBlock: FC<{ content: string; isComplete: boolean }> = ({
+  content,
+  isComplete,
+}) => {
+  const [isExpanded, setIsExpanded] = useState(!isComplete);
+  const [elapsedMs, setElapsedMs] = useState(0);
+  const startTimeRef = useRef<number>(Date.now());
+  const finalMsRef = useRef<number | null>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+
+  // Single effect: run interval while thinking, freeze + collapse when done.
+  // We never call setElapsedMs synchronously inside the completion branch to
+  // avoid triggering the "Maximum update depth exceeded" cascade.
+  useEffect(() => {
+    if (isComplete) {
+      // Record final elapsed time into a ref (no setState = no re-render loop)
+      if (finalMsRef.current === null) {
+        finalMsRef.current = Date.now() - startTimeRef.current;
+      }
+      const timer = setTimeout(() => setIsExpanded(false), 1500);
+      return () => clearTimeout(timer);
+    }
+    // Tick every 100 ms while the model is still thinking
+    const interval = setInterval(() => {
+      setElapsedMs(Date.now() - startTimeRef.current);
+    }, 100);
+    return () => clearInterval(interval);
+  }, [isComplete]);
+
+  // Auto-scroll to bottom as content streams in
+  useEffect(() => {
+    if (!isComplete && isExpanded && contentRef.current) {
+      contentRef.current.scrollTop = contentRef.current.scrollHeight;
+    }
+  }, [content, isComplete, isExpanded]);
+
+  const displayMs = finalMsRef.current ?? elapsedMs;
+  const seconds = displayMs / 1000;
+  const label = isComplete
+    ? seconds < 1
+      ? "Thought for less than a second"
+      : `Thought for ${seconds.toFixed(1)} seconds`
+    : `Thinking... (${seconds.toFixed(1)}s)`;
+
+  return (
+    <div className="my-2 rounded-md border border-gray-100 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/40 w-full">
+      <button
+        onClick={() => setIsExpanded(!isExpanded)}
+        className="flex items-center gap-1.5 w-full px-3 py-1.5 text-left rounded-t-md hover:bg-gray-100 dark:hover:bg-gray-700/40 transition-colors group"
+      >
+        {isExpanded ? (
+          <ChevronDown className="h-3 w-3 text-gray-400 shrink-0" />
+        ) : (
+          <ChevronRight className="h-3 w-3 text-gray-400 shrink-0" />
+        )}
+        <Brain className={`h-3 w-3 shrink-0 ${isComplete ? "text-gray-400" : "text-blue-400 animate-pulse"}`} />
+        <span className="text-xs text-gray-400 font-medium select-none">
+          {label}
+        </span>
+      </button>
+      {isExpanded && (
+        <div
+          ref={contentRef}
+          className="px-3 pb-2 pt-1 max-h-48 overflow-y-auto overflow-x-hidden border-t border-gray-100 dark:border-gray-700"
+        >
+          <pre className="text-[11px] leading-[1.45] text-gray-400 dark:text-gray-500 whitespace-pre-wrap break-words font-sans m-0">
+            {content}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
 };
 
 interface Citation {
@@ -67,10 +144,31 @@ export const Answer: FC<{
   // Debounce citations to prevent rapid API calls during streaming
   const debouncedCitations = useDebouncedValue(citations, 300);
 
-  const processedMarkdown = useMemo(() => {
-    return markdown
-      .replace(/<think>/g, "## 💭 深度思考\n```think")
-      .replace(/<\/think>/g, "```");
+  // Keep refs so CitationLink can read the latest data without changing its
+  // identity (avoiding react-markdown remounting all <a> elements every render)
+  const citationsRef = useRef(debouncedCitations);
+  const citationInfoMapRef = useRef(citationInfoMap);
+  citationsRef.current = debouncedCitations;
+  citationInfoMapRef.current = citationInfoMap;
+
+  const parsedContent = useMemo(() => {
+    const completeMatch = markdown.match(/^<think>([\s\S]*?)<\/think>([\s\S]*)$/);
+    if (completeMatch) {
+      return {
+        thinkContent: completeMatch[1].trim(),
+        isThinkingComplete: true,
+        answerText: completeMatch[2].trim(),
+      };
+    }
+    const openMatch = markdown.match(/^<think>([\s\S]*)$/);
+    if (openMatch) {
+      return {
+        thinkContent: openMatch[1],
+        isThinkingComplete: false,
+        answerText: "",
+      };
+    }
+    return { thinkContent: null, isThinkingComplete: false, answerText: markdown };
   }, [markdown]);
 
   useEffect(() => {
@@ -114,86 +212,97 @@ export const Answer: FC<{
     }
   }, [debouncedCitations]);
 
-  const CitationLink = useMemo(
-    () =>
-      (
-        props: ClassAttributes<HTMLAnchorElement> &
-          AnchorHTMLAttributes<HTMLAnchorElement>
-      ) => {
-        const citationId = props.href?.match(/^(\d+)$/)?.[1];
-        const citation = citationId
-          ? debouncedCitations[parseInt(citationId) - 1]
-          : null;
+  // Stable component reference — never recreated, reads current data from refs.
+  // This prevents react-markdown from unmounting/remounting all <a> elements
+  // whenever citationInfoMap or debouncedCitations change, which was causing
+  // Radix Popover state cascades and "Maximum update depth exceeded".
+  const CitationLink = useCallback(
+    (
+      props: ClassAttributes<HTMLAnchorElement> &
+        AnchorHTMLAttributes<HTMLAnchorElement>
+    ) => {
+      const citationId = props.href?.match(/^(\d+)$/)?.[1];
+      const citation = citationId
+        ? citationsRef.current[parseInt(citationId) - 1]
+        : null;
 
-        if (!citation) {
-          return <a>[{props.href}]</a>;
-        }
+      if (!citation) {
+        return <a>[{props.href}]</a>;
+      }
 
-        const citationInfo =
-          citationInfoMap[
-            `${citation.metadata.kb_id}-${citation.metadata.document_id}`
-          ];
+      const citationInfo =
+        citationInfoMapRef.current[
+          `${citation.metadata.kb_id}-${citation.metadata.document_id}`
+        ];
 
-        return (
-          <Popover>
-            <PopoverTrigger asChild>
-              <a
-                {...props}
-                href="#"
-                role="button"
-                className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs font-medium text-blue-600 bg-blue-50 rounded hover:bg-blue-100 transition-colors relative"
-              >
-                <span className="absolute -top-3 -right-1">[{props.href}]</span>
-              </a>
-            </PopoverTrigger>
-            <PopoverContent
-              side="top"
-              align="start"
-              className="max-w-2xl w-[calc(100vw-100px)] p-4 rounded-lg shadow-lg"
+      return (
+        <Popover>
+          <PopoverTrigger asChild>
+            <a
+              {...props}
+              href="#"
+              role="button"
+              className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs font-medium text-blue-600 bg-blue-50 rounded hover:bg-blue-100 transition-colors relative"
             >
-              <div className="text-sm space-y-3">
-                {citationInfo && (
-                  <div className="flex items-center gap-2 text-xs font-medium text-gray-700 bg-gray-50 p-2 rounded">
-                    <div className="w-5 h-5 flex items-center justify-center">
-                      <FileIcon
-                        extension={
-                          citationInfo.document.file_name.split(".").pop() || ""
-                        }
-                        color="#E2E8F0"
-                        labelColor="#94A3B8"
-                      />
-                    </div>
-                    <span className="truncate">
-                      {citationInfo.knowledge_base.name} /{" "}
-                      {citationInfo.document.file_name}
-                    </span>
+              <span className="absolute -top-3 -right-1">[{props.href}]</span>
+            </a>
+          </PopoverTrigger>
+          <PopoverContent
+            side="top"
+            align="start"
+            className="max-w-2xl w-[calc(100vw-100px)] p-4 rounded-lg shadow-lg"
+          >
+            <div className="text-sm space-y-3">
+              {citationInfo && (
+                <div className="flex items-center gap-2 text-xs font-medium text-gray-700 bg-gray-50 p-2 rounded">
+                  <div className="w-5 h-5 flex items-center justify-center">
+                    <FileIcon
+                      extension={
+                        citationInfo.document.file_name.split(".").pop() || ""
+                      }
+                      color="#E2E8F0"
+                      labelColor="#94A3B8"
+                    />
                   </div>
-                )}
-                <Divider />
-                <p className="text-gray-700 leading-relaxed">{citation.text}</p>
-                <Divider />
-                {Object.keys(citation.metadata).length > 0 && (
-                  <div className="text-xs text-gray-500 bg-gray-50 p-2 rounded">
-                    <div className="font-medium mb-2">Debug Info:</div>
-                    <div className="space-y-1">
-                      {Object.entries(citation.metadata).map(([key, value]) => (
-                        <div key={key} className="flex">
-                          <span className="font-medium min-w-[100px]">
-                            {key}:
-                          </span>
-                          <span className="text-gray-600">{String(value)}</span>
-                        </div>
-                      ))}
-                    </div>
+                  <span className="truncate">
+                    {citationInfo.knowledge_base.name} /{" "}
+                    {citationInfo.document.file_name}
+                  </span>
+                </div>
+              )}
+              <Divider />
+              <p className="text-gray-700 leading-relaxed">{citation.text}</p>
+              <Divider />
+              {Object.keys(citation.metadata).length > 0 && (
+                <div className="text-xs text-gray-500 bg-gray-50 p-2 rounded">
+                  <div className="font-medium mb-2">Debug Info:</div>
+                  <div className="space-y-1">
+                    {Object.entries(citation.metadata).map(([key, value]) => (
+                      <div key={key} className="flex">
+                        <span className="font-medium min-w-[100px]">
+                          {key}:
+                        </span>
+                        <span className="text-gray-600">{String(value)}</span>
+                      </div>
+                    ))}
                   </div>
-                )}
-              </div>
-            </PopoverContent>
-          </Popover>
-        );
-      },
-    [debouncedCitations, citationInfoMap]
+                </div>
+              )}
+            </div>
+          </PopoverContent>
+        </Popover>
+      );
+    },
+    [] // stable — reads from refs
   );
+
+  // Memoize the components object so react-markdown never sees a new reference
+  const markdownComponents = useMemo(() => ({ a: CitationLink }), [CitationLink]);
+
+  // Key changes only when citation info is first fetched; this forces a single
+  // controlled remount of <Markdown> (so popover content updates after the
+  // async fetch), instead of continuous uncontrolled remounts during streaming.
+  const citationInfoKey = Object.keys(citationInfoMap).sort().join(",");
 
   if (!markdown) {
     return (
@@ -209,15 +318,22 @@ export const Answer: FC<{
 
   return (
     <div className="prose prose-sm max-w-full">
-      <Markdown
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeHighlight]}
-        components={{
-          a: CitationLink,
-        }}
-      >
-        {processedMarkdown}
-      </Markdown>
+      {parsedContent.thinkContent !== null && (
+        <ThinkBlock
+          content={parsedContent.thinkContent}
+          isComplete={parsedContent.isThinkingComplete}
+        />
+      )}
+      {parsedContent.answerText && (
+        <Markdown
+          key={citationInfoKey}
+          remarkPlugins={[remarkGfm]}
+          rehypePlugins={[rehypeHighlight]}
+          components={markdownComponents}
+        >
+          {parsedContent.answerText}
+        </Markdown>
+      )}
     </div>
   );
 };

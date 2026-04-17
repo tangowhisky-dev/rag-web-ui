@@ -2,10 +2,17 @@
 module.exports = {
   output: "standalone",
   experimental: {
-    // This is needed for standalone output to work correctly
     outputFileTracingRoot: undefined,
     outputStandalone: true,
     skipMiddlewareUrlNormalize: true,
     skipTrailingSlashRedirect: true,
+  },
+  async rewrites() {
+    return [
+      {
+        source: "/api/:path*",
+        destination: `${process.env.BACKEND_URL || "http://backend:8000"}/api/:path*`,
+      },
+    ];
   },
 };

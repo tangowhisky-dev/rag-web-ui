@@ -1,7 +1,6 @@
 import logging
 
 from app.api.api_v1.api import api_router
-from app.api.openapi.api import router as openapi_router
 from app.core.config import settings
 from app.core.minio import init_minio
 from app.startup.migarate import DatabaseMigrator
@@ -16,11 +15,11 @@ app = FastAPI(
     title=settings.PROJECT_NAME,
     version=settings.VERSION,
     openapi_url=f"{settings.API_V1_STR}/openapi.json",
+    redirect_slashes=False,
 )
 
 # Include routers
 app.include_router(api_router, prefix=settings.API_V1_STR)
-app.include_router(openapi_router, prefix="/openapi")
 
 
 @app.on_event("startup")

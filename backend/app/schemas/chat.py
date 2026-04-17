@@ -1,5 +1,5 @@
-from pydantic import BaseModel
-from typing import List, Optional
+from pydantic import BaseModel, model_validator
+from typing import Any, List, Optional
 from datetime import datetime
 
 class MessageBase(BaseModel):
@@ -34,6 +34,13 @@ class ChatResponse(ChatBase):
     updated_at: datetime
     messages: List[MessageResponse] = []
     knowledge_base_ids: List[int] = []
+
+    @model_validator(mode='before')
+    @classmethod
+    def extract_kb_ids(cls, data: Any) -> Any:
+        if hasattr(data, 'knowledge_bases'):
+            data.__dict__['knowledge_base_ids'] = [kb.id for kb in data.knowledge_bases]
+        return data
 
     class Config:
         from_attributes = True 

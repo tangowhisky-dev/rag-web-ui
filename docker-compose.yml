@@ -26,9 +26,10 @@ services:
 
   frontend:
     build: ./frontend
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
+    ports:
+      - "3000:3000"
+    environment:
+      - BACKEND_URL=http://backend:8000
     networks:
       - app_network
 
@@ -100,18 +101,6 @@ services:
     networks:
       - app_network
 
-  nginx:
-    image: nginx:alpine
-    ports:
-      - "80:80"
-    volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
-    depends_on:
-      - frontend
-      - backend
-      - minio
-    networks:
-      - app_network
 
 volumes:
   mysql_data:

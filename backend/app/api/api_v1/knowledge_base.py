@@ -2,6 +2,8 @@ import hashlib
 from typing import List, Any, Dict
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks, Query
 from sqlalchemy.orm import Session
+import chromadb
+from langchain_openai import OpenAIEmbeddings
 from langchain_chroma import Chroma
 from sqlalchemy import text
 import logging
@@ -26,8 +28,7 @@ from app.services.document_processor import process_document_background, upload_
 from app.core.config import settings
 from app.core.minio import get_minio_client
 from minio.error import MinioException
-from app.services.vector_store import VectorStoreFactory
-from app.services.embedding.embedding_factory import EmbeddingsFactory
+
 
 router = APIRouter()
 
@@ -165,12 +166,9 @@ async def delete_knowledge_base(
         
         # Initialize services
         minio_client = get_minio_client()
-        embeddings = EmbeddingsFactory.create()
-
-        vector_store = VectorStoreFactory.create(
-            store_type=settings.VECTOR_STORE_TYPE,
-            collection_name=f"kb_{kb_id}",
-            embedding_function=embeddings,
+        chroma_client = chromadb.HttpClient(
+            host=settings.CHROMA_DB_HOST,
+            port=settings.CHROMA_DB_PORT,
         )
         
         # Clean up external resources first
@@ -189,7 +187,7 @@ async def delete_knowledge_base(
         
         # 2. Clean up vector store
         try:
-            vector_store._store.delete_collection(f"kb_{kb_id}")
+            chroma_client.delete_collection(f"kb_{kb_id}")
             logger.info(f"Cleaned up vector store for knowledge base {kb_id}")
         except Exception as e:
             cleanup_errors.append(f"Failed to clean up vector store: {str(e)}")
@@ -556,14 +554,22 @@ async def test_retrieval(
                 detail=f"Knowledge base {request.kb_id} not found",
             )
         
-        embeddings = EmbeddingsFactory.create()
-        
-        vector_store = VectorStoreFactory.create(
-            store_type=settings.VECTOR_STORE_TYPE,
+        embeddings = OpenAIEmbeddings(
+            openai_api_key=settings.OPENAI_API_KEY,
+            openai_api_base=settings.OPENAI_API_BASE,
+            model=settings.OPENAI_EMBEDDINGS_MODEL,
+            check_embedding_ctx_length=False,
+        )
+        chroma_client = chromadb.HttpClient(
+            host=settings.CHROMA_DB_HOST,
+            port=settings.CHROMA_DB_PORT,
+        )
+        vector_store = Chroma(
+            client=chroma_client,
             collection_name=f"kb_{request.kb_id}",
             embedding_function=embeddings,
         )
-        
+
         results = vector_store.similarity_search_with_score(request.query, k=request.top_k)
         
         response = []

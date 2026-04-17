@@ -485,7 +485,7 @@ qa_system_prompt = (
       "Please limit to 1024 tokens. Do not give any information that is not related to the question, and do not repeat. "
       "Say 'information is missing on' followed by the related topic, if the given context do not provide sufficient information. "
       "If a sentence draws from multiple contexts, please list all applicable citations, like [citation:1][citation:2]. "
-      "Other than code and specific names and citations, your answer must be written in the same language as the question. "
+      "Your answer must be written in English only. Do not respond in any other language. "
       "Be concise.\n\nContext: {context}\n\n"
       "Remember: Cite contexts by their position number (1 for first context, 2 for second, etc.) and don't blindly "
       "repeat the contexts verbatim."

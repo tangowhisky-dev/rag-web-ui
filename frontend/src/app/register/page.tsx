@@ -28,31 +28,10 @@ export default function RegisterPage() {
   };
 
   const validatePassword = (password: string) => {
-    if (password.length < 8) {
+    if (password.length < 6) {
       setValidationErrors((prev) => ({
         ...prev,
-        password: "Password must be at least 8 characters long",
-      }));
-      return false;
-    }
-    if (!/[A-Z]/.test(password)) {
-      setValidationErrors((prev) => ({
-        ...prev,
-        password: "Password must contain at least one uppercase letter",
-      }));
-      return false;
-    }
-    if (!/[a-z]/.test(password)) {
-      setValidationErrors((prev) => ({
-        ...prev,
-        password: "Password must contain at least one lowercase letter",
-      }));
-      return false;
-    }
-    if (!/[0-9]/.test(password)) {
-      setValidationErrors((prev) => ({
-        ...prev,
-        password: "Password must contain at least one number",
+        password: "Password must be at least 6 characters long",
       }));
       return false;
     }

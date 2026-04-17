@@ -2,8 +2,7 @@
 
 import { useEffect, useRef, useState, useMemo } from "react";
 import { useRouter } from "next/navigation";
-import { useChat } from "ai/react";
-import { Send, User, Bot } from "lucide-react";
+import { Send, User } from "lucide-react";
 import DashboardLayout from "@/components/layout/dashboard-layout";
 import { api, ApiError } from "@/lib/api";
 import { useToast } from "@/components/ui/use-toast";
@@ -35,37 +34,14 @@ interface Citation {
   metadata: Record<string, any>;
 }
 
-// Extend the default useChat message type
-declare module "ai/react" {
-  interface Message {
-    citations?: Citation[];
-  }
-}
-
 export default function ChatPage({ params }: { params: { id: string } }) {
   const router = useRouter();
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const { toast } = useToast();
   const [isInitialLoad, setIsInitialLoad] = useState(true);
-
-  const {
-    messages,
-    data,
-    input,
-    handleInputChange,
-    handleSubmit,
-    isLoading,
-    setMessages,
-  } = useChat({
-    api: `/api/chat/${params.id}/messages`,
-    headers: {
-      Authorization: `Bearer ${
-        typeof window !== "undefined"
-          ? window.localStorage.getItem("token")
-          : ""
-      }`,
-    },
-  });
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [input, setInput] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
 
   useEffect(() => {
     if (isInitialLoad) {
@@ -152,44 +128,6 @@ export default function ChatPage({ params }: { params: { id: string } }) {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
-  const processMessageContent = (message: Message): Message => {
-    if (message.role !== "assistant" || !message.content) return message;
-
-    try {
-      if (!message.content.includes("__LLM_RESPONSE__")) {
-        return message;
-      }
-
-      const [base64Part, responseText] =
-        message.content.split("__LLM_RESPONSE__");
-
-      const contextData = base64Part
-        ? (JSON.parse(atob(base64Part.trim())) as {
-            context: Array<{
-              page_content: string;
-              metadata: Record<string, any>;
-            }>;
-          })
-        : null;
-
-      const citations: Citation[] =
-        contextData?.context.map((citation, index) => ({
-          id: index + 1,
-          text: citation.page_content,
-          metadata: citation.metadata,
-        })) || [];
-
-      return {
-        ...message,
-        content: responseText || "",
-        citations,
-      };
-    } catch (e) {
-      console.error("Failed to process message:", e);
-      return message;
-    }
-  };
-
   const markdownParse = (text: string) => {
     return text
       .replace(/\[\[([cC])itation/g, "[citation")
@@ -198,46 +136,186 @@ export default function ChatPage({ params }: { params: { id: string } }) {
       .replace(/\[[cC]itation:(\d+)]/g, "[citation]($1)");
   };
 
+  const parseContextCitations = (base64Part: string): Citation[] => {
+    if (!base64Part) {
+      return [];
+    }
+
+    const contextData = JSON.parse(atob(base64Part.trim())) as {
+      context: Array<{
+        page_content: string;
+        metadata: Record<string, any>;
+      }>;
+    };
+
+    return (
+      contextData.context.map((citation, index) => ({
+        id: index + 1,
+        text: citation.page_content,
+        metadata: citation.metadata,
+      })) || []
+    );
+  };
+
+  const flushToBrowser = async () => {
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => resolve());
+    });
+  };
+
+  const appendAssistantChunk = (
+    assistantId: string,
+    updater: (message: Message) => Message
+  ) => {
+    setMessages((prev) =>
+      prev.map((message) =>
+        message.id === assistantId ? updater(message) : message
+      )
+    );
+  };
+
+  const processStreamLine = (line: string, assistantId: string) => {
+    const trimmedLine = line.trim();
+
+    if (!trimmedLine || trimmedLine === "d:[DONE]") {
+      return;
+    }
+
+    if (trimmedLine.startsWith("0:")) {
+      try {
+        const payload = JSON.parse(trimmedLine.slice(2)) as string;
+
+        if (payload.includes("__LLM_RESPONSE__")) {
+          const [base64Part, initialResponseText] = payload.split(
+            "__LLM_RESPONSE__"
+          );
+          const citations = parseContextCitations(base64Part);
+          appendAssistantChunk(assistantId, (message) => ({
+            ...message,
+            citations,
+            content: initialResponseText || message.content,
+          }));
+          return;
+        }
+
+        appendAssistantChunk(assistantId, (message) => ({
+          ...message,
+          content: `${message.content}${payload}`,
+        }));
+      } catch (error) {
+        console.error("Failed to parse stream line:", trimmedLine, error);
+      }
+      return;
+    }
+
+    if (trimmedLine.startsWith("3:")) {
+      const errorMessage = trimmedLine.slice(2);
+      throw new Error(errorMessage || "Streaming request failed");
+    }
+  };
+
+  const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    const trimmedInput = input.trim();
+    if (!trimmedInput || isLoading) {
+      return;
+    }
+
+    const token =
+      typeof window !== "undefined"
+        ? window.localStorage.getItem("token") || ""
+        : "";
+
+    const assistantId = crypto.randomUUID();
+    const userMessage: Message = {
+      id: crypto.randomUUID(),
+      role: "user",
+      content: trimmedInput,
+    };
+    const assistantMessage: Message = {
+      id: assistantId,
+      role: "assistant",
+      content: "",
+      citations: [],
+    };
+
+    const requestMessages = messages
+      .filter((message) => message.role === "user" || message.role === "assistant")
+      .map((message) => ({
+        role: message.role,
+        content: message.content,
+      }))
+      .concat({
+        role: "user" as const,
+        content: trimmedInput,
+      });
+
+    setInput("");
+    setIsLoading(true);
+    setMessages((prev) => [...prev, userMessage, assistantMessage]);
+
+    try {
+      const response = await fetch(`/api/chat/${params.id}/messages`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ messages: requestMessages }),
+      });
+
+      if (!response.ok || !response.body) {
+        throw new Error(`Request failed with status ${response.status}`);
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+          break;
+        }
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          processStreamLine(line, assistantId);
+          await flushToBrowser();
+        }
+      }
+
+      if (buffer.trim()) {
+        processStreamLine(buffer, assistantId);
+        await flushToBrowser();
+      }
+    } catch (error) {
+      console.error("Failed to stream chat:", error);
+      setMessages((prev) => prev.filter((message) => message.id !== assistantId));
+
+      toast({
+        title: "Error",
+        description:
+          error instanceof Error ? error.message : "Failed to send message",
+        variant: "destructive",
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const processedMessages = useMemo(() => {
     return messages.map((message) => {
       if (message.role !== "assistant" || !message.content) return message;
 
-      try {
-        if (!message.content.includes("__LLM_RESPONSE__")) {
-          return {
-            ...message,
-            content: markdownParse(message.content),
-          };
-        }
-
-        const [base64Part, responseText] =
-          message.content.split("__LLM_RESPONSE__");
-
-        const contextData = base64Part
-          ? (JSON.parse(atob(base64Part.trim())) as {
-              context: Array<{
-                page_content: string;
-                metadata: Record<string, any>;
-              }>;
-            })
-          : null;
-
-        const citations: Citation[] =
-          contextData?.context.map((citation, index) => ({
-            id: index + 1,
-            text: citation.page_content,
-            metadata: citation.metadata,
-          })) || [];
-
-        return {
-          ...message,
-          content: markdownParse(responseText || ""),
-          citations,
-        };
-      } catch (e) {
-        console.error("Failed to process message:", e);
-        return message;
-      }
+      return {
+        ...message,
+        content: markdownParse(message.content),
+      };
     });
   }, [messages]);
 
@@ -259,11 +337,19 @@ export default function ChatPage({ params }: { params: { id: string } }) {
                   />
                 </div>
                 <div className="max-w-[80%] rounded-lg px-4 py-2 text-accent-foreground">
-                  <Answer
-                    key={message.id}
-                    markdown={message.content}
-                    citations={message.citations}
-                  />
+                  {isLoading && !message.content ? (
+                    <div className="flex items-center space-x-1 py-2">
+                      <div className="w-2 h-2 rounded-full bg-primary animate-bounce" />
+                      <div className="w-2 h-2 rounded-full bg-primary animate-bounce [animation-delay:0.2s]" />
+                      <div className="w-2 h-2 rounded-full bg-primary animate-bounce [animation-delay:0.4s]" />
+                    </div>
+                  ) : (
+                    <Answer
+                      key={message.id}
+                      markdown={message.content}
+                      citations={message.citations}
+                    />
+                  )}
                 </div>
               </div>
             ) : (
@@ -280,19 +366,6 @@ export default function ChatPage({ params }: { params: { id: string } }) {
               </div>
             )
           )}
-          <div className="flex justify-start">
-            {isLoading &&
-              processedMessages[processedMessages.length - 1]?.role !=
-                "assistant" && (
-                <div className="max-w-[80%] rounded-lg px-4 py-2 text-accent-foreground">
-                  <div className="flex items-center space-x-1">
-                    <div className="w-2 h-2 rounded-full bg-primary animate-bounce" />
-                    <div className="w-2 h-2 rounded-full bg-primary animate-bounce [animation-delay:0.2s]" />
-                    <div className="w-2 h-2 rounded-full bg-primary animate-bounce [animation-delay:0.4s]" />
-                  </div>
-                </div>
-              )}
-          </div>
           <div ref={messagesEndRef} />
         </div>
         <form
@@ -301,7 +374,7 @@ export default function ChatPage({ params }: { params: { id: string } }) {
         >
           <input
             value={input}
-            onChange={handleInputChange}
+            onChange={(event) => setInput(event.target.value)}
             placeholder="Type your message..."
             className="flex-1 min-w-0 h-10 rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
           />

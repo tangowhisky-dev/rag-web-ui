@@ -3,15 +3,13 @@ from typing import Optional
 from jose import JWTError, jwt
 import bcrypt
 from app.core.config import settings
-from fastapi import Depends, HTTPException, status, Security
-from fastapi.security import OAuth2PasswordBearer, APIKeyHeader
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.models.user import User
-from app.services.api_key import APIKeyService
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login/access-token")
-api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     return bcrypt.checkpw(plain_password.encode("utf-8"), hashed_password.encode("utf-8"))
@@ -56,29 +54,3 @@ def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
     return user 
-
-def get_api_key_user(
-    db: Session = Depends(get_db),
-    api_key: str = Security(api_key_header),
-) -> User:
-    if not api_key:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="API key header missing",
-        )
-    
-    api_key_obj = APIKeyService.get_api_key_by_key(db=db, key=api_key)
-    if not api_key_obj:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API key",
-        )
-    
-    if not api_key_obj.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Inactive API key",
-        )
-    
-    APIKeyService.update_last_used(db=db, api_key=api_key_obj)
-    return api_key_obj.user 

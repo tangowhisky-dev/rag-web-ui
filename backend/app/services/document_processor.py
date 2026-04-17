@@ -8,29 +8,21 @@ from app.db.session import SessionLocal
 from io import BytesIO
 from typing import Optional, List, Dict, Set
 from fastapi import UploadFile
-from langchain_community.document_loaders import (
-    PyPDFLoader,
-    Docx2txtLoader,
-    UnstructuredMarkdownLoader,
-    TextLoader
-)
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader, TextLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document as LangchainDocument
 from pydantic import BaseModel
-from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.minio import get_minio_client
 from app.models.knowledge import ProcessingTask, Document, DocumentChunk
 from app.services.chunk_record import ChunkRecord
-import uuid
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders import UnstructuredFileLoader
 from minio.error import MinioException
 from minio import Minio
 from minio.commonconfig import CopySource
-from app.services.vector_store import VectorStoreFactory
-from app.services.embedding.embedding_factory import EmbeddingsFactory
+import chromadb
+from langchain_openai import OpenAIEmbeddings
+from langchain_chroma import Chroma
 
 class UploadResult(BaseModel):
     file_path: str
@@ -56,11 +48,20 @@ async def process_document(file_path: str, file_name: str, kb_id: int, document_
         
         # Initialize embeddings
         logger.info("Initializing OpenAI embeddings...")
-        embeddings = EmbeddingsFactory.create()
-        
+        embeddings = OpenAIEmbeddings(
+            openai_api_key=settings.OPENAI_API_KEY,
+            openai_api_base=settings.OPENAI_API_BASE,
+            model=settings.OPENAI_EMBEDDINGS_MODEL,
+            check_embedding_ctx_length=False,
+        )
+
         logger.info(f"Initializing vector store with collection: kb_{kb_id}")
-        vector_store = VectorStoreFactory.create(
-            store_type=settings.VECTOR_STORE_TYPE,
+        chroma_client = chromadb.HttpClient(
+            host=settings.CHROMA_DB_HOST,
+            port=settings.CHROMA_DB_PORT,
+        )
+        vector_store = Chroma(
+            client=chroma_client,
             collection_name=f"kb_{kb_id}",
             embedding_function=embeddings,
         )
@@ -203,7 +204,7 @@ async def preview_document(file_path: str, chunk_size: int = 1000, chunk_overlap
         elif ext == ".docx":
             loader = Docx2txtLoader(temp_path)
         elif ext == ".md":
-            loader = UnstructuredMarkdownLoader(temp_path)
+            loader = TextLoader(temp_path)
         else:  # Default to text loader
             loader = TextLoader(temp_path)
         
@@ -289,7 +290,7 @@ async def process_document_background(
             elif ext == ".docx":
                 loader = Docx2txtLoader(local_temp_path)
             elif ext == ".md":
-                loader = UnstructuredMarkdownLoader(local_temp_path)
+                loader = TextLoader(local_temp_path)
             else:  # 默认使用文本加载器
                 loader = TextLoader(local_temp_path)
             
@@ -307,10 +308,18 @@ async def process_document_background(
             
             # 3. 创建向量存储
             logger.info(f"Task {task_id}: Initializing vector store")
-            embeddings = EmbeddingsFactory.create()
-            
-            vector_store = VectorStoreFactory.create(
-                store_type=settings.VECTOR_STORE_TYPE,
+            embeddings = OpenAIEmbeddings(
+                openai_api_key=settings.OPENAI_API_KEY,
+                openai_api_base=settings.OPENAI_API_BASE,
+                model=settings.OPENAI_EMBEDDINGS_MODEL,
+                check_embedding_ctx_length=False,
+            )
+            chroma_client = chromadb.HttpClient(
+                host=settings.CHROMA_DB_HOST,
+                port=settings.CHROMA_DB_PORT,
+            )
+            vector_store = Chroma(
+                client=chroma_client,
                 collection_name=f"kb_{kb_id}",
                 embedding_function=embeddings,
             )

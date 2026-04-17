@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import Link from "next/link";
-import { Book, MessageSquare, LogOut, Menu, User } from "lucide-react";
+import { Book, MessageSquare, LogOut, Menu } from "lucide-react";
 import Breadcrumb from "@/components/ui/breadcrumb";
 
 export default function DashboardLayout({
@@ -30,7 +30,6 @@ export default function DashboardLayout({
   const navigation = [
     { name: "Knowledge Base", href: "/dashboard/knowledge", icon: Book },
     { name: "Chat", href: "/dashboard/chat", icon: MessageSquare },
-    { name: "API Keys", href: "/dashboard/api-keys", icon: User },
   ];
 
   return (
