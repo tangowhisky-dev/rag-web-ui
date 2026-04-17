@@ -69,7 +69,7 @@ services:
     ports:
       - "3306:3306"
     volumes:
-      - mysql_data:/var/lib/mysql
+      - ./docker-data/mysql:/var/lib/mysql
     networks:
       - app_network
 
@@ -78,7 +78,7 @@ services:
     ports:
       - "8001:8000"
     volumes:
-      - chroma_data:/chroma/chroma
+      - ./docker-data/chroma:/chroma/chroma
     networks:
       - app_network
 
@@ -91,15 +91,10 @@ services:
       - MINIO_ROOT_USER=minioadmin
       - MINIO_ROOT_PASSWORD=minioadmin
     volumes:
-      - minio_data:/data
+      - ./docker-data/minio:/data
     command: server --console-address ":9001" /data
     networks:
       - app_network
-
-volumes:
-  mysql_data:
-  chroma_data:
-  minio_data:
 
 networks:
   app_network:
