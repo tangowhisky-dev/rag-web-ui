@@ -13,6 +13,7 @@ from openai import AsyncOpenAI
 from app.core.config import settings
 from app.models.chat import Message
 from app.models.knowledge import KnowledgeBase, Document
+from app.services.retrieval import hybrid_search
 
 _IDENTITY_PATTERNS = re.compile(
     r"^\s*(who\s+are\s+you|what\s+are\s+you|introduce\s+yourself|tell\s+me\s+about\s+yourself|"
@@ -104,10 +105,7 @@ async def generate_response(
             bot_message.content = error_msg
             db.commit()
             return
-        
-        # Use first vector store for now
-        retriever = vector_stores[0].as_retriever()
-        
+
         # Build chat history from previous messages
         chat_history = []
         for message in messages["messages"]:
@@ -146,8 +144,13 @@ async def generate_response(
                 {"input": query, "chat_history": chat_history}
             )
 
-        # Step 2: Retrieve relevant documents
-        docs = await retriever.ainvoke(standalone_question)
+        # Step 2: Retrieve relevant documents via hybrid search (dense + BM25 + RRF)
+        docs = await hybrid_search(
+            query=standalone_question,
+            kb_ids=knowledge_base_ids,
+            db=db,
+            vector_stores=vector_stores,
+        )
 
         # Step 3: Emit context chunk as base64 before streaming the answer
         serializable_context = [

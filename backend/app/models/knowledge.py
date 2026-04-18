@@ -85,13 +85,15 @@ class DocumentChunk(Base, TimestampMixin):
     kb_id = Column(Integer, ForeignKey("knowledge_bases.id"), nullable=False)
     document_id = Column(Integer, ForeignKey("documents.id"), nullable=False)
     file_name = Column(String(255), nullable=False)
-    chunk_metadata = Column(JSON, nullable=True)
-    hash = Column(String(64), nullable=False, index=True)  # Content hash for change detection
-    
+    chunk_text = Column(LONGTEXT, nullable=False)   # the actual chunk text — FULLTEXT indexed
+    chunk_index = Column(Integer, nullable=True)    # position within the document (0-based)
+    chunk_metadata = Column(JSON, nullable=True)    # variable source metadata (page, source path, etc.)
+    hash = Column(String(64), nullable=False, index=True)  # content hash for change detection
+
     # Relationships
     knowledge_base = relationship("KnowledgeBase", back_populates="chunks")
     document = relationship("Document", back_populates="chunks")
 
     __table_args__ = (
         sa.Index('idx_kb_file_name', 'kb_id', 'file_name'),
-    ) 
+    )

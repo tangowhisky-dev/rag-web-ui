@@ -34,6 +34,17 @@ class Settings(BaseSettings):
     # File storage
     UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", "/app/uploads")
 
+    # Retrieval
+    RETRIEVAL_TOP_K: int = int(os.getenv("RETRIEVAL_TOP_K", "6"))
+
+    # Hybrid search weights (BM25 + dense vector) and result count.
+    HYBRID_DENSE_WEIGHT: float = float(os.getenv("HYBRID_DENSE_WEIGHT", "0.7"))
+    HYBRID_SPARSE_WEIGHT: float = float(os.getenv("HYBRID_SPARSE_WEIGHT", "0.3"))
+    # Cosine distance cutoff for the dense leg (Chroma: 0=identical, 2=opposite).
+    # Excludes documents with no real semantic signal from either leg.
+    # Default 2.0 keeps all dense results; lower (e.g. 1.2) to be more selective.
+    HYBRID_MAX_DENSE_DISTANCE: float = float(os.getenv("HYBRID_MAX_DENSE_DISTANCE", "2.0"))
+
     # LLM + Embeddings (OpenAI-compatible)
     OPENAI_API_BASE: str = os.getenv("OPENAI_API_BASE", "http://localhost:1234/v1")
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "lmstudio")

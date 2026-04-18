@@ -35,7 +35,9 @@ class ChunkRecord:
                     kb_id=chunk_data['kb_id'],
                     document_id=chunk_data['document_id'],
                     file_name=chunk_data['file_name'],
-                    chunk_metadata=chunk_data['metadata'],
+                    chunk_text=chunk_data['chunk_text'],
+                    chunk_index=chunk_data.get('chunk_index'),
+                    chunk_metadata=chunk_data.get('metadata'),
                     hash=chunk_data['hash']
                 )
                 session.merge(chunk)  # Use merge instead of add to handle updates

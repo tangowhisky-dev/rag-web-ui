@@ -33,7 +33,10 @@ services:
 
   db:
     image: mysql:8.0
-    command: --default-authentication-plugin=mysql_native_password
+    command: >
+      --default-authentication-plugin=mysql_native_password
+      --innodb_ft_min_token_size=1
+      --innodb_ft_enable_stopword=0
     environment:
       - MYSQL_ROOT_PASSWORD=root
       - MYSQL_DATABASE=ragwebui

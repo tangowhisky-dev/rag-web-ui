@@ -71,7 +71,7 @@ async def process_document(file_path: str, file_name: str, kb_id: int, document_
         current_hashes = set()
         documents_to_update = []
         
-        for chunk in preview_result.chunks:
+        for chunk_index, chunk in enumerate(preview_result.chunks):
             # Calculate chunk hash
             chunk_hash = hashlib.sha256(
                 (chunk.content + str(chunk.metadata)).encode()
@@ -87,21 +87,18 @@ async def process_document(file_path: str, file_name: str, kb_id: int, document_
                 f"{kb_id}:{file_name}:{chunk_hash}".encode()
             ).hexdigest()
             
-            # Prepare chunk record
-            # Prepare metadata
-            metadata = {
-                **chunk.metadata,
-                "chunk_id": chunk_id,
-                "file_name": file_name,
-                "kb_id": kb_id,
-                "document_id": document_id
-            }
+            # chunk_metadata holds only variable source metadata (page number, source path)
+            # chunk_text and chunk_index are stored as proper columns
+            metadata = {k: v for k, v in chunk.metadata.items()
+                        if k not in ("kb_id", "document_id", "chunk_id", "file_name")}
             
             new_chunks.append({
                 "id": chunk_id,
                 "kb_id": kb_id,
                 "document_id": document_id,
                 "file_name": file_name,
+                "chunk_text": chunk.content,
+                "chunk_index": chunk_index,
                 "metadata": metadata,
                 "hash": chunk_hash
             })
@@ -326,19 +323,20 @@ async def process_document_background(
                 ).hexdigest()
 
                 chunk.metadata["source"] = file_name
-                chunk.metadata["kb_id"] = kb_id
-                chunk.metadata["document_id"] = document.id
-                chunk.metadata["chunk_id"] = chunk_id
+
+                # chunk_text and chunk_index are proper columns; store only
+                # variable source metadata (page number, source path) in JSON
+                source_metadata = {k: v for k, v in chunk.metadata.items()
+                                   if k not in ("kb_id", "document_id", "chunk_id", "file_name")}
 
                 doc_chunk = DocumentChunk(
                     id=chunk_id,
                     document_id=document.id,
                     kb_id=kb_id,
                     file_name=file_name,
-                    chunk_metadata={
-                        "page_content": chunk.page_content,
-                        **chunk.metadata
-                    },
+                    chunk_text=chunk.page_content,
+                    chunk_index=i,
+                    chunk_metadata=source_metadata,
                     hash=hashlib.sha256(
                         (chunk.page_content + str(chunk.metadata)).encode()
                     ).hexdigest()
