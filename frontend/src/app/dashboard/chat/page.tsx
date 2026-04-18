@@ -132,13 +132,29 @@ export default function ChatPage() {
                   </div>
                   {chat.messages.length > 0 && (
                     <p className="text-sm text-muted-foreground mt-4 line-clamp-2">
-                      {chat.messages[chat.messages.length - 1].content.includes(
-                        "__LLM_RESPONSE__"
-                      )
-                        ? chat.messages[chat.messages.length - 1].content.split(
-                            "__LLM_RESPONSE__"
-                          )[1]
-                        : chat.messages[chat.messages.length - 1].content}
+                      {(() => {
+                        const raw = chat.messages[chat.messages.length - 1].content;
+                        const text = raw.includes("__LLM_RESPONSE__")
+                          ? raw.split("__LLM_RESPONSE__")[1]
+                          : raw;
+                        return text
+                          // Strip <think>…</think> blocks
+                          .replace(/<think>[\s\S]*?<\/think>/g, "")
+                          // Strip citation markers [citation:1]
+                          .replace(/\[citation:\d+\]/g, "")
+                          // Strip markdown headings
+                          .replace(/^#{1,6}\s+/gm, "")
+                          // Strip bold/italic (**text**, *text*, __text__, _text_)
+                          .replace(/(\*\*|__)(.*?)\1/g, "$2")
+                          .replace(/(\*|_)(.*?)\1/g, "$2")
+                          // Strip inline code
+                          .replace(/`([^`]+)`/g, "$1")
+                          // Strip markdown links [text](url) → text
+                          .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+                          // Collapse excess whitespace
+                          .replace(/\s+/g, " ")
+                          .trim();
+                      })()}
                     </p>
                   )}
                 </div>

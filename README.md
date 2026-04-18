@@ -18,6 +18,8 @@ RAG Web UI is a self-hosted knowledge base Q&A system. Upload your documents, th
 
 Retrieval uses **3-leg hybrid search**: dense vector (Qdrant cosine), sparse vector (SPLADE via Qdrant), and exact keyword (MySQL full-text), combined with configurable weights.
 
+> **Based on:** This is an opinionated, slimmed-down fork of [rag-web-ui/rag-web-ui](https://github.com/rag-web-ui/rag-web-ui). All credit for the original design and implementation goes to the original authors. The goal of this fork is to serve as a learning resource for understanding the RAG pipeline end-to-end — keeping minimal dependencies, removing abstraction layers, and adding visibility into individual RAG components (retrieval legs, reranking, prompt construction, token flow).
+
 ## Screenshots
 
 <div align="center">
@@ -135,11 +137,7 @@ To avoid a ~500 MB download on first ingestion, pre-download the model into `./a
 
 ```bash
 pip install fastembed
-python -c "
-from fastembed import SparseTextEmbedding
-SparseTextEmbedding(model_name='prithivida/Splade_PP_en_v1', cache_dir='$(pwd)/assets/fastembed')
-print('Done.')
-"
+python download_assets.py
 ```
 
 The directory is bind-mounted into the container, so the model will be available immediately on next start.

@@ -41,6 +41,7 @@ export default function ChatPage({ params }: { params: { id: string } }) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const { toast } = useToast();
   const [isInitialLoad, setIsInitialLoad] = useState(true);
+  const [chatTitle, setChatTitle] = useState<string | undefined>();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -61,6 +62,7 @@ export default function ChatPage({ params }: { params: { id: string } }) {
   const fetchChat = async () => {
     try {
       const data: Chat = await api.get(`/api/chat/${params.id}`);
+      setChatTitle(data.title);
       const formattedMessages = data.messages.map((msg) => {
         if (msg.role !== "assistant" || !msg.content)
           return {
@@ -354,7 +356,7 @@ export default function ChatPage({ params }: { params: { id: string } }) {
   }, [processedMessages]);
 
   return (
-    <DashboardLayout>
+    <DashboardLayout pageTitle={chatTitle}>
       <div className="flex flex-col h-[calc(100vh-5rem)] relative">
         <div className="flex-1 overflow-y-auto p-4 space-y-4 pb-[80px]">
           {processedMessages.map((message) =>

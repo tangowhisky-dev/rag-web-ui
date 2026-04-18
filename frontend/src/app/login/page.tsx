@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { api, ApiError } from "@/lib/api";
@@ -14,6 +14,12 @@ export default function LoginPage() {
   const router = useRouter();
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (localStorage.getItem("token")) {
+      router.replace("/dashboard");
+    }
+  }, [router]);
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -55,7 +61,7 @@ export default function LoginPage() {
         <div className="bg-white rounded-lg shadow-md p-8 space-y-6">
           <div className="text-center">
             <h1 className="text-3xl font-bold text-gray-900">
-              Welcome To RAG Web UI
+              Welcome To InsightCore
             </h1>
             <p className="mt-2 text-sm text-gray-600">
               Please sign in to continue

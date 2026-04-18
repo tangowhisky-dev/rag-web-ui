@@ -1,7 +1,7 @@
 "use client";
 
 import { useParams } from "next/navigation";
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { DocumentUploadSteps } from "@/components/knowledge-base/document-upload-steps";
 import { DocumentList } from "@/components/knowledge-base/document-list";
 import { Button } from "@/components/ui/button";
@@ -15,12 +15,20 @@ import {
 } from "@/components/ui/dialog";
 import { PlusIcon } from "lucide-react";
 import DashboardLayout from "@/components/layout/dashboard-layout";
+import { api } from "@/lib/api";
 
 export default function KnowledgeBasePage() {
   const params = useParams();
   const knowledgeBaseId = parseInt(params.id as string);
   const [refreshKey, setRefreshKey] = useState(0);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [kbName, setKbName] = useState<string | undefined>();
+
+  useEffect(() => {
+    api.get(`/api/knowledge-base/${knowledgeBaseId}`)
+      .then((data) => setKbName(data.name))
+      .catch(() => {});
+  }, [knowledgeBaseId]);
 
   const handleUploadComplete = useCallback(() => {
     setRefreshKey((prev) => prev + 1);
@@ -28,7 +36,7 @@ export default function KnowledgeBasePage() {
   }, []);
 
   return (
-    <DashboardLayout>
+    <DashboardLayout pageTitle={kbName}>
       <div className="flex justify-between items-center mb-8">
         <h1 className="text-3xl font-bold">Knowledge Base</h1>
         <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>

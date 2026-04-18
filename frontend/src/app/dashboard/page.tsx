@@ -66,7 +66,7 @@ export default function DashboardPage() {
           <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
             <div className="space-y-4">
               <h1 className="text-4xl font-bold tracking-tight bg-gradient-to-r from-blue-600 to-indigo-500 bg-clip-text text-transparent">
-                Knowledge Assistant
+                Enterprise Knowledge Assistant
               </h1>
               <p className="text-slate-600 dark:text-slate-300 max-w-xl">
                 Your personal AI-powered knowledge hub. Upload documents, create
@@ -133,15 +133,18 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* Quick Actions */}
+        {/* How It Works */}
         <h2 className="text-2xl font-semibold text-slate-900 dark:text-white mb-6">
-          Quick Actions
+          How It Works
         </h2>
         <div className="grid gap-6 md:grid-cols-3 mb-12">
           <a
             href="/dashboard/knowledge/new"
-            className="flex flex-col items-center justify-center rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-8 shadow-sm hover:shadow-md transition-all hover:border-blue-500 dark:hover:border-blue-500"
+            className="relative flex flex-col items-center justify-center rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-8 shadow-sm hover:shadow-md transition-all hover:border-blue-500 dark:hover:border-blue-500"
           >
+            <span className="absolute top-2 left-2 flex h-7 w-7 items-center justify-center rounded-full bg-blue-100 dark:bg-blue-900/40 text-xs font-bold text-blue-600 dark:text-blue-400">
+              1
+            </span>
             <div className="rounded-full bg-blue-100 dark:bg-blue-900/30 p-4 mb-4">
               <Brain className="h-8 w-8 text-blue-600 dark:text-blue-400" />
             </div>
@@ -155,8 +158,11 @@ export default function DashboardPage() {
 
           <a
             href="/dashboard/knowledge"
-            className="flex flex-col items-center justify-center rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-8 shadow-sm hover:shadow-md transition-all hover:border-indigo-500 dark:hover:border-indigo-500"
+            className="relative flex flex-col items-center justify-center rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-8 shadow-sm hover:shadow-md transition-all hover:border-indigo-500 dark:hover:border-indigo-500"
           >
+            <span className="absolute top-2 left-2 flex h-7 w-7 items-center justify-center rounded-full bg-indigo-100 dark:bg-indigo-900/40 text-xs font-bold text-indigo-600 dark:text-indigo-400">
+              2
+            </span>
             <div className="rounded-full bg-indigo-100 dark:bg-indigo-900/30 p-4 mb-4">
               <Upload className="h-8 w-8 text-indigo-600 dark:text-indigo-400" />
             </div>
@@ -170,8 +176,11 @@ export default function DashboardPage() {
 
           <a
             href="/dashboard/chat/new"
-            className="flex flex-col items-center justify-center rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-8 shadow-sm hover:shadow-md transition-all hover:border-purple-500 dark:hover:border-purple-500"
+            className="relative flex flex-col items-center justify-center rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-8 shadow-sm hover:shadow-md transition-all hover:border-purple-500 dark:hover:border-purple-500"
           >
+            <span className="absolute top-2 left-2 flex h-7 w-7 items-center justify-center rounded-full bg-purple-100 dark:bg-purple-900/40 text-xs font-bold text-purple-600 dark:text-purple-400">
+              3
+            </span>
             <div className="rounded-full bg-purple-100 dark:bg-purple-900/30 p-4 mb-4">
               <Sparkles className="h-8 w-8 text-purple-600 dark:text-purple-400" />
             </div>
@@ -182,83 +191,6 @@ export default function DashboardPage() {
               Get instant answers from your knowledge with AI
             </p>
           </a>
-        </div>
-
-        {/* Getting Started Guide */}
-        <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-8 shadow-sm">
-          <h2 className="text-2xl font-semibold text-slate-900 dark:text-white mb-6 flex items-center">
-            <Search className="mr-3 h-5 w-5 text-blue-600 dark:text-blue-400" />
-            How It Works
-          </h2>
-          <div className="space-y-6">
-            <div className="flex items-start gap-6 p-6 rounded-xl bg-slate-50 dark:bg-slate-700/30">
-              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-blue-600 text-white font-semibold">
-                1
-              </div>
-              <div>
-                <h3 className="font-medium text-lg text-slate-900 dark:text-white mb-2">
-                  Create a Knowledge Base
-                </h3>
-                <p className="text-slate-600 dark:text-slate-300">
-                  Start by creating a new knowledge base to organize your
-                  information. Give it a name and description that helps you
-                  identify its purpose.
-                </p>
-                <a
-                  href="/dashboard/knowledge/new"
-                  className="mt-4 inline-flex items-center text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 text-sm font-medium"
-                >
-                  Create now
-                  <ArrowRight className="ml-2 h-4 w-4" />
-                </a>
-              </div>
-            </div>
-
-            <div className="flex items-start gap-6 p-6 rounded-xl bg-slate-50 dark:bg-slate-700/30">
-              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-indigo-600 text-white font-semibold">
-                2
-              </div>
-              <div>
-                <h3 className="font-medium text-lg text-slate-900 dark:text-white mb-2">
-                  Upload Your Documents
-                </h3>
-                <p className="text-slate-600 dark:text-slate-300">
-                  Upload PDF, DOCX, MD or TXT files to your knowledge base. Our
-                  system will process and index them for AI-powered retrieval.
-                </p>
-                <a
-                  href="/dashboard/knowledge"
-                  className="mt-4 inline-flex items-center text-indigo-600 dark:text-indigo-400 hover:text-indigo-700 dark:hover:text-indigo-300 text-sm font-medium"
-                >
-                  Upload documents
-                  <ArrowRight className="ml-2 h-4 w-4" />
-                </a>
-              </div>
-            </div>
-
-            <div className="flex items-start gap-6 p-6 rounded-xl bg-slate-50 dark:bg-slate-700/30">
-              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-purple-600 text-white font-semibold">
-                3
-              </div>
-              <div>
-                <h3 className="font-medium text-lg text-slate-900 dark:text-white mb-2">
-                  Chat With Your Knowledge
-                </h3>
-                <p className="text-slate-600 dark:text-slate-300">
-                  Start a conversation with your knowledge base. Ask questions
-                  in natural language and get accurate answers based on your
-                  documents.
-                </p>
-                <a
-                  href="/dashboard/chat/new"
-                  className="mt-4 inline-flex items-center text-purple-600 dark:text-purple-400 hover:text-purple-700 dark:hover:text-purple-300 text-sm font-medium"
-                >
-                  Start chatting
-                  <ArrowRight className="ml-2 h-4 w-4" />
-                </a>
-              </div>
-            </div>
-          </div>
         </div>
       </div>
     </DashboardLayout>

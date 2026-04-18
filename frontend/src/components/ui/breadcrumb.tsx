@@ -4,7 +4,11 @@ import { ChevronRight, Home } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
-const Breadcrumb = () => {
+interface BreadcrumbProps {
+  overrideLastLabel?: string;
+}
+
+const Breadcrumb = ({ overrideLastLabel }: BreadcrumbProps) => {
   const pathname = usePathname();
 
   const generateBreadcrumbs = () => {
@@ -20,7 +24,7 @@ const Breadcrumb = () => {
 
       return {
         href,
-        label: displayLabel,
+        label: isLast && overrideLastLabel ? overrideLastLabel : displayLabel,
         isLast,
       };
     });

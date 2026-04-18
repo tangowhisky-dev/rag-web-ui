@@ -176,6 +176,10 @@ async def generate_response(
         full_response = base64_context + separator
 
         # Step 4: Stream the QA answer via LCEL (LangChain 1.x)
+        # The condensation step (Step 1) already distilled the full history into
+        # standalone_question. The QA step only needs: system prompt + context +
+        # standalone question. Sending history here is redundant, inflates the
+        # prompt, and causes attention dilution on the context chunks.
         formatted_context = "\n\n".join(
             f"[{i + 1}] {doc.page_content}" for i, doc in enumerate(docs)
         )
@@ -204,14 +208,14 @@ async def generate_response(
         )
         qa_prompt = ChatPromptTemplate.from_messages([
             ("system", qa_system_prompt),
-            MessagesPlaceholder("chat_history"),
             ("human", "{input}"),
         ])
         qa_messages = qa_prompt.format_prompt(
-            input=query,
-            chat_history=chat_history,
+            input=standalone_question,
             context=formatted_context,
         ).to_messages()
+        logger.info("[STEP 4] QA request | model=%s | standalone_question=%r | context_chunks=%d | no history",
+                    settings.OPENAI_MODEL, standalone_question, len(docs))
 
         openai_messages = []
         for message in qa_messages:
@@ -233,8 +237,8 @@ async def generate_response(
             base_url=settings.OPENAI_API_BASE,
         )
 
-        logger.info("[STEP 4] QA request | model=%s | messages=%d | context_chunks=%d",
-                    settings.OPENAI_MODEL, len(openai_messages), len(docs))
+        logger.info("[STEP 4] QA streaming | model=%s | openai_messages=%d",
+                    settings.OPENAI_MODEL, len(openai_messages))
         stream = await openai_client.chat.completions.create(
             model=settings.OPENAI_MODEL,
             messages=openai_messages,

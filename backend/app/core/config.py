@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    PROJECT_NAME: str = "RAG Web UI"
+    PROJECT_NAME: str = "InsightCore"
     VERSION: str = "0.1.0"
     API_V1_STR: str = "/api"
 

@@ -8,8 +8,10 @@ import Breadcrumb from "@/components/ui/breadcrumb";
 
 export default function DashboardLayout({
   children,
+  pageTitle,
 }: {
   children: React.ReactNode;
+  pageTitle?: string;
 }) {
   const router = useRouter();
   const pathname = usePathname();
@@ -63,7 +65,7 @@ export default function DashboardLayout({
                 alt="Logo"
                 className="w-16 h-16 rounded-lg"
               />
-              RAG Web UI
+              InsightCore
             </Link>
           </div>
 
@@ -112,7 +114,7 @@ export default function DashboardLayout({
       {/* Main content */}
       <div className="lg:pl-64">
         <main className="min-h-screen py-6 px-4 sm:px-6 lg:px-8">
-          <Breadcrumb />
+          <Breadcrumb overrideLastLabel={pageTitle} />
           {children}
         </main>
       </div>
