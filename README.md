@@ -55,7 +55,7 @@ Retrieval uses **3-leg hybrid search**: dense vector (Qdrant cosine), sparse vec
 **Prerequisites:** Docker & Docker Compose v2+
 
 ```bash
-git clone https://github.com/rag-web-ui/rag-web-ui.git
+git clone https://github.com/tangowhisky-dev/rag-web-ui.git
 cd rag-web-ui
 cp .env.example .env
 # Edit .env — set OPENAI_API_KEY, OPENAI_API_BASE, OPENAI_MODEL, OPENAI_EMBEDDINGS_MODEL, DENSE_EMBEDDING_DIM
