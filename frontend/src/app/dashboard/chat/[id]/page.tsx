@@ -13,6 +13,8 @@ interface Message {
   role: "assistant" | "user" | "system" | "data";
   content: string;
   citations?: Citation[];
+  rewrittenQuery?: string;
+  retrievedContext?: Array<{ page_content: string; metadata: Record<string, any> }>;
 }
 
 interface ChatMessage {
@@ -157,6 +159,31 @@ export default function ChatPage({ params }: { params: { id: string } }) {
     );
   };
 
+  const parseContextData = (base64Part: string): {
+    citations: Citation[];
+    rewrittenQuery: string | undefined;
+    retrievedContext: Array<{ page_content: string; metadata: Record<string, any> }>;
+  } => {
+    if (!base64Part) return { citations: [], rewrittenQuery: undefined, retrievedContext: [] };
+
+    const contextData = JSON.parse(atob(base64Part.trim())) as {
+      context: Array<{ page_content: string; metadata: Record<string, any> }>;
+      rewritten_query?: string;
+    };
+
+    const citations = contextData.context.map((doc, index) => ({
+      id: index + 1,
+      text: doc.page_content,
+      metadata: doc.metadata,
+    }));
+
+    return {
+      citations,
+      rewrittenQuery: contextData.rewritten_query,
+      retrievedContext: contextData.context,
+    };
+  };
+
   const flushToBrowser = async () => {
     await new Promise<void>((resolve) => {
       requestAnimationFrame(() => resolve());
@@ -189,10 +216,12 @@ export default function ChatPage({ params }: { params: { id: string } }) {
           const [base64Part, initialResponseText] = payload.split(
             "__LLM_RESPONSE__"
           );
-          const citations = parseContextCitations(base64Part);
+          const { citations, rewrittenQuery, retrievedContext } = parseContextData(base64Part);
           appendAssistantChunk(assistantId, (message) => ({
             ...message,
             citations,
+            rewrittenQuery,
+            retrievedContext,
             content: initialResponseText || message.content,
           }));
           return;
@@ -319,6 +348,11 @@ export default function ChatPage({ params }: { params: { id: string } }) {
     });
   }, [messages]);
 
+  const lastAssistantId = useMemo(() => {
+    const assistants = processedMessages.filter((m) => m.role === "assistant");
+    return assistants[assistants.length - 1]?.id;
+  }, [processedMessages]);
+
   return (
     <DashboardLayout>
       <div className="flex flex-col h-[calc(100vh-5rem)] relative">
@@ -348,6 +382,16 @@ export default function ChatPage({ params }: { params: { id: string } }) {
                       key={message.id}
                       markdown={message.content}
                       citations={message.citations}
+                      rewrittenQuery={
+                        message.id === lastAssistantId
+                          ? message.rewrittenQuery
+                          : undefined
+                      }
+                      retrievedContext={
+                        message.id === lastAssistantId
+                          ? message.retrievedContext
+                          : undefined
+                      }
                     />
                   )}
                 </div>

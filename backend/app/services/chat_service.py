@@ -158,7 +158,10 @@ async def generate_response(
             for doc in docs
         ]
         base64_context = base64.b64encode(
-            json.dumps({"context": serializable_context}).encode()
+            json.dumps({
+                "context": serializable_context,
+                "rewritten_query": standalone_question,
+            }).encode()
         ).decode()
         separator = "__LLM_RESPONSE__"
         yield f'0:"{base64_context}{separator}"\n'

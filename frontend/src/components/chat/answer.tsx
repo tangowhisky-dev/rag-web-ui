@@ -8,7 +8,7 @@ import React, {
   ClassAttributes,
 } from "react";
 import { AnchorHTMLAttributes } from "react";
-import { ChevronDown, ChevronRight, Brain } from "lucide-react";
+import { ChevronDown, ChevronRight, Brain, Search, BookOpen } from "lucide-react";
 import {
   Popover,
   PopoverContent,
@@ -113,6 +113,81 @@ const ThinkBlock: FC<{ content: string; isComplete: boolean }> = ({
   );
 };
 
+interface ContextDoc {
+  page_content: string;
+  metadata: Record<string, any>;
+}
+
+const RewrittenQueryBlock: FC<{ query: string }> = ({ query }) => {
+  const [isExpanded, setIsExpanded] = useState(true);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setIsExpanded(false), 1500);
+    return () => clearTimeout(timer);
+  }, []);
+
+  return (
+    <div className="my-2 rounded-md border border-gray-100 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/40 w-full">
+      <button
+        onClick={() => setIsExpanded(!isExpanded)}
+        className="flex items-center gap-1.5 w-full px-3 py-1.5 text-left rounded-t-md hover:bg-gray-100 dark:hover:bg-gray-700/40 transition-colors"
+      >
+        {isExpanded ? (
+          <ChevronDown className="h-3 w-3 text-gray-400 shrink-0" />
+        ) : (
+          <ChevronRight className="h-3 w-3 text-gray-400 shrink-0" />
+        )}
+        <Search className="h-3 w-3 shrink-0 text-gray-400" />
+        <span className="text-xs text-gray-400 font-medium select-none">
+          Rewritten Query
+        </span>
+      </button>
+      {isExpanded && (
+        <div className="px-3 pb-2 pt-1 border-t border-gray-100 dark:border-gray-700">
+          <p className="text-[11px] leading-[1.45] text-gray-400 dark:text-gray-500 whitespace-pre-wrap break-words font-sans m-0">
+            {query}
+          </p>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const RetrievedContextBlock: FC<{ docs: ContextDoc[] }> = ({ docs }) => {
+  const [isExpanded, setIsExpanded] = useState(false);
+
+  return (
+    <div className="my-2 rounded-md border border-gray-100 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/40 w-full">
+      <button
+        onClick={() => setIsExpanded(!isExpanded)}
+        className="flex items-center gap-1.5 w-full px-3 py-1.5 text-left rounded-t-md hover:bg-gray-100 dark:hover:bg-gray-700/40 transition-colors"
+      >
+        {isExpanded ? (
+          <ChevronDown className="h-3 w-3 text-gray-400 shrink-0" />
+        ) : (
+          <ChevronRight className="h-3 w-3 text-gray-400 shrink-0" />
+        )}
+        <BookOpen className="h-3 w-3 shrink-0 text-gray-400" />
+        <span className="text-xs text-gray-400 font-medium select-none">
+          Retrieved {docs.length} context{docs.length !== 1 ? "s" : ""}
+        </span>
+      </button>
+      {isExpanded && (
+        <div className="px-3 pb-2 pt-1 max-h-64 overflow-y-auto border-t border-gray-100 dark:border-gray-700 space-y-2">
+          {docs.map((doc, i) => (
+            <div key={i} className="text-[11px] leading-[1.45] text-gray-400 dark:text-gray-500 font-sans">
+              <span className="font-semibold text-gray-500 dark:text-gray-400">[{i + 1}] </span>
+              {doc.page_content.length > 300
+                ? doc.page_content.slice(0, 300) + "..."
+                : doc.page_content}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 interface Citation {
   id: number;
   text: string;
@@ -136,7 +211,9 @@ interface CitationInfo {
 export const Answer: FC<{
   markdown: string;
   citations?: Citation[];
-}> = ({ markdown, citations = [] }) => {
+  rewrittenQuery?: string;
+  retrievedContext?: ContextDoc[];
+}> = ({ markdown, citations = [], rewrittenQuery, retrievedContext }) => {
   const [citationInfoMap, setCitationInfoMap] = useState<
     Record<string, CitationInfo>
   >({});
@@ -318,6 +395,10 @@ export const Answer: FC<{
 
   return (
     <div className="prose prose-sm max-w-full">
+      {rewrittenQuery && <RewrittenQueryBlock query={rewrittenQuery} />}
+      {retrievedContext && retrievedContext.length > 0 && (
+        <RetrievedContextBlock docs={retrievedContext} />
+      )}
       {parsedContent.thinkContent !== null && (
         <ThinkBlock
           content={parsedContent.thinkContent}
