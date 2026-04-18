@@ -70,7 +70,7 @@ services:
     ports:
       - "8001:8000"
     volumes:
-      - ./docker-data/chroma:/chroma/chroma
+      - ./docker-data/chroma:/data
     networks:
       - app_network
 

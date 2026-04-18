@@ -37,11 +37,14 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile.dev
+    command: node server.js
     environment:
       - WATCHPACK_POLLING=true
       - CHOKIDAR_USEPOLLING=true
       - NODE_ENV=development
       - BACKEND_URL=http://backend:8000
+      - BACKEND_HOST=backend
+      - BACKEND_PORT=8000
     ports:
       - "3000:3000"
     volumes:
@@ -78,7 +81,7 @@ services:
     ports:
       - "8001:8000"
     volumes:
-      - ./docker-data/chroma:/chroma/chroma
+      - ./docker-data/chroma:/data
     networks:
       - app_network
 
