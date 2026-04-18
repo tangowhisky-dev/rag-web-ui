@@ -34,9 +34,6 @@ Retrieval uses **3-leg hybrid search**: dense vector (Qdrant cosine), sparse vec
 
   <img src="https://raw.githubusercontent.com/rag-web-ui/rag-web-ui/main/docs/images/screenshot4.png" alt="Chat" width="800">
   <p><em>Chat with References</em></p>
-
-  <img src="https://raw.githubusercontent.com/rag-web-ui/rag-web-ui/main/docs/images/screenshot6.png" alt="API Reference" width="800">
-  <p><em>OpenAPI Reference</em></p>
 </div>
 
 ## Stack
