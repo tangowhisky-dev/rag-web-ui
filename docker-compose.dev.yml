@@ -20,7 +20,6 @@ services:
     depends_on:
       - db
       - chromadb
-      - minio
     restart: on-failure
     deploy:
       restart_policy:
@@ -86,7 +85,7 @@ services:
       - app_network
 
   chromadb-admin:
-    image: wonderooo/chromadb-admin
+    image: fengzhichao/chromadb-admin
     ports:
       - "3001:3000"
     environment:
@@ -95,20 +94,6 @@ services:
       - app_network
     depends_on:
       - chromadb
-
-  minio:
-    image: minio/minio:latest
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    environment:
-      - MINIO_ROOT_USER=minioadmin
-      - MINIO_ROOT_PASSWORD=minioadmin
-    volumes:
-      - ./docker-data/minio:/data
-    command: server --console-address ":9001" /data
-    networks:
-      - app_network
 
 networks:
   app_network:

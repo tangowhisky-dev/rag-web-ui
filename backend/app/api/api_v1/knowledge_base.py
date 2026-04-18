@@ -26,8 +26,7 @@ from app.schemas.knowledge import (
 )
 from app.services.document_processor import process_document_background, upload_document, preview_document, PreviewResult
 from app.core.config import settings
-from app.core.minio import get_minio_client
-from minio.error import MinioException
+from app.core.storage import save_file, delete_kb_files, delete_file
 
 
 router = APIRouter()
@@ -165,7 +164,6 @@ async def delete_knowledge_base(
         document_paths = [doc.file_path for doc in kb.documents]
         
         # Initialize services
-        minio_client = get_minio_client()
         chroma_client = chromadb.HttpClient(
             host=settings.CHROMA_DB_HOST,
             port=settings.CHROMA_DB_PORT,
@@ -173,17 +171,14 @@ async def delete_knowledge_base(
         
         # Clean up external resources first
         cleanup_errors = []
-        
-        # 1. Clean up MinIO files
+
+        # 1. Clean up stored files
         try:
-            # Delete all objects with prefix kb_{kb_id}/
-            objects = minio_client.list_objects(settings.MINIO_BUCKET_NAME, prefix=f"kb_{kb_id}/")
-            for obj in objects:
-                minio_client.remove_object(settings.MINIO_BUCKET_NAME, obj.object_name)
-            logger.info(f"Cleaned up MinIO files for knowledge base {kb_id}")
-        except MinioException as e:
-            cleanup_errors.append(f"Failed to clean up MinIO files: {str(e)}")
-            logger.error(f"MinIO cleanup error for kb {kb_id}: {str(e)}")
+            delete_kb_files(current_user.id, kb_id)
+            logger.info(f"Cleaned up storage files for knowledge base {kb_id}")
+        except Exception as e:
+            cleanup_errors.append(f"Failed to clean up storage files: {str(e)}")
+            logger.error(f"Storage cleanup error for kb {kb_id}: {str(e)}")
         
         # 2. Clean up vector store
         try:
@@ -252,21 +247,13 @@ async def upload_kb_documents(
             })
             continue
         
-        # 3. 上传到临时目录
-        temp_path = f"kb_{kb_id}/temp/{file.filename}"
-        await file.seek(0)
+        # 3. Save to temp directory
+        temp_path = f"user_{current_user.id}/kb_{kb_id}/temp/{file.filename}"
         try:
-            minio_client = get_minio_client()
-            file_size = len(file_content)  # 使用之前读取的文件内容长度
-            minio_client.put_object(
-                bucket_name=settings.MINIO_BUCKET_NAME,
-                object_name=temp_path,
-                data=file.file,
-                length=file_size,  # 指定文件大小
-                content_type=file.content_type
-            )
-        except MinioException as e:
-            logger.error(f"Failed to upload file to MinIO: {str(e)}")
+            file_size = len(file_content)
+            save_file(temp_path, file_content)
+        except Exception as e:
+            logger.error(f"Failed to save file to storage: {str(e)}")
             raise HTTPException(status_code=500, detail="Failed to upload file")
         
         # 4. 创建上传记录
@@ -414,12 +401,13 @@ async def process_kb_documents(
     background_tasks.add_task(
         add_processing_tasks_to_queue,
         task_data,
-        kb_id
+        kb_id,
+        current_user.id
     )
     
     return {"tasks": task_info}
 
-async def add_processing_tasks_to_queue(task_data, kb_id):
+async def add_processing_tasks_to_queue(task_data, kb_id, user_id):
     """Helper function to add document processing tasks to the queue without blocking the main response."""
     for data in task_data:
         asyncio.create_task(
@@ -428,7 +416,8 @@ async def add_processing_tasks_to_queue(task_data, kb_id):
                 data["file_name"],
                 kb_id,
                 data["task_id"],
-                None
+                None,
+                user_id
             )
         )
     logger.info(f"Added {len(task_data)} document processing tasks to queue")
@@ -446,16 +435,12 @@ async def cleanup_temp_files(
         DocumentUpload.created_at < expired_time
     ).all()
     
-    minio_client = get_minio_client()
     for upload in expired_uploads:
         try:
-            minio_client.remove_object(
-                bucket_name=settings.MINIO_BUCKET_NAME,
-                object_name=upload.temp_path
-            )
-        except MinioException as e:
+            delete_file(upload.temp_path)
+        except Exception as e:
             logger.error(f"Failed to delete temp file {upload.temp_path}: {str(e)}")
-        
+
         db.delete(upload)
     
     db.commit()

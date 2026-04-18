@@ -2,7 +2,7 @@ import logging
 
 from app.api.api_v1.api import api_router
 from app.core.config import settings
-from app.core.minio import init_minio
+from app.core.storage import init_storage
 from app.startup.migarate import DatabaseMigrator
 from fastapi import FastAPI
 
@@ -24,8 +24,8 @@ app.include_router(api_router, prefix=settings.API_V1_STR)
 
 @app.on_event("startup")
 async def startup_event():
-    # Initialize MinIO
-    init_minio()
+    # Initialize local file storage
+    init_storage()
     # Run database migrations
     migrator = DatabaseMigrator(settings.get_database_url)
     migrator.run_migrations()
