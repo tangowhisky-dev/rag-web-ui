@@ -1,63 +1,104 @@
 """
-Hybrid retrieval: MySQL InnoDB FULLTEXT (sparse) + ChromaDB cosine similarity (dense),
-fused with Reciprocal Rank Fusion (RRF).
+3-leg hybrid retrieval fused with Reciprocal Rank Fusion (RRF):
 
-Sparse leg: MySQL MATCH ... AGAINST (NATURAL LANGUAGE MODE) — uses the server's
-built-in BM25/TF-IDF scoring on the `chunk_text` LONGTEXT column.  No in-memory
-index rebuild; results come directly from the persistent FULLTEXT index.
+  Leg 1 — Dense   : Qdrant cosine-similarity search on Qwen3 embeddings
+  Leg 2 — Sparse  : Qdrant learned sparse-vector search (SPLADE via FastEmbed)
+  Leg 3 — Exact   : MySQL InnoDB FULLTEXT search (BM25/TF-IDF, server-side)
 
-Four tunable parameters (all in .env / settings):
-  HYBRID_DENSE_WEIGHT       — weight applied to the dense ranking leg
-  HYBRID_SPARSE_WEIGHT      — weight applied to the sparse (FTS) ranking leg
-  RETRIEVAL_TOP_K           — number of documents to return
-  HYBRID_MAX_DENSE_DISTANCE — cosine distance cutoff for the dense leg
-                              (Chroma: 0 = identical, 2 = opposite)
+All three legs are run independently; their rank lists are merged by weighted
+RRF.  Individual legs can be disabled via .env (retrieval only — ingestion
+always indexes all three, so re-enabling a leg needs no re-indexing).
 
-Absent leg vs. no signal — design rationale
---------------------------------------------
-MySQL FTS returns no row when the relevance score would be 0 (no query-term
-overlap), so those documents are simply absent from the sparse leg.  They
-can still be returned via the dense leg — that case (paraphrase / synonym
-match with no exact keyword overlap) is exactly what dense retrieval is for.
+Configuration (.env / settings):
+  HYBRID_DENSE_WEIGHT          — RRF weight for the dense leg          (default 0.5)
+  HYBRID_QDRANT_SPARSE_WEIGHT  — RRF weight for the Qdrant sparse leg  (default 0.3)
+  HYBRID_EXACT_WEIGHT          — RRF weight for the MySQL exact leg     (default 0.2)
+  RETRIEVAL_TOP_K              — number of documents returned           (default 6)
+  RETRIEVAL_DENSE_ENABLED      — enable/disable dense leg               (default true)
+  RETRIEVAL_QDRANT_SPARSE_ENABLED — enable/disable sparse leg           (default true)
+  RETRIEVAL_EXACT_ENABLED      — enable/disable exact leg               (default true)
 
-HYBRID_MAX_DENSE_DISTANCE is the symmetric control for the dense leg: a
-document with both FTS score = 0 *and* high cosine distance carries no
-signal from either leg and should be excluded.  Set HYBRID_MAX_DENSE_DISTANCE
-< 2.0 (e.g. 1.2) to enforce this.  Default 2.0 keeps all dense results.
+Absent-leg design
+-----------------
+A document absent from a leg (no hit, score=0, or leg disabled) contributes
+0 to its RRF score from that leg.  It can still surface via the other legs —
+this is the correct behaviour: a paraphrase match with no exact keyword
+overlap should be returned by the dense/sparse legs, not suppressed.
 """
 
 import hashlib
+import json
 import logging
-from dataclasses import dataclass
-from typing import List, Dict
+from dataclasses import dataclass, field
+from typing import List, Dict, Optional
 
 from langchain_core.documents import Document as LangchainDocument
+from openai import OpenAI as SyncOpenAI
+from qdrant_client import QdrantClient
+from qdrant_client.models import SparseVector
+from fastembed import SparseTextEmbedding
 from sqlalchemy import text, bindparam
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.models.knowledge import DocumentChunk
 
 logger = logging.getLogger(__name__)
 
-# RRF smoothing constant — standard value from the original paper.
+# RRF smoothing constant — standard value from the original paper (k=60).
 _RRF_K = 60
 
+# ── Module-level singletons (lazy-initialised) ────────────────────────────────
+_qdrant_client: Optional[QdrantClient] = None
+_openai_client: Optional[SyncOpenAI] = None
+_sparse_embedder: Optional[SparseTextEmbedding] = None
+
+
+def _get_qdrant_client() -> QdrantClient:
+    global _qdrant_client
+    if _qdrant_client is None:
+        _qdrant_client = QdrantClient(host=settings.QDRANT_HOST, port=settings.QDRANT_PORT)
+    return _qdrant_client
+
+
+def _get_openai_client() -> SyncOpenAI:
+    global _openai_client
+    if _openai_client is None:
+        _openai_client = SyncOpenAI(
+            api_key=settings.OPENAI_API_KEY,
+            base_url=settings.OPENAI_API_BASE,
+        )
+    return _openai_client
+
+
+def _get_sparse_embedder() -> SparseTextEmbedding:
+    global _sparse_embedder
+    if _sparse_embedder is None:
+        _sparse_embedder = SparseTextEmbedding(
+            model_name=settings.SPLADE_MODEL,
+            cache_dir=settings.FASTEMBED_CACHE_DIR,
+        )
+    return _sparse_embedder
+
+
+# ── Data model ────────────────────────────────────────────────────────────────
 
 @dataclass
 class _Candidate:
     doc: LangchainDocument
     content_hash: str
-    dense_rank: int = -1   # -1 = absent from this leg
-    sparse_rank: int = -1
+    dense_rank: int = -1           # -1 = absent from this leg
+    qdrant_sparse_rank: int = -1
+    exact_rank: int = -1
 
     @property
     def rrf_score(self) -> float:
         score = 0.0
         if self.dense_rank >= 0:
             score += settings.HYBRID_DENSE_WEIGHT / (_RRF_K + self.dense_rank)
-        if self.sparse_rank >= 0:
-            score += settings.HYBRID_SPARSE_WEIGHT / (_RRF_K + self.sparse_rank)
+        if self.qdrant_sparse_rank >= 0:
+            score += settings.HYBRID_QDRANT_SPARSE_WEIGHT / (_RRF_K + self.qdrant_sparse_rank)
+        if self.exact_rank >= 0:
+            score += settings.HYBRID_EXACT_WEIGHT / (_RRF_K + self.exact_rank)
         return score
 
 
@@ -65,32 +106,102 @@ def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def _dense_search(query: str, vector_stores: list, candidates: int) -> Dict[str, _Candidate]:
-    all_pairs: list[tuple] = []
-    for vs in vector_stores:
-        all_pairs.extend(vs.similarity_search_with_score(query, k=candidates))
+def _qdrant_payload_to_doc(payload: dict) -> LangchainDocument:
+    chunk_text = payload.get("chunk_text", "")
+    metadata = {k: v for k, v in payload.items() if k != "chunk_text"}
+    return LangchainDocument(page_content=chunk_text, metadata=metadata)
 
-    all_pairs.sort(key=lambda pair: pair[1])  # ascending distance = best first
 
-    max_distance = settings.HYBRID_MAX_DENSE_DISTANCE
+# ── Search legs ───────────────────────────────────────────────────────────────
+
+def _dense_search(query: str, kb_ids: List[int], candidates: int) -> Dict[str, _Candidate]:
+    """Qdrant cosine-similarity search using the dense (OpenAI) embedding."""
+    logger.info("[DENSE] embedding request | model=%s | query=%r", settings.OPENAI_EMBEDDINGS_MODEL, query[:120])
+    response = _get_openai_client().embeddings.create(
+        input=query,
+        model=settings.OPENAI_EMBEDDINGS_MODEL,
+    )
+    query_vector = response.data[0].embedding
+    logger.info("[DENSE] embedding response | dim=%d | first5=%s",
+                len(query_vector), [round(v, 4) for v in query_vector[:5]])
+
     result: Dict[str, _Candidate] = {}
     rank = 0
-    for doc, distance in all_pairs:
-        if distance > max_distance:
-            break  # list is sorted — all remaining are farther away
-        h = _content_hash(doc.page_content)
-        if h not in result:
-            result[h] = _Candidate(doc=doc, content_hash=h, dense_rank=rank)
-            rank += 1
+    for kb_id in kb_ids:
+        logger.info("[DENSE] qdrant query | collection=kb_%d | using=dense | limit=%d", kb_id, candidates)
+        try:
+            hits = _get_qdrant_client().query_points(
+                collection_name=f"kb_{kb_id}",
+                query=query_vector,
+                using="dense",
+                limit=candidates,
+                with_payload=True,
+            ).points
+        except Exception as e:
+            logger.warning("dense_search: Qdrant query failed for kb_%d: %s", kb_id, e)
+            continue
+        logger.info("[DENSE] qdrant response | kb_%d | hits=%d", kb_id, len(hits))
+        for hit in hits:
+            text = (hit.payload or {}).get("chunk_text", "")
+            h = _content_hash(text)
+            if h not in result:
+                result[h] = _Candidate(
+                    doc=_qdrant_payload_to_doc(hit.payload or {}),
+                    content_hash=h,
+                    dense_rank=rank,
+                )
+                logger.debug("[DENSE]   rank=%d score=%.4f text=%r", rank, getattr(hit, 'score', -1), text[:80])
+                rank += 1
+    logger.info("[DENSE] unique candidates=%d", len(result))
     return result
 
 
-def _sparse_search(query: str, kb_ids: List[int], db: Session, candidates: int) -> Dict[str, _Candidate]:
-    """MySQL InnoDB FULLTEXT search (BM25/TF-IDF scoring, server-side).
+def _qdrant_sparse_search(query: str, kb_ids: List[int], candidates: int) -> Dict[str, _Candidate]:
+    """Qdrant learned-sparse search (SPLADE via FastEmbed)."""
+    logger.info("[SPARSE] SPLADE embed | model=%s | query=%r", settings.SPLADE_MODEL, query[:120])
+    sparse_emb = next(iter(_get_sparse_embedder().embed([query])))
+    query_sparse = SparseVector(
+        indices=sparse_emb.indices.tolist(),
+        values=sparse_emb.values.tolist(),
+    )
+    logger.info("[SPARSE] SPLADE response | nnz=%d | top_terms_indices=%s | top_values=%s",
+                len(sparse_emb.indices),
+                sparse_emb.indices[:5].tolist(),
+                [round(v, 4) for v in sparse_emb.values[:5].tolist()])
 
-    Returns only rows with a non-zero relevance score, ordered best-first.
-    Avoids loading all chunks into memory — the DB does the ranking.
-    """
+    result: Dict[str, _Candidate] = {}
+    rank = 0
+    for kb_id in kb_ids:
+        logger.info("[SPARSE] qdrant query | collection=kb_%d | using=sparse | limit=%d", kb_id, candidates)
+        try:
+            hits = _get_qdrant_client().query_points(
+                collection_name=f"kb_{kb_id}",
+                query=query_sparse,
+                using="sparse",
+                limit=candidates,
+                with_payload=True,
+            ).points
+        except Exception as e:
+            logger.warning("qdrant_sparse_search: Qdrant query failed for kb_%d: %s", kb_id, e)
+            continue
+        logger.info("[SPARSE] qdrant response | kb_%d | hits=%d", kb_id, len(hits))
+        for hit in hits:
+            text = (hit.payload or {}).get("chunk_text", "")
+            h = _content_hash(text)
+            if h not in result:
+                result[h] = _Candidate(
+                    doc=_qdrant_payload_to_doc(hit.payload or {}),
+                    content_hash=h,
+                    qdrant_sparse_rank=rank,
+                )
+                logger.debug("[SPARSE]   rank=%d score=%.4f text=%r", rank, getattr(hit, 'score', -1), text[:80])
+                rank += 1
+    logger.info("[SPARSE] unique candidates=%d", len(result))
+    return result
+
+
+def _exact_search(query: str, kb_ids: List[int], db: Session, candidates: int) -> Dict[str, _Candidate]:
+    """MySQL InnoDB FULLTEXT search — exact keyword / BM25 scoring, server-side."""
     if not query.strip():
         return {}
 
@@ -106,48 +217,109 @@ def _sparse_search(query: str, kb_ids: List[int], db: Session, candidates: int) 
         """
     ).bindparams(bindparam("kb_ids", expanding=True))
 
-    rows = db.execute(sql, {"query": query, "kb_ids": kb_ids, "candidates": candidates}).fetchall()
+    logger.info("[EXACT] MySQL FTS query | query=%r | kb_ids=%s | candidates=%d", query[:120], kb_ids, candidates)
+    try:
+        rows = db.execute(sql, {"query": query, "kb_ids": kb_ids, "candidates": candidates}).fetchall()
+    except Exception as e:
+        logger.warning("exact_search: MySQL FTS query failed: %s", e)
+        return {}
+
+    logger.info("[EXACT] MySQL FTS response | rows=%d", len(rows))
+    if rows:
+        for i, row in enumerate(rows[:5]):
+            logger.info("  exact[%d] fts_score=%.4f text=%r", i, row.fts_score, (row.chunk_text or "")[:80])
 
     result: Dict[str, _Candidate] = {}
     for rank, row in enumerate(rows):
         chunk_text = row.chunk_text or ""
         h = _content_hash(chunk_text)
         if h not in result:
-            doc = LangchainDocument(
-                page_content=chunk_text,
-                metadata=dict(row.chunk_metadata or {}),
+            raw_meta = row.chunk_metadata
+            if isinstance(raw_meta, str):
+                try:
+                    meta = json.loads(raw_meta)
+                except (ValueError, TypeError):
+                    meta = {}
+            elif isinstance(raw_meta, dict):
+                meta = raw_meta
+            else:
+                meta = {}
+            result[h] = _Candidate(
+                doc=LangchainDocument(
+                    page_content=chunk_text,
+                    metadata=meta,
+                ),
+                content_hash=h,
+                exact_rank=rank,
             )
-            result[h] = _Candidate(doc=doc, content_hash=h, sparse_rank=rank)
     return result
 
 
-def _rrf_merge(dense: Dict[str, _Candidate], sparse: Dict[str, _Candidate], top_k: int) -> List[LangchainDocument]:
+# ── RRF merge ─────────────────────────────────────────────────────────────────
+
+def _rrf_merge(
+    dense: Dict[str, _Candidate],
+    qdrant_sparse: Dict[str, _Candidate],
+    exact: Dict[str, _Candidate],
+    top_k: int,
+) -> List[LangchainDocument]:
     merged: Dict[str, _Candidate] = {**dense}
-    for h, c in sparse.items():
+
+    for h, c in qdrant_sparse.items():
         if h in merged:
-            merged[h].sparse_rank = c.sparse_rank
+            merged[h].qdrant_sparse_rank = c.qdrant_sparse_rank
+        else:
+            merged[h] = c
+
+    for h, c in exact.items():
+        if h in merged:
+            merged[h].exact_rank = c.exact_rank
         else:
             merged[h] = c
 
     ranked = sorted(merged.values(), key=lambda c: c.rrf_score, reverse=True)
+    logger.info("[RRF] total unique candidates=%d | returning top_k=%d", len(ranked), top_k)
+    for i, c in enumerate(ranked[:top_k]):
+        logger.info(
+            "  rrf[%d] score=%.5f dense_rank=%s sparse_rank=%s exact_rank=%s text=%r",
+            i, c.rrf_score,
+            c.dense_rank if c.dense_rank >= 0 else "-",
+            c.qdrant_sparse_rank if c.qdrant_sparse_rank >= 0 else "-",
+            c.exact_rank if c.exact_rank >= 0 else "-",
+            c.doc.page_content[:80],
+        )
     return [c.doc for c in ranked[:top_k]]
 
+
+# ── Public API ────────────────────────────────────────────────────────────────
 
 async def hybrid_search(
     query: str,
     kb_ids: List[int],
     db: Session,
-    vector_stores: list,
 ) -> List[LangchainDocument]:
+    """Run enabled retrieval legs in parallel (sync calls) and merge via RRF."""
     top_k = settings.RETRIEVAL_TOP_K
-    pool = top_k * 4  # fetch more candidates per leg so RRF has room to rerank
+    pool = top_k * 4  # over-fetch so RRF has room to rerank
 
-    logger.info("hybrid_search | kb_ids=%s top_k=%d dense_w=%.2f sparse_w=%.2f",
-                kb_ids, top_k, settings.HYBRID_DENSE_WEIGHT, settings.HYBRID_SPARSE_WEIGHT)
+    enabled = {
+        "dense": settings.RETRIEVAL_DENSE_ENABLED,
+        "qdrant_sparse": settings.RETRIEVAL_QDRANT_SPARSE_ENABLED,
+        "exact": settings.RETRIEVAL_EXACT_ENABLED,
+    }
+    logger.info(
+        "hybrid_search | kb_ids=%s top_k=%d legs=%s weights=(%.2f, %.2f, %.2f)",
+        kb_ids, top_k,
+        [k for k, v in enabled.items() if v],
+        settings.HYBRID_DENSE_WEIGHT,
+        settings.HYBRID_QDRANT_SPARSE_WEIGHT,
+        settings.HYBRID_EXACT_WEIGHT,
+    )
 
-    dense = _dense_search(query, vector_stores, pool)
-    sparse = _sparse_search(query, kb_ids, db, pool)
-    docs = _rrf_merge(dense, sparse, top_k)
+    dense        = _dense_search(query, kb_ids, pool)           if enabled["dense"]          else {}
+    qdrant_sparse = _qdrant_sparse_search(query, kb_ids, pool)  if enabled["qdrant_sparse"]  else {}
+    exact        = _exact_search(query, kb_ids, db, pool)       if enabled["exact"]          else {}
 
+    docs = _rrf_merge(dense, qdrant_sparse, exact, top_k)
     logger.info("hybrid_search returned %d documents", len(docs))
     return docs

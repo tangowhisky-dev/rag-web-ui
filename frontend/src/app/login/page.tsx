@@ -36,6 +36,7 @@ export default function LoginPage() {
       });
 
       localStorage.setItem("token", data.access_token);
+      document.cookie = `token=${data.access_token}; path=/; SameSite=Lax`;
       router.push("/dashboard");
     } catch (err) {
       if (err instanceof ApiError) {

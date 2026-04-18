@@ -2,9 +2,7 @@ import hashlib
 from typing import List, Any, Dict
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks, Query
 from sqlalchemy.orm import Session
-import chromadb
-from langchain_openai import OpenAIEmbeddings
-from langchain_chroma import Chroma
+from qdrant_client import QdrantClient
 from sqlalchemy import text
 import logging
 from datetime import datetime, timedelta
@@ -163,12 +161,6 @@ async def delete_knowledge_base(
         # Get all document file paths before deletion
         document_paths = [doc.file_path for doc in kb.documents]
         
-        # Initialize services
-        chroma_client = chromadb.HttpClient(
-            host=settings.CHROMA_DB_HOST,
-            port=settings.CHROMA_DB_PORT,
-        )
-        
         # Clean up external resources first
         cleanup_errors = []
 
@@ -180,13 +172,14 @@ async def delete_knowledge_base(
             cleanup_errors.append(f"Failed to clean up storage files: {str(e)}")
             logger.error(f"Storage cleanup error for kb {kb_id}: {str(e)}")
         
-        # 2. Clean up vector store
+        # 2. Clean up Qdrant collection
         try:
-            chroma_client.delete_collection(f"kb_{kb_id}")
-            logger.info(f"Cleaned up vector store for knowledge base {kb_id}")
+            qdrant = QdrantClient(host=settings.QDRANT_HOST, port=settings.QDRANT_PORT)
+            qdrant.delete_collection(f"kb_{kb_id}")
+            logger.info(f"Cleaned up Qdrant collection for knowledge base {kb_id}")
         except Exception as e:
-            cleanup_errors.append(f"Failed to clean up vector store: {str(e)}")
-            logger.error(f"Vector store cleanup error for kb {kb_id}: {str(e)}")
+            cleanup_errors.append(f"Failed to clean up Qdrant collection: {str(e)}")
+            logger.error(f"Qdrant cleanup error for kb {kb_id}: {str(e)}")
         
         # Finally, delete database records in a single transaction
         db.delete(kb)
@@ -539,32 +532,16 @@ async def test_retrieval(
                 detail=f"Knowledge base {request.kb_id} not found",
             )
         
-        embeddings = OpenAIEmbeddings(
-            openai_api_key=settings.OPENAI_API_KEY,
-            openai_api_base=settings.OPENAI_API_BASE,
-            model=settings.OPENAI_EMBEDDINGS_MODEL,
-            check_embedding_ctx_length=False,
+        from app.services.retrieval import hybrid_search
+        docs = await hybrid_search(
+            query=request.query,
+            kb_ids=[request.kb_id],
+            db=db,
         )
-        chroma_client = chromadb.HttpClient(
-            host=settings.CHROMA_DB_HOST,
-            port=settings.CHROMA_DB_PORT,
-        )
-        vector_store = Chroma(
-            client=chroma_client,
-            collection_name=f"kb_{request.kb_id}",
-            embedding_function=embeddings,
-        )
-
-        results = vector_store.similarity_search_with_score(request.query, k=request.top_k)
-        
-        response = []
-        for doc, score in results:
-            response.append({
-                "content": doc.page_content,
-                "metadata": doc.metadata,
-                "score": float(score)
-            })
-            
+        response = [
+            {"content": doc.page_content, "metadata": doc.metadata, "score": 0.0}
+            for doc in docs[: request.top_k]
+        ]
         return {"results": response}
         
     except Exception as e:

@@ -1,227 +1,179 @@
 # Troubleshooting Guide
 
+## Admin & Developer Tools
+
+Quick reference for the web UIs available in development:
+
+| Tool | URL | Credentials |
+|---|---|---|
+| RAG Web UI | http://localhost:3000 | Your registered account |
+| Backend API Docs | http://localhost:8000/redoc | — |
+| Qdrant Dashboard | http://localhost:6333/dashboard | — (no login) |
+| MinIO Console | http://localhost:9001 | `minioadmin` / `minioadmin` |
+| Adminer (MySQL) | http://localhost:8080 | Server: `db`, User: `ragwebui`, Pass: `ragwebui`, DB: `ragwebui` |
+
+Start Adminer if it's not running:
+```bash
+docker compose -f docker-compose.dev.yml up -d adminer
+```
+
 ## Database Issues
 
-### 1. Database Tables Not Found
-
-If you encounter "table not found" or similar database errors after starting your services, follow these steps:
-
-#### Check if MySQL is Ready
+### Tables Not Found / Migration Errors
 
 ```bash
 # Check MySQL container status
-docker ps | grep db
+docker compose -f docker-compose.dev.yml ps db
 
 # Check MySQL logs
-docker logs ragwebui-db-1
+docker compose -f docker-compose.dev.yml logs db
+
+# Run migrations manually
+docker exec -it ragwebui-backend-1 alembic upgrade head
+
+# Check current migration state
+docker exec -it ragwebui-backend-1 alembic current
+docker exec -it ragwebui-backend-1 alembic history
 ```
 
-Make sure you see messages indicating MySQL is running successfully.
-
-#### Check Database Connection
+### Connect to MySQL CLI
 
 ```bash
-# Connect to MySQL container
-docker exec -it ragwebui-db-1 mysql -u ragwebui -p
-
-# Enter password when prompted: ragwebui
-
-# Then check your database
-mysql> USE ragwebui;
-mysql> SHOW TABLES;
+docker exec -it ragwebui-db-1 mysql -u ragwebui -pragwebui ragwebui
 ```
 
-#### Check if Migrations Were Applied
+### Backup and Restore
 
 ```bash
-# Check backend logs for migration messages
-docker logs ragwebui-backend-1
+# Backup
+docker exec ragwebui-db-1 mysqldump -u ragwebui -pragwebui ragwebui > backup.sql
 
-# Enter container shell to check migration history
-docker exec -it ragwebui-backend-1 sh
-alembic history
-alembic current
-
-# If migrations need to be applied, run:
-alembic upgrade head
-exit
+# Restore
+docker exec -i ragwebui-db-1 mysql -u ragwebui -pragwebui ragwebui < backup.sql
 ```
 
-### 2. Database Connection Issues
+## Qdrant Issues
 
-#### Environment Variables
+### Inspect Collections
 
-Verify your environment variables in `.env` file:
+Open http://localhost:6333/dashboard — the Collections tab shows all collections, point counts, and vector config.
 
-```dotenv
-DB_HOST=db
-DB_USER=ragwebui
-DB_PASSWORD=ragwebui
-DB_NAME=ragwebui
+Or via CLI:
+```bash
+# List collections
+curl http://localhost:6333/collections
+
+# Inspect a specific collection
+curl http://localhost:6333/collections/knowledge_1
 ```
 
-#### Service Order Problems
+### Collection Out of Sync
 
-If the backend started before MySQL was ready:
+If vectors exist in Qdrant but documents appear missing, re-process the affected documents from the Knowledge Base UI. The ingestion pipeline is idempotent — re-processing overwrites existing points.
+
+## Backend Issues
+
+### Document Processing Failures
 
 ```bash
-# Restart backend service
-docker compose -f docker-compose.yml restart backend
+# Watch backend logs during ingestion
+docker compose -f docker-compose.dev.yml logs -f backend
 ```
 
-## Container and Service Issues
+Common causes:
+- **Embedding model mismatch**: `DENSE_EMBEDDING_DIM` must match the actual output dimension of `OPENAI_EMBEDDINGS_MODEL`. Check the model's spec.
+- **SPLADE model not downloaded**: On first run, FastEmbed downloads `prithivida/Splade_PP_en_v1` (~500 MB). If the container restarts mid-download, delete the incomplete entry in `./assets/fastembed/` and retry.
+- **LM Studio not running**: Verify `OPENAI_API_BASE` is reachable: `curl http://localhost:1234/v1/models`
 
-### 1. Container Startup Failures
+### SPLADE Model Download Issues
 
-#### Check Container Status
-
+If you see errors loading the sparse embedding model:
 ```bash
-# View all container statuses
-docker ps -a
+# Check what's in the cache directory
+ls -la ./assets/fastembed/
 
-# View specific container logs
-docker logs <container-id>
+# Remove any incomplete downloads and retry
+rm -rf ./assets/fastembed/models--Qdrant--Splade_PP_en_v1
+
+# Pre-download on host (avoids container restart issues)
+pip install fastembed
+python -c "
+from fastembed import SparseTextEmbedding
+SparseTextEmbedding(model_name='prithivida/Splade_PP_en_v1', cache_dir='$(pwd)/assets/fastembed')
+print('Done.')
+"
 ```
 
-#### Port Conflicts
+### API Endpoints Not Responding
 
 ```bash
-# Check if ports are already in use
-netstat -tuln | grep <port-number>
+# Check backend health
+curl http://localhost:8000/api/health
 
-# Alternative port checking command
-lsof -i :<port-number>
-```
-
-### 2. Network Issues
-
-#### Check Network Connectivity
-
-```bash
-# List Docker networks
-docker network ls
-
-# Inspect network
-docker network inspect ragwebui_default
-```
-
-#### Container Communication
-
-```bash
-# Test network connectivity between containers
-docker exec ragwebui-backend-1 ping db
-```
-
-## Application-Specific Issues
-
-### 1. Frontend Issues
-
-#### Static Files Not Loading
-
-- Check if the frontend container is running
-- Verify nginx configuration
-- Check console for CORS errors
-
-#### Authentication Problems
-
-- Clear browser cache and cookies
-- Verify JWT token configuration
-- Check backend logs for auth errors
-
-### 2. Backend Issues
-
-#### API Endpoints Not Responding
-
-```bash
 # Check backend logs
-docker compose -f docker-compose.yml logs backend
-
-# Verify backend health
-curl http://localhost/api/health
+docker compose -f docker-compose.dev.yml logs backend --tail=50
 ```
 
-#### Memory Issues
+### Memory Issues
 
 ```bash
-# Check container resource usage
+# Monitor container resource usage
 docker stats
-
-# View backend memory usage
-docker exec ragwebui-backend-1 ps aux
 ```
 
-## Complete Reset Procedure
+## Frontend Issues
 
-If you need to start fresh:
+### Authentication / Token Issues
 
-1. Stop all containers:
+The backend generates a new `SECRET_KEY` on every container restart (if `.env` has the placeholder `your-secret-key-here`). This invalidates all existing JWTs — simply log in again.
 
-    ```bash
-    docker compose -f docker-compose.yml down
-    ```
+To persist JWT tokens across restarts, set a fixed `SECRET_KEY` in `.env`:
+```env
+SECRET_KEY=your-actual-random-secret-here
+```
 
-2. Remove volumes to clear database:
+### Route Redirecting to Login Unexpectedly
 
-    ```bash
-    docker compose -f docker-compose.yml down -v
-    ```
+The middleware checks for a `token` cookie (not localStorage). If you previously logged in before the middleware was added, clear cookies for `localhost:3000` and log in again.
 
-3. Start everything again:
+## Container Issues
 
-    ```bash
-    docker compose -f docker-compose.yml up -d
-    ```
-
-4. Wait a minute for MySQL to initialize, then run migrations:
-
-    ```bash
-    docker exec -it ragwebui-backend-1 alembic upgrade head
-    ```
-
-## Debugging Tools
-
-### 1. Logging
-
-#### View All Service Logs
+### Port Conflicts
 
 ```bash
-docker compose -f docker-compose.yml logs
+# Check if a port is already in use
+lsof -i :3000
+lsof -i :8000
+lsof -i :6333
+lsof -i :8080
 ```
 
-#### Service-Specific Logs
+### Check All Service Status
 
 ```bash
-docker compose -f docker-compose.yml logs backend
-docker compose -f docker-compose.yml logs db
-docker compose -f docker-compose.yml logs frontend
+docker compose -f docker-compose.dev.yml ps
 ```
 
-### 2. Database Debugging
-
-#### Connect to Database CLI
+### View All Logs
 
 ```bash
-docker exec -it ragwebui-db-1 mysql -u ragwebui -p
+docker compose -f docker-compose.dev.yml logs --tail=50
 ```
 
-#### Backup and Restore
+## Complete Reset
+
+Wipes all data (database, vectors, uploads) and starts fresh:
 
 ```bash
-# Create backup
-docker exec ragwebui-db-1 mysqldump -u ragwebui -p ragwebui > backup.sql
+# Stop everything
+docker compose -f docker-compose.dev.yml down
 
-# Restore from backup
-docker exec -i ragwebui-db-1 mysql -u ragwebui -p ragwebui < backup.sql
+# Remove persisted data
+rm -rf ./docker-data/mysql ./docker-data/qdrant ./uploads/*
+
+# Rebuild and start
+docker compose -f docker-compose.dev.yml up -d --build
 ```
 
-## Need More Help?
+> This does **not** remove `./assets/fastembed/` — the SPLADE model cache is preserved intentionally.
 
-If you're still experiencing issues:
-
-1. Check the application logs for specific error messages
-2. Verify all environment variables are correctly set
-3. Ensure all required services are running
-4. Check system resources (CPU, memory, disk space)
-5. Review recent changes that might have caused the issue
-
-Remember: Most services need a few seconds to initialize after starting. If you get connection errors, wait a moment and try again.

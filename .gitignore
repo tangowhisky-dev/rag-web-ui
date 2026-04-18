@@ -59,3 +59,4 @@ backend/media/
 frontend/.env
 backend/.env
 /docker-data
+/assets

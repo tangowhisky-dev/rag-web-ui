@@ -1,17 +1,23 @@
 #!/usr/bin/env bash
 set -e
 
-echo "Stopping containers..."
-docker compose -f docker-compose.dev.yml down
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo "Removing volumes..."
-docker volume rm -f \
-  rag-web-ui_mysql_data \
-  rag-web-ui_chroma_data \
-  rag-web-ui_minio_data
+echo "Stopping containers..."
+docker compose -f "$SCRIPT_DIR/docker-compose.dev.yml" down
+
+echo "Removing data directories..."
+rm -rf \
+  "$SCRIPT_DIR/docker-data/mysql" \
+  "$SCRIPT_DIR/docker-data/qdrant" \
+  "$SCRIPT_DIR/docker-data/minio" \
+  "$SCRIPT_DIR/uploads"
+
+echo "Recreating empty upload dir..."
+mkdir -p "$SCRIPT_DIR/uploads"
 
 echo "Starting fresh..."
-docker compose -f docker-compose.dev.yml up -d
+docker compose -f "$SCRIPT_DIR/docker-compose.dev.yml" up -d
 
 echo "Waiting for backend..."
 until curl -s http://localhost:8000/api/health > /dev/null 2>&1; do

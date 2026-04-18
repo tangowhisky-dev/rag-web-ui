@@ -3,6 +3,13 @@
 # exit on error
 set -e
 
+# Generate a random SECRET_KEY each startup if the placeholder is still set,
+# so that JWT tokens are invalidated whenever the container restarts.
+if [ -z "$SECRET_KEY" ] || [ "$SECRET_KEY" = "your-secret-key-here" ]; then
+  export SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+  echo "Generated ephemeral SECRET_KEY for this session"
+fi
+
 echo "Waiting for MySQL..."
 while ! nc -z db 3306; do
   sleep 1

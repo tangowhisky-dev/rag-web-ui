@@ -1,22 +1,159 @@
 import logging
 import os
+import uuid
 import hashlib
 import traceback
 from app.db.session import SessionLocal
-from typing import Optional, List, Dict, Set
+from typing import Optional, List, Dict, Set, Tuple
 from fastapi import UploadFile
 from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document as LangchainDocument
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from openai import AsyncOpenAI
+from qdrant_client import QdrantClient
+from qdrant_client.models import (
+    Distance,
+    PointIdsList,
+    PointStruct,
+    SparseIndexParams,
+    SparseVector,
+    SparseVectorParams,
+    VectorParams,
+)
+from fastembed import SparseTextEmbedding
 from app.core.config import settings
 from app.core.storage import get_abs_path, save_file, move_file, delete_file
 from app.models.knowledge import ProcessingTask, Document, DocumentChunk
 from app.services.chunk_record import ChunkRecord
-import chromadb
-from langchain_openai import OpenAIEmbeddings
-from langchain_chroma import Chroma
+
+# ── Module-level singletons (lazy) ────────────────────────────────────────────
+_qdrant_client: Optional[QdrantClient] = None
+_sparse_embedder: Optional[SparseTextEmbedding] = None
+_EMBED_BATCH_SIZE = 32
+_QDRANT_UPSERT_BATCH = 100
+
+
+def _get_qdrant_client() -> QdrantClient:
+    global _qdrant_client
+    if _qdrant_client is None:
+        _qdrant_client = QdrantClient(host=settings.QDRANT_HOST, port=settings.QDRANT_PORT)
+    return _qdrant_client
+
+
+def _get_sparse_embedder() -> SparseTextEmbedding:
+    global _sparse_embedder
+    if _sparse_embedder is None:
+        _sparse_embedder = SparseTextEmbedding(
+            model_name=settings.SPLADE_MODEL,
+            cache_dir=settings.FASTEMBED_CACHE_DIR,
+        )
+    return _sparse_embedder
+
+
+def _chunk_id_to_point_id(chunk_id: str) -> str:
+    """Convert a SHA-256 hex chunk ID to a deterministic UUID for Qdrant."""
+    return str(uuid.uuid5(uuid.NAMESPACE_OID, chunk_id))
+
+
+def _ensure_qdrant_collection(client: QdrantClient, kb_id: int) -> None:
+    """Create the Qdrant collection for a knowledge base if it does not exist."""
+    collection_name = f"kb_{kb_id}"
+    existing = {c.name for c in client.get_collections().collections}
+    if collection_name not in existing:
+        client.create_collection(
+            collection_name=collection_name,
+            vectors_config={
+                "dense": VectorParams(
+                    size=settings.DENSE_EMBEDDING_DIM,
+                    distance=Distance.COSINE,
+                )
+            },
+            sparse_vectors_config={
+                "sparse": SparseVectorParams(
+                    index=SparseIndexParams(on_disk=False)
+                )
+            },
+        )
+
+
+async def _embed_texts_batch(texts: List[str]) -> List[List[float]]:
+    """Compute dense embeddings via the OpenAI-compatible API, in batches."""
+    client = AsyncOpenAI(
+        api_key=settings.OPENAI_API_KEY,
+        base_url=settings.OPENAI_API_BASE,
+    )
+    all_embeddings: List[List[float]] = []
+    for i in range(0, len(texts), _EMBED_BATCH_SIZE):
+        batch = texts[i : i + _EMBED_BATCH_SIZE]
+        response = await client.embeddings.create(
+            input=batch,
+            model=settings.OPENAI_EMBEDDINGS_MODEL,
+        )
+        all_embeddings.extend(r.embedding for r in response.data)
+    return all_embeddings
+
+
+def _build_qdrant_points(
+    chunk_payloads: List[Tuple[str, str, dict, int]],  # (chunk_id, text, metadata, index)
+    dense_embeddings: List[List[float]],
+    sparse_embeddings,
+    kb_id: int,
+    document_id: int,
+    file_name: str,
+) -> List[PointStruct]:
+    """Build Qdrant PointStruct list from pre-computed embeddings."""
+    points = []
+    for (chunk_id, chunk_text, source_meta, chunk_index), dense_emb, sparse_emb in zip(
+        chunk_payloads, dense_embeddings, sparse_embeddings
+    ):
+        points.append(
+            PointStruct(
+                id=_chunk_id_to_point_id(chunk_id),
+                vector={
+                    "dense": dense_emb,
+                    "sparse": SparseVector(
+                        indices=sparse_emb.indices.tolist(),
+                        values=sparse_emb.values.tolist(),
+                    ),
+                },
+                payload={
+                    "chunk_text": chunk_text,
+                    "kb_id": kb_id,
+                    "document_id": document_id,
+                    "file_name": file_name,
+                    "chunk_index": chunk_index,
+                    **source_meta,
+                },
+            )
+        )
+    return points
+
+
+async def _upsert_to_qdrant(
+    chunk_payloads: List[Tuple[str, str, dict, int]],
+    kb_id: int,
+    document_id: int,
+    file_name: str,
+) -> None:
+    """Compute both vector types and upsert all points to Qdrant."""
+    if not chunk_payloads:
+        return
+    texts = [p[1] for p in chunk_payloads]
+    dense_embs = await _embed_texts_batch(texts)
+    sparse_embs = list(_get_sparse_embedder().embed(texts))
+
+    client = _get_qdrant_client()
+    _ensure_qdrant_collection(client, kb_id)
+    points = _build_qdrant_points(
+        chunk_payloads, dense_embs, sparse_embs, kb_id, document_id, file_name
+    )
+    for i in range(0, len(points), _QDRANT_UPSERT_BATCH):
+        client.upsert(
+            collection_name=f"kb_{kb_id}",
+            points=points[i : i + _QDRANT_UPSERT_BATCH],
+        )
 
 class UploadResult(BaseModel):
     file_path: str
@@ -40,26 +177,6 @@ async def process_document(file_path: str, file_name: str, kb_id: int, document_
     try:
         preview_result = await preview_document(file_path, chunk_size, chunk_overlap)
         
-        # Initialize embeddings
-        logger.info("Initializing OpenAI embeddings...")
-        embeddings = OpenAIEmbeddings(
-            openai_api_key=settings.OPENAI_API_KEY,
-            openai_api_base=settings.OPENAI_API_BASE,
-            model=settings.OPENAI_EMBEDDINGS_MODEL,
-            check_embedding_ctx_length=False,
-        )
-
-        logger.info(f"Initializing vector store with collection: kb_{kb_id}")
-        chroma_client = chromadb.HttpClient(
-            host=settings.CHROMA_DB_HOST,
-            port=settings.CHROMA_DB_PORT,
-        )
-        vector_store = Chroma(
-            client=chroma_client,
-            collection_name=f"kb_{kb_id}",
-            embedding_function=embeddings,
-        )
-        
         # Initialize chunk record manager
         chunk_manager = ChunkRecord(kb_id)
         
@@ -69,7 +186,6 @@ async def process_document(file_path: str, file_name: str, kb_id: int, document_
         # Prepare new chunks
         new_chunks = []
         current_hashes = set()
-        documents_to_update = []
         
         for chunk_index, chunk in enumerate(preview_result.chunks):
             # Calculate chunk hash
@@ -102,26 +218,27 @@ async def process_document(file_path: str, file_name: str, kb_id: int, document_
                 "metadata": metadata,
                 "hash": chunk_hash
             })
-            
-            # Prepare document for vector store
-            doc = LangchainDocument(
-                page_content=chunk.content,
-                metadata=metadata
-            )
-            documents_to_update.append(doc)
         
-        # Add new chunks to database and vector store
+        # Add new chunks to MySQL + Qdrant
         if new_chunks:
             logger.info(f"Adding {len(new_chunks)} new/updated chunks")
             chunk_manager.add_chunks(new_chunks)
-            vector_store.add_documents(documents_to_update)
+            chunk_payloads = [
+                (c["id"], c["chunk_text"], c.get("metadata") or {}, c["chunk_index"])
+                for c in new_chunks
+            ]
+            await _upsert_to_qdrant(chunk_payloads, kb_id, document_id, file_name)
         
-        # Delete removed chunks
+        # Delete removed chunks from MySQL + Qdrant
         chunks_to_delete = chunk_manager.get_deleted_chunks(current_hashes, file_name)
         if chunks_to_delete:
             logger.info(f"Removing {len(chunks_to_delete)} deleted chunks")
             chunk_manager.delete_chunks(chunks_to_delete)
-            vector_store.delete(chunks_to_delete)
+            point_ids = [_chunk_id_to_point_id(cid) for cid in chunks_to_delete]
+            _get_qdrant_client().delete(
+                collection_name=f"kb_{kb_id}",
+                points_selector=PointIdsList(points=point_ids),
+            )
         
         logger.info("Document processing completed successfully")
         
@@ -269,23 +386,9 @@ async def process_document_background(
             chunks = text_splitter.split_documents(documents)
             logger.info(f"Task {task_id}: Document split into {len(chunks)} chunks")
 
-            # 3. Initialize vector store
-            logger.info(f"Task {task_id}: Initializing vector store")
-            embeddings = OpenAIEmbeddings(
-                openai_api_key=settings.OPENAI_API_KEY,
-                openai_api_base=settings.OPENAI_API_BASE,
-                model=settings.OPENAI_EMBEDDINGS_MODEL,
-                check_embedding_ctx_length=False,
-            )
-            chroma_client = chromadb.HttpClient(
-                host=settings.CHROMA_DB_HOST,
-                port=settings.CHROMA_DB_PORT,
-            )
-            vector_store = Chroma(
-                client=chroma_client,
-                collection_name=f"kb_{kb_id}",
-                embedding_function=embeddings,
-            )
+            # 3. Initialise Qdrant collection (creates if not exists)
+            logger.info(f"Task {task_id}: Ensuring Qdrant collection kb_{kb_id}")
+            _ensure_qdrant_collection(_get_qdrant_client(), kb_id)
 
             # 4. Move temp file to permanent location
             permanent_path = f"user_{user_id}/kb_{kb_id}/{file_name}"
@@ -315,8 +418,9 @@ async def process_document_background(
             db.refresh(document)
             logger.info(f"Task {task_id}: Document record created with ID {document.id}")
 
-            # 6. Store document chunks
-            logger.info(f"Task {task_id}: Storing document chunks")
+            # 6. Store document chunks in MySQL + collect Qdrant payload
+            logger.info(f"Task {task_id}: Storing document chunks in MySQL")
+            qdrant_payloads: List[Tuple[str, str, dict, int]] = []
             for i, chunk in enumerate(chunks):
                 chunk_id = hashlib.sha256(
                     f"{kb_id}:{file_name}:{chunk.page_content}".encode()
@@ -342,14 +446,15 @@ async def process_document_background(
                     ).hexdigest()
                 )
                 db.add(doc_chunk)
+                qdrant_payloads.append((chunk_id, chunk.page_content, source_metadata, i))
                 if i > 0 and i % 100 == 0:
                     logger.info(f"Task {task_id}: Stored {i} chunks")
                     db.commit()
 
-            # 7. Add to vector store
-            logger.info(f"Task {task_id}: Adding chunks to vector store")
-            vector_store.add_documents(chunks)
-            logger.info(f"Task {task_id}: Chunks added to vector store")
+            # 7. Upsert dense + sparse vectors to Qdrant (all ingestion paths always run)
+            logger.info(f"Task {task_id}: Upserting {len(qdrant_payloads)} chunks to Qdrant")
+            await _upsert_to_qdrant(qdrant_payloads, kb_id, document.id, file_name)
+            logger.info(f"Task {task_id}: Chunks added to Qdrant")
 
             # 8. Update task status
             logger.info(f"Task {task_id}: Updating task status to completed")

@@ -1,18 +1,19 @@
 import json
 import base64
+import logging
 import re  # used by _IDENTITY_PATTERNS
 from typing import List, AsyncGenerator
 from sqlalchemy.orm import Session
-import chromadb
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_chroma import Chroma
+
+logger = logging.getLogger(__name__)
+from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.output_parsers import StrOutputParser
 from openai import AsyncOpenAI
 from app.core.config import settings
 from app.models.chat import Message
-from app.models.knowledge import KnowledgeBase, Document
+from app.models.knowledge import KnowledgeBase
 from app.services.retrieval import hybrid_search
 
 _IDENTITY_PATTERNS = re.compile(
@@ -40,6 +41,9 @@ async def generate_response(
     chat_id: int,
     db: Session
 ) -> AsyncGenerator[str, None]:
+    logger.info("=" * 70)
+    logger.info("[CHAT] chat_id=%s | kb_ids=%s | query=%r", chat_id, knowledge_base_ids, query)
+
     try:
         # Create user message
         user_message = Message(
@@ -61,44 +65,21 @@ async def generate_response(
 
         # Short-circuit identity questions — no RAG needed
         if _is_identity_question(query):
+            logger.info("[CHAT] identity shortcut — skipping RAG")
             yield f'0:{json.dumps(_IDENTITY_RESPONSE)}\n'
             yield 'd:{"finishReason":"stop","usage":{"promptTokens":0,"completionTokens":0}}\n'
             bot_message.content = _IDENTITY_RESPONSE
             db.commit()
             return
 
-        # Get knowledge bases and their documents
+        # Get knowledge bases
         knowledge_bases = (
             db.query(KnowledgeBase)
             .filter(KnowledgeBase.id.in_(knowledge_base_ids))
             .all()
         )
-        
-        # Initialize embeddings and vector store client
-        embeddings = OpenAIEmbeddings(
-            openai_api_key=settings.OPENAI_API_KEY,
-            openai_api_base=settings.OPENAI_API_BASE,
-            model=settings.OPENAI_EMBEDDINGS_MODEL,
-            check_embedding_ctx_length=False,
-        )
-        chroma_client = chromadb.HttpClient(
-            host=settings.CHROMA_DB_HOST,
-            port=settings.CHROMA_DB_PORT,
-        )
 
-        # Create a vector store for each knowledge base
-        vector_stores = []
-        for kb in knowledge_bases:
-            documents = db.query(Document).filter(Document.knowledge_base_id == kb.id).all()
-            if documents:
-                vector_store = Chroma(
-                    client=chroma_client,
-                    collection_name=f"kb_{kb.id}",
-                    embedding_function=embeddings,
-                )
-                vector_stores.append(vector_store)
-        
-        if not vector_stores:
+        if not knowledge_bases:
             error_msg = "I don't have any knowledge base to help answer your question."
             yield f'0:"{error_msg}"\n'
             yield 'd:{"finishReason":"stop","usage":{"promptTokens":0,"completionTokens":0}}\n'
@@ -106,9 +87,12 @@ async def generate_response(
             db.commit()
             return
 
-        # Build chat history from previous messages
+        # Build chat history from previous messages (exclude the current/last message)
+        logger.info("[CHAT] total messages in payload=%d | prior (history) messages=%d",
+                    len(messages["messages"]), len(messages["messages"]) - 1)
         chat_history = []
-        for message in messages["messages"]:
+        prior_messages = messages["messages"][:-1]
+        for message in prior_messages:
             if message["role"] == "user":
                 chat_history.append(HumanMessage(content=message["content"]))
             elif message["role"] == "assistant":
@@ -118,6 +102,7 @@ async def generate_response(
                 chat_history.append(AIMessage(content=content))
 
         # Step 1: Condense question with chat history into a standalone question
+        logger.info("[STEP 1] condense | chat_history_turns=%d", len(chat_history))
         standalone_question = query
         if chat_history:
             llm = ChatOpenAI(
@@ -134,23 +119,43 @@ async def generate_response(
                     "which might reference context in the chat history, "
                     "formulate a standalone question which can be understood "
                     "without the chat history. Do NOT answer the question, just "
-                    "reformulate it if needed and otherwise return it as is.",
+                    "reformulate it if needed and otherwise return it as is."
+                    "Your only task is to rewrite the user's question as a fully self-contained question "
+                    "that can be understood without the chat history. "
+                    "Output ONLY the rewritten question — no explanations, no answers, no extra text. "
+                    "If the question is already self-contained, output it unchanged. "
+                    "Never answer the question.",
                 ),
                 MessagesPlaceholder("chat_history"),
                 ("human", "{input}"),
             ])
+            logger.info("[STEP 1] sending condense request to model=%s", settings.OPENAI_MODEL)
             condense_chain = contextualize_q_prompt | llm | StrOutputParser()
-            standalone_question = await condense_chain.ainvoke(
+            raw_rewrite = (await condense_chain.ainvoke(
                 {"input": query, "chat_history": chat_history}
-            )
+            )).strip()
+            # Strip reasoning blocks emitted by thinking models (e.g. <think>...</think>)
+            had_think = bool(re.search(r"<think>", raw_rewrite))
+            standalone_question = re.sub(r"<think>.*?</think>", "", raw_rewrite, flags=re.DOTALL).strip()
+            if not standalone_question:
+                standalone_question = query
+            logger.info("[STEP 1] raw_rewrite=%r | had_think_block=%s | standalone_question=%r",
+                        raw_rewrite[:300], had_think, standalone_question)
 
-        # Step 2: Retrieve relevant documents via hybrid search (dense + BM25 + RRF)
+        logger.info("[STEP 1] standalone_question=%r", standalone_question)
+
+        # Step 2: Retrieve relevant documents via hybrid search (dense + sparse + BM25 + RRF)
+        logger.info("[STEP 2] starting hybrid_search | standalone_question=%r", standalone_question)
         docs = await hybrid_search(
             query=standalone_question,
             kb_ids=knowledge_base_ids,
             db=db,
-            vector_stores=vector_stores,
         )
+
+        logger.info("[STEP 2] hybrid_search returned %d docs", len(docs))
+        for i, doc in enumerate(docs):
+            snippet = doc.page_content[:120].replace("\n", " ")
+            logger.info("  chunk[%d] meta=%s | text=%r", i, doc.metadata, snippet)
 
         # Step 3: Emit context chunk as base64 before streaming the answer
         serializable_context = [
@@ -175,18 +180,27 @@ async def generate_response(
             f"[{i + 1}] {doc.page_content}" for i, doc in enumerate(docs)
         )
         qa_system_prompt = (
-            "You are a professional AI based Knowledge Assistant that answers questions using the provided context documents. "
-            "You will be given a set of related contexts to the question, numbered sequentially starting from 1. "
-            "Each context has an implicit reference number based on its position in the list (first context is 1, second is 2, etc.). "
-            "You MUST cite sources using EXACTLY this format: [citation:x] — for example: 'The sky is blue [citation:1].' "
-            "Do NOT use any other citation format such as [1], (1), Context [1], or footnotes. "
-            "Your answer must be correct, accurate and written by an expert using an unbiased and professional tone. "
-            "Please limit to 2048 tokens. Do not give any information that is not related to the question, and do not repeat. "
-            "If the provided context does not contain sufficient information to answer the question, say so briefly and professionally. "
-            "If a sentence draws from multiple contexts, list all applicable citations: [citation:1][citation:2]. "
-            "Other than code and specific names and citations, your answer must be written in the same language as the question. "
-            "Be concise.\n\nContext: {context}\n\n"
-            "Remember: cite using [citation:x] only. Do not blindly repeat the contexts verbatim."
+            "You are a professional AI-based Knowledge Assistant that answers questions using the provided context documents.\n\n"
+            "## Formatting\n"
+            "- Use **bold** for key terms, concepts, and important phrases.\n"
+            "- Use *italics* for definitions, technical terms, or emphasis.\n"
+            "- Use numbered lists (1. 2. 3.) for sequential steps or ordered items.\n"
+            "- Use bullet points (- or *) for non-ordered lists, features, or comparisons.\n"
+            "- Use headings (##, ###) only for longer multi-section answers.\n"
+            "- Keep paragraphs short and well-separated for readability.\n\n"
+            "## Citations\n"
+            "You will be given context documents numbered sequentially starting from 1.\n"
+            "You MUST cite sources using EXACTLY this format: [citation:x] — for example: 'The sky is blue [citation:1].'\n"
+            "Do NOT use any other citation format such as [1], (1), Context [1], or footnotes.\n"
+            "If a sentence draws from multiple contexts, list all applicable citations: [citation:1][citation:2].\n\n"
+            "## General\n"
+            "- Your answer must be correct, accurate, and written in a professional, unbiased tone.\n"
+            "- Limit your response to 2048 tokens.\n"
+            "- Do not include information unrelated to the question, and do not repeat yourself.\n"
+            "- If the provided context does not contain sufficient information, say so briefly and professionally.\n"
+            "- Write in the same language as the question (except for code, citations, and proper nouns).\n"
+            "- Do not blindly repeat the contexts verbatim; synthesise and explain.\n\n"
+            "Context:\n{context}"
         )
         qa_prompt = ChatPromptTemplate.from_messages([
             ("system", qa_system_prompt),
@@ -219,6 +233,8 @@ async def generate_response(
             base_url=settings.OPENAI_API_BASE,
         )
 
+        logger.info("[STEP 4] QA request | model=%s | messages=%d | context_chunks=%d",
+                    settings.OPENAI_MODEL, len(openai_messages), len(docs))
         stream = await openai_client.chat.completions.create(
             model=settings.OPENAI_MODEL,
             messages=openai_messages,
@@ -236,6 +252,7 @@ async def generate_response(
             full_response += chunk_text
             yield f'0:{json.dumps(chunk_text)}\n'
 
+        logger.info("[STEP 4] QA streaming complete | response_length=%d chars", len(full_response))
         bot_message.content = full_response
         db.commit()
             
