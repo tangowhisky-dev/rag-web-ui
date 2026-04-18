@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="./docs/images/github-cover-new.png" alt="RAG Web UI">
+  <img src="https://raw.githubusercontent.com/rag-web-ui/rag-web-ui/main/docs/images/github-cover-new.png" alt="RAG Web UI">
   <br />
   <p>
     <strong>Knowledge Base Management with Retrieval-Augmented Generation</strong>
@@ -23,22 +23,19 @@ Retrieval uses **3-leg hybrid search**: dense vector (Qdrant cosine), sparse vec
 ## Screenshots
 
 <div align="center">
-  <img src="./docs/images/screenshot1.png" alt="Knowledge Base Management" width="800">
+  <img src="https://raw.githubusercontent.com/rag-web-ui/rag-web-ui/main/docs/images/screenshot1.png" alt="Knowledge Base Management" width="800">
   <p><em>Knowledge Base Management</em></p>
 
-  <img src="./docs/images/screenshot2.png" alt="Chat Interface" width="800">
+  <img src="https://raw.githubusercontent.com/rag-web-ui/rag-web-ui/main/docs/images/screenshot2.png" alt="Chat Interface" width="800">
   <p><em>Document Processing</em></p>
 
-  <img src="./docs/images/screenshot3.png" alt="Document List" width="800">
+  <img src="https://raw.githubusercontent.com/rag-web-ui/rag-web-ui/main/docs/images/screenshot3.png" alt="Document List" width="800">
   <p><em>Document List</em></p>
 
-  <img src="./docs/images/screenshot4.png" alt="Chat" width="800">
+  <img src="https://raw.githubusercontent.com/rag-web-ui/rag-web-ui/main/docs/images/screenshot4.png" alt="Chat" width="800">
   <p><em>Chat with References</em></p>
 
-  <img src="./docs/images/screenshot5.png" alt="API Keys" width="800">
-  <p><em>API Key Management</em></p>
-
-  <img src="./docs/images/screenshot6.png" alt="API Reference" width="800">
+  <img src="https://raw.githubusercontent.com/rag-web-ui/rag-web-ui/main/docs/images/screenshot6.png" alt="API Reference" width="800">
   <p><em>OpenAPI Reference</em></p>
 </div>
 
@@ -233,7 +230,6 @@ docker compose -f docker-compose.dev.yml up -d --build backend
 - 3-leg hybrid search: dense vector + SPLADE sparse + MySQL full-text
 - Multi-turn chat with source citations
 - Streaming responses with think-block collapsing for reasoning models
-- API key management for programmatic access (OpenAPI at `/api/openapi`)
 - Retrieval quality testing UI
 - Route protection: unauthenticated users are redirected to `/login`
 - JWT invalidated on container restart (ephemeral secret key in dev)
