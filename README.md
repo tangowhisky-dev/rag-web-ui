@@ -44,7 +44,7 @@ Retrieval uses **3-leg hybrid search**: dense vector (Qdrant cosine), sparse vec
 | Backend | Python FastAPI, LangChain, SQLAlchemy |
 | Vector DB | Qdrant (dense + sparse vectors) |
 | Sparse Embeddings | SPLADE via FastEmbed (CPU, local) |
-| File Storage | MinIO |
+| File Storage | Local Folder mapped to Docker as Volume |
 | Database | MySQL 8 |
 
 ## Quick Start
@@ -117,7 +117,6 @@ DENSE_EMBEDDING_DIM=1024
 
 | Variable | Description | Example |
 |---|---|---|
-| `MINIO_ENDPOINT` | MinIO endpoint | `minio:9000` |
 | `MYSQL_SERVER` | MySQL host | `db` |
 | `MYSQL_USER` | MySQL username | `ragwebui` |
 | `MYSQL_PASSWORD` | MySQL password | `ragwebui` |
@@ -145,7 +144,7 @@ The following web UIs are available when running locally:
 | **RAG Web UI** | http://localhost:3000 | Main application |
 | **Backend API Docs** | http://localhost:8000/redoc | OpenAPI reference |
 | **Qdrant Dashboard** | http://localhost:6333/dashboard | Browse vector collections, inspect points, run queries |
-| **MinIO Console** | http://localhost:9001 | Browse uploaded files (login: `minioadmin` / `minioadmin`) |
+| **File Storage** | Local Folder mapped to Docker as Volume | Browse uploaded files |
 | **Adminer** | http://localhost:8080 | MySQL web GUI (dev only — see below) |
 
 ### Adminer (MySQL web GUI)
@@ -191,7 +190,6 @@ Services:
 | Backend (uvicorn reload) | http://localhost:8000 |
 | API Docs | http://localhost:8000/redoc |
 | Qdrant Dashboard | http://localhost:6333/dashboard |
-| MinIO Console | http://localhost:9001 |
 | Adminer (MySQL) | http://localhost:8080 |
 
 **Stop without losing state:**

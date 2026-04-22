@@ -60,3 +60,4 @@ frontend/.env
 backend/.env
 /docker-data
 /assets
+/uploads
