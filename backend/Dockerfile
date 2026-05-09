@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 FROM python:3.11-slim
 
 WORKDIR /app
@@ -17,11 +18,14 @@ COPY requirements.txt .
 
 # Install CPU-only torch before requirements.txt so sentence-transformers
 # doesn't pull the full CUDA stack (~2GB of nvidia/triton wheels).
-RUN pip install --no-cache-dir \
-    torch torchvision --index-url https://download.pytorch.org/whl/cpu
+# Cache mount keeps downloaded wheels across rebuilds.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install \
+        torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
 # Install Python packages
-RUN pip install --no-cache-dir -r requirements.txt \
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements.txt \
         --extra-index-url https://download.pytorch.org/whl/cpu
 
 # Copy entrypoint script first

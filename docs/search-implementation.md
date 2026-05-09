@@ -235,7 +235,7 @@ All parameters live in `backend/app/core/config.py` and are set via `.env`.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `RETRIEVAL_TOP_K` | `6` | Number of chunks returned to the LLM |
+| `RETRIEVAL_TOP_K` | `10` | Number of chunks returned to the LLM |
 | `HYBRID_DENSE_WEIGHT` | `0.5` | RRF weight for the dense (embedding) leg |
 | `HYBRID_QDRANT_SPARSE_WEIGHT` | `0.3` | RRF weight for the SPLADE sparse leg |
 | `HYBRID_EXACT_WEIGHT` | `0.2` | RRF weight for the MySQL FTS leg |

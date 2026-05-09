@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 FROM node:20-alpine AS base
 
 ### Dependencies ###
@@ -12,7 +13,10 @@ RUN npm install -g pnpm@8
 WORKDIR /app
 
 COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --no-frozen-lockfile
+
+# Cache mount for pnpm content-addressable store
+RUN --mount=type=cache,target=/pnpm/store \
+    pnpm install --no-frozen-lockfile
 
 # Builder
 FROM base AS builder

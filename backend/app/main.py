@@ -10,6 +10,12 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 
+# Suppress noisy INFO notifications from the Neo4j driver and neo4j-graphrag
+# internals. These fire on every schema op ("index already exists") and every
+# relationship merge ("cartesian product") — none are actionable at INFO level.
+logging.getLogger("neo4j.notifications").setLevel(logging.WARNING)
+logging.getLogger("neo4j_graphrag").setLevel(logging.WARNING)
+
 app = FastAPI(
     title=settings.PROJECT_NAME,
     version=settings.VERSION,

@@ -137,11 +137,20 @@ class Settings(BaseSettings):
     NEO4J_USER: str = os.getenv("NEO4J_USER", "neo4j")
     NEO4J_PASSWORD: str = os.getenv("NEO4J_PASSWORD", "ragwebui_neo4j")
 
-    # Set false to disable graph extraction during ingestion (saves LLM calls).
+    # Set false to disable graph extraction during ingestion.
     GRAPHRAG_ENABLED: bool = os.getenv("GRAPHRAG_ENABLED", "true").lower() == "true"
 
-    # LLM model for entity/relationship extraction. Falls back to OPENAI_MODEL.
-    GRAPHRAG_LLM_MODEL: str = os.getenv("GRAPHRAG_LLM_MODEL", "")
+    # ReLiK service URL (dockerized NER+RE service).
+    RELIK_URL: str = os.getenv("RELIK_URL", "http://relik:8000")
+
+    # LLM to use for entity/relationship extraction when ReLiK is not available.
+    # When set, the LLM pipeline is used instead of ReLiK.
+    # When unset (empty string / omitted), ReLiK is used.
+    # Use an OpenAI-compatible model name, e.g. "gpt-4o" or your local model.
+    # Requires use_structured_output support (OpenAI-compatible /chat/completions
+    # with response_format=json_schema — most GPT-4 class models and compatible
+    # local models with JSON schema support).
+    GRAPHRAG_LLM: Optional[str] = os.getenv("GRAPHRAG_LLM") or None
 
     # Enable/disable the graph retrieval leg at query time (ingestion unaffected).
     RETRIEVAL_GRAPH_ENABLED: bool = os.getenv("RETRIEVAL_GRAPH_ENABLED", "true").lower() == "true"

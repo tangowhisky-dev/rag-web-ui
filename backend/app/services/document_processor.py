@@ -282,6 +282,7 @@ def _build_qdrant_points(
                     "document_id": document_id,
                     "file_name": file_name,
                     "chunk_index": chunk_index,
+                    "qdrant_point_id": _chunk_id_to_point_id(chunk_id),  # explicit UUID for Neo4j cross-reference
                     **source_meta,
                 },
             )

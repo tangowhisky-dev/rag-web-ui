@@ -2,10 +2,11 @@
 
 ## Overview
 
-When a document is uploaded it goes through an **8-step pipeline** that ends
-with each text chunk stored in two places: Qdrant (for vector search) and MySQL
-(for full-text search). Every chunk produces exactly **2 vectors** — one dense,
-one sparse — stored as named vector fields on a single Qdrant point.
+When a document is uploaded it goes through a **9-step pipeline** that ends
+with each text chunk stored in three places: Qdrant (for vector search), MySQL
+(for full-text search), and optionally Neo4j (for entity/relationship graph
+traversal). Every chunk produces exactly **2 vectors** — one dense, one sparse —
+stored as named vector fields on a single Qdrant point.
 
 Document parsing is handled by **[MarkItDown](https://github.com/microsoft/markitdown)**
 (Microsoft), which converts every supported file type into clean, consistent
@@ -177,11 +178,12 @@ PointStruct(
         "sparse": SparseVector(indices=[...], values=[...])
     },
     payload = {
-        "chunk_text":   "...",
-        "kb_id":        <int>,
-        "document_id":  <int>,
-        "file_name":    "...",
-        "chunk_index":  <int>,
+        "chunk_text":      "...",
+        "kb_id":           <int>,
+        "document_id":     <int>,
+        "file_name":       "...",
+        "chunk_index":     <int>,
+        "qdrant_point_id": "<uuid>",   # explicit copy of the point ID for graph cross-reference
         # plus any source metadata — e.g. page number for PDFs
     }
 )
@@ -200,6 +202,60 @@ The chunk text and metadata written here back the `document_chunks` table so
 that MySQL's InnoDB FULLTEXT index can serve the exact-search leg at query time.
 This is the same table the exact retrieval leg queries with
 `MATCH(...) AGAINST(... IN NATURAL LANGUAGE MODE)`.
+
+### 9. GraphRAG Extraction (optional)
+
+When `GRAPHRAG_ENABLED=true`, `graph_service.extract_graph_for_document()` is
+called after the Qdrant+MySQL commit. This step is deliberately **after** the
+main commit — a graph extraction failure leaves the document fully searchable
+via the 3-leg hybrid pipeline; it does not roll back chunk storage.
+
+**ReLiK backend** (`COMPOSE_PROFILES=relik` in `.env`):
+
+```
+For each chunk text:
+    POST http://relik:8000/api/relik?text=<chunk>&annotation_type=char&relation_threshold=0.5
+    → parse spans (entities) and triplets (relationships)
+    → MERGE (:Chunk {qdrant_point_id}) in Neo4j
+    → MERGE entity nodes, CREATE relationships
+    → CREATE (chunk)-[:FROM_CHUNK]->(entity) edges
+```
+
+**LLM backend** (`GRAPHRAG_LLM=<model>` in `.env`):
+
+```
+For each chunk text:
+    neo4j-graphrag Pipeline:
+        LLMEntityRelationExtractor(use_structured_output=True)
+            → OpenAI-compatible API with JSON Schema response_format
+            → guaranteed Neo4jGraph JSON (no free-form drift)
+        Neo4jWriter
+            → write Entity nodes + relationships via APOC
+    Then:
+        MATCH (:__KGBuilder__) nodes just written
+        → link to (:Chunk {qdrant_point_id}) via [:FROM_CHUNK]
+```
+
+`GRAPHRAG_LLM` takes precedence over ReLiK when both are configured. If both
+are unset, this step is silently skipped.
+
+**Neo4j graph schema after extraction:**
+
+```
+(:Chunk {qdrant_point_id, document_id, chunk_index, kb_id, file_name})
+    -[:FROM_CHUNK]→
+(:__Entity__ {name, ...})
+    -[:RELATIONSHIP_TYPE]→
+(:__Entity__ {name, ...})
+```
+
+Chunks are the bridge between the vector world (Qdrant, keyed by `qdrant_point_id`)
+and the graph world (Neo4j, keyed by the same UUID). This is what makes
+`expand_docs_via_graph()` at retrieval time a single index hop rather than a
+compound property lookup.
+
+**Explore the graph:** Neo4j Browser — http://localhost:7474/browser/
+Login: `neo4j` / `ragwebui_neo4j`
 
 ---
 
@@ -334,6 +390,9 @@ Both errors surface in `task.error_message` and the document is not stored.
 | `OPENAI_VISION_API_BASE` | Base URL for the vision model. Falls back to `OPENAI_API_BASE`. | unset |
 | `SPLADE_MODEL` | FastEmbed SPLADE model name | `prithivida/Splade_PP_en_v1` |
 | `FASTEMBED_CACHE_DIR` | Where FastEmbed caches ONNX models | `./assets/fastembed` |
+| `GRAPHRAG_ENABLED` | Enable graph extraction step during ingestion | `true` |
+| `COMPOSE_PROFILES` | Set to `relik` to start the ReLiK extraction service | unset |
+| `GRAPHRAG_LLM` | Model name for LLM-based extraction (takes precedence over ReLiK) | unset |
 
 ---
 
@@ -342,9 +401,11 @@ Both errors surface in `task.error_message` and the document is not stored.
 | File | Role |
 |------|------|
 | `backend/app/services/document_processor.py` | Full ingestion implementation including `_convert_to_markdown()` |
-| `backend/app/core/config.py` | `DENSE_EMBEDDING_DIM`, `SPLADE_MODEL`, `FASTEMBED_CACHE_DIR`, batch sizes |
+| `backend/app/services/graph_service.py` | GraphRAG extraction — ReLiK + LLM backends, Neo4j write, FROM_CHUNK linking |
+| `backend/app/core/config.py` | `DENSE_EMBEDDING_DIM`, `SPLADE_MODEL`, `FASTEMBED_CACHE_DIR`, `GRAPHRAG_LLM`, batch sizes |
 | `backend/app/services/chunk_record.py` | MySQL chunk upsert and deduplication helpers |
-| `backend/requirements.txt` | `markitdown[all]` and `markitdown-ocr` dependencies |
+| `backend/requirements.txt` | `markitdown[all]`, `markitdown-ocr`, `neo4j-graphrag` dependencies |
+| `relik-service/` | Custom arm64 Docker image for ReLiK NER+RE service |
 
 ---
 

@@ -7,11 +7,13 @@ Two modes depending on whether the reranker is enabled:
 All docs passed to this function have already cleared the reranker threshold,
 so every doc is considered genuinely relevant. Signals:
 
-  A. Top score      (50 pts) — best reranker logit, normalised over [0, 8]
+  A. Top score      (50 pts) — best reranker logit, normalised over [-5, 8]
                                score ≥ 8  → 50 pts (ceiling)
                                score = 0  → 0 pts
-                               Linear in between: pts = clamp(score/8, 0, 1) * 50
-  B. Doc count      (30 pts) — stepped: 1 doc → 10, 2 → 20, 3+ → 30
+                               Linear in between: pts = clamp(score/span, 0, 1) * 50
+  B. Doc count      (30 pts) — continuous: min(n / RETRIEVAL_TOP_K, 1.0) * 30
+                               Rewards graph-expanded pools proportionally;
+                               saturates at top_k docs (30 pts), not capped at 3.
   C. Mean score     (20 pts) — mean logit of all passing docs, same normalisation
                                as A. Penalises cases where one good chunk is
                                surrounded by many marginal ones.
@@ -173,14 +175,11 @@ def _score_reranker(
     # A: top score (50 pts)
     a = normalise(top_score) * 50
 
-    # B: doc count — stepped at 1/2/3+ (30 pts)
-    n = len(docs)
-    if n >= 3:
-        b = 30.0
-    elif n == 2:
-        b = 20.0
-    else:
-        b = 10.0
+    # B: doc count (30 pts)
+    # Scale against RETRIEVAL_TOP_K so graph-expanded pools (which can exceed
+    # top_k) are rewarded proportionally rather than capped at 3.
+    top_k = settings.RETRIEVAL_TOP_K
+    b = min(len(docs) / max(top_k, 1), 1.0) * 30
 
     # C: mean score (20 pts)
     c = normalise(mean_score) * 20
@@ -196,7 +195,7 @@ def _score_reranker(
         "doc_count_pts": round(b),
         "mean_score_pts": round(c),
         "total": score,
-        "docs_returned": n,
+        "docs_returned": len(docs),
         "failed_legs": failed_legs,
     }
 

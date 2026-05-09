@@ -17,7 +17,7 @@ Configuration (.env / settings):
   HYBRID_DENSE_WEIGHT          — RRF weight for the dense leg          (default 0.5)
   HYBRID_QDRANT_SPARSE_WEIGHT  — RRF weight for the Qdrant sparse leg  (default 0.3)
   HYBRID_EXACT_WEIGHT          — RRF weight for the MySQL exact leg     (default 0.2)
-  RETRIEVAL_TOP_K              — number of documents returned           (default 6)
+  RETRIEVAL_TOP_K              — number of documents returned           (default 10)
   RETRIEVAL_DENSE_ENABLED      — enable/disable dense leg               (default true)
   RETRIEVAL_QDRANT_SPARSE_ENABLED — enable/disable sparse leg           (default true)
   RETRIEVAL_EXACT_ENABLED      — enable/disable exact leg               (default true)
@@ -392,20 +392,49 @@ async def hybrid_search_with_legs(
 
     logger.info("hybrid_search_with_legs: RRF returned %d docs | failed_legs=%s", len(docs), failed_legs)
 
-    # ── Graph enrichment (post-merge, pre-reranker) ────────────────────────────
-    # Neo4j traversal uses (document_id, chunk_index) from each doc's Qdrant
-    # payload to look up entity relationships — no separate vector search in Neo4j.
+    # ── Graph expansion (post-RRF, pre-reranker) ───────────────────────────
+    # Traverse Neo4j to find entity-connected chunks NOT returned by vector
+    # search. Fetch their text from Qdrant by UUID. Merge into candidate pool.
+    # Runs before enrichment so the reranker scores expanded chunks too.
+    graph_expansion_count = 0
+    if enabled["graph"] and docs:
+        try:
+            from app.services.graph_service import expand_docs_via_graph
+            expanded = expand_docs_via_graph(docs, kb_ids)
+            if expanded:
+                existing_hashes = {_content_hash(d.page_content) for d in docs}
+                new_docs = [d for d in expanded if _content_hash(d.page_content) not in existing_hashes]
+                for d in new_docs:
+                    d.metadata["_legs"] = ["graph"]
+                docs = docs + new_docs
+                graph_expansion_count = len(new_docs)
+                logger.info(
+                    "hybrid_search_with_legs: graph expansion added %d new chunks (total=%d)",
+                    graph_expansion_count, len(docs),
+                )
+        except Exception as exc:
+            logger.warning("hybrid_search_with_legs: graph expansion failed (non-fatal): %s", exc)
+
+    # ── Graph enrichment (post-expansion, pre-reranker) ────────────────────
+    # Appends entity relationship triples to each candidate's text so the
+    # reranker and LLM both see the entity context alongside chunk text.
+    graph_enriched_count = 0
     if enabled["graph"] and docs:
         try:
             from app.services.graph_service import enrich_docs_with_graph
             docs = enrich_docs_with_graph(docs)
-            graph_count = sum(1 for d in docs if d.metadata.get("_graph_triples", 0) > 0)
-            legs["graph"] = {"status": "ok", "count": graph_count, "error": None}
+            graph_enriched_count = sum(1 for d in docs if d.metadata.get("_graph_triples", 0) > 0)
+            legs["graph"] = {
+                "status": "ok",
+                "count": graph_enriched_count,
+                "expanded": graph_expansion_count,
+                "error": None,
+            }
         except Exception as exc:
             logger.warning("hybrid_search_with_legs: graph enrichment failed (non-fatal): %s", exc)
-            legs["graph"] = {"status": "failed", "count": 0, "error": str(exc)}
+            legs["graph"] = {"status": "failed", "count": 0, "expanded": graph_expansion_count, "error": str(exc)}
     else:
-        legs["graph"] = {"status": "disabled", "count": 0, "error": None}
+        legs["graph"] = {"status": "disabled", "count": 0, "expanded": 0, "error": None}
 
     # ── Cross-encoder reranking (optional) ────────────────────────────────────
     if settings.RERANKER_ENABLED and docs:

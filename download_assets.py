@@ -5,6 +5,7 @@ download_assets.py — pre-download all model assets required by the backend.
 Currently downloads:
   1. FastEmbed SPLADE sparse-embedding model (hybrid retrieval, sparse leg)
   2. Cross-encoder reranker model (post-RRF reranking)
+  3. ReLiK models for GraphRAG entity/relationship extraction (5 sub-models)
 
 Usage:
     python download_assets.py [options]
@@ -14,14 +15,19 @@ Options:
     --model MODEL             SPLADE model name
     --reranker-cache-dir PATH Reranker cache directory
     --reranker-model MODEL    Cross-encoder model name
+    --relik-cache-dir PATH    ReLiK HuggingFace cache directory
+    --relik-model MODEL       ReLiK top-level model name
     --skip-splade             Skip SPLADE download
     --skip-reranker           Skip reranker download
+    --skip-relik              Skip ReLiK download
 
 Defaults are read from environment variables (or .env) matching backend config:
     FASTEMBED_CACHE_DIR  (default: ./assets/fastembed)
     SPLADE_MODEL         (default: prithivida/Splade_PP_en_v1)
     RERANKER_CACHE_DIR   (default: ./assets/reranker)
     RERANKER_MODEL       (default: cross-encoder/ms-marco-MiniLM-L-12-v2)
+    RELIK_HF_CACHE_DIR   (default: ./assets/relik-hf-cache)
+    RELIK_MODEL          (default: relik-ie/relik-cie-small)
 """
 
 import argparse
@@ -67,6 +73,54 @@ def download_splade(model_name: str, cache_dir: str) -> None:
     print(f"Done in {elapsed:.1f}s.\n")
 
 
+def download_relik(model_name: str, cache_dir: str) -> None:
+    """
+    Download all ReLiK sub-models via huggingface_hub.snapshot_download.
+
+    relik-cie-small is a meta-model that references 5 sub-repos at runtime:
+      - relik-ie/relik-cie-small             (config + tokenizer)
+      - relik-ie/encoder-e5-base-v2-wikipedia-matryoshka   (span retriever encoder)
+      - relik-ie/index-e5-base-v2-wikipedia-matryoshka     (span index)
+      - relik-ie/encoder-e5-small-v2-wikipedia-relations   (triplet retriever encoder)
+      - relik-ie/encoder-e5-small-v2-wikipedia-relations-index (triplet index)
+      - relik-ie/relik-reader-deberta-v3-small-cie-wikipedia   (reader)
+
+    All are downloaded into cache_dir (which maps to /root/.cache/huggingface/hub
+    inside the relik container).
+    """
+    print(f"  model      : {model_name}")
+    print(f"  cache_dir  : {os.path.abspath(cache_dir)}")
+
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError:
+        print("\n[ERROR] huggingface_hub is not installed.")
+        print("        Run:  pip install huggingface_hub")
+        sys.exit(1)
+
+    os.makedirs(cache_dir, exist_ok=True)
+
+    # The top-level model + all sub-models referenced by relik-cie-small.
+    # Download each explicitly so they're cached before container startup.
+    repos = [
+        model_name,
+        "relik-ie/encoder-e5-base-v2-wikipedia-matryoshka",
+        "relik-ie/index-e5-base-v2-wikipedia-matryoshka",
+        "relik-ie/encoder-e5-small-v2-wikipedia-relations",
+        "relik-ie/encoder-e5-small-v2-wikipedia-relations-index",
+        "relik-ie/relik-reader-deberta-v3-small-cie-wikipedia",
+    ]
+
+    print(f"\nDownloading {len(repos)} ReLiK model repos …")
+    t0 = time.time()
+    for repo in repos:
+        print(f"  -> {repo}")
+        snapshot_download(repo_id=repo, cache_dir=cache_dir)
+    elapsed = time.time() - t0
+
+    print(f"Done in {elapsed:.1f}s.\n")
+
+
 def download_reranker(model_name: str, cache_dir: str) -> None:
     print(f"  model      : {model_name}")
     print(f"  cache_dir  : {os.path.abspath(cache_dir)}")
@@ -95,6 +149,8 @@ def main() -> None:
     default_splade_model  = os.getenv("SPLADE_MODEL", "prithivida/Splade_PP_en_v1")
     default_reranker_cache = os.getenv("RERANKER_CACHE_DIR", "./assets/reranker")
     default_reranker_model = os.getenv("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-12-v2")
+    default_relik_cache   = os.getenv("RELIK_HF_CACHE_DIR", "./assets/relik-hf-cache")
+    default_relik_model   = os.getenv("RELIK_MODEL", "relik-ie/relik-cie-small")
 
     parser = argparse.ArgumentParser(description="Pre-download RAG-Web-UI model assets.")
     parser.add_argument("--cache-dir", default=default_splade_cache,
@@ -105,10 +161,16 @@ def main() -> None:
                         help=f"Reranker cache directory (default: {default_reranker_cache})")
     parser.add_argument("--reranker-model", default=default_reranker_model,
                         help=f"Cross-encoder model name (default: {default_reranker_model})")
+    parser.add_argument("--relik-cache-dir", default=default_relik_cache,
+                        help=f"ReLiK HuggingFace cache directory (default: {default_relik_cache})")
+    parser.add_argument("--relik-model", default=default_relik_model,
+                        help=f"ReLiK top-level model (default: {default_relik_model})")
     parser.add_argument("--skip-splade", action="store_true",
                         help="Skip SPLADE model download")
     parser.add_argument("--skip-reranker", action="store_true",
                         help="Skip reranker model download")
+    parser.add_argument("--skip-relik", action="store_true",
+                        help="Skip ReLiK model download")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -116,7 +178,7 @@ def main() -> None:
     print("=" * 60)
 
     step = 1
-    total = sum([not args.skip_splade, not args.skip_reranker])
+    total = sum([not args.skip_splade, not args.skip_reranker, not args.skip_relik])
 
     if not args.skip_splade:
         print(f"\n[{step}/{total}] SPLADE sparse-embedding model (FastEmbed)")
@@ -126,6 +188,11 @@ def main() -> None:
     if not args.skip_reranker:
         print(f"[{step}/{total}] Cross-encoder reranker model (sentence-transformers)")
         download_reranker(model_name=args.reranker_model, cache_dir=args.reranker_cache_dir)
+        step += 1
+
+    if not args.skip_relik:
+        print(f"[{step}/{total}] ReLiK GraphRAG models (huggingface_hub)")
+        download_relik(model_name=args.relik_model, cache_dir=args.relik_cache_dir)
         step += 1
 
     print("All assets downloaded successfully.")

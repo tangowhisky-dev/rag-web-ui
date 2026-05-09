@@ -7,10 +7,7 @@ from typing import List, AsyncGenerator
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
-from langchain_openai import ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, AIMessage
-from langchain_core.output_parsers import StrOutputParser
 from openai import AsyncOpenAI
 from app.core.config import settings
 from app.models.chat import Chat, Message
@@ -44,16 +41,6 @@ def _is_identity_question(query: str) -> bool:
 
 
 # ── LLM helpers ───────────────────────────────────────────────────────────────
-
-def _make_llm() -> ChatOpenAI:
-    return ChatOpenAI(
-        temperature=0,
-        streaming=True,
-        model=settings.effective_query_model,
-        openai_api_key=settings.OPENAI_API_KEY,
-        openai_api_base=settings.OPENAI_API_BASE,
-    )
-
 
 def _strip_think(text: str) -> str:
     """Remove <think>...</think> blocks emitted by reasoning models."""
@@ -221,7 +208,6 @@ async def _rewrite_query(
     if not recent_history:
         return query
 
-    llm = _make_llm()
     # Build messages manually — avoids LangChain template curly-brace hazards
     # and lets us set max_tokens to prevent the small model from answering instead of rewriting
     system_msg = (

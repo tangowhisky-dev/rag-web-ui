@@ -9,10 +9,10 @@ A self-hosted knowledge base Q&A system using 3-leg hybrid retrieval (dense vect
 │                           RAG WEB UI ARCHITECTURE                            │
 └──────────────────────────────────────────────────────────────────────────────┘
 
-┏━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┓
-┃  FRONTEND   ┃   BACKEND    ┃  VECTOR DB  ┃   DATABASE   ┃
-┃ (Next.js)   ┃ (FastAPI)    ┃ (Qdrant)    ┃ (MySQL 8)    ┃
-┗━━━━━━━━━━━━━┻━━━━━━━━━━━━━━┻━━━━━━━━━━━━━┻━━━━━━━━━━━━━━┛
+┏━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┓
+┃  FRONTEND   ┃   BACKEND    ┃  VECTOR DB  ┃   GRAPH DB   ┃  DATABASE    ┃
+┃ (Next.js)   ┃ (FastAPI)    ┃ (Qdrant)    ┃  (Neo4j)     ┃ (MySQL 8)    ┃
+┗━━━━━━━━━━━━━┻━━━━━━━━━━━━━━┻━━━━━━━━━━━━━┻━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━┛
 
 USER REQUEST → [Frontend:3000] → [Backend API:8000] → [Retrieval Engine] → [LLM] → RESPONSE
 ```
@@ -34,8 +34,14 @@ document_processor.py
     ├── Chunk (RecursiveCharacterTextSplitter)
     ├── Embed chunks — async OpenAI-compatible API → dense vectors
     ├── Embed chunks — FastEmbed SPLADE → sparse vectors
-    ├── Upsert to Qdrant (dense + sparse named vectors per collection kb_<id>)
-    └── Store chunk text in MySQL document_chunks (for FTS + metadata)
+    ├── Upsert to Qdrant (dense + sparse named vectors per collection kb_<id>; qdrant_point_id stored in payload)
+    ├── Store chunk text in MySQL document_chunks (for FTS + metadata)
+    └── graph_service.py — GraphRAG extraction (when GRAPHRAG_ENABLED=true)
+            ├── [ReLiK mode]  POST /api/relik → NER+RE → write Entity nodes + relationships to Neo4j
+            │                  └── MATCH Chunk node by qdrant_point_id → CREATE (chunk)-[:FROM_CHUNK]->(entity)
+            └── [LLM mode]    LLMEntityRelationExtractor (use_structured_output=True, JSON Schema-constrained)
+                               → neo4j-graphrag Pipeline → write Entity nodes + relationships to Neo4j
+                               └── MATCH Chunk node by qdrant_point_id → CREATE (chunk)-[:FROM_CHUNK]->(entity)
 ```
 
 ### 2. Query / Chat Pipeline
@@ -63,10 +69,18 @@ retrieval.py — hybrid_search()
     top-K LangchainDocuments
                         │
                         ▼ (optional, when GRAPHRAG_ENABLED + use_graph_rag)
+    graph_service.py — expand_docs_via_graph()
+        └── Extract qdrant_point_ids from seed docs
+            → MATCH (Chunk)-[:FROM_CHUNK]→(Entity)-[r]→(Entity)←[:FROM_CHUNK]-(Chunk2)
+            → collect new Chunk2.qdrant_point_ids (not already in seed set)
+            → fetch new chunk texts from Qdrant by UUID (direct key lookup, no re-embedding)
+            → merge new chunks into candidate pool
+                        │
+                        ▼
     graph_service.py — enrich_docs_with_graph()
-        └── Look up Chunk node by (document_id, chunk_index) in Neo4j
-            → traverse entity relationships (FROM_CHUNK → Entity -[r]→ Entity)
-            → append [Graph context] triples to each chunk's text
+        └── For each candidate chunk (seed + graph-expanded):
+            MATCH (Chunk {qdrant_point_id})-[:FROM_CHUNK]→(Entity)-[r]→(Entity)
+            → append [Graph context] triples to chunk text
                         │
                         ▼
     reranker.py — cross-encoder reranking (optional, RERANKER_ENABLED)
@@ -83,12 +97,31 @@ chat_service.py
 
 #### GraphRAG architecture note
 
-Neo4j is used **only** for entity/relationship storage and graph-context enrichment — not for vector search. The correct division of responsibility is:
+**Strict separation of concerns:**
 
-- **Qdrant** — all vector search (dense cosine + SPLADE sparse)
-- **Neo4j** — entity graph traversal, queried by chunk IDs from Qdrant results
+```
+Qdrant  — source of truth for all chunk TEXT and VECTORS
+Neo4j   — source of truth for GRAPH TOPOLOGY (entities, relationships, chunk linkage)
+```
 
-This matches the Qdrant+Neo4j reference architecture: vector search finds relevant chunk IDs, those IDs are used to retrieve graph context from Neo4j, the enriched text is then reranked. Neo4j never runs its own vector index.
+Vectors are never stored in Neo4j. Neo4j Chunk nodes are keyed by `qdrant_point_id` (the exact UUID Qdrant uses as a point ID), enabling bidirectional lookup in a single index hit. This means graph-expanded chunks can be fetched from Qdrant by UUID — no re-embedding, no re-scoring, just a direct key lookup.
+
+**Retrieval expansion vs enrichment** — two distinct operations:
+
+- **Expansion** (`expand_docs_via_graph`) — finds chunks NOT in the vector search results by traversing entity connections. A query surface 5 chunks; expansion may add 3 more that are entity-connected but not in the top-K by similarity.
+- **Enrichment** (`enrich_docs_with_graph`) — appends entity/relationship triples as `[Graph context]` text to every candidate chunk (seed + expanded), giving the reranker and LLM explicit graph signal.
+
+**Extraction backends** (controlled by `.env`, mutually exclusive):
+
+| Mode | Trigger | Notes |
+|---|---|---|
+| ReLiK | `COMPOSE_PROFILES=relik` | Local NER+RE model; 12–16 GB RAM for Wikipedia-scale indexes |
+| LLM | `GRAPHRAG_LLM=<model>` | `LLMEntityRelationExtractor` + `use_structured_output=True`; JSON Schema-constrained |
+| Disabled | both unset | Extraction silently skipped; retrieval graph leg also inactive |
+
+`GRAPHRAG_LLM` takes precedence over ReLiK when both are set.
+
+**Explore the graph:** Neo4j Browser — http://localhost:7474/browser/ (login: `neo4j` / `ragwebui_neo4j`)
 
 ---
 
@@ -151,7 +184,8 @@ src/
 | `frontend` | custom (Next.js) | Web UI; Next.js dev server or production build |
 | `qdrant` | `qdrant/qdrant` | Vector database (dense + sparse collections) |
 | `db` | `mysql:8` | Relational data + FULLTEXT chunk index |
-| `neo4j` | `neo4j:5` | Graph DB — entity/relationship storage for GraphRAG enrichment (optional) |
+| `neo4j` | `neo4j:2026.04` | Graph DB — entity/relationship storage for GraphRAG; browser at http://localhost:7474/browser/ |
+| `relik` | custom (arm64, CPU torch) | ReLiK NER+RE service — optional, start with `COMPOSE_PROFILES=relik`; requires 12–16 GB RAM |
 | `adminer` | `adminer` | MySQL web GUI (dev compose only) |
 
 ---
@@ -205,6 +239,7 @@ Four distinct model roles are supported, all pointing at OpenAI-compatible endpo
 | Frontend | Next.js 14, TypeScript, Tailwind CSS, shadcn/ui, Vercel AI SDK |
 | Backend | Python FastAPI, LangChain, SQLAlchemy, Alembic |
 | Vector DB | Qdrant (dense + sparse named vectors) |
+| Graph DB | Neo4j (entity/relationship graph; neo4j-graphrag pipeline) |
 | Sparse Embeddings | SPLADE via FastEmbed (CPU, ONNX, local) |
 | File Storage | Local filesystem (Docker volume mount) |
 | Database | MySQL 8 (ORM data + FULLTEXT index) |

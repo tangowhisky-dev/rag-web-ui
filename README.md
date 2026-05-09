@@ -16,7 +16,7 @@
 
 RAG Web UI is a self-hosted knowledge base Q&A system. Upload your documents, then chat with them. Uses any **OpenAI-compatible API** for LLM and embeddings — works with OpenAI, LM Studio, or any local model server.
 
-Retrieval uses **3-leg hybrid search**: dense vector (Qdrant cosine), sparse vector (SPLADE via Qdrant), and exact keyword (MySQL full-text), combined with configurable weights.
+Retrieval uses **3-leg hybrid search**: dense vector (Qdrant cosine), sparse vector (SPLADE via Qdrant), and exact keyword (MySQL full-text), combined with configurable weights. Optionally extended with **GraphRAG**: entity and relationship extraction into Neo4j, enabling graph-traversal retrieval expansion alongside vector search.
 
 > **Based on:** This is an opinionated, slimmed-down fork of [rag-web-ui/rag-web-ui](https://github.com/rag-web-ui/rag-web-ui). All credit for the original design and implementation goes to the original authors. The goal of this fork is to serve as a learning resource for understanding the RAG pipeline end-to-end — keeping minimal dependencies, removing abstraction layers, and adding visibility into individual RAG components (retrieval legs, reranking, prompt construction, token flow).
 
@@ -43,6 +43,7 @@ Retrieval uses **3-leg hybrid search**: dense vector (Qdrant cosine), sparse vec
 | Frontend | Next.js 14, TypeScript, Tailwind CSS, shadcn/ui, Vercel AI SDK |
 | Backend | Python FastAPI, LangChain, SQLAlchemy |
 | Vector DB | Qdrant (dense + sparse vectors) |
+| Graph DB | Neo4j (entity/relationship graph for GraphRAG — optional) |
 | Sparse Embeddings | SPLADE via FastEmbed (CPU, local) |
 | File Storage | Local Folder mapped to Docker as Volume |
 | Database | MySQL 8 |
@@ -102,7 +103,67 @@ DENSE_EMBEDDING_DIM=1024
 
 > **Warning:** Do not change these after ingesting documents. Re-upload existing documents to re-index with new settings. See [docs/chunking.md](docs/chunking.md).
 
-### Retrieval
+### GraphRAG (Knowledge Graph)
+
+GraphRAG enriches the retrieval pipeline by extracting entities and relationships from ingested chunks and storing them as a graph in Neo4j. At query time, vector search results are expanded by traversing entity connections — surfacing related chunks that similarity search alone would miss.
+
+**Extraction backends (mutually exclusive, controlled by `.env`):**
+
+| Mode | How to enable | Notes |
+|---|---|---|
+| ReLiK | `COMPOSE_PROFILES=relik` in `.env` | Local NER+RE model. Accurate, zero API cost per chunk, but requires 12–16 GB RAM to load Wikipedia-scale indexes. |
+| LLM | `GRAPHRAG_LLM=<model>` in `.env` | Uses `neo4j-graphrag` Pipeline + `LLMEntityRelationExtractor` with `use_structured_output=True` (JSON Schema-constrained). Flexible, no RAM requirement beyond your LLM server. |
+| Disabled | Both unset | Graph extraction silently skipped. Documents remain fully searchable via 3-leg hybrid. |
+
+**Priority:** if `GRAPHRAG_LLM` is set, it takes precedence over ReLiK regardless of `COMPOSE_PROFILES`.
+
+**Data architecture:**
+
+```
+Qdrant  — source of truth for all chunk TEXT and VECTORS
+Neo4j   — source of truth for GRAPH TOPOLOGY (entities, relationships, chunk linkage)
+```
+
+Vectors are never stored in Neo4j. Neo4j Chunk nodes are cross-referenced to Qdrant by `qdrant_point_id` (the exact UUID Qdrant uses as point ID), enabling bidirectional lookup in a single index hit.
+
+**Retrieval flow with GraphRAG enabled:**
+
+```
+vector search → RRF merge → graph expansion (new chunks via entity traversal)
+             → graph enrichment (append triples to all candidates) → reranker → LLM
+```
+
+Graph expansion finds chunks that share entities with the seed results but weren't returned by vector similarity — a query about "Steve Jobs" may surface an Apple product philosophy chunk that never mentions Jobs by name but is entity-connected through the graph.
+
+**Environment variables:**
+
+| Variable | Description |
+|---|---|
+| `GRAPHRAG_ENABLED` | Set `false` to skip graph extraction at ingest time. Retrieval graph leg also becomes inactive. |
+| `COMPOSE_PROFILES` | Set to `relik` to start the ReLiK container with the stack. |
+| `GRAPHRAG_LLM` | Model name for LLM-based extraction (e.g. `gpt-4o`, `qwen/qwen3.5-4b`). |
+| `RETRIEVAL_GRAPH_ENABLED` | Enable/disable graph retrieval leg independently of ingestion. |
+| `GRAPHRAG_RETRIEVAL_HOPS` | Relationship hops to traverse from seed nodes (default `2`). |
+
+**Explore the graph:** Neo4j Browser is available at **http://localhost:7474/browser/**
+
+Log in with:
+- Username: `neo4j`
+- Password: `ragwebui_neo4j`
+
+Useful Cypher queries to explore the graph:
+```cypher
+// See all entity types
+MATCH (e:__Entity__) RETURN DISTINCT labels(e), count(*) ORDER BY count(*) DESC
+
+// See entities and their relationships
+MATCH (a:__Entity__)-[r]->(b:__Entity__) RETURN a, r, b LIMIT 50
+
+// Find which chunks contain a given entity
+MATCH (c:Chunk)-[:FROM_CHUNK]-(e:__Entity__ {name: "Apple"}) RETURN c, e
+```
+
+
 
 | Variable | Description | Default |
 |---|---|---|
@@ -160,6 +221,7 @@ The following web UIs are available when running locally:
 | **RAG Web UI** | http://localhost:3000 | Main application |
 | **Backend API Docs** | http://localhost:8000/redoc | OpenAPI reference |
 | **Qdrant Dashboard** | http://localhost:6333/dashboard | Browse vector collections, inspect points, run queries |
+| **Neo4j Browser** | http://localhost:7474/browser/ | Explore entity/relationship graph, run Cypher queries |
 | **File Storage** | Local Folder mapped to Docker as Volume | Browse uploaded files |
 | **Adminer** | http://localhost:8080 | MySQL web GUI (dev only — see below) |
 
@@ -206,6 +268,7 @@ Services:
 | Backend (uvicorn reload) | http://localhost:8000 |
 | API Docs | http://localhost:8000/redoc |
 | Qdrant Dashboard | http://localhost:6333/dashboard |
+| Neo4j Browser | http://localhost:7474/browser/ |
 | Adminer (MySQL) | http://localhost:8080 |
 
 **Stop without losing state:**
@@ -241,6 +304,7 @@ docker compose -f docker-compose.dev.yml up -d --build backend
 - Separate model for query rewriting and summarisation via `OPENAI_QUERY_MODEL` (falls back to `OPENAI_MODEL`)
 - Automatic chunking, embedding, and incremental updates
 - 3-leg hybrid search: dense vector + SPLADE sparse + MySQL full-text
+- **GraphRAG** — optional entity/relationship extraction into Neo4j with graph-traversal retrieval expansion; two backends: ReLiK (local model) or LLM (`GRAPHRAG_LLM`)
 - Multi-turn chat with source citations
 - Streaming responses with think-block collapsing for reasoning models
 - Retrieval quality testing UI

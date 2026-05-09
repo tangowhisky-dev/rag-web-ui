@@ -62,3 +62,4 @@ backend/.env
 /assets
 /uploads
 /samples
+.webui_secret_key
