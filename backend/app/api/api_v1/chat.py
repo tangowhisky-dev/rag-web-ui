@@ -1,6 +1,6 @@
-from typing import List, Any
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
+from typing import List, Any, Literal
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse, Response
 from sqlalchemy.orm import Session, joinedload
 from app.db.session import get_db
 from app.models.user import User
@@ -140,6 +140,80 @@ async def create_message(
         }
     )
 
+@router.delete("/{chat_id}/messages/{message_id}")
+def delete_message(
+    *,
+    db: Session = Depends(get_db),
+    chat_id: int,
+    message_id: int,
+    current_user: User = Depends(get_current_user),
+) -> Any:
+    """Delete a single assistant message (and the user message that prompted it)."""
+    chat = (
+        db.query(Chat)
+        .filter(Chat.id == chat_id, Chat.user_id == current_user.id)
+        .first()
+    )
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    msg = (
+        db.query(Message)
+        .filter(Message.id == message_id, Message.chat_id == chat_id)
+        .first()
+    )
+    if not msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    db.delete(msg)
+    db.commit()
+    return {"status": "success"}
+
+
+@router.get("/{chat_id}/messages/{message_id}/export")
+def export_message(
+    *,
+    db: Session = Depends(get_db),
+    chat_id: int,
+    message_id: int,
+    format: Literal["pdf", "word", "image"] = Query(...),
+    current_user: User = Depends(get_current_user),
+) -> Response:
+    """Export a single assistant message as PDF, Word (.docx), or PNG image."""
+    chat = (
+        db.query(Chat)
+        .filter(Chat.id == chat_id, Chat.user_id == current_user.id)
+        .first()
+    )
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    msg = (
+        db.query(Message)
+        .filter(Message.id == message_id, Message.chat_id == chat_id, Message.role == "assistant")
+        .first()
+    )
+    if not msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    # Strip the base64 context prefix stored in legacy messages
+    content = msg.content
+    if "__LLM_RESPONSE__" in content:
+        content = content.split("__LLM_RESPONSE__", 1)[1]
+
+    from app.services.export_service import export_message as _export
+    try:
+        data, media_type, filename = _export(content, format)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Export failed: {exc}")
+
+    return Response(
+        content=data,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @router.delete("/{chat_id}")
 def delete_chat(
     *,
@@ -157,7 +231,7 @@ def delete_chat(
     )
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
-    
+
     db.delete(chat)
     db.commit()
     return {"status": "success"}

@@ -503,6 +503,9 @@ async def generate_response(
 
         logger.info("[STEP 4] streaming complete | response_length=%d chars", len(full_response))
         bot_message.content = full_response
+        bot_message.confidence_level = confidence_result.level
+        bot_message.confidence_score = confidence_result.score
+        bot_message.confidence_breakdown = json.dumps(confidence_result.breakdown)
         db.commit()
 
         # ── Post-turn: schedule summary update (fire-and-forget) ──────────

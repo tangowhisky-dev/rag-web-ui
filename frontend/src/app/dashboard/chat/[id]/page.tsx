@@ -15,7 +15,7 @@ function generateId(): string {
 import { useEffect, useRef, useState, useMemo } from "react";
 import { flushSync } from "react-dom";
 import { useRouter } from "next/navigation";
-import { Send, User } from "lucide-react";
+import { Send, User, Copy, Trash2 } from "lucide-react";
 import DashboardLayout from "@/components/layout/dashboard-layout";
 import { api, ApiError } from "@/lib/api";
 import { useToast } from "@/components/ui/use-toast";
@@ -40,6 +40,9 @@ interface ChatMessage {
   content: string;
   role: "assistant" | "user";
   created_at: string;
+  confidence_level?: string;
+  confidence_score?: number;
+  confidence_breakdown?: string;
 }
 
 interface Chat {
@@ -125,6 +128,11 @@ export default function ChatPage({ params }: { params: { id: string } }) {
             role: msg.role,
             content: responseText || "",
             citations,
+            confidence: msg.confidence_level as Message["confidence"] | undefined,
+            confidenceScore: msg.confidence_score ?? undefined,
+            confidenceBreakdown: msg.confidence_breakdown
+              ? JSON.parse(msg.confidence_breakdown)
+              : undefined,
           };
         } catch (e) {
           console.error("Failed to process message:", e);
@@ -458,6 +466,8 @@ export default function ChatPage({ params }: { params: { id: string } }) {
                   ) : (
                     <Answer
                       key={message.id}
+                      messageId={message.id}
+                      chatId={params.id}
                       markdown={message.content}
                       citations={message.citations}
                       rewrittenQuery={
@@ -472,7 +482,11 @@ export default function ChatPage({ params }: { params: { id: string } }) {
                       }
                       confidence={message.confidence}
                       confidenceScore={message.confidenceScore}
+                      confidenceBreakdown={message.confidenceBreakdown}
                       suggestion={message.suggestion}
+                      onDelete={(id) =>
+                        setMessages((prev) => prev.filter((m) => m.id !== id))
+                      }
                     />
                   )}
                 </div>
@@ -480,10 +494,42 @@ export default function ChatPage({ params }: { params: { id: string } }) {
             ) : (
               <div
                 key={message.id}
-                className="flex justify-end items-start space-x-2"
+                className="flex justify-end items-start space-x-2 group"
               >
-                <div className="max-w-[80%] rounded-lg px-4 py-2 bg-primary text-primary-foreground">
-                  {message.content}
+                <div className="flex flex-col items-end gap-1">
+                  <div className="max-w-[80%] rounded-lg px-4 py-2 bg-primary text-primary-foreground">
+                    {message.content}
+                  </div>
+                  {/* action buttons — visible on hover */}
+                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(message.content);
+                      }}
+                      title="Copy"
+                      className="flex items-center gap-1 px-2 py-0.5 rounded text-xs text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 dark:hover:text-zinc-200 dark:hover:bg-zinc-800 transition-colors"
+                    >
+                      <Copy className="h-3 w-3" />
+                      <span>Copy</span>
+                    </button>
+                    <button
+                      onClick={async () => {
+                        const confirmed = window.confirm("Delete this message? This cannot be undone.");
+                        if (!confirmed) return;
+                        try {
+                          await api.delete(`/api/chat/${params.id}/messages/${message.id}`);
+                          setMessages((prev) => prev.filter((m) => m.id !== message.id));
+                        } catch (e) {
+                          console.error("Failed to delete message:", e);
+                        }
+                      }}
+                      title="Delete"
+                      className="flex items-center gap-1 px-2 py-0.5 rounded text-xs text-zinc-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                      <span>Delete</span>
+                    </button>
+                  </div>
                 </div>
                 <div className="w-8 h-8 rounded-full bg-primary flex items-center justify-center">
                   <User className="h-5 w-5 text-primary-foreground" />

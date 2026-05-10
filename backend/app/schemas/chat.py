@@ -21,6 +21,9 @@ class MessageResponse(MessageBase):
     chat_id: int
     created_at: datetime
     updated_at: datetime
+    confidence_level: Optional[str] = None
+    confidence_score: Optional[int] = None
+    confidence_breakdown: Optional[str] = None  # JSON string, parsed by frontend
 
     @field_serializer("created_at", "updated_at")
     def serialise_datetimes(self, v): return _as_utc_iso(v)

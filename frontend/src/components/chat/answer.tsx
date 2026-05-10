@@ -8,7 +8,7 @@ import React, {
   ClassAttributes,
 } from "react";
 import { AnchorHTMLAttributes } from "react";
-import { ChevronDown, ChevronRight, Brain, Search, BookOpen, Share2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Brain, Search, BookOpen, Share2, Copy, Trash2, FileText, FileImage, FileType } from "lucide-react";
 import {
   Popover,
   PopoverContent,
@@ -268,51 +268,88 @@ const CONFIDENCE_CONFIG: Record<ConfidenceLevel, {
   none:      { steps: 0, label: "None",       stepColor: "bg-red-400",     textColor: "text-red-700",     bgColor: "bg-red-50",      borderColor: "border-red-200"     },
 };
 
-const ConfidenceBar: FC<{
+// ── Confidence collapsible (bottom-right of each answer) ────────────────────
+
+const CONFIDENCE_COLORS: Record<ConfidenceLevel, { bar: string; text: string; bg: string; border: string }> = {
+  very_high: { bar: "bg-emerald-500", text: "text-emerald-700 dark:text-emerald-400", bg: "bg-emerald-50 dark:bg-emerald-900/20", border: "border-emerald-200 dark:border-emerald-800" },
+  high:      { bar: "bg-green-500",   text: "text-green-700 dark:text-green-400",     bg: "bg-green-50 dark:bg-green-900/20",     border: "border-green-200 dark:border-green-800"   },
+  medium:    { bar: "bg-yellow-500",  text: "text-yellow-700 dark:text-yellow-400",   bg: "bg-yellow-50 dark:bg-yellow-900/20",   border: "border-yellow-200 dark:border-yellow-800" },
+  low:       { bar: "bg-orange-500",  text: "text-orange-700 dark:text-orange-400",   bg: "bg-orange-50 dark:bg-orange-900/20",   border: "border-orange-200 dark:border-orange-800" },
+  none:      { bar: "bg-red-400",     text: "text-red-700 dark:text-red-400",         bg: "bg-red-50 dark:bg-red-900/20",         border: "border-red-200 dark:border-red-800"       },
+};
+
+const ConfidenceCollapsible: FC<{
   level: ConfidenceLevel;
   score?: number;
   suggestion?: string | null;
-}> = ({ level, score, suggestion }) => {
-  const cfg = CONFIDENCE_CONFIG[level];
+  breakdown?: Record<string, unknown>;
+}> = ({ level, score, suggestion, breakdown }) => {
+  const [open, setOpen] = useState(false);
+  const cfg = CONFIDENCE_COLORS[level];
+  const label = CONFIDENCE_CONFIG[level].label;
+  const pct = score !== undefined ? score : 0;
+
   return (
-    <div className={`rounded-md border ${cfg.borderColor} ${cfg.bgColor} px-3 py-2 mb-3 not-prose`}>
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2 min-w-0">
-          <span className={`text-xs font-medium ${cfg.textColor} shrink-0`}>
-            Retrieval confidence
-          </span>
-          <span className={`text-xs font-semibold ${cfg.textColor} shrink-0`}>
-            {cfg.label}{score !== undefined ? ` · ${score}/100` : ""}
-          </span>
+    <div className={`rounded-md border ${cfg.border} ${cfg.bg} text-xs not-prose`}>
+      {/* collapsed header — always visible */}
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-2 w-full px-3 py-1.5 text-left"
+      >
+        {open ? (
+          <ChevronDown className={`h-3 w-3 shrink-0 ${cfg.text}`} />
+        ) : (
+          <ChevronRight className={`h-3 w-3 shrink-0 ${cfg.text}`} />
+        )}
+        <span className={`font-medium shrink-0 ${cfg.text}`}>
+          Confidence: {label}{score !== undefined ? ` · ${score}/100` : ""}
+        </span>
+        {/* inline progress bar */}
+        <div className="flex-1 h-1.5 rounded-full bg-zinc-200 dark:bg-zinc-700 overflow-hidden">
+          <div
+            className={`h-full rounded-full transition-all ${cfg.bar}`}
+            style={{ width: `${pct}%` }}
+          />
         </div>
-        {/* stepped progress bar — 4 equal segments */}
-        <div className="flex gap-1 shrink-0">
-          {[1, 2, 3, 4].map(step => (
-            <div
-              key={step}
-              className={`h-2 w-7 rounded-sm transition-colors ${
-                step <= cfg.steps ? cfg.stepColor : "bg-zinc-200"
-              }`}
-            />
-          ))}
+      </button>
+
+      {/* expanded body */}
+      {open && (
+        <div className={`px-3 pb-2 pt-1 border-t ${cfg.border} space-y-1`}>
+          {suggestion && (
+            <p className={`${cfg.text} opacity-80`}>{suggestion}</p>
+          )}
+          {breakdown && Object.keys(breakdown).length > 0 && (
+            <div className="space-y-0.5">
+              {Object.entries(breakdown)
+                .filter(([k]) => !["mode", "total", "failed_legs", "enabled_legs", "producing_legs"].includes(k))
+                .map(([k, v]) => (
+                  <div key={k} className="flex justify-between gap-4">
+                    <span className="text-zinc-500 dark:text-zinc-400">{k.replace(/_/g, " ")}</span>
+                    <span className={`font-medium ${cfg.text}`}>{String(v)}</span>
+                  </div>
+                ))}
+            </div>
+          )}
         </div>
-      </div>
-      {suggestion && (
-        <p className={`mt-1 text-xs ${cfg.textColor} opacity-80`}>{suggestion}</p>
       )}
     </div>
   );
 };
 
 export const Answer: FC<{
+  messageId?: string;
+  chatId?: string;
   markdown: string;
   citations?: Citation[];
   rewrittenQuery?: string;
   retrievedContext?: ContextDoc[];
   confidence?: "very_high" | "high" | "medium" | "low" | "none";
   confidenceScore?: number;
+  confidenceBreakdown?: Record<string, unknown>;
   suggestion?: string | null;
-}> = ({ markdown, citations = [], rewrittenQuery, retrievedContext, confidence, confidenceScore, suggestion }) => {
+  onDelete?: (id: string) => void;
+}> = ({ messageId, chatId, markdown, citations = [], rewrittenQuery, retrievedContext, confidence, confidenceScore, confidenceBreakdown, suggestion, onDelete }) => {
   const [citationInfoMap, setCitationInfoMap] = useState<
     Record<string, CitationInfo>
   >({});
@@ -491,6 +528,48 @@ export const Answer: FC<{
   // async fetch), instead of continuous uncontrolled remounts during streaming.
   const citationInfoKey = Object.keys(citationInfoMap).sort().join(",");
 
+  // ── Action handlers ────────────────────────────────────────────────────────
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = useCallback(() => {
+    const plain = parsedContent.answerText.replace(/\[citation:\d+\]/g, "").trim();
+    navigator.clipboard.writeText(plain).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  }, [parsedContent.answerText]);
+
+  const handleDelete = useCallback(async () => {
+    if (!messageId || !chatId) return;
+    const confirmed = window.confirm("Delete this message? This cannot be undone.");
+    if (!confirmed) return;
+    try {
+      await api.delete(`/api/chat/${chatId}/messages/${messageId}`);
+      onDelete?.(messageId);
+    } catch (e) {
+      console.error("Failed to delete message:", e);
+    }
+  }, [messageId, chatId, onDelete]);
+
+  const handleExport = useCallback(async (format: "pdf" | "word" | "image") => {
+    if (!messageId || !chatId) return;
+    const ext = format === "word" ? "docx" : format === "image" ? "png" : "pdf";
+    const url = `/api/chat/${chatId}/messages/${messageId}/export?format=${format}`;
+    const token = typeof window !== "undefined" ? window.localStorage.getItem("token") || "" : "";
+    try {
+      const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+      if (!res.ok) throw new Error(`Export failed: ${res.status}`);
+      const blob = await res.blob();
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `answer.${ext}`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (e) {
+      console.error("Export failed:", e);
+    }
+  }, [messageId, chatId]);
+
   if (!markdown && !rewrittenQuery && (!retrievedContext || retrievedContext.length === 0)) {
     return (
       <div className="flex flex-col gap-2">
@@ -506,9 +585,6 @@ export const Answer: FC<{
   return (
     <div className="prose prose-sm max-w-full">
       {rewrittenQuery && <RewrittenQueryBlock query={rewrittenQuery} />}
-      {confidence && confidence !== "none" && (
-        <ConfidenceBar level={confidence} score={confidenceScore} suggestion={suggestion} />
-      )}
       {confidence === "none" && suggestion && (
         <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 mb-2">
           <span className="mt-0.5 shrink-0">⚠</span>
@@ -543,6 +619,67 @@ export const Answer: FC<{
         >
           {parsedContent.answerText}
         </Markdown>
+      )}
+
+      {/* ── Bottom bar: actions left, confidence right ─────────────────────── */}
+      {markdown && (
+        <div className="flex items-start justify-between gap-4 mt-3 not-prose">
+          {/* Left: action buttons */}
+          <div className="flex items-center gap-1 flex-shrink-0">
+            <button
+              onClick={handleCopy}
+              title={copied ? "Copied!" : "Copy text"}
+              className="flex items-center gap-1 px-2 py-1 rounded text-xs text-zinc-500 hover:text-zinc-800 hover:bg-zinc-100 dark:hover:text-zinc-200 dark:hover:bg-zinc-800 transition-colors"
+            >
+              <Copy className="h-3.5 w-3.5" />
+              <span>{copied ? "Copied" : "Copy"}</span>
+            </button>
+            <button
+              onClick={handleDelete}
+              title="Delete message"
+              className="flex items-center gap-1 px-2 py-1 rounded text-xs text-zinc-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              <span>Delete</span>
+            </button>
+            <button
+              onClick={() => handleExport("word")}
+              title="Export as Word"
+              className="flex items-center gap-1 px-2 py-1 rounded text-xs text-zinc-500 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors"
+            >
+              <FileText className="h-3.5 w-3.5" />
+              <span>Word</span>
+            </button>
+            <button
+              onClick={() => handleExport("pdf")}
+              title="Export as PDF"
+              className="flex items-center gap-1 px-2 py-1 rounded text-xs text-zinc-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+            >
+              <FileType className="h-3.5 w-3.5" />
+              <span>PDF</span>
+            </button>
+            <button
+              onClick={() => handleExport("image")}
+              title="Export as image"
+              className="flex items-center gap-1 px-2 py-1 rounded text-xs text-zinc-500 hover:text-purple-600 hover:bg-purple-50 dark:hover:bg-purple-900/20 transition-colors"
+            >
+              <FileImage className="h-3.5 w-3.5" />
+              <span>Image</span>
+            </button>
+          </div>
+
+          {/* Right: confidence collapsible */}
+          {confidence && confidence !== "none" && (
+            <div className="flex-1 min-w-0 max-w-xs">
+              <ConfidenceCollapsible
+                level={confidence}
+                score={confidenceScore}
+                suggestion={suggestion}
+                breakdown={confidenceBreakdown}
+              />
+            </div>
+          )}
+        </div>
       )}
     </div>
   );

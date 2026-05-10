@@ -7,16 +7,16 @@ Two modes depending on whether the reranker is enabled:
 All docs passed to this function have already cleared the reranker threshold,
 so every doc is considered genuinely relevant. Signals:
 
-  A. Top score      (50 pts) — best reranker logit, normalised over [-5, 8]
-                               score ≥ 8  → 50 pts (ceiling)
-                               score = 0  → 0 pts
-                               Linear in between: pts = clamp(score/span, 0, 1) * 50
-  B. Doc count      (30 pts) — continuous: min(n / RETRIEVAL_TOP_K, 1.0) * 30
-                               Rewards graph-expanded pools proportionally;
-                               saturates at top_k docs (30 pts), not capped at 3.
-  C. Mean score     (20 pts) — mean logit of all passing docs, same normalisation
+  A. Top score      (60 pts) — best reranker logit, normalised over [-5, 8]
+                               Dominant signal: one perfect chunk → ~55 pts.
+  B. Evidence count (10 pts) — log(n+1) / log(11), saturates at 10 chunks.
+                               TOP_K-independent: only chunks that cleared the
+                               reranker threshold count. Graph-expanded chunks
+                               compete in the same pool — good ones raise B and
+                               C, marginal ones barely move B and drag C down.
+  C. Mean score     (30 pts) — mean logit of all passing docs, same normalisation
                                as A. Penalises cases where one good chunk is
-                               surrounded by many marginal ones.
+                               surrounded by many marginal ones. Keeps B honest.
 
 ── Reranker OFF ───────────────────────────────────────────────────────────────
 Falls back to the original four-signal model based on retrieval leg metadata:
@@ -39,6 +39,7 @@ The same function is used by chat_service.py (streaming chat) and query.py
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -172,17 +173,14 @@ def _score_reranker(
         span = _RERANKER_SCORE_MAX - _RERANKER_SCORE_MIN
         return max(0.0, min((s - _RERANKER_SCORE_MIN) / span, 1.0))
 
-    # A: top score (50 pts)
-    a = normalise(top_score) * 50
+    # A: top score (60 pts)
+    a = normalise(top_score) * 60
 
-    # B: doc count (30 pts)
-    # Scale against RETRIEVAL_TOP_K so graph-expanded pools (which can exceed
-    # top_k) are rewarded proportionally rather than capped at 3.
-    top_k = settings.RETRIEVAL_TOP_K
-    b = min(len(docs) / max(top_k, 1), 1.0) * 30
+    # B: evidence count (10 pts)
+    b = min(math.log(len(docs) + 1) / math.log(11), 1.0) * 10
 
-    # C: mean score (20 pts)
-    c = normalise(mean_score) * 20
+    # C: mean score (30 pts)
+    c = normalise(mean_score) * 30
 
     score = round(a + b + c)
     level, suggestion = _level_and_suggestion(score, failed_legs)
@@ -192,7 +190,7 @@ def _score_reranker(
         "top_reranker_score": round(top_score, 3),
         "mean_reranker_score": round(mean_score, 3),
         "top_score_pts": round(a),
-        "doc_count_pts": round(b),
+        "evidence_count_pts": round(b),
         "mean_score_pts": round(c),
         "total": score,
         "docs_returned": len(docs),

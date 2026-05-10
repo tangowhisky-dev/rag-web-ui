@@ -1,5 +1,5 @@
 from sqlalchemy import Column, Integer, String, ForeignKey, Boolean, Table
-from sqlalchemy.dialects.mysql import LONGTEXT
+from sqlalchemy.dialects.mysql import LONGTEXT, JSON
 from sqlalchemy.orm import relationship
 from app.models.base import Base, TimestampMixin
 
@@ -39,6 +39,10 @@ class Message(Base, TimestampMixin):
     content = Column(LONGTEXT, nullable=False)
     role = Column(String(50), nullable=False)
     chat_id = Column(Integer, ForeignKey("chats.id"), nullable=False)
+    # Confidence fields — populated for assistant messages only
+    confidence_level = Column(String(20), nullable=True)
+    confidence_score = Column(Integer, nullable=True)
+    confidence_breakdown = Column(LONGTEXT, nullable=True)  # JSON string
 
     # Relationships
     chat = relationship("Chat", back_populates="messages") 

@@ -8,6 +8,7 @@ import { Progress } from "@/components/ui/progress";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/components/ui/use-toast";
 import { Loader2, Upload, X, Settings, FileText } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -42,6 +43,7 @@ interface FileStatus {
     | "completed"
     | "error";
   uploadId?: number;
+  taskId?: number;     // task_id from the process response — key into taskStatuses
   documentId?: number;
   tempPath?: string;
   error?: string;
@@ -78,6 +80,8 @@ interface TaskStatus {
   document_id: number;
   status: "pending" | "processing" | "completed" | "failed";
   error_message?: string;
+  progress?: number;         // 0-100
+  progress_message?: string; // human-readable stage label
 }
 
 interface TaskStatusMap {
@@ -106,6 +110,9 @@ export function DocumentUploadSteps({
   const [isLoading, setIsLoading] = useState(false);
   const [chunkSize, setChunkSize] = useState(1500);
   const [chunkOverlap, setChunkOverlap] = useState(300);
+  // Per-file OCR toggle. Defaults to false for PDFs >5 MB (memory pressure),
+  // true for everything else (images, scanned docs genuinely need it).
+  const [ocrEnabled, setOcrEnabled] = useState<{ [uploadId: number]: boolean }>({});
   const { toast } = useToast();
 
   // Fetch server-side chunk defaults from .env so the UI stays in sync.
@@ -180,30 +187,28 @@ export function DocumentUploadSteps({
         }
       )) as UploadResult[];
 
-      // Update file statuses
+      // Update file statuses and initialise OCR defaults
+      const newOcrDefaults: { [id: number]: boolean } = {};
       setFiles((prev) =>
         prev.map((f) => {
           const uploadResult = data.find((d) => d.file_name === f.file.name);
           if (uploadResult) {
             if (uploadResult.status === "exists") {
-              return {
-                ...f,
-                status: "completed",
-                documentId: uploadResult.document_id,
-                error: uploadResult.message,
-              };
+              return { ...f, status: "completed", documentId: uploadResult.document_id, error: uploadResult.message };
             } else {
-              return {
-                ...f,
-                status: "uploaded",
-                uploadId: uploadResult.upload_id,
-                tempPath: uploadResult.temp_path,
-              };
+              // Default OCR off for PDFs > 5 MB — they usually have a text layer
+              // and the vision model OOMs on long documents.
+              const isPdf = f.file.name.toLowerCase().endsWith(".pdf");
+              const isLarge = f.file.size > 5 * 1024 * 1024;
+              const defaultOcr = !(isPdf && isLarge);
+              if (uploadResult.upload_id != null) newOcrDefaults[uploadResult.upload_id] = defaultOcr;
+              return { ...f, status: "uploaded", uploadId: uploadResult.upload_id, tempPath: uploadResult.temp_path };
             }
           }
           return f;
         })
       );
+      setOcrEnabled((prev) => ({ ...prev, ...newOcrDefaults }));
 
       // 移除自动处理的逻辑，只更新步骤
       setCurrentStep(2);
@@ -272,6 +277,7 @@ export function DocumentUploadSteps({
           status: "pending" as const,
           skip_processing: false,
           temp_path: f.tempPath!,
+          enable_ocr: ocrEnabled[f.uploadId!] ?? true,
         }));
 
     if (resultsToProcess.length === 0) return;
@@ -296,6 +302,14 @@ export function DocumentUploadSteps({
       );
       setTaskStatuses(initialStatuses);
 
+      // Stamp taskId onto each file so the progress render can look up taskStatuses[file.taskId]
+      setFiles((prev) =>
+        prev.map((f) => {
+          const t = data.tasks.find((t) => t.upload_id === f.uploadId);
+          return t ? { ...f, taskId: t.task_id } : f;
+        })
+      );
+
       // Start polling for task status
       pollTaskStatus(data.tasks.map((t) => t.task_id));
     } catch (error) {
@@ -311,6 +325,11 @@ export function DocumentUploadSteps({
 
   // Poll task status
   const pollTaskStatus = async (taskIds: number[]) => {
+    let consecutiveErrors = 0;
+    const MAX_ERRORS = 10;       // give up only after 10 consecutive failures
+    const BASE_DELAY = 3000;     // 3s base — less hammering during heavy ingestion
+    const ERROR_DELAY = 8000;    // back off on error so a busy backend gets room
+
     const poll = async () => {
       try {
         const response = (await api.get(
@@ -318,6 +337,8 @@ export function DocumentUploadSteps({
             ","
           )}`
         )) as TaskStatusResponse;
+
+        consecutiveErrors = 0;  // reset on success
 
         // Convert string keys to numbers
         const data = Object.entries(response).reduce<TaskStatusMap>(
@@ -330,7 +351,6 @@ export function DocumentUploadSteps({
 
         setTaskStatuses(data);
 
-        // Check if all tasks are completed or failed
         const allDone = Object.values(data).every(
           (task) => task.status === "completed" || task.status === "failed"
         );
@@ -354,17 +374,22 @@ export function DocumentUploadSteps({
             });
           }
         } else {
-          // Continue polling
-          setTimeout(poll, 2000);
+          setTimeout(poll, BASE_DELAY);
         }
       } catch (error) {
-        setIsLoading(false);
-        toast({
-          title: "Status check failed",
-          description:
-            error instanceof ApiError ? error.message : "Something went wrong",
-          variant: "destructive",
-        });
+        consecutiveErrors++;
+        if (consecutiveErrors >= MAX_ERRORS) {
+          // Backend appears genuinely dead — stop polling
+          setIsLoading(false);
+          toast({
+            title: "Lost contact with server",
+            description: "Processing may still be running. Refresh the page to check status.",
+            variant: "destructive",
+          });
+          return;
+        }
+        // Network blip (ECONNRESET, timeout, etc.) — retry silently
+        setTimeout(poll, ERROR_DELAY);
       }
     };
 
@@ -639,9 +664,9 @@ export function DocumentUploadSteps({
                 {files
                   .filter((f) => f.status === "uploaded")
                   .map((file) => {
-                    const task = Object.values(taskStatuses).find(
-                      (t) => t.document_id === file.documentId
-                    );
+                    const task = file.taskId != null
+                      ? taskStatuses[file.taskId]
+                      : Object.values(taskStatuses).find((t) => t.document_id === file.documentId);
                     return (
                       <div
                         key={file.uploadId}
@@ -673,19 +698,44 @@ export function DocumentUploadSteps({
                               )}
                             </div>
                           </div>
-                          {task?.status === "failed" && (
-                            <p className="text-sm text-destructive">
-                              {task.error_message}
-                            </p>
-                          )}
+                          <div className="flex items-center gap-4">
+                            <div className="flex items-center gap-2">
+                              <Switch
+                                id={`ocr-${file.uploadId}`}
+                                checked={ocrEnabled[file.uploadId!] ?? true}
+                                onCheckedChange={(v) =>
+                                  setOcrEnabled((prev) => ({ ...prev, [file.uploadId!]: v }))
+                                }
+                                disabled={isLoading}
+                              />
+                              <label
+                                htmlFor={`ocr-${file.uploadId}`}
+                                className="text-xs text-muted-foreground cursor-pointer select-none"
+                              >
+                                OCR
+                              </label>
+                            </div>
+                            {task?.status === "failed" && (
+                              <p className="text-sm text-destructive">
+                                {task.error_message}
+                              </p>
+                            )}
+                          </div>
                         </div>
                         {task &&
                           (task.status === "pending" ||
                             task.status === "processing") && (
-                            <Progress
-                              value={task.status === "processing" ? 50 : 25}
-                              className="w-full"
-                            />
+                            <div className="space-y-1">
+                              <Progress
+                                value={task.progress ?? (task.status === "processing" ? 10 : 5)}
+                                className="w-full"
+                              />
+                              {task.progress_message && (
+                                <p className="text-xs text-muted-foreground">
+                                  {task.progress_message}
+                                </p>
+                              )}
+                            </div>
                           )}
                       </div>
                     );
