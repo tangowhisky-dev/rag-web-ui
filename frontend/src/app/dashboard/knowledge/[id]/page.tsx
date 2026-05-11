@@ -35,11 +35,20 @@ export default function KnowledgeBasePage() {
     setDialogOpen(false);
   }, []);
 
+  const handleDialogOpenChange = useCallback((open: boolean) => {
+    setDialogOpen(open);
+    if (!open) {
+      // Dialog closed (user hit X or clicked away mid-upload) — refresh the
+      // document list so DocumentList can start polling any in-progress tasks.
+      setRefreshKey((prev) => prev + 1);
+    }
+  }, []);
+
   return (
     <DashboardLayout pageTitle={kbName}>
       <div className="flex justify-between items-center mb-8">
         <h1 className="text-3xl font-bold">Knowledge Base</h1>
-        <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+        <Dialog open={dialogOpen} onOpenChange={handleDialogOpenChange}>
           <DialogTrigger asChild>
             <Button>
               <PlusIcon className="w-4 h-4 mr-2" />
@@ -63,7 +72,7 @@ export default function KnowledgeBasePage() {
       </div>
 
       <div className="mt-8">
-        <DocumentList key={refreshKey} knowledgeBaseId={knowledgeBaseId} />
+        <DocumentList knowledgeBaseId={knowledgeBaseId} refreshKey={refreshKey} />
       </div>
     </DashboardLayout>
   );

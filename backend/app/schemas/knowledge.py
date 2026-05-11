@@ -62,8 +62,10 @@ class ProcessingTaskCreate(ProcessingTaskBase):
 
 class ProcessingTask(ProcessingTaskBase):
     id: int
-    document_id: int
+    document_id: Optional[int] = None
     knowledge_base_id: int
+    progress: Optional[int] = None
+    progress_message: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

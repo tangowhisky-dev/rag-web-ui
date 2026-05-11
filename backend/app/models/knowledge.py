@@ -71,6 +71,8 @@ class ProcessingTask(Base):
     document_upload_id = Column(Integer, ForeignKey("document_uploads.id"), nullable=True)
     status = Column(String(50), default="pending")  # pending, processing, completed, failed
     error_message = Column(Text, nullable=True)
+    progress = Column(Integer, default=0, nullable=True)          # 0-100
+    progress_message = Column(String(255), nullable=True)         # human-readable stage label
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

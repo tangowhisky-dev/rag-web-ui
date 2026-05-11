@@ -406,7 +406,8 @@ async def process_kb_documents(
                     "task_id": task.id,
                     "upload_id": upload_id,
                     "temp_path": upload.temp_path,
-                    "file_name": upload.file_name
+                    "file_name": upload.file_name,
+                    "enable_ocr": result.get("enable_ocr"),  # None|True|False
                 })
     
     background_tasks.add_task(
@@ -428,7 +429,8 @@ async def add_processing_tasks_to_queue(task_data, kb_id, user_id):
                 kb_id,
                 data["task_id"],
                 None,
-                user_id
+                user_id,
+                enable_ocr=data.get("enable_ocr"),
             )
         )
     logger.info(f"Added {len(task_data)} document processing tasks to queue")
@@ -495,6 +497,8 @@ async def get_processing_tasks(
             "document_id": task.document_id,
             "status": task.status,
             "error_message": task.error_message,
+            "progress": task.progress or 0,
+            "progress_message": task.progress_message or "",
             "upload_id": task.document_upload_id,
             "file_name": task.document_upload.file_name if task.document_upload else None
         }

@@ -214,7 +214,10 @@ def _get_llm_pipeline():
 
     llm = OpenAILLM(
         model_name=settings.GRAPHRAG_LLM,
-        model_params={"temperature": 0},
+        model_params={
+            "temperature": 0,
+            # "max_tokens": 1024,  # entity/relation JSON is small; cap prevents full context reservation
+        },
         base_url=settings.OPENAI_API_BASE,
         api_key=settings.OPENAI_API_KEY,
     )
@@ -224,7 +227,7 @@ def _get_llm_pipeline():
         use_structured_output=True,
         on_error=OnError.IGNORE,
         create_lexical_graph=False,
-        max_concurrency=3,
+        max_concurrency=1,   # 1 = fully sequential; local models OOM at >1
     )
 
     writer = Neo4jWriter(
@@ -252,19 +255,32 @@ async def _extract_with_llm(
     """
     Run neo4j-graphrag LLM pipeline per chunk.
 
-    After the pipeline writes Entity nodes, an additional pass links them to
-    our Chunk nodes via FROM_CHUNK edges using qdrant_point_id — consistent
-    with the ReLiK path so retrieval expansion works the same way regardless
-    of which extraction backend was used.
+    Throttled: a small inter-chunk sleep prevents LM Studio from accumulating
+    KV cache across hundreds of sequential calls on a low-memory local model.
+    The semaphore caps concurrent pipeline runs to 1 — LM Studio's memory
+    manager needs the gap between requests to reclaim KV cache.
     """
+    import asyncio
     from neo4j_graphrag.experimental.components.types import TextChunks, TextChunk
+
+    _INTER_CHUNK_DELAY = settings.GRAPHRAG_CHUNK_DELAY
 
     pipe = _get_llm_pipeline()
     driver = _get_driver()
     total_nodes = 0  # overridden by post-loop Neo4j query; kept for early-return path
     total_rels = 0
 
-    for idx, (text, point_id) in enumerate(zip(chunks, qdrant_point_ids)):
+    # Cap chunks to avoid OOM on low-RAM local models. Qdrant still has all chunks.
+    cap = settings.GRAPHRAG_MAX_CHUNKS
+    effective_chunks = chunks if cap <= 0 else chunks[:cap]
+    effective_ids = qdrant_point_ids if cap <= 0 else qdrant_point_ids[:cap]
+    if cap > 0 and len(chunks) > cap:
+        logger.info(
+            "GraphService[llm]: doc %d — capping graph extraction at %d/%d chunks (GRAPHRAG_MAX_CHUNKS=%d)",
+            document_id, cap, len(chunks), cap,
+        )
+
+    for idx, (text, point_id) in enumerate(zip(effective_chunks, effective_ids)):
         try:
             pipe_result = await pipe.run({
                 "extractor": {
@@ -317,6 +333,10 @@ async def _extract_with_llm(
             meta = getattr(pipe_result, "metadata", {}) or {}
             # relationship_count is not reliably present on PipelineResult;
             # we do a single accurate query at the end instead.
+
+            # Brief pause so LM Studio can reclaim KV cache between chunks.
+            # Critical for large documents (500+ chunks) on low-RAM local models.
+            await asyncio.sleep(_INTER_CHUNK_DELAY)
 
         except Exception as exc:
             logger.warning(

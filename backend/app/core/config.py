@@ -158,6 +158,18 @@ class Settings(BaseSettings):
     # Number of graph hops to traverse from seed nodes at query time.
     GRAPHRAG_RETRIEVAL_HOPS: int = int(os.getenv("GRAPHRAG_RETRIEVAL_HOPS", "2"))
 
+    # Maximum number of chunks to run graph extraction on per document.
+    # Chunks beyond this limit are skipped for graph extraction but still
+    # fully indexed in Qdrant. Set to 0 to disable the cap (default: 300).
+    # For large documents on low-RAM local models (e.g. 2B), keep this at
+    # 200–400. The first N chunks usually cover the most concept-dense content.
+    GRAPHRAG_MAX_CHUNKS: int = int(os.getenv("GRAPHRAG_MAX_CHUNKS", "300"))
+
+    # Inter-chunk delay (seconds) between LLM graph extraction calls.
+    # A non-zero value allows LM Studio / llama.cpp to reclaim KV cache
+    # between sequential requests. 0.3s is safe for 2B-class models.
+    GRAPHRAG_CHUNK_DELAY: float = float(os.getenv("GRAPHRAG_CHUNK_DELAY", "0.3"))
+
     @property
     def graphrag_model(self) -> str:
         """Model to use for entity/relationship extraction. Falls back to OPENAI_MODEL."""
