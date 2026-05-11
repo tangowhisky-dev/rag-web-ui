@@ -30,7 +30,7 @@ Upload (PDF / DOCX / DOC / PPTX / PPT / XLSX / XLS /
     │
     ▼
 document_processor.py
-    ├── Convert to Markdown (MarkItDown — single unified parser for all formats; OCR via vision model when OPENAI_VISION_MODEL is set)
+    ├── Convert to Markdown (MarkItDown — single unified parser for all formats; OCR via vision model when VISION_MODEL is set)
     ├── Chunk (RecursiveCharacterTextSplitter)
     ├── Embed chunks — async OpenAI-compatible API → dense vectors
     ├── Embed chunks — FastEmbed SPLADE → sparse vectors
@@ -54,7 +54,7 @@ chat_service.py
     ├── Identity shortcut  (hardcoded response for "who are you?" etc.)
     ├── Sliding-window context (3 most-recent turn-pairs verbatim)
     ├── Rolling summary    (older turns folded into a summary via LLM)
-    ├── Standalone question (context folded in → self-contained query; uses OPENAI_QUERY_MODEL if set)
+    ├── Standalone question (context folded in → self-contained query; uses QUERY_MODEL if set)
     │
     ▼
 retrieval.py — hybrid_search()
@@ -201,13 +201,13 @@ SPLADE runs locally via FastEmbed (ONNX, CPU-optimised), avoiding any GPU depend
 ### 3. MarkItDown for Unified Document Parsing
 All document types are converted to Markdown by [MarkItDown](https://github.com/microsoft/markitdown) before chunking. A single parser handles 20+ formats (PDF, Office, spreadsheets, email, images via OCR, archives) and produces consistent Markdown output that the splitter can break on structural boundaries. Format-specific LangChain loaders (`PyPDFLoader`, `Docx2txtLoader`) are no longer used.
 
-When `OPENAI_VISION_MODEL` is set, the `markitdown-ocr` plugin is activated and embedded images in documents (scanned PDF pages, photos in DOCX/PPTX/XLSX) are sent to the vision model for OCR. Think-block traces emitted by reasoning vision models are stripped before the text is chunked. When `OPENAI_VISION_MODEL` is unset the behaviour is identical to before — no OCR, no external calls.
+When `VISION_MODEL` is set, the `markitdown-ocr` plugin is activated and embedded images in documents (scanned PDF pages, photos in DOCX/PPTX/XLSX) are sent to the vision model for OCR. Think-block traces emitted by reasoning vision models are stripped before the text is chunked. When `VISION_MODEL` is unset the behaviour is identical to before — no OCR, no external calls.
 
 ### 4. Ingestion Always Indexes All Three Stores
 Per-leg retrieval can be toggled via `.env` without re-ingestion. This makes A/B testing retrieval configurations cheap — flip a flag, test, flip back.
 
 ### 5. Sliding Window + Rolling Summary for Context
-Rather than truncating history or stuffing the full chat into the prompt, older turns are summarised by the LLM and folded into a rolling summary. The 3 most-recent turn-pairs are kept verbatim. Both the query-rewriting step and the summarisation step use `OPENAI_QUERY_MODEL` when set, falling back to `OPENAI_MODEL`.
+Rather than truncating history or stuffing the full chat into the prompt, older turns are summarised by the LLM and folded into a rolling summary. The 3 most-recent turn-pairs are kept verbatim. Both the query-rewriting step and the summarisation step use `QUERY_MODEL` when set, falling back to `OPENAI_MODEL`.
 
 ### 6. OpenAI-Compatible API for LLM and Embeddings
 Four distinct model roles are supported, all pointing at OpenAI-compatible endpoints:
@@ -215,9 +215,9 @@ Four distinct model roles are supported, all pointing at OpenAI-compatible endpo
 | Variable | Role | Falls back to |
 |---|---|---|
 | `OPENAI_MODEL` | Response generation (RAG answers) | — (required) |
-| `OPENAI_QUERY_MODEL` | Query rewriting + rolling summarisation | `OPENAI_MODEL` |
-| `OPENAI_VISION_MODEL` | markitdown-ocr OCR during ingestion | unset = OCR disabled |
-| `OPENAI_EMBEDDINGS_MODEL` | Dense embeddings | — (required) |
+| `QUERY_MODEL` | Query rewriting + rolling summarisation | `OPENAI_MODEL` |
+| `VISION_MODEL` | markitdown-ocr OCR during ingestion | unset = OCR disabled |
+| `DENSE_EMBEDDINGS_MODEL` | Dense embeddings | — (required) |
 
 `OPENAI_VISION_API_BASE` lets the vision model live on a different server (e.g. a separate Ollama instance for a multimodal model). When unset it falls back to `OPENAI_API_BASE`.
 
@@ -253,8 +253,8 @@ Four distinct model roles are supported, all pointing at OpenAI-compatible endpo
 git clone https://github.com/tangowhisky-dev/rag-web-ui.git
 cd rag-web-ui
 cp .env.example .env
-# Edit .env — set OPENAI_API_KEY, OPENAI_API_BASE, OPENAI_MODEL, OPENAI_EMBEDDINGS_MODEL, DENSE_EMBEDDING_DIM
-# Optional: OPENAI_QUERY_MODEL (query rewriting), OPENAI_VISION_MODEL (OCR), OPENAI_VISION_API_BASE
+# Edit .env — set OPENAI_API_KEY, OPENAI_API_BASE, OPENAI_MODEL, DENSE_EMBEDDINGS_MODEL, DENSE_EMBEDDING_DIM
+# Optional: QUERY_MODEL (query rewriting), VISION_MODEL (OCR), OPENAI_VISION_API_BASE
 docker compose up -d --build
 ```
 

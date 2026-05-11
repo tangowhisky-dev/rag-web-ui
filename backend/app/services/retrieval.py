@@ -121,10 +121,10 @@ def _qdrant_payload_to_doc(payload: dict) -> LangchainDocument:
 
 def _dense_search(query: str, kb_ids: List[int], candidates: int) -> Dict[str, _Candidate]:
     """Qdrant cosine-similarity search using the dense (OpenAI) embedding."""
-    logger.info("[DENSE] embedding request | model=%s | query=%r", settings.OPENAI_EMBEDDINGS_MODEL, query[:120])
+    logger.info("[DENSE] embedding request | model=%s | query=%r", settings.DENSE_EMBEDDINGS_MODEL, query[:120])
     response = _get_openai_client().embeddings.create(
         input=query,
-        model=settings.OPENAI_EMBEDDINGS_MODEL,
+        model=settings.DENSE_EMBEDDINGS_MODEL,
     )
     query_vector = response.data[0].embedding
     logger.info("[DENSE] embedding response | dim=%d | first5=%s",

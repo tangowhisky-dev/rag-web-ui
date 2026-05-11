@@ -113,17 +113,17 @@ def _get_markitdown() -> MarkItDown:
     """
     Lazy singleton for MarkItDown converter.
 
-    When OPENAI_VISION_MODEL is configured, the markitdown-ocr plugin is
+    When VISION_MODEL is configured, the markitdown-ocr plugin is
     activated with an llm_client so it can OCR embedded images in PDFs,
     DOCX, PPTX, and XLSX files automatically.
 
-    When OPENAI_VISION_MODEL is unset, MarkItDown is initialised without a
+    When VISION_MODEL is unset, MarkItDown is initialised without a
     client — markitdown-ocr still loads (if installed) but silently skips
     OCR, which is identical to the previous behaviour.
     """
     global _markitdown
     if _markitdown is None:
-        vision_model = settings.OPENAI_VISION_MODEL
+        vision_model = settings.VISION_MODEL
         if vision_model:
             vision_client = SyncOpenAI(
                 api_key=settings.OPENAI_API_KEY,
@@ -152,7 +152,7 @@ def _get_markitdown() -> MarkItDown:
         else:
             _markitdown = MarkItDown()
             logging.getLogger(__name__).info(
-                "[markitdown] OCR disabled — OPENAI_VISION_MODEL not set"
+                "[markitdown] OCR disabled — VISION_MODEL not set"
             )
     return _markitdown
 
@@ -162,8 +162,8 @@ def _convert_to_markdown(abs_path: str, file_name: str, enable_ocr: Optional[boo
     Convert any supported file to clean Markdown text using markitdown.
 
     enable_ocr: tri-state override.
-      None  → use global OPENAI_VISION_MODEL setting (default behaviour)
-      True  → force OCR on (requires OPENAI_VISION_MODEL to be configured)
+      None  → use global VISION_MODEL setting (default behaviour)
+      True  → force OCR on (requires VISION_MODEL to be configured)
       False → force OCR off for this document regardless of global setting
 
     Think traces (<think>...</think>) are stripped before returning.
@@ -178,8 +178,8 @@ def _convert_to_markdown(abs_path: str, file_name: str, enable_ocr: Optional[boo
         elif enable_ocr is True:
             # Explicit on: use the configured singleton (which has OCR if set up).
             md_instance = _get_markitdown()
-            if settings.OPENAI_VISION_MODEL is None:
-                logger.warning("[markitdown] OCR requested but OPENAI_VISION_MODEL not set — falling back to text-only")
+            if settings.VISION_MODEL is None:
+                logger.warning("[markitdown] OCR requested but VISION_MODEL not set — falling back to text-only")
         else:
             # Default: respect global setting.
             md_instance = _get_markitdown()
@@ -201,7 +201,7 @@ def _convert_to_markdown(abs_path: str, file_name: str, enable_ocr: Optional[boo
 
         logger.info(
             "[markitdown] converted %s → %d chars of markdown (ocr=%s)",
-            file_name, len(cleaned), bool(settings.OPENAI_VISION_MODEL),
+            file_name, len(cleaned), bool(settings.VISION_MODEL),
         )
         return cleaned
     except Exception as e:
@@ -263,7 +263,7 @@ async def _embed_texts_batch(
         batch = texts[i : i + _EMBED_BATCH_SIZE]
         response = await client.embeddings.create(
             input=batch,
-            model=settings.OPENAI_EMBEDDINGS_MODEL,
+            model=settings.DENSE_EMBEDDINGS_MODEL,
         )
         all_embeddings.extend(r.embedding for r in response.data)
         if progress_cb is not None:

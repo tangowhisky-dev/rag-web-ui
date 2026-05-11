@@ -94,7 +94,7 @@ async def hybrid_search(query, kb_ids, db) -> List[LangchainDocument]:
 Embeds the query with the configured OpenAI-compatible embedding model, then queries each knowledge base's Qdrant collection using cosine distance on the `dense` named vector.
 
 ```python
-response = _get_openai_client().embeddings.create(input=query, model=settings.OPENAI_EMBEDDINGS_MODEL)
+response = _get_openai_client().embeddings.create(input=query, model=settings.DENSE_EMBEDDINGS_MODEL)
 query_vector = response.data[0].embedding
 
 hits = _get_qdrant_client().query_points(

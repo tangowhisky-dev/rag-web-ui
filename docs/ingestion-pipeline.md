@@ -52,11 +52,11 @@ The file is received by `POST /api/knowledge-base/{kb_id}/documents/upload`.
 
 `_convert_to_markdown(abs_path, file_name)` in `document_processor.py`.
 
-MarkItDown is initialised once as a lazy singleton. When `OPENAI_VISION_MODEL` is
+MarkItDown is initialised once as a lazy singleton. When `VISION_MODEL` is
 set in `.env`, the `markitdown-ocr` plugin is activated and a `SyncOpenAI` client
 is passed as `llm_client`. The vision model then automatically OCRs any images
 embedded in uploaded documents — scanned PDF pages, photos in DOCX/PPTX/XLSX, or
-standalone image uploads. When `OPENAI_VISION_MODEL` is unset, MarkItDown is
+standalone image uploads. When `VISION_MODEL` is unset, MarkItDown is
 initialised without a client and OCR is silently skipped (identical to the
 previous behaviour).
 
@@ -78,7 +78,7 @@ MarkItDown applies the appropriate converter for each file type:
 | XML | Preserves structure as formatted text |
 | Email (msg/eml) | Extracts headers, body, and attachments |
 | EPUB | Extracts chapter text |
-| Images | OCR via `markitdown-ocr` using `OPENAI_VISION_MODEL`; skipped when model is unset |
+| Images | OCR via `markitdown-ocr` using `VISION_MODEL`; skipped when model is unset |
 | ZIP | Recursively converts all contained files |
 
 **Fallback:** if MarkItDown raises any exception, `_convert_to_markdown` falls
@@ -158,7 +158,7 @@ flushed to Qdrant. Both embedding calls happen before any DB commit so a network
 failure rolls back cleanly.
 
 **Dense embeddings** — chunk texts are sent to the configured OpenAI-compatible
-API (`OPENAI_EMBEDDINGS_MODEL`) in batches of 32. Each chunk produces one
+API (`DENSE_EMBEDDINGS_MODEL`) in batches of 32. Each chunk produces one
 `List[float]` of length `DENSE_EMBEDDING_DIM` (1024 for local models such as
 `qwen3-embedding-0.6b`; 1536 for `text-embedding-3-small`).
 
@@ -385,8 +385,8 @@ Both errors surface in `task.error_message` and the document is not stored.
 | `CHUNK_SIZE` | Target chunk size in characters | `1500` |
 | `OVERLAP_PERCENTAGE` | Fraction of `CHUNK_SIZE` to overlap (0.0–1.0) | `0.20` |
 | `DENSE_EMBEDDING_DIM` | Output dimension of embedding model | `1024` |
-| `OPENAI_EMBEDDINGS_MODEL` | Embedding model name | local model |
-| `OPENAI_VISION_MODEL` | Multimodal model for OCR of embedded images. Leave unset to disable. | unset |
+| `DENSE_EMBEDDINGS_MODEL` | Embedding model name | local model |
+| `VISION_MODEL` | Multimodal model for OCR of embedded images. Leave unset to disable. | unset |
 | `OPENAI_VISION_API_BASE` | Base URL for the vision model. Falls back to `OPENAI_API_BASE`. | unset |
 | `SPLADE_MODEL` | FastEmbed SPLADE model name | `prithivida/Splade_PP_en_v1` |
 | `FASTEMBED_CACHE_DIR` | Where FastEmbed caches ONNX models | `./assets/fastembed` |

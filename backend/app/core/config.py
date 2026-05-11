@@ -45,27 +45,27 @@ class Settings(BaseSettings):
     # rolling-summary generation). Falls back to OPENAI_MODEL when unset.
     # A smaller/faster model works well here — the task is mechanical rewording,
     # not complex reasoning.
-    OPENAI_QUERY_MODEL: Optional[str] = os.getenv("OPENAI_QUERY_MODEL") or None
+    QUERY_MODEL: Optional[str] = os.getenv("QUERY_MODEL") or None
 
     # Vision model for OCR of embedded images (scanned PDFs, images in DOCX/
     # PPTX/XLSX). Must be a multimodal (vision-capable) model.
     # When unset, markitdown-ocr is loaded without an llm_client and OCR is
     # silently skipped — behaviour identical to before.
-    OPENAI_VISION_MODEL: Optional[str] = os.getenv("OPENAI_VISION_MODEL") or None
+    VISION_MODEL: Optional[str] = os.getenv("VISION_MODEL") or None
 
     # Optional separate base URL for the vision model. When unset, falls back
     # to OPENAI_API_BASE (same server as chat/embeddings).
     OPENAI_VISION_API_BASE: Optional[str] = os.getenv("OPENAI_VISION_API_BASE") or None
 
-    OPENAI_EMBEDDINGS_MODEL: str = os.getenv("OPENAI_EMBEDDINGS_MODEL", "local-embedding-model")
-    # Dimension of the dense embedding model output. Must match OPENAI_EMBEDDINGS_MODEL.
+    DENSE_EMBEDDINGS_MODEL: str = os.getenv("DENSE_EMBEDDINGS_MODEL", "local-embedding-model")
+    # Dimension of the dense embedding model output. Must match DENSE_EMBEDDINGS_MODEL.
     # qwen3-embedding-0.6b = 1024, text-embedding-3-small = 1536, text-embedding-ada-002 = 1536
     DENSE_EMBEDDING_DIM: int = int(os.getenv("DENSE_EMBEDDING_DIM", "1024"))
 
     @property
     def effective_query_model(self) -> str:
         """Model to use for query rewriting and summarisation. Falls back to OPENAI_MODEL."""
-        return self.OPENAI_QUERY_MODEL or self.OPENAI_MODEL
+        return self.QUERY_MODEL or self.OPENAI_MODEL
 
     @property
     def effective_vision_api_base(self) -> str:
