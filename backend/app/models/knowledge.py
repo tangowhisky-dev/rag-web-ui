@@ -73,6 +73,9 @@ class ProcessingTask(Base):
     error_message = Column(Text, nullable=True)
     progress = Column(Integer, default=0, nullable=True)          # 0-100
     progress_message = Column(String(255), nullable=True)         # human-readable stage label
+    # Graph extraction status: null = not attempted, pending, completed, failed
+    graph_status = Column(String(50), nullable=True)
+    graph_error = Column(Text, nullable=True)                     # last error if graph_status=failed
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

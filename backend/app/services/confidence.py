@@ -52,13 +52,9 @@ from app.core.config import settings
 
 LEVELS = ("none", "low", "medium", "high", "very_high")
 
-# Reranker logit normalisation range.
-# ms-marco-MiniLM-L-12-v2 observed range:
-#   Specific Q&A queries:  relevant chunks  ~1 to 10
-#   Broad/meta queries:    relevant chunks  ~-5 to -1, irrelevant ~-6 to -11
-# Normalise over [-5, 8] so both query types produce meaningful confidence scores.
-_RERANKER_SCORE_MIN = -5.0
-_RERANKER_SCORE_MAX = 8.0
+# Reranker logit normalisation range for ms-marco-MiniLM-L-12-v2.
+_RERANKER_SCORE_MIN = -10.0
+_RERANKER_SCORE_MAX = 10.0
 
 
 @dataclass
@@ -162,25 +158,27 @@ def _score_reranker(
     ]
 
     if not reranker_scores:
-        # Reranker ran but didn't annotate — fall back to presence only.
         top_score = mean_score = 0.0
+        norm_top = norm_mean = 0.5
     else:
         top_score = max(reranker_scores)
         mean_score = sum(reranker_scores) / len(reranker_scores)
 
-    def normalise(s: float) -> float:
-        """Map logit [_RERANKER_SCORE_MIN, _RERANKER_SCORE_MAX] → [0, 1], clamped."""
-        span = _RERANKER_SCORE_MAX - _RERANKER_SCORE_MIN
-        return max(0.0, min((s - _RERANKER_SCORE_MIN) / span, 1.0))
+        def normalise(s: float) -> float:
+            span = _RERANKER_SCORE_MAX - _RERANKER_SCORE_MIN
+            return max(0.0, min((s - _RERANKER_SCORE_MIN) / span, 1.0))
+
+        norm_top  = normalise(top_score)
+        norm_mean = normalise(mean_score)
 
     # A: top score (60 pts)
-    a = normalise(top_score) * 60
+    a = norm_top * 60
 
     # B: evidence count (10 pts)
     b = min(math.log(len(docs) + 1) / math.log(11), 1.0) * 10
 
     # C: mean score (30 pts)
-    c = normalise(mean_score) * 30
+    c = norm_mean * 30
 
     score = round(a + b + c)
     level, suggestion = _level_and_suggestion(score, failed_legs)

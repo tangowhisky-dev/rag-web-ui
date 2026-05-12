@@ -263,25 +263,96 @@ def _get_llm_pipeline():
     return _llm_pipeline
 
 
+def _strip_overlap(prev: str, curr: str, max_search: int) -> str:
+    """Strip the overlapping prefix from *curr* that duplicates the tail of *prev*.
+
+    Searches for the longest suffix of *prev* (up to *max_search* chars) that
+    appears as a prefix of *curr* and strips it.  Returns *curr* unchanged if
+    no overlap is found.
+    """
+    search_len = min(len(prev), len(curr), max_search)
+    for length in range(search_len, 0, -1):
+        if prev[-length:] == curr[:length]:
+            return curr[length:]
+    return curr
+
+
+def _build_extraction_batches(
+    chunks: list[str],
+    point_ids: list[str],
+    context_budget: int,
+) -> list[tuple[str, list[str]]]:
+    """Group consecutive chunks into batches whose combined text fits within
+    *context_budget* characters (80% of NEO4J_LLM_CONTEXT, reserving headroom
+    for the system prompt and JSON schema output).
+
+    Within each batch, chunk overlap is stripped from chunk[i+1] before
+    concatenation so the LLM sees clean, non-redundant prose.
+
+    Returns a list of (combined_text, [point_id, ...]) tuples — one per batch.
+    Each entry in the point_id list corresponds to one of the original Qdrant
+    chunks so FROM_CHUNK edges fan out to all of them after extraction.
+    """
+    budget = int(context_budget * 0.33)
+    # neo4j-graphrag's system prompt + JSON schema for structured output consumes
+    # ~800-1200 tokens. Using 33% of the char budget leaves 67% headroom for
+    # prompt overhead + output tokens, keeping total well within the model's limit.
+    max_overlap_search = max(200, getattr(settings, "chunk_overlap", 200) * 2)
+
+    batches: list[tuple[str, list[str]]] = []
+    batch_texts: list[str] = []
+    batch_ids: list[str] = []
+    running_len = 0
+
+    for i, (text, pid) in enumerate(zip(chunks, point_ids)):
+        # Strip overlap with the previous chunk in this batch
+        if batch_texts:
+            deduped = _strip_overlap(batch_texts[-1], text, max_overlap_search)
+        else:
+            deduped = text
+
+        if running_len + len(deduped) > budget and batch_texts:
+            # Flush current batch and start a new one with the full chunk text
+            batches.append((" ".join(batch_texts), batch_ids))
+            batch_texts = [text]      # new batch starts with full text
+            batch_ids = [pid]
+            running_len = len(text)
+        else:
+            batch_texts.append(deduped)
+            batch_ids.append(pid)
+            running_len += len(deduped)
+
+    if batch_texts:
+        batches.append((" ".join(batch_texts), batch_ids))
+
+    return batches
+
+
 async def _extract_with_llm(
     document_id: int,
     file_name: str,
     chunks: list[str],
     qdrant_point_ids: list[str],
 ) -> tuple[int, int]:
-    """
-    Run neo4j-graphrag LLM pipeline per chunk.
-    All synchronous Neo4j I/O is dispatched via run_in_executor so the event
-    loop stays responsive to other requests (poll, GET /knowledge-base, etc.)
-    while extraction is in progress.
+    """Run neo4j-graphrag LLM pipeline on context-sized batches of chunks.
+
+    Consecutive chunks are merged into batches sized to NEO4J_LLM_CONTEXT
+    (with overlap stripped) before being sent to the LLM. This gives the
+    extractor broader context than single-chunk calls, reducing duplicate
+    entities at chunk boundaries and surfacing intra-document relationships.
+
+    After each pipe.run(), FROM_CHUNK edges are written to ALL Qdrant chunk
+    nodes in the batch — so entity→chunk links remain granular even though
+    extraction ran on the merged text.
+
+    Up to 4 batches run concurrently (local _chunk_sem). All synchronous Neo4j
+    I/O is dispatched via run_in_executor.
     """
     from neo4j_graphrag.experimental.components.types import TextChunks, TextChunk
 
     loop = asyncio.get_event_loop()
     pipe = _get_llm_pipeline()
     driver = _get_driver()
-    total_nodes = 0
-    total_rels = 0
 
     # Cap chunks to avoid OOM on low-RAM local models. Qdrant still has all chunks.
     cap = settings.GRAPHRAG_MAX_CHUNKS
@@ -293,70 +364,90 @@ async def _extract_with_llm(
             document_id, cap, len(chunks), cap,
         )
 
-    _chunk_sem = asyncio.Semaphore(4)
+    batches = _build_extraction_batches(
+        effective_chunks, effective_ids, settings.NEO4J_LLM_CONTEXT
+    )
+    logger.info(
+        "GraphService[llm]: doc %d — %d chunks → %d extraction batches (NEO4J_LLM_CONTEXT=%d)",
+        document_id, len(effective_chunks), len(batches), settings.NEO4J_LLM_CONTEXT,
+    )
 
-    async def _process_chunk(idx: int, text: str, point_id: str) -> tuple[int, int]:
-        async with _chunk_sem:
-            try:
-                pipe_result = await pipe.run({
-                    "extractor": {
-                        "chunks": TextChunks(chunks=[TextChunk(text=text, index=idx)]),
-                        "examples": "",
-                    },
-                    "writer": {},
-                })
-                writer_output = None
-                raw = getattr(pipe_result, "result", None)
-                if isinstance(raw, dict):
-                    writer_output = raw.get("writer")
-                elif hasattr(raw, "status"):
-                    writer_output = raw
+    _batch_sem = asyncio.Semaphore(4)
 
-                status = getattr(writer_output, "status", None)
-                if status == "FAILURE":
+    async def _process_batch(
+        batch_idx: int, combined_text: str, batch_point_ids: list[str]
+    ) -> tuple[int, int]:
+        async with _batch_sem:
+            last_exc = None
+            for attempt in range(1, 4):  # up to 3 attempts
+                try:
+                    pipe_result = await pipe.run({
+                        "extractor": {
+                            "chunks": TextChunks(chunks=[TextChunk(text=combined_text, index=batch_idx)]),
+                            "examples": "",
+                        },
+                        "writer": {},
+                    })
+                    writer_output = None
+                    raw = getattr(pipe_result, "result", None)
+                    if isinstance(raw, dict):
+                        writer_output = raw.get("writer")
+                    elif hasattr(raw, "status"):
+                        writer_output = raw
+
+                    status = getattr(writer_output, "status", None)
+                    if status == "FAILURE":
+                        logger.warning(
+                            "GraphService[llm]: writer FAILURE for doc %d batch %d — skipping FROM_CHUNK links",
+                            document_id, batch_idx,
+                        )
+                        return 0, 0
+
+                    # Fan out FROM_CHUNK edges to every chunk in the batch.
+                    def _link_batch_chunks(pids=batch_point_ids):
+                        linked_total = 0
+                        with driver.session() as session:
+                            for pid in pids:
+                                rec = session.run(
+                                    """
+                                    MATCH (e:__Entity__)
+                                    WHERE NOT EXISTS {
+                                        MATCH (e)-[:FROM_CHUNK]->(:Chunk {qdrant_point_id: $point_id})
+                                    }
+                                    WITH e LIMIT 500
+                                    MATCH (c:Chunk {qdrant_point_id: $point_id})
+                                    MERGE (e)-[:FROM_CHUNK]->(c)
+                                    RETURN count(e) AS linked
+                                    """,
+                                    point_id=pid,
+                                ).single()
+                                linked_total += rec["linked"] if rec else 0
+                        return linked_total
+
+                    linked = await loop.run_in_executor(None, _link_batch_chunks)
+                    return linked, 0
+
+                except Exception as exc:
+                    last_exc = exc
                     logger.warning(
-                        "GraphService[llm]: writer returned FAILURE for doc %d chunk %d — skipping FROM_CHUNK link",
-                        document_id, idx,
+                        "GraphService[llm]: pipeline failed for doc %d batch %d (attempt %d/3): %s",
+                        document_id, batch_idx, attempt, exc,
                     )
-                    return 0, 0
+                    if attempt < 3:
+                        await asyncio.sleep(1)
 
-                # Link entities to the Chunk node — sync Neo4j I/O in executor.
-                def _link_chunk(pid=point_id):
-                    with driver.session() as session:
-                        rec = session.run(
-                            """
-                            MATCH (e:__Entity__)
-                            WHERE NOT EXISTS {
-                                MATCH (e)-[:FROM_CHUNK]->(:Chunk {qdrant_point_id: $point_id})
-                            }
-                            WITH e LIMIT 500
-                            MATCH (c:Chunk {qdrant_point_id: $point_id})
-                            MERGE (e)-[:FROM_CHUNK]->(c)
-                            RETURN count(e) AS linked
-                            """,
-                            point_id=pid,
-                        ).single()
-                        return rec["linked"] if rec else 0
-
-                linked = await loop.run_in_executor(None, _link_chunk)
-                return linked, 0
-
-            except Exception as exc:
-                logger.warning(
-                    "GraphService[llm]: pipeline failed for doc %d chunk %d: %s",
-                    document_id, idx, exc,
-                )
-                return 0, 0
+            logger.error(
+                "GraphService[llm]: all 3 attempts failed for doc %d batch %d — giving up: %s",
+                document_id, batch_idx, last_exc,
+            )
+            return 0, 0
 
     results = await asyncio.gather(*[
-        _process_chunk(idx, text, point_id)
-        for idx, (text, point_id) in enumerate(zip(effective_chunks, effective_ids))
+        _process_batch(idx, text, pids)
+        for idx, (text, pids) in enumerate(batches)
     ])
-    for nodes, rels in results:
-        total_nodes += nodes
-        total_rels += rels
 
-    # Final accurate count — sync Neo4j I/O in executor.
+    # Final accurate count from Neo4j.
     def _count_nodes_rels():
         with driver.session() as session:
             rec = session.run(
@@ -714,14 +805,16 @@ def delete_graph_for_document(kb_id: int, document_id: int) -> None:
 
         rec = session.run(
             """
-            MATCH (e:__Entity__)
-            WHERE NOT EXISTS { MATCH (:Chunk)-[:FROM_CHUNK]->(e) }
+            MATCH (e)
+            WHERE (e:__KGBuilder__ OR e:Entity OR e:__Entity__)
+              AND NOT EXISTS { MATCH ()-[:FROM_CHUNK]->(e) }
+              AND NOT EXISTS { MATCH (e)-[:FROM_CHUNK]->() }
             DETACH DELETE e
             RETURN count(e) AS cleaned
             """
         ).single()
         logger.info(
-            "GraphService: cleaned %d orphaned Entity nodes after doc %d deletion",
+            "GraphService: cleaned %d orphaned entity nodes after doc %d deletion",
             rec["cleaned"] if rec else 0, document_id,
         )
 
@@ -750,15 +843,20 @@ def delete_graph_for_kb(kb_id: int) -> None:
             rec["deleted"] if rec else 0, kb_id,
         )
 
+        # Clean up entity nodes that have no remaining FROM_CHUNK edges.
+        # Match by relationship absence rather than label — the LLM pipeline
+        # (neo4j-graphrag) writes __KGBuilder__ entities, not __Entity__.
         rec = session.run(
             """
-            MATCH (e:__Entity__)
-            WHERE NOT EXISTS { MATCH (:Chunk)-[:FROM_CHUNK]->(e) }
+            MATCH (e)
+            WHERE (e:__KGBuilder__ OR e:Entity OR e:__Entity__)
+              AND NOT EXISTS { MATCH ()-[:FROM_CHUNK]->(e) }
+              AND NOT EXISTS { MATCH (e)-[:FROM_CHUNK]->() }
             DETACH DELETE e
             RETURN count(e) AS cleaned
             """
         ).single()
         logger.info(
-            "GraphService: cleaned %d orphaned Entity nodes after kb_%d deletion",
+            "GraphService: cleaned %d orphaned entity nodes after kb_%d deletion",
             rec["cleaned"] if rec else 0, kb_id,
         )

@@ -731,7 +731,20 @@ async def process_document_background(
             _doc_id = document.id   # capture plain int before session closes
             _chunks = [p[1] for p in qdrant_payloads]
             _chunk_ids = [p[0] for p in qdrant_payloads]
+            _task_id = task_id
             async def _build_graph() -> None:
+                # Mark graph extraction as in-progress in the DB
+                from app.db.session import SessionLocal as _SessionLocal
+                from app.models.knowledge import ProcessingTask as _PT
+                _db = _SessionLocal()
+                try:
+                    _t = _db.query(_PT).filter(_PT.id == _task_id).first()
+                    if _t:
+                        _t.graph_status = "pending"
+                        _db.commit()
+                finally:
+                    _db.close()
+
                 try:
                     from app.services.graph_service import build_graph_for_document
                     await build_graph_for_document(
@@ -742,11 +755,29 @@ async def process_document_background(
                         chunk_ids=_chunk_ids,
                     )
                     logger.info(f"Task {task_id}: Knowledge graph built in Neo4j")
+                    _db2 = _SessionLocal()
+                    try:
+                        _t = _db2.query(_PT).filter(_PT.id == _task_id).first()
+                        if _t:
+                            _t.graph_status = "completed"
+                            _t.graph_error = None
+                            _db2.commit()
+                    finally:
+                        _db2.close()
                 except Exception as _e:
                     logger.warning(
                         f"Task {task_id}: Neo4j graph build failed (non-fatal): {_e}",
                         exc_info=True,
                     )
+                    _db3 = _SessionLocal()
+                    try:
+                        _t = _db3.query(_PT).filter(_PT.id == _task_id).first()
+                        if _t:
+                            _t.graph_status = "failed"
+                            _t.graph_error = str(_e)[:1000]
+                            _db3.commit()
+                    finally:
+                        _db3.close()
             asyncio.create_task(_build_graph())
 
     except Exception as e:

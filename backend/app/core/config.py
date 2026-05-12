@@ -100,7 +100,7 @@ class Settings(BaseSettings):
     RERANKER_CACHE_DIR: str = os.getenv("RERANKER_CACHE_DIR", "./assets/reranker")
     # How many chunks to keep after reranking. Must be <= RETRIEVAL_TOP_K.
     # Reducing this keeps only the most relevant chunks, further limiting noise.
-    RERANKER_SCORE_THRESHOLD: float = float(os.getenv("RERANKER_SCORE_THRESHOLD", "-5.0"))
+    RERANKER_SCORE_THRESHOLD: float = float(os.getenv("RERANKER_SCORE_THRESHOLD", "-2.0"))
 
     # ── Chunking ────────────────────────────────────────────────────────────────
     # WARNING: changing these values after documents have been ingested creates
@@ -163,7 +163,16 @@ class Settings(BaseSettings):
     # fully indexed in Qdrant. Set to 0 to disable the cap (default: 300).
     # For large documents on low-RAM local models (e.g. 2B), keep this at
     # 200–400. The first N chunks usually cover the most concept-dense content.
-    GRAPHRAG_MAX_CHUNKS: int = int(os.getenv("GRAPHRAG_MAX_CHUNKS", "300"))
+    GRAPHRAG_MAX_CHUNKS: int = int(os.getenv("GRAPHRAG_MAX_CHUNKS", "0"))
+
+    # Context window size (in characters) available to the LLM used for graph
+    # extraction. Consecutive chunks are merged into batches up to this budget
+    # (with ~20% headroom reserved for the system prompt + JSON schema output).
+    # Overlap between adjacent chunks is stripped before concatenation so the
+    # LLM sees clean, non-redundant text.
+    # Rule of thumb: 1 token ≈ 3–4 chars. For a 4K token context set ~12000.
+    # Default: 6000 (safe for 2K-token local models like Qwen-3.5-4B).
+    NEO4J_LLM_CONTEXT: int = int(os.getenv("NEO4J_LLM_CONTEXT", "6000"))
 
     @property
     def graphrag_model(self) -> str:
