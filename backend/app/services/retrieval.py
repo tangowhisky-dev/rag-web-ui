@@ -33,6 +33,7 @@ overlap should be returned by the dense/sparse legs, not suppressed.
 
 import hashlib
 import json
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional
@@ -400,7 +401,8 @@ async def hybrid_search_with_legs(
     if enabled["graph"] and docs:
         try:
             from app.services.graph_service import expand_docs_via_graph
-            expanded = expand_docs_via_graph(docs, kb_ids)
+            loop = asyncio.get_event_loop()
+            expanded = await loop.run_in_executor(None, lambda: expand_docs_via_graph(docs, kb_ids))
             if expanded:
                 existing_hashes = {_content_hash(d.page_content) for d in docs}
                 new_docs = [d for d in expanded if _content_hash(d.page_content) not in existing_hashes]
@@ -422,7 +424,8 @@ async def hybrid_search_with_legs(
     if enabled["graph"] and docs:
         try:
             from app.services.graph_service import enrich_docs_with_graph
-            docs = enrich_docs_with_graph(docs)
+            loop = asyncio.get_event_loop()
+            docs = await loop.run_in_executor(None, lambda: enrich_docs_with_graph(docs))
             graph_enriched_count = sum(1 for d in docs if d.metadata.get("_graph_triples", 0) > 0)
             legs["graph"] = {
                 "status": "ok",
@@ -488,7 +491,8 @@ async def hybrid_search(
     if enabled["graph"] and docs:
         try:
             from app.services.graph_service import enrich_docs_with_graph
-            docs = enrich_docs_with_graph(docs)
+            loop = asyncio.get_event_loop()
+            docs = await loop.run_in_executor(None, lambda: enrich_docs_with_graph(docs))
         except Exception as e:
             logger.warning("hybrid_search: graph enrichment failed (non-fatal): %s", e)
 

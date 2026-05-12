@@ -63,6 +63,7 @@ Deletion
   ingest run. Also cleans up orphaned Entity nodes with no remaining chunk links.
 """
 
+import asyncio
 import logging
 import uuid
 from typing import Optional
@@ -78,6 +79,11 @@ logger = logging.getLogger(__name__)
 # ── Module-level singletons (lazy) ────────────────────────────────────────────
 _neo4j_driver: Optional[neo4j.Driver] = None
 _llm_pipeline = None   # neo4j_graphrag Pipeline — only built when GRAPHRAG_LLM is set
+
+# Cap concurrent graph extraction jobs. Each job fires N sequential LLM calls
+# per chunk. Running too many simultaneously starves the local model and blocks
+# the event loop via the synchronous Neo4j driver calls.
+_graph_semaphore = asyncio.Semaphore(1)
 
 
 def _get_driver() -> neo4j.Driver:
@@ -117,7 +123,8 @@ async def _call_relik(text: str) -> dict:
 
 
 async def _extract_with_relik(
-    session: neo4j.Session,
+    driver: neo4j.Driver,
+    loop,
     document_id: int,
     chunks: list[str],
     qdrant_point_ids: list[str],
@@ -125,6 +132,7 @@ async def _extract_with_relik(
     """
     Run ReLiK on each chunk, write Entity nodes + typed relationships to Neo4j.
     Links Entity nodes to Chunk nodes via FROM_CHUNK edges using qdrant_point_id.
+    All sync Neo4j writes are offloaded via run_in_executor.
     Returns (total_entities, total_relations).
     """
     total_entities = 0
@@ -140,47 +148,56 @@ async def _extract_with_relik(
             )
             continue
 
-        # spans → Entity nodes + FROM_CHUNK edges
-        for span in out.get("spans", []):
-            entity_name = (span.get("text") or "").strip()
-            entity_type = span.get("label") or "Entity"
-            if entity_type == "--NME--":
-                entity_type = "Entity"
-            if not entity_name:
-                continue
-            session.run(
-                """
-                MERGE (e:Entity {name: $name})
-                SET e.type = $type
-                WITH e
-                MATCH (c:Chunk {qdrant_point_id: $point_id})
-                MERGE (e)-[:FROM_CHUNK]->(c)
-                """,
-                name=entity_name,
-                type=entity_type,
-                point_id=point_id,
-            )
-            total_entities += 1
+        spans = out.get("spans", [])
+        triplets = out.get("triplets", [])
 
-        # triplets → typed relationship edges between Entity pairs
-        for triplet in out.get("triplets", []):
-            subj = (triplet.get("subject", {}).get("text") or "").strip()
-            obj  = (triplet.get("object",  {}).get("text") or "").strip()
-            rel  = triplet.get("relation", {}).get("label") or "RELATED_TO"
-            rel  = rel.upper().replace(" ", "_")
-            if not subj or not obj:
-                continue
-            rel_safe = "".join(c if c.isalnum() or c == "_" else "_" for c in rel)
-            session.run(
-                f"""
-                MERGE (a:Entity {{name: $subj}})
-                MERGE (b:Entity {{name: $obj}})
-                MERGE (a)-[:`{rel_safe}`]->(b)
-                """,
-                subj=subj,
-                obj=obj,
-            )
-            total_relations += 1
+        def _write_entities_and_rels(spans=spans, triplets=triplets, pid=point_id):
+            written_entities = 0
+            written_rels = 0
+            with driver.session() as session:
+                for span in spans:
+                    entity_name = (span.get("text") or "").strip()
+                    entity_type = span.get("label") or "Entity"
+                    if entity_type == "--NME--":
+                        entity_type = "Entity"
+                    if not entity_name:
+                        continue
+                    session.run(
+                        """
+                        MERGE (e:Entity {name: $name})
+                        SET e.type = $type
+                        WITH e
+                        MATCH (c:Chunk {qdrant_point_id: $point_id})
+                        MERGE (e)-[:FROM_CHUNK]->(c)
+                        """,
+                        name=entity_name,
+                        type=entity_type,
+                        point_id=pid,
+                    )
+                    written_entities += 1
+                for triplet in triplets:
+                    subj = (triplet.get("subject", {}).get("text") or "").strip()
+                    obj  = (triplet.get("object",  {}).get("text") or "").strip()
+                    rel  = triplet.get("relation", {}).get("label") or "RELATED_TO"
+                    rel  = rel.upper().replace(" ", "_")
+                    if not subj or not obj:
+                        continue
+                    rel_safe = "".join(c if c.isalnum() or c == "_" else "_" for c in rel)
+                    session.run(
+                        f"""
+                        MERGE (a:Entity {{name: $subj}})
+                        MERGE (b:Entity {{name: $obj}})
+                        MERGE (a)-[:`{rel_safe}`]->(b)
+                        """,
+                        subj=subj,
+                        obj=obj,
+                    )
+                    written_rels += 1
+            return written_entities, written_rels
+
+        ents, rels = await loop.run_in_executor(None, _write_entities_and_rels)
+        total_entities += ents
+        total_relations += rels
 
     return total_entities, total_relations
 
@@ -254,20 +271,16 @@ async def _extract_with_llm(
 ) -> tuple[int, int]:
     """
     Run neo4j-graphrag LLM pipeline per chunk.
-
-    Throttled: a small inter-chunk sleep prevents LM Studio from accumulating
-    KV cache across hundreds of sequential calls on a low-memory local model.
-    The semaphore caps concurrent pipeline runs to 1 — LM Studio's memory
-    manager needs the gap between requests to reclaim KV cache.
+    All synchronous Neo4j I/O is dispatched via run_in_executor so the event
+    loop stays responsive to other requests (poll, GET /knowledge-base, etc.)
+    while extraction is in progress.
     """
-    import asyncio
     from neo4j_graphrag.experimental.components.types import TextChunks, TextChunk
 
-    _INTER_CHUNK_DELAY = settings.GRAPHRAG_CHUNK_DELAY
-
+    loop = asyncio.get_event_loop()
     pipe = _get_llm_pipeline()
     driver = _get_driver()
-    total_nodes = 0  # overridden by post-loop Neo4j query; kept for early-return path
+    total_nodes = 0
     total_rels = 0
 
     # Cap chunks to avoid OOM on low-RAM local models. Qdrant still has all chunks.
@@ -280,90 +293,87 @@ async def _extract_with_llm(
             document_id, cap, len(chunks), cap,
         )
 
-    for idx, (text, point_id) in enumerate(zip(effective_chunks, effective_ids)):
-        try:
-            pipe_result = await pipe.run({
-                "extractor": {
-                    "chunks": TextChunks(chunks=[TextChunk(text=text, index=idx)]),
-                    "examples": "",
-                },
-                "writer": {},
-            })
-            # PipelineResult.result is a dict keyed by component name.
-            # The writer output is KGWriterModel(status="SUCCESS"|"FAILURE").
-            # Any other shape (None, unexpected) — we still attempt the
-            # FROM_CHUNK linking because the Cypher may have run regardless.
-            writer_output = None
-            raw = getattr(pipe_result, "result", None)
-            if isinstance(raw, dict):
-                writer_output = raw.get("writer")
-            elif hasattr(raw, "status"):
-                writer_output = raw  # direct KGWriterModel (future-proofing)
+    _chunk_sem = asyncio.Semaphore(4)
 
-            status = getattr(writer_output, "status", None)
-            if status == "FAILURE":
+    async def _process_chunk(idx: int, text: str, point_id: str) -> tuple[int, int]:
+        async with _chunk_sem:
+            try:
+                pipe_result = await pipe.run({
+                    "extractor": {
+                        "chunks": TextChunks(chunks=[TextChunk(text=text, index=idx)]),
+                        "examples": "",
+                    },
+                    "writer": {},
+                })
+                writer_output = None
+                raw = getattr(pipe_result, "result", None)
+                if isinstance(raw, dict):
+                    writer_output = raw.get("writer")
+                elif hasattr(raw, "status"):
+                    writer_output = raw
+
+                status = getattr(writer_output, "status", None)
+                if status == "FAILURE":
+                    logger.warning(
+                        "GraphService[llm]: writer returned FAILURE for doc %d chunk %d — skipping FROM_CHUNK link",
+                        document_id, idx,
+                    )
+                    return 0, 0
+
+                # Link entities to the Chunk node — sync Neo4j I/O in executor.
+                def _link_chunk(pid=point_id):
+                    with driver.session() as session:
+                        rec = session.run(
+                            """
+                            MATCH (e:__Entity__)
+                            WHERE NOT EXISTS {
+                                MATCH (e)-[:FROM_CHUNK]->(:Chunk {qdrant_point_id: $point_id})
+                            }
+                            WITH e LIMIT 500
+                            MATCH (c:Chunk {qdrant_point_id: $point_id})
+                            MERGE (e)-[:FROM_CHUNK]->(c)
+                            RETURN count(e) AS linked
+                            """,
+                            point_id=pid,
+                        ).single()
+                        return rec["linked"] if rec else 0
+
+                linked = await loop.run_in_executor(None, _link_chunk)
+                return linked, 0
+
+            except Exception as exc:
                 logger.warning(
-                    "GraphService[llm]: writer returned FAILURE for doc %d chunk %d — skipping FROM_CHUNK link",
-                    document_id, idx,
+                    "GraphService[llm]: pipeline failed for doc %d chunk %d: %s",
+                    document_id, idx, exc,
                 )
-                continue
-            # status == "SUCCESS" or None (unknown shape) — proceed either way
-            # since Neo4j Cypher already ran if no exception was raised.
+                return 0, 0
 
-            # Link entities written by this chunk run to our Chunk node.
-            # Use __Entity__ — neo4j-graphrag's internal label convention.
-            # Only link entities not already connected to this specific chunk
-            # (idempotent on re-ingest).
-            with driver.session() as session:
-                rec = session.run(
-                    """
-                    MATCH (e:__Entity__)
-                    WHERE NOT EXISTS {
-                        MATCH (e)-[:FROM_CHUNK]->(:Chunk {qdrant_point_id: $point_id})
-                    }
-                    WITH e LIMIT 500
-                    MATCH (c:Chunk {qdrant_point_id: $point_id})
-                    MERGE (e)-[:FROM_CHUNK]->(c)
-                    RETURN count(e) AS linked
-                    """,
-                    point_id=point_id,
-                ).single()
-                total_nodes += rec["linked"] if rec else 0
+    results = await asyncio.gather(*[
+        _process_chunk(idx, text, point_id)
+        for idx, (text, point_id) in enumerate(zip(effective_chunks, effective_ids))
+    ])
+    for nodes, rels in results:
+        total_nodes += nodes
+        total_rels += rels
 
-            meta = getattr(pipe_result, "metadata", {}) or {}
-            # relationship_count is not reliably present on PipelineResult;
-            # we do a single accurate query at the end instead.
+    # Final accurate count — sync Neo4j I/O in executor.
+    def _count_nodes_rels():
+        with driver.session() as session:
+            rec = session.run(
+                """
+                MATCH (c:Chunk {document_id: $doc_id})<-[:FROM_CHUNK]-(e)
+                WITH collect(DISTINCT e) AS entities
+                UNWIND entities AS e
+                OPTIONAL MATCH (e)-[r]-(e2)
+                WHERE e2 IN entities
+                RETURN size(entities) AS node_count,
+                       count(r)      AS rel_count
+                """,
+                doc_id=str(document_id),
+            ).single()
+            return (rec["node_count"] if rec else 0, rec["rel_count"] if rec else 0)
 
-            # Brief pause so LM Studio can reclaim KV cache between chunks.
-            # Critical for large documents (500+ chunks) on low-RAM local models.
-            await asyncio.sleep(_INTER_CHUNK_DELAY)
-
-        except Exception as exc:
-            logger.warning(
-                "GraphService[llm]: pipeline failed for doc %d chunk %d: %s",
-                document_id, idx, exc,
-            )
-            continue
-
-    # Query actual counts from Neo4j scoped to this document.
-    # total_nodes = unique __Entity__ nodes linked to any of this doc's chunks.
-    # total_rels  = relationships between those entities.
-    with driver.session() as session:
-        rec = session.run(
-            """
-            MATCH (c:Chunk {document_id: $doc_id})<-[:FROM_CHUNK]-(e)
-            WITH collect(DISTINCT e) AS entities
-            UNWIND entities AS e
-            OPTIONAL MATCH (e)-[r]-(e2)
-            WHERE e2 IN entities
-            RETURN size(entities) AS node_count,
-                   count(r)      AS rel_count
-            """,
-            doc_id=str(document_id),
-        ).single()
-        total_nodes = rec["node_count"] if rec else 0
-        total_rels  = rec["rel_count"]  if rec else 0
-
+    total_nodes, total_rels = await loop.run_in_executor(None, _count_nodes_rels)
     return total_nodes, total_rels
 
 
@@ -396,6 +406,7 @@ async def build_graph_for_document(
         return
 
     driver = _get_driver()
+    loop = asyncio.get_event_loop()
     backend = "llm" if settings.GRAPHRAG_LLM else "relik"
 
     # Convert SHA-256 chunk IDs → the actual UUIDs Qdrant uses as point IDs
@@ -407,41 +418,48 @@ async def build_graph_for_document(
         backend, len(chunks), document_id, kb_id,
     )
 
-    with driver.session() as session:
-        for idx, (text, point_id) in enumerate(zip(chunks, qdrant_point_ids)):
-            session.run(
-                """
-                MERGE (c:Chunk {qdrant_point_id: $point_id})
-                SET c.qdrant_collection = $collection,
-                    c.document_id       = $document_id,
-                    c.chunk_index       = $chunk_index,
-                    c.kb_id             = $kb_id,
-                    c.file_name         = $file_name
-                """,
-                point_id=point_id,
-                collection=collection_name,
-                document_id=str(document_id),
-                chunk_index=idx,
-                kb_id=str(kb_id),
-                file_name=file_name,
-            )
-
-    # Extract entities and relationships
-    if settings.GRAPHRAG_LLM:
-        total_entities, total_relations = await _extract_with_llm(
-            document_id=document_id,
-            file_name=file_name,
-            chunks=chunks,
-            qdrant_point_ids=qdrant_point_ids,
-        )
-    else:
+    # Write Chunk nodes — sync Neo4j I/O, must run in executor to avoid
+    # blocking the event loop and causing ECONNRESET on concurrent requests.
+    def _write_chunk_nodes():
         with driver.session() as session:
-            total_entities, total_relations = await _extract_with_relik(
-                session=session,
+            for idx, (text, point_id) in enumerate(zip(chunks, qdrant_point_ids)):
+                session.run(
+                    """
+                    MERGE (c:Chunk {qdrant_point_id: $point_id})
+                    SET c.qdrant_collection = $collection,
+                        c.document_id       = $document_id,
+                        c.chunk_index       = $chunk_index,
+                        c.kb_id             = $kb_id,
+                        c.file_name         = $file_name
+                    """,
+                    point_id=point_id,
+                    collection=collection_name,
+                    document_id=str(document_id),
+                    chunk_index=idx,
+                    kb_id=str(kb_id),
+                    file_name=file_name,
+                )
+
+    await loop.run_in_executor(None, _write_chunk_nodes)
+
+    # Extract entities and relationships — throttled by semaphore so we don't
+    # run all 20 documents' extraction simultaneously on one local LLM.
+    async with _graph_semaphore:
+        if settings.GRAPHRAG_LLM:
+            total_entities, total_relations = await _extract_with_llm(
                 document_id=document_id,
+                file_name=file_name,
                 chunks=chunks,
                 qdrant_point_ids=qdrant_point_ids,
             )
+        else:
+                total_entities, total_relations = await _extract_with_relik(
+                    driver=driver,
+                    loop=loop,
+                    document_id=document_id,
+                    chunks=chunks,
+                    qdrant_point_ids=qdrant_point_ids,
+                )
 
     logger.info(
         "GraphService[%s]: doc %d — %d entities, %d relations written to Neo4j",

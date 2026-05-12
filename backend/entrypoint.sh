@@ -26,7 +26,10 @@ fi
 
 echo "Starting application..."
 if [ "$ENVIRONMENT" = "development" ]; then
-  uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+  # --reload-dir /app/app: only watch source code changes, NOT /app/uploads or /app/assets.
+  # Without this, every file write during ingest (uploads, temp files) triggers a reload
+  # that kills the worker mid-flight, leaving all in-progress tasks stuck in "processing".
+  uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir /app/app --timeout-keep-alive 120
 else
-  uvicorn app.main:app --host 0.0.0.0 --port 8000
+  uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2 --timeout-keep-alive 120
 fi

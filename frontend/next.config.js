@@ -5,6 +5,7 @@ module.exports = {
   skipTrailingSlashRedirect: true,
   experimental: {
     outputFileTracingRoot: undefined,
+    proxyTimeout: 120000,
   },
   async rewrites() {
     return [

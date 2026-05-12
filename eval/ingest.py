@@ -70,7 +70,7 @@ def ingest_articles(
     kb_id: int,
     articles: dict[str, str],
     poll_interval: int = 5,
-    timeout: int = 300,
+    timeout: int = 3000,
 ) -> None:
     upload_results = []
     print(f"  Uploading {len(articles)} articles...")

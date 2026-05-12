@@ -35,10 +35,6 @@ from app.services.chunk_record import ChunkRecord
 _qdrant_client: Optional[QdrantClient] = None
 _sparse_embedder: Optional[SparseTextEmbedding] = None
 
-# Limit concurrent background document processing to avoid exhausting the DB
-# connection pool. Pool is size=5 overflow=10 (max 15); leave room for
-# request-serving sessions alongside background workers.
-_processing_semaphore = asyncio.Semaphore(8)
 _markitdown: Optional[MarkItDown] = None
 _EMBED_BATCH_SIZE = 32
 _QDRANT_UPSERT_BATCH = 100
@@ -561,32 +557,6 @@ async def process_document_background(
         chunk_size = settings.CHUNK_SIZE
     if chunk_overlap is None:
         chunk_overlap = settings.chunk_overlap
-    logger.info(f"Starting background processing for task {task_id}, file: {file_name}")
-
-    async with _processing_semaphore:
-        await _process_document_background_inner(
-            temp_path, file_name, kb_id, task_id, db, user_id, chunk_size, chunk_overlap,
-            enable_ocr=enable_ocr,
-        )
-
-
-async def _process_document_background_inner(
-    temp_path: str,
-    file_name: str,
-    kb_id: int,
-    task_id: int,
-    db: Session = None,
-    user_id: int = None,
-    chunk_size: int = None,
-    chunk_overlap: int = None,
-    enable_ocr: Optional[bool] = None,
-) -> None:
-    """Process document in background (runs under _processing_semaphore)"""
-    logger = logging.getLogger(__name__)
-    if chunk_size is None:
-        chunk_size = settings.CHUNK_SIZE
-    if chunk_overlap is None:
-        chunk_overlap = settings.chunk_overlap
 
     if db is None:
         db = SessionLocal()
@@ -746,8 +716,9 @@ async def _process_document_background_inner(
         task.status = "completed"
         task.progress = 90
         task.progress_message = "Finalising…"
-        # db.commit with 2795 pending objects is a big synchronous MySQL write — run in executor
-        await loop.run_in_executor(None, db.commit)
+        # Commit directly — SQLAlchemy sessions are not thread-safe, running
+        # db.commit() in run_in_executor risks concurrent access with the event loop.
+        db.commit()
         task.document_id = document.id
         upload = task.document_upload
         if upload:
@@ -756,28 +727,27 @@ async def _process_document_background_inner(
         logger.info(f"Task {task_id}: Processing completed successfully")
 
         # ── Step 9: Build Neo4j knowledge graph (non-fatal) ──────────────────
-        # Runs AFTER the atomic commit so a Neo4j failure never triggers a
-        # DB rollback. The document is fully searchable via the other 3 legs
-        # even if graph extraction fails.
         if settings.GRAPHRAG_ENABLED:
-            try:
-                _set_progress(92, "Building knowledge graph…")
-                from app.services.graph_service import build_graph_for_document
-                chunk_texts = [p[1] for p in qdrant_payloads]
-                chunk_uuid_ids = [p[0] for p in qdrant_payloads]
-                await build_graph_for_document(
-                    kb_id=kb_id,
-                    document_id=document.id,
-                    file_name=file_name,
-                    chunks=chunk_texts,
-                    chunk_ids=chunk_uuid_ids,
-                )
-                logger.info(f"Task {task_id}: Knowledge graph built in Neo4j")
-            except Exception as e:
-                logger.warning(
-                    f"Task {task_id}: Neo4j graph build failed (non-fatal): {e}",
-                    exc_info=True
-                )
+            _doc_id = document.id   # capture plain int before session closes
+            _chunks = [p[1] for p in qdrant_payloads]
+            _chunk_ids = [p[0] for p in qdrant_payloads]
+            async def _build_graph() -> None:
+                try:
+                    from app.services.graph_service import build_graph_for_document
+                    await build_graph_for_document(
+                        kb_id=kb_id,
+                        document_id=_doc_id,
+                        file_name=file_name,
+                        chunks=_chunks,
+                        chunk_ids=_chunk_ids,
+                    )
+                    logger.info(f"Task {task_id}: Knowledge graph built in Neo4j")
+                except Exception as _e:
+                    logger.warning(
+                        f"Task {task_id}: Neo4j graph build failed (non-fatal): {_e}",
+                        exc_info=True,
+                    )
+            asyncio.create_task(_build_graph())
 
     except Exception as e:
         logger.error(f"Task {task_id}: Error processing document: {str(e)}")

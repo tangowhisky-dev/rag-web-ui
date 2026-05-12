@@ -109,6 +109,11 @@ async def query(
     # ── Confidence ────────────────────────────────────────────────────────────
     confidence_result = score_retrieval(docs, retrieval_info)
 
+    # Release the DB connection before the LLM call — retrieval is complete and
+    # the connection would otherwise be held open for the entire generation time,
+    # exhausting the pool under parallel eval / concurrent requests.
+    db.close()
+
     answer: Optional[str] = None
     if body.generate_answer and docs:
         context_text = "\n\n".join(

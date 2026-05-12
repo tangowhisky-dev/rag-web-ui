@@ -90,7 +90,7 @@ def _level_and_suggestion(score: int, failed_legs: list) -> tuple[str, Optional[
     elif level == "none":
         suggestion = (
             "No relevant documents found. "
-            "Try rephrasing your question or using different keywords."
+            "Answering from intrinsic knowledge only."
         )
     elif level == "low":
         suggestion = (
@@ -134,7 +134,7 @@ def score_retrieval(
         return ConfidenceResult(
             level="none",
             score=0,
-            suggestion="No relevant documents found. Try rephrasing your question or using different keywords.",
+            suggestion="No relevant documents found. Answering from intrinsic knowledge only.",
             breakdown={
                 "mode": "reranker" if settings.RERANKER_ENABLED else "legacy",
                 "total": 0,

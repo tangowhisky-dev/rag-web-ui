@@ -165,11 +165,6 @@ class Settings(BaseSettings):
     # 200–400. The first N chunks usually cover the most concept-dense content.
     GRAPHRAG_MAX_CHUNKS: int = int(os.getenv("GRAPHRAG_MAX_CHUNKS", "300"))
 
-    # Inter-chunk delay (seconds) between LLM graph extraction calls.
-    # A non-zero value allows LM Studio / llama.cpp to reclaim KV cache
-    # between sequential requests. 0.3s is safe for 2B-class models.
-    GRAPHRAG_CHUNK_DELAY: float = float(os.getenv("GRAPHRAG_CHUNK_DELAY", "0.3"))
-
     @property
     def graphrag_model(self) -> str:
         """Model to use for entity/relationship extraction. Falls back to OPENAI_MODEL."""

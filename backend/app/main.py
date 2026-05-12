@@ -3,6 +3,8 @@ import logging
 from app.api.api_v1.api import api_router
 from app.core.config import settings
 from app.core.storage import init_storage
+from app.db.session import SessionLocal
+from app.models.knowledge import ProcessingTask
 from fastapi import FastAPI
 
 logging.basicConfig(
@@ -31,6 +33,24 @@ app.include_router(api_router, prefix=settings.API_V1_STR)
 async def startup_event():
     # Initialize local file storage
     init_storage()
+
+    # Reset any tasks left in "processing" state from a previous worker crash.
+    # With --reload, a file-write event kills the worker mid-flight leaving tasks
+    # permanently stuck. On restart we mark them failed so clients don't hang.
+    db = SessionLocal()
+    try:
+        stuck = db.query(ProcessingTask).filter(ProcessingTask.status == "processing").all()
+        if stuck:
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                f"Startup: resetting {len(stuck)} stuck 'processing' task(s) to 'failed'"
+            )
+            for t in stuck:
+                t.status = "failed"
+                t.error_message = "Worker restarted while task was in progress"
+            db.commit()
+    finally:
+        db.close()
 
 
 @app.get("/")

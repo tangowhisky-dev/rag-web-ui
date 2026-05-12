@@ -185,7 +185,9 @@ async def delete_knowledge_base(
         # 3. Clean up Neo4j graph nodes for this KB
         try:
             from app.services.graph_service import delete_graph_for_kb
-            delete_graph_for_kb(kb_id=kb_id)
+            await asyncio.get_event_loop().run_in_executor(
+                None, lambda: delete_graph_for_kb(kb_id=kb_id)
+            )
             logger.info(f"Cleaned up Neo4j graph nodes for knowledge base {kb_id}")
         except Exception as e:
             cleanup_errors.append(f"Failed to clean up Neo4j graph: {str(e)}")
@@ -598,7 +600,9 @@ async def delete_document(
         # 5b. Delete Neo4j graph nodes for this document
         try:
             from app.services.graph_service import delete_graph_for_document
-            delete_graph_for_document(kb_id=kb_id, document_id=doc_id)
+            await asyncio.get_event_loop().run_in_executor(
+                None, lambda: delete_graph_for_document(kb_id=kb_id, document_id=doc_id)
+            )
             logger.info(f"Deleted Neo4j graph nodes for document {doc_id}")
         except Exception as e:
             cleanup_warnings.append(f"Neo4j graph cleanup warning: {str(e)}")

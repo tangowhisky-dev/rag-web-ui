@@ -39,11 +39,12 @@ def run_config(
     questions: list[dict],
     kb_id: int,
     generate_answers: bool,
+    concurrency: int = 1,
 ) -> dict:
     results = []
     latencies = []
 
-    for q in tqdm(questions, desc=f"  {config['name']:<16}", leave=False):
+    def query_one(q: dict) -> dict:
         try:
             resp = client.query(
                 question=q["question"],
@@ -55,8 +56,7 @@ def run_config(
                 generate_answer=generate_answers,
             )
         except Exception as e:
-            results.append({"error": str(e), "f1": 0.0, "em": 0.0, "hit": 0.0})
-            continue
+            return {"error": str(e), "f1": 0.0, "em": 0.0, "hit": 0.0}
 
         answer     = resp.get("answer") or ""
         contexts   = resp.get("contexts", [])
@@ -64,17 +64,13 @@ def run_config(
         latency_ms = resp.get("latency_ms", 0)
         legs       = resp.get("retrieval_info", {}).get("legs", {})
 
-        # When answer generation is off, score F1/EM against the retrieved
-        # context text (oracle span scoring). When generation is on, score
-        # against the LLM answer.
         score_text = answer if answer else " ".join(c["content"] for c in contexts)
 
         f1  = token_f1(score_text, q["answers"])    if score_text else 0.0
         em  = exact_match(score_text, q["answers"]) if score_text else 0.0
         hit = retrieval_hit(contexts, q["answers"])
 
-        latencies.append(latency_ms)
-        results.append({
+        return {
             "question":   q["question"],
             "answers":    q["answers"],
             "prediction": answer,
@@ -84,7 +80,17 @@ def run_config(
             "confidence": confidence,
             "latency_ms": latency_ms,
             "legs":       legs,
-        })
+        }
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        futures = {pool.submit(query_one, q): q for q in questions}
+        for future in tqdm(as_completed(futures), total=len(questions),
+                           desc=f"  {config['name']:<16}", leave=False):
+            r = future.result()
+            if "latency_ms" in r:
+                latencies.append(r["latency_ms"])
+            results.append(r)
 
     n = len(results)
     errors = sum(1 for r in results if "error" in r)
@@ -141,6 +147,8 @@ def main() -> None:
     parser.add_argument("--graph",      action="store_true",
                         help="Include all_3+graph config in sweep")
     parser.add_argument("--generate-answers", action="store_true")
+    parser.add_argument("--concurrency", type=int, default=1,
+                        help="Parallel requests per config (useful with --generate-answers)")
     parser.add_argument("--output",    default="eval_results.json")
     args = parser.parse_args()
 
@@ -184,7 +192,7 @@ def main() -> None:
     run_results = []
     for cfg in configs:
         print(f"\nRunning config: {cfg['name']} — {cfg['label']}")
-        result = run_config(client, cfg, questions, kb_id, args.generate_answers)
+        result = run_config(client, cfg, questions, kb_id, args.generate_answers, args.concurrency)
         run_results.append(result)
         print(
             f"  F1={result['mean_f1']:.3f}  EM={result['mean_em']:.3f}  "
