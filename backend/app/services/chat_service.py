@@ -239,7 +239,7 @@ async def _rewrite_query(
         elif isinstance(m, AIMessage):
             # Truncate long AI responses to avoid flooding the rewrite context
             messages.append({"role": "assistant", "content": m.content[:400]})
-    messages.append({"role": "user", "content": f"Rewrite this as a standalone query: {query}"})
+    messages.append({"role": "user", "content": query})
 
     from openai import AsyncOpenAI as _OAI
     client = _OAI(api_key=settings.OPENAI_API_KEY, base_url=settings.OPENAI_API_BASE)
@@ -249,11 +249,26 @@ async def _rewrite_query(
         max_tokens=60,
         temperature=0,
         stream=False,
+        extra_body={"thinking": {"type": "disabled"}},  # Qwen3: suppress reasoning preamble
     )
     raw_rewrite = (resp.choices[0].message.content or "").strip()
 
     had_think = bool(re.search(r"<think>", raw_rewrite))
     standalone = _strip_think(raw_rewrite) or query
+
+    # Strip meta-commentary preamble that some models emit before the actual rewrite
+    # e.g. "The user is asking me to rewrite... Here is the rewritten query: ..."
+    # The actual rewritten query is always the last sentence / after the last colon.
+    if re.search(r"\buser\b.*\brewrite\b|\brewritten\b|\bstandalone\b", standalone, re.IGNORECASE):
+        # Take everything after the last colon if present, else last sentence
+        if ":" in standalone:
+            candidate = standalone.rsplit(":", 1)[-1].strip()
+        else:
+            sentences = re.split(r"(?<=[.?!])\s+", standalone)
+            candidate = sentences[-1].strip()
+        if len(candidate) > 5:
+            standalone = candidate
+
     logger.info("[STEP 1] raw_rewrite=%r | had_think=%s | standalone=%r",
                 raw_rewrite[:300], had_think, standalone)
     return standalone

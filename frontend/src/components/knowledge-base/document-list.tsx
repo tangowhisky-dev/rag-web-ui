@@ -245,21 +245,13 @@ export function DocumentList({ knowledgeBaseId, refreshKey }: DocumentListProps)
               <TableCell className="font-medium">
                 <div className="flex items-center gap-2">
                   <div className="w-6 h-6">
-                    {doc.content_type.toLowerCase().includes("pdf") ? (
-                      <FileIcon extension="pdf" {...defaultStyles.pdf} />
-                    ) : doc.content_type.toLowerCase().includes("doc") ? (
-                      <FileIcon extension="doc" {...defaultStyles.docx} />
-                    ) : doc.content_type.toLowerCase().includes("txt") ? (
-                      <FileIcon extension="txt" {...defaultStyles.txt} />
-                    ) : doc.content_type.toLowerCase().includes("md") ? (
-                      <FileIcon extension="md" {...defaultStyles.md} />
-                    ) : (
-                      <FileIcon
-                        extension={doc.file_name.split(".").pop() || ""}
-                        color="#E2E8F0"
-                        labelColor="#94A3B8"
-                      />
-                    )}
+                    {(() => {
+                      const ext = (doc.file_name.split(".").pop() || "").toLowerCase();
+                      const style = defaultStyles[ext as keyof typeof defaultStyles];
+                      return style
+                        ? <FileIcon extension={ext} {...style} />
+                        : <FileIcon extension={ext} color="#E2E8F0" labelColor="#94A3B8" />;
+                    })()}
                   </div>
                   {doc.file_name}
                 </div>

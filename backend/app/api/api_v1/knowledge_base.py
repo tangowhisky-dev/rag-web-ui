@@ -184,9 +184,19 @@ async def delete_knowledge_base(
 
         # 3. Clean up Neo4j graph nodes for this KB
         try:
-            from app.services.graph_service import delete_graph_for_kb
+            from app.services.graph_service import delete_graph_for_kb, purge_stale_graph_data
+            # Get remaining active KB ids BEFORE deleting the DB record so we
+            # can compare against Neo4j and sweep any historical debris.
+            remaining_kb_ids = [
+                row.id for row in db.query(KnowledgeBase.id)
+                .filter(KnowledgeBase.id != kb_id)
+                .all()
+            ]
             await asyncio.get_event_loop().run_in_executor(
                 None, lambda: delete_graph_for_kb(kb_id=kb_id)
+            )
+            await asyncio.get_event_loop().run_in_executor(
+                None, lambda: purge_stale_graph_data(active_kb_ids=remaining_kb_ids)
             )
             logger.info(f"Cleaned up Neo4j graph nodes for knowledge base {kb_id}")
         except Exception as e:

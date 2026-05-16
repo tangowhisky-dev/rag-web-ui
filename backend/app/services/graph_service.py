@@ -126,6 +126,7 @@ async def _extract_with_relik(
     driver: neo4j.Driver,
     loop,
     document_id: int,
+    kb_id: int,
     chunks: list[str],
     qdrant_point_ids: list[str],
 ) -> tuple[int, int]:
@@ -151,7 +152,7 @@ async def _extract_with_relik(
         spans = out.get("spans", [])
         triplets = out.get("triplets", [])
 
-        def _write_entities_and_rels(spans=spans, triplets=triplets, pid=point_id):
+        def _write_entities_and_rels(spans=spans, triplets=triplets, pid=point_id, _kb_id=kb_id):
             written_entities = 0
             written_rels = 0
             with driver.session() as session:
@@ -183,14 +184,18 @@ async def _extract_with_relik(
                     if not subj or not obj:
                         continue
                     rel_safe = "".join(c if c.isalnum() or c == "_" else "_" for c in rel)
+                    # kb_id is part of the MERGE key so each KB owns its copy of
+                    # the relationship. This lets delete_graph_for_kb sweep them
+                    # cleanly without touching relationships from other KBs.
                     session.run(
                         f"""
                         MERGE (a:Entity {{name: $subj}})
                         MERGE (b:Entity {{name: $obj}})
-                        MERGE (a)-[:`{rel_safe}`]->(b)
+                        MERGE (a)-[:`{rel_safe}` {{kb_id: $kb_id}}]->(b)
                         """,
                         subj=subj,
                         obj=obj,
+                        kb_id=str(_kb_id),
                     )
                     written_rels += 1
             return written_entities, written_rels
@@ -548,6 +553,7 @@ async def build_graph_for_document(
                     driver=driver,
                     loop=loop,
                     document_id=document_id,
+                    kb_id=kb_id,
                     chunks=chunks,
                     qdrant_point_ids=qdrant_point_ids,
                 )
@@ -714,12 +720,16 @@ def enrich_docs_with_graph(docs: list[LangchainDocument]) -> list[LangchainDocum
         try:
             with driver.session() as session:
                 if point_id:
-                    # Primary path: lookup by Qdrant point UUID (O(1) index hit)
+                    # Primary path: lookup by Qdrant point UUID (O(1) index hit).
+                    # Neighbor traversal is scoped to entities that also have a
+                    # FROM_CHUNK edge into this same Qdrant collection — prevents
+                    # stale inter-entity edges from deleted KBs bleeding in.
                     result = session.run(
                         """
                         MATCH (c:Chunk {qdrant_point_id: $point_id})
                         OPTIONAL MATCH (e)-[:FROM_CHUNK]->(c)
                         OPTIONAL MATCH (e)-[r]-(neighbor)
+                        WHERE EXISTS { MATCH (neighbor)-[:FROM_CHUNK]->(:Chunk {qdrant_collection: c.qdrant_collection}) }
                         WITH e.name AS ename, type(r) AS rel, neighbor.name AS nname
                         WHERE ename IS NOT NULL AND nname IS NOT NULL
                         RETURN collect(DISTINCT [ename, rel, nname])[..40] AS triples
@@ -727,7 +737,8 @@ def enrich_docs_with_graph(docs: list[LangchainDocument]) -> list[LangchainDocum
                         point_id=point_id,
                     )
                 elif doc_id is not None and chunk_idx is not None:
-                    # Fallback: legacy lookup by (document_id, chunk_index)
+                    # Fallback: legacy lookup by (document_id, chunk_index).
+                    # No collection scoping available — best-effort.
                     result = session.run(
                         """
                         MATCH (c:Chunk {document_id: $document_id, chunk_index: $chunk_index})
@@ -807,7 +818,6 @@ def delete_graph_for_document(kb_id: int, document_id: int) -> None:
             """
             MATCH (e)
             WHERE (e:__KGBuilder__ OR e:Entity OR e:__Entity__)
-              AND NOT EXISTS { MATCH ()-[:FROM_CHUNK]->(e) }
               AND NOT EXISTS { MATCH (e)-[:FROM_CHUNK]->() }
             DETACH DELETE e
             RETURN count(e) AS cleaned
@@ -817,6 +827,22 @@ def delete_graph_for_document(kb_id: int, document_id: int) -> None:
             "GraphService: cleaned %d orphaned entity nodes after doc %d deletion",
             rec["cleaned"] if rec else 0, document_id,
         )
+
+        # Defensive: sweep any Chunk nodes for this document that somehow
+        # survived (e.g. from a prior run that was interrupted mid-transaction).
+        rec = session.run(
+            """
+            MATCH (c:Chunk {document_id: $doc_id})
+            DETACH DELETE c
+            RETURN count(c) AS cleaned
+            """,
+            doc_id=str(document_id),
+        ).single()
+        if rec and rec["cleaned"]:
+            logger.info(
+                "GraphService: cleaned %d residual Chunk nodes for doc %d",
+                rec["cleaned"], document_id,
+            )
 
 
 def delete_graph_for_kb(kb_id: int) -> None:
@@ -830,6 +856,23 @@ def delete_graph_for_kb(kb_id: int) -> None:
 
     driver = _get_driver()
     with driver.session() as session:
+        # 1. Delete all inter-entity relationships stamped with this KB's id.
+        #    The ReLiK pipeline writes these as MERGE (a)-[:REL {kb_id: ...}]->(b).
+        #    Must run before the chunk DETACH DELETE while entity nodes still exist.
+        rec = session.run(
+            """
+            MATCH ()-[r {kb_id: $kb_id}]->()
+            DELETE r
+            RETURN count(r) AS deleted_rels
+            """,
+            kb_id=str(kb_id),
+        ).single()
+        logger.info(
+            "GraphService: deleted %d inter-entity relationships for kb_%d",
+            rec["deleted_rels"] if rec else 0, kb_id,
+        )
+
+        # 2. Delete all Chunk nodes for this KB (DETACH DELETE removes FROM_CHUNK edges too).
         rec = session.run(
             """
             MATCH (n {kb_id: $kb_id})
@@ -843,14 +886,15 @@ def delete_graph_for_kb(kb_id: int) -> None:
             rec["deleted"] if rec else 0, kb_id,
         )
 
-        # Clean up entity nodes that have no remaining FROM_CHUNK edges.
-        # Match by relationship absence rather than label — the LLM pipeline
-        # (neo4j-graphrag) writes __KGBuilder__ entities, not __Entity__.
+        # 3. Sweep entity nodes that have no remaining FROM_CHUNK edges.
+        #    Covers: (a) ReLiK Entity nodes (b) LLM-pipeline __Entity__ nodes
+        #            (c) neo4j-graphrag __KGBuilder__ bookkeeping nodes.
+        #    The FROM_CHUNK direction is always entity→chunk, so checking the
+        #    outgoing side is sufficient.
         rec = session.run(
             """
             MATCH (e)
             WHERE (e:__KGBuilder__ OR e:Entity OR e:__Entity__)
-              AND NOT EXISTS { MATCH ()-[:FROM_CHUNK]->(e) }
               AND NOT EXISTS { MATCH (e)-[:FROM_CHUNK]->() }
             DETACH DELETE e
             RETURN count(e) AS cleaned
@@ -860,3 +904,119 @@ def delete_graph_for_kb(kb_id: int) -> None:
             "GraphService: cleaned %d orphaned entity nodes after kb_%d deletion",
             rec["cleaned"] if rec else 0, kb_id,
         )
+
+        # 4. Defensive: sweep any Chunk nodes that still carry this kb_id.
+        #    These would only survive if a prior deletion was blocked (e.g. by the
+        #    old GRAPHRAG_ENABLED gate) or interrupted partway through.
+        #    Running this last means entities above were already swept, so
+        #    DETACH DELETE here only removes the chunk nodes themselves.
+        rec = session.run(
+            """
+            MATCH (c:Chunk {kb_id: $kb_id})
+            DETACH DELETE c
+            RETURN count(c) AS cleaned
+            """,
+            kb_id=str(kb_id),
+        ).single()
+        if rec and rec["cleaned"]:
+            logger.info(
+                "GraphService: cleaned %d residual Chunk nodes for kb_%d",
+                rec["cleaned"], kb_id,
+            )
+            # Entity nodes whose only FROM_CHUNK edges pointed at those
+            # now-deleted chunks become newly orphaned — sweep again.
+            rec2 = session.run(
+                """
+                MATCH (e)
+                WHERE (e:__KGBuilder__ OR e:Entity OR e:__Entity__)
+                  AND NOT EXISTS { MATCH (e)-[:FROM_CHUNK]->() }
+                DETACH DELETE e
+                RETURN count(e) AS cleaned
+                """
+            ).single()
+            if rec2 and rec2["cleaned"]:
+                logger.info(
+                    "GraphService: cleaned %d newly-orphaned entity nodes after residual chunk sweep for kb_%d",
+                    rec2["cleaned"], kb_id,
+                )
+
+
+def purge_stale_graph_data(active_kb_ids: list[int]) -> None:
+    """
+    Delete any Chunk nodes (and their dependent entities) whose kb_id is not
+    in active_kb_ids.  Call this after every KB deletion to sweep historical
+    debris left by prior code paths that skipped Neo4j cleanup.
+    """
+    if not settings.NEO4J_URI:
+        return
+
+    driver = _get_driver()
+    active_str = [str(i) for i in active_kb_ids]
+
+    with driver.session() as session:
+        # Find kb_ids present in Neo4j that are no longer in MySQL.
+        stale_rec = session.run(
+            """
+            MATCH (c:Chunk)
+            WHERE NOT c.kb_id IN $active_ids
+            RETURN DISTINCT c.kb_id AS stale_kb_id
+            """,
+            active_ids=active_str,
+        )
+        stale_ids = [r["stale_kb_id"] for r in stale_rec if r["stale_kb_id"] is not None]
+
+    if not stale_ids:
+        return
+
+    logger.info("GraphService: found stale kb_ids in Neo4j not in MySQL: %s", stale_ids)
+
+    for stale_id in stale_ids:
+        logger.info("GraphService: purging stale kb_%s in batches", stale_id)
+
+        # Inter-entity rels stamped with this kb_id (usually small, single pass ok)
+        with driver.session() as session:
+            r1 = session.run(
+                "MATCH ()-[r {kb_id: $kb_id}]->() DELETE r RETURN count(r) AS n",
+                kb_id=stale_id,
+            ).single()
+            logger.info("GraphService: purged %d inter-entity rels for stale kb_%s", r1["n"] if r1 else 0, stale_id)
+
+        # Chunk nodes in batches — each chunk can have hundreds of FROM_CHUNK
+        # relationships, so deleting all at once blows the transaction memory limit.
+        total_chunks = 0
+        while True:
+            with driver.session() as session:
+                rec = session.run(
+                    """
+                    MATCH (c:Chunk {kb_id: $kb_id})
+                    WITH c LIMIT 100
+                    DETACH DELETE c
+                    RETURN count(c) AS n
+                    """,
+                    kb_id=stale_id,
+                ).single()
+                n = rec["n"] if rec else 0
+                total_chunks += n
+                if n == 0:
+                    break
+        logger.info("GraphService: purged %d chunks for stale kb_%s", total_chunks, stale_id)
+
+        # Entity nodes now orphaned — also batch in case there are many
+        total_entities = 0
+        while True:
+            with driver.session() as session:
+                rec = session.run(
+                    """
+                    MATCH (e)
+                    WHERE (e:__KGBuilder__ OR e:Entity OR e:__Entity__)
+                      AND NOT EXISTS { MATCH (e)-[:FROM_CHUNK]->() }
+                    WITH e LIMIT 500
+                    DETACH DELETE e
+                    RETURN count(e) AS n
+                    """
+                ).single()
+                n = rec["n"] if rec else 0
+                total_entities += n
+                if n == 0:
+                    break
+        logger.info("GraphService: purged %d orphaned entities for stale kb_%s", total_entities, stale_id)

@@ -172,7 +172,7 @@ class Settings(BaseSettings):
     # LLM sees clean, non-redundant text.
     # Rule of thumb: 1 token ≈ 3–4 chars. For a 4K token context set ~12000.
     # Default: 6000 (safe for 2K-token local models like Qwen-3.5-4B).
-    NEO4J_LLM_CONTEXT: int = int(os.getenv("NEO4J_LLM_CONTEXT", "6000"))
+    NEO4J_LLM_CONTEXT: int = int(os.getenv("NEO4J_LLM_CONTEXT", "12000"))
 
     @property
     def graphrag_model(self) -> str:

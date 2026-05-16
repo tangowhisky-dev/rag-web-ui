@@ -147,21 +147,13 @@ export default function KnowledgeBasePage() {
                         className="flex flex-col items-center gap-2 p-2 rounded-lg border bg-card hover:bg-accent/50 cursor-pointer transition-colors w-[150px] h-[150px] justify-center"
                       >
                         <div className="w-8 h-8 mb-2">
-                          {doc.content_type.toLowerCase().includes("pdf") ? (
-                            <FileIcon extension="pdf" {...defaultStyles.pdf} />
-                          ) : doc.content_type.toLowerCase().includes("doc") ? (
-                            <FileIcon extension="doc" {...defaultStyles.docx} />
-                          ) : doc.content_type.toLowerCase().includes("txt") ? (
-                            <FileIcon extension="txt" {...defaultStyles.txt} />
-                          ) : doc.content_type.toLowerCase().includes("md") ? (
-                            <FileIcon extension="md" {...defaultStyles.md} />
-                          ) : (
-                            <FileIcon
-                              extension={doc.file_name.split(".").pop() || ""}
-                              color="#E2E8F0"
-                              labelColor="#94A3B8"
-                            />
-                          )}
+                          {(() => {
+                            const ext = (doc.file_name.split(".").pop() || "").toLowerCase();
+                            const style = defaultStyles[ext as keyof typeof defaultStyles];
+                            return style
+                              ? <FileIcon extension={ext} {...style} />
+                              : <FileIcon extension={ext} color="#E2E8F0" labelColor="#94A3B8" />;
+                          })()}
                         </div>
                         <div className="text-sm font-medium text-center max-w-[100px]">
                           <div className="line-clamp-2 overflow-hidden text-ellipsis">
