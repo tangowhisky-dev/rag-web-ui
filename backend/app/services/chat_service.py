@@ -3,6 +3,7 @@ import json
 import base64
 import logging
 import re
+import time
 from typing import List, AsyncGenerator
 from sqlalchemy.orm import Session
 
@@ -272,6 +273,83 @@ async def _rewrite_query(
     logger.info("[STEP 1] raw_rewrite=%r | had_think=%s | standalone=%r",
                 raw_rewrite[:300], had_think, standalone)
     return standalone
+
+
+# ── Query classification ──────────────────────────────────────────────────────
+
+async def classify_query(query: str) -> "QueryClassification":
+    """
+    Classify a query into one of 4 types using LLM-based zero-shot classification.
+    
+    Returns QueryClassification with type, confidence, latency_ms, and fallback flag.
+    On any failure, returns FACTUAL with fallback=True (safe default).
+    """
+    from app.schemas.chat import QueryType, QueryClassification
+    
+    start = time.perf_counter()
+    
+    try:
+        if not settings.QUERY_CLASSIFIER_ENABLED:
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            logger.info("[CLASSIFY] disabled | latency=%.1fms query=%s", elapsed_ms, query[:80])
+            return QueryClassification(
+                type=QueryType.FACTUAL, confidence=0.0,
+                latency_ms=elapsed_ms, fallback=True
+            )
+        
+        client = AsyncOpenAI(
+            api_key=settings.OPENAI_API_KEY,
+            base_url=settings.OPENAI_API_BASE,
+        )
+        
+        prompt = settings.QUERY_CLASSIFIER_PROMPT.format(query=query)
+        
+        response = await client.chat.completions.create(
+            model=settings.effective_query_model,
+            messages=[
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=10,
+            temperature=0,
+            stream=False,
+            extra_body={"thinking": {"type": "disabled"}},
+        )
+        
+        raw = (response.choices[0].message.content or "").strip().upper()
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        
+        # Parse response — expect single enum value
+        confidence = 0.0
+        query_type = QueryType.FACTUAL  # safe default
+        
+        # Exact match
+        if raw in QueryType.__members__:
+            query_type = QueryType[raw]
+            confidence = 1.0
+        # Fuzzy match — check if any enum value is contained in response
+        else:
+            for member in QueryType:
+                if member.value in raw:
+                    query_type = member
+                    confidence = 0.5
+                    break
+        
+        logger.info("[CLASSIFY] type=%s confidence=%.2f latency=%.1fms query=%s",
+                    query_type.value, confidence, elapsed_ms, query[:80])
+        
+        return QueryClassification(
+            type=query_type, confidence=confidence,
+            latency_ms=elapsed_ms, fallback=False
+        )
+        
+    except Exception as e:
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        logger.error("[CLASSIFY] fallback due to error: %s | latency=%.1fms query=%s",
+                     str(e), elapsed_ms, query[:80])
+        return QueryClassification(
+            type=QueryType.FACTUAL, confidence=0.0,
+            latency_ms=elapsed_ms, fallback=True
+        )
 
 
 # ── Main entry point ──────────────────────────────────────────────────────────
