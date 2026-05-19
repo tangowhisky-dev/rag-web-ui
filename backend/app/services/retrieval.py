@@ -47,8 +47,32 @@ from sqlalchemy import text, bindparam
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.schemas.chat import QueryType
 
 logger = logging.getLogger(__name__)
+
+
+def get_retrieval_config(query_type: QueryType) -> dict:
+    """
+    Return retrieval config preset for a query type.
+    
+    Presets override default leg flags and weights based on query classification.
+    Falls back to default settings when preset is not found.
+    """
+    presets = settings.retrieval_config_presets
+    preset = presets.get(query_type.value, {})
+    
+    config = {
+        "use_dense": preset.get("use_dense", True),
+        "use_sparse": preset.get("use_sparse", True),
+        "use_exact": preset.get("use_exact", True),
+        "dense_weight": preset.get("dense_weight", settings.HYBRID_DENSE_WEIGHT),
+        "sparse_weight": preset.get("sparse_weight", settings.HYBRID_QDRANT_SPARSE_WEIGHT),
+        "exact_weight": preset.get("exact_weight", settings.HYBRID_EXACT_WEIGHT),
+        "top_k": preset.get("top_k", settings.RETRIEVAL_TOP_K),
+    }
+    
+    return config
 
 # RRF smoothing constant — standard value from the original paper (k=60).
 _RRF_K = 60
@@ -318,6 +342,7 @@ async def hybrid_search_with_legs(
     use_sparse:    bool = True,
     use_exact:     bool = True,
     use_graph_rag: bool = False,
+    query_type: Optional[QueryType] = None,
 ) -> dict:
     """
     Like hybrid_search but returns a richer dict:
@@ -338,8 +363,21 @@ async def hybrid_search_with_legs(
 
     Per-call flags AND with global .env settings: a leg is only enabled when
     both the chat-level flag and the global env flag are True.
+    
+    When query_type is provided, apply retrieval config preset to override
+    default leg flags and weights.
     """
-    top_k = settings.RETRIEVAL_TOP_K
+    # Apply query-type preset if provided
+    if query_type is not None:
+        preset = get_retrieval_config(query_type)
+        use_dense = preset["use_dense"]
+        use_sparse = preset["use_sparse"]
+        use_exact = preset["use_exact"]
+        top_k = preset["top_k"]
+        logger.info("[RETRIEVAL] query_type=%s | config=%s", query_type.value, preset)
+    else:
+        top_k = settings.RETRIEVAL_TOP_K
+    
     pool  = top_k * 4
 
     enabled = {
