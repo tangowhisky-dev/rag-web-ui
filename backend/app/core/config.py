@@ -1,5 +1,6 @@
+import json
 import os
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from pydantic_settings import BaseSettings
 
@@ -71,6 +72,52 @@ class Settings(BaseSettings):
     def effective_vision_api_base(self) -> str:
         """Base URL for vision/OCR calls. Falls back to OPENAI_API_BASE."""
         return self.OPENAI_VISION_API_BASE or self.OPENAI_API_BASE
+
+    # ── Query Classification ──────────────────────────────────────────────────
+    # Enable/disable LLM-based query classification for adaptive retrieval routing.
+    QUERY_CLASSIFIER_ENABLED: bool = os.getenv("QUERY_CLASSIFIER_ENABLED", "true").lower() == "true"
+
+    # Zero-shot classification prompt for the query classifier.
+    QUERY_CLASSIFIER_PROMPT: str = (
+        "Classify this query into exactly one category. Respond with only the category name.\n\n"
+        "Categories:\n"
+        "FACTUAL — Questions asking for specific facts, definitions, or concrete information (e.g., 'What is RRF?', 'Define BM25 scoring')\n"
+        "ENTITY_CENTRIC — Questions about specific entities, organizations, people, or products (e.g., 'What did Apple acquire?', 'Who founded Microsoft?')\n"
+        "MULTI_PART — Questions comparing/contrasting things, asking for pros/cons, or requesting multiple aspects (e.g., 'Compare RRF and BM25', 'Pros and cons of vector databases')\n"
+        "AMBIGUOUS — Vague, context-dependent, or incomplete queries (e.g., 'Tell me about that', 'What do you think?')\n\n"
+        "Query: {query}\n\n"
+        "Category: "
+    )
+
+    # JSON string of retrieval config presets per query type.
+    # Each preset: use_dense, use_sparse, use_exact, dense_weight, sparse_weight, exact_weight, top_k
+    RETRIEVAL_CONFIG_PRESETS: str = json.dumps({
+        "FACTUAL": {
+            "use_dense": True, "use_sparse": True, "use_exact": True,
+            "dense_weight": 0.5, "sparse_weight": 0.3, "exact_weight": 0.2,
+            "top_k": 10
+        },
+        "ENTITY_CENTRIC": {
+            "use_dense": True, "use_sparse": True, "use_exact": True,
+            "dense_weight": 0.6, "sparse_weight": 0.2, "exact_weight": 0.2,
+            "top_k": 10
+        },
+        "MULTI_PART": {
+            "use_dense": True, "use_sparse": True, "use_exact": False,
+            "dense_weight": 0.5, "sparse_weight": 0.5, "exact_weight": 0.0,
+            "top_k": 10
+        },
+        "AMBIGUOUS": {
+            "use_dense": True, "use_sparse": True, "use_exact": True,
+            "dense_weight": 0.4, "sparse_weight": 0.4, "exact_weight": 0.2,
+            "top_k": 15
+        }
+    })
+
+    @property
+    def retrieval_config_presets(self) -> Dict[str, Any]:
+        """Parse retrieval config presets from JSON string."""
+        return json.loads(self.RETRIEVAL_CONFIG_PRESETS)
 
     # Qdrant vector store
     QDRANT_HOST: str = os.getenv("QDRANT_HOST", "qdrant")

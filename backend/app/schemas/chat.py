@@ -1,3 +1,4 @@
+from enum import Enum
 from pydantic import BaseModel, model_validator, field_serializer
 from typing import Any, List, Optional
 from datetime import datetime
@@ -7,6 +8,22 @@ def _as_utc_iso(dt: datetime) -> str:
     if dt is None:
         return None
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class QueryType(str, Enum):
+    """4-way query classification for adaptive retrieval routing."""
+    FACTUAL = "FACTUAL"
+    ENTITY_CENTRIC = "ENTITY_CENTRIC"
+    MULTI_PART = "MULTI_PART"
+    AMBIGUOUS = "AMBIGUOUS"
+
+
+class QueryClassification(BaseModel):
+    """Result of LLM-based query classification."""
+    type: QueryType
+    confidence: float
+    latency_ms: float
+    fallback: bool = False
 
 
 class MessageBase(BaseModel):
@@ -24,6 +41,7 @@ class MessageResponse(MessageBase):
     confidence_level: Optional[str] = None
     confidence_score: Optional[int] = None
     confidence_breakdown: Optional[str] = None  # JSON string, parsed by frontend
+    query_classification: Optional[QueryClassification] = None
 
     @field_serializer("created_at", "updated_at")
     def serialise_datetimes(self, v): return _as_utc_iso(v)
