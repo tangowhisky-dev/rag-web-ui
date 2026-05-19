@@ -34,6 +34,13 @@ async def startup_event():
     # Initialize local file storage
     init_storage()
 
+    # Load best tuning config from disk (precedence: .env > best_config > defaults)
+    try:
+        from app.services.auto_tune import load_best_config
+        load_best_config()
+    except Exception as e:
+        logging.getLogger(__name__).warning("Failed to load best tuning config: %s", e)
+
     # Reset any tasks left in "processing" state from a previous worker crash.
     # With --reload, a file-write event kills the worker mid-flight leaving tasks
     # permanently stuck. On restart we mark them failed so clients don't hang.
