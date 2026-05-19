@@ -149,6 +149,8 @@ def main() -> None:
     parser.add_argument("--generate-answers", action="store_true")
     parser.add_argument("--concurrency", type=int, default=1,
                         help="Parallel requests per config (useful with --generate-answers)")
+    parser.add_argument("--classify", action="store_true",
+                        help="Enable query classification — group results by inferred query type")
     parser.add_argument("--output",    default="eval_results.json")
     args = parser.parse_args()
 
@@ -200,6 +202,41 @@ def main() -> None:
         )
 
     print_comparison_table(run_results)
+
+    # ── Per-type breakdown (when --classify) ────────────────────────────────
+    if args.classify:
+        print("\n--- Per-Query-Type Breakdown ---")
+        type_results = {"FACTUAL": [], "ENTITY_CENTRIC": [], "MULTI_PART": [], "AMBIGUOUS": []}
+        
+        for r in run_results:
+            for detail in r["details"]:
+                # Infer type from classification metadata if available
+                classification = detail.get("classification", {})
+                q_type = classification.get("type", "FACTUAL")  # default
+                if not q_type:
+                    q_type = "FACTUAL"
+                type_results[q_type].append(detail)
+        
+        for q_type, details in type_results.items():
+            if details:
+                n = len(details)
+                avg_f1 = sum(d["f1"] for d in details) / n
+                avg_hit = sum(d["hit"] for d in details) / n
+                print(f"  {q_type:<18} n={n:>3}  F1={avg_f1:.3f}  Hit={avg_hit:.3f}")
+            else:
+                print(f"  {q_type:<18} n=0  (no queries classified as this type)")
+        print()
+        
+        output["per_type"] = {}
+        for q_type, details in type_results.items():
+            if details:
+                n = len(details)
+                output["per_type"][q_type] = {
+                    "n_questions": n,
+                    "mean_f1": round(sum(d["f1"] for d in details) / n, 4),
+                    "mean_em": round(sum(d["em"] for d in details) / n, 4),
+                    "hit_rate": round(sum(d["hit"] for d in details) / n, 4),
+                }
 
     output = {
         "timestamp":        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
