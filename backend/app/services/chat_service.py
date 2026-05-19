@@ -438,8 +438,14 @@ async def generate_response(
         # Emit rewritten query immediately — UI shows it without waiting for LLM
         yield f'1:{json.dumps({"rewritten_query": standalone_question})}\n'
 
+        # ── Step 1.5: Classify query for adaptive retrieval ────────────────
+        classification = await classify_query(standalone_question)
+        logger.info("[CHAT] classification=%s | confidence=%.2f | latency=%dms",
+                    classification.type.value, classification.confidence, classification.latency_ms)
+
         # ── Step 2: Hybrid retrieval ───────────────────────────────────────
-        logger.info("[STEP 2] hybrid_search | query=%r", standalone_question)
+        logger.info("[STEP 2] hybrid_search | query=%r | query_type=%s",
+                    standalone_question, classification.type.value)
         retrieval_result = await hybrid_search_with_legs(
             query=standalone_question,
             kb_ids=knowledge_base_ids,
@@ -448,6 +454,7 @@ async def generate_response(
             use_sparse=use_sparse,
             use_exact=use_exact,
             use_graph_rag=use_graph_rag,
+            query_type=classification.type,
         )
         docs = retrieval_result["docs"]
         retrieval_info = retrieval_result["retrieval_info"]
@@ -467,7 +474,7 @@ async def generate_response(
             {"page_content": doc.page_content, "metadata": doc.metadata}
             for doc in docs
         ]
-        yield f'2:{json.dumps({"context": serializable_context, "confidence": confidence, "score": confidence_result.score, "suggestion": suggestion, "failed_legs": failed_legs, "breakdown": confidence_result.breakdown})}\n'
+        yield f'2:{json.dumps({"context": serializable_context, "confidence": confidence, "score": confidence_result.score, "suggestion": suggestion, "failed_legs": failed_legs, "breakdown": confidence_result.breakdown, "query_classification": {"type": classification.type.value, "confidence": classification.confidence, "latency_ms": classification.latency_ms, "fallback": classification.fallback}})}\n'
 
         # ── Step 3: Emit base64 context chunk (legacy, for DB persistence) ─
         base64_context = base64.b64encode(
