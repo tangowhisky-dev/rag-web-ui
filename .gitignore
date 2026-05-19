@@ -63,3 +63,21 @@ backend/.env
 /uploads
 /samples
 .webui_secret_key
+
+# ── GSD baseline (auto-generated) ──
+.gsd
+.gsd-id
+.mcp.json
+.bg-shell/
+Thumbs.db
+*.code-workspace
+.env.*
+!.env.example
+*.pyc
+.venv/
+target/
+vendor/
+*.log
+coverage/
+.cache/
+tmp/
