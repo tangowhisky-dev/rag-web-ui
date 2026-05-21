@@ -187,16 +187,12 @@ class Settings(BaseSettings):
     # Set false to disable graph extraction during ingestion.
     GRAPHRAG_ENABLED: bool = os.getenv("GRAPHRAG_ENABLED", "true").lower() == "true"
 
-    # ReLiK service URL (dockerized NER+RE service).
-    RELIK_URL: str = os.getenv("RELIK_URL", "http://relik:8000")
-
-    # LLM to use for entity/relationship extraction when ReLiK is not available.
-    # When set, the LLM pipeline is used instead of ReLiK.
-    # When unset (empty string / omitted), ReLiK is used.
+    # LLM to use for entity/relationship extraction during graph ingestion.
     # Use an OpenAI-compatible model name, e.g. "gpt-4o" or your local model.
     # Requires use_structured_output support (OpenAI-compatible /chat/completions
     # with response_format=json_schema — most GPT-4 class models and compatible
     # local models with JSON schema support).
+    # Also used for query-level entity extraction in entity-aware retrieval.
     GRAPHRAG_LLM: Optional[str] = os.getenv("GRAPHRAG_LLM") or None
 
     # Enable/disable the graph retrieval leg at query time (ingestion unaffected).
@@ -221,10 +217,31 @@ class Settings(BaseSettings):
     # Default: 6000 (safe for 2K-token local models like Qwen-3.5-4B).
     NEO4J_LLM_CONTEXT: int = int(os.getenv("NEO4J_LLM_CONTEXT", "12000"))
 
+    # ── Entity-Aware Retrieval ──────────────────────────────────────────────────
+    # Enable/disable entity-aware retrieval (NER extraction + Neo4j expansion).
+    ENTITY_AWARE_ENABLED: bool = os.getenv("ENTITY_AWARE_ENABLED", "true").lower() == "true"
+    # Score boost factor per entity mention found in a chunk.
+    # 0.1 = +10% score per mention. Higher = stronger bias toward entity-rich chunks.
+    ENTITY_BOOST_FACTOR: float = float(os.getenv("ENTITY_BOOST_FACTOR", "0.1"))
+
+    # ── Agentic Tool Calling ───────────────────────────────────────────────────
+    # Enable/disable LLM tool calling. When enabled, chat requests include the
+    # registered tool schemas in the tools= parameter and the backend executes
+    # tool_calls returned by the LLM, feeding results back in a loop.
+    TOOL_CALLING_ENABLED: bool = os.getenv("TOOL_CALLING_ENABLED", "true").lower() == "true"
+    # Maximum tool call iterations per chat turn to prevent infinite loops.
+    MAX_TOOL_ITERATIONS: int = int(os.getenv("MAX_TOOL_ITERATIONS", "5"))
+
+    # ── Multi-Document Synthesis ───────────────────────────────────────────────
+    # Enable synthesis mode for MULTI_PART queries with synthesis keywords.
+    # When enabled, a synthesis-specific system prompt replaces the QA prompt,
+    # guiding the LLM through synthesize_documents → extract_entities → summarize_chunks.
+    SYNTHESIS_MODE_ENABLED: bool = os.getenv("SYNTHESIS_MODE_ENABLED", "true").lower() == "true"
+
     @property
     def graphrag_model(self) -> str:
         """Model to use for entity/relationship extraction. Falls back to OPENAI_MODEL."""
-        return self.GRAPHRAG_LLM_MODEL or self.OPENAI_MODEL
+        return self.GRAPHRAG_LLM or self.OPENAI_MODEL
 
     class Config:
         env_file = ".env"

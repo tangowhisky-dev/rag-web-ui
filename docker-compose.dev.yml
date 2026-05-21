@@ -116,20 +116,6 @@ services:
       timeout: 5s
       retries: 10
 
-  relik:
-    profiles: [relik]
-    build: ./relik-service
-    ports:
-      - "8001:8000"
-    environment:
-      - RELIK_MODEL=relik-ie/relik-cie-small
-      - RELIK_DEVICE=cpu
-    volumes:
-      - ./assets/relik-hf-cache:/root/.cache/huggingface/hub
-    networks:
-      - app_network
-    restart: on-failure
-
   adminer:
     image: adminer:latest
     ports:

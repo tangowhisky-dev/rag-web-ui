@@ -41,6 +41,44 @@ def _is_identity_question(query: str) -> bool:
     return bool(_IDENTITY_PATTERNS.match(query.strip()))
 
 
+_SYNTHESIS_KEYWORDS = re.compile(
+    r"\b(summarize|summary|themes?|across|compare|comparison|overview|report|"
+    r"aggregate|synthesis|synthesize|all\s+\w+|key\s+(findings?|points?|themes?))\b",
+    re.IGNORECASE,
+)
+
+def _is_synthesis_query(query: str, query_type: str = "") -> bool:
+    """
+    Heuristic: True for MULTI_PART queries that contain synthesis keywords.
+    These queries benefit from synthesize_documents rather than single-shot retrieval.
+    """
+    if query_type.upper() not in ("MULTI_PART", "AMBIGUOUS"):
+        return False
+    return bool(_SYNTHESIS_KEYWORDS.search(query))
+
+
+_SYNTHESIS_SYSTEM_PROMPT = (
+    "You are a professional research assistant that synthesizes information from multiple documents.\n\n"
+    "## Your task\n"
+    "The user wants a comprehensive synthesis across multiple documents. Follow this workflow:\n\n"
+    "1. **Gather coverage**: Call `synthesize_documents` with the topic and 3–6 targeted sub-queries "
+    "to retrieve a broad, deduplicated set of relevant chunks.\n"
+    "2. **Extract entities** (optional): Call `extract_entities` on the combined text if entity context "
+    "would enrich the synthesis.\n"
+    "3. **Summarize**: Call `summarize_chunks` with a precise instruction to synthesize the gathered chunks.\n"
+    "4. **Write the report**: After tool calls are done, write a structured Markdown report with:\n"
+    "   - `## Executive Summary` — 2–3 sentence overview\n"
+    "   - `## Key Themes` — bullet points for each major theme\n"
+    "   - `## Details` — elaboration per theme with [citation:N] references\n"
+    "   - `## Sources` — list of source documents cited\n\n"
+    "## Citation rules\n"
+    "Cite using EXACTLY [citation:N] format where N is the chunk number from context (1-indexed). "
+    "Do NOT use [1], (1), or any other format.\n\n"
+    "## Style\n"
+    "Be precise, professional, and concise. Do not pad. Do not repeat yourself."
+)
+
+
 # ── LLM helpers ───────────────────────────────────────────────────────────────
 
 def _strip_think(text: str) -> str:
@@ -474,7 +512,87 @@ async def generate_response(
             {"page_content": doc.page_content, "metadata": doc.metadata}
             for doc in docs
         ]
-        yield f'2:{json.dumps({"context": serializable_context, "confidence": confidence, "score": confidence_result.score, "suggestion": suggestion, "failed_legs": failed_legs, "breakdown": confidence_result.breakdown, "query_classification": {"type": classification.type.value, "confidence": classification.confidence, "latency_ms": classification.latency_ms, "fallback": classification.fallback}})}\n'
+
+        # Shared OpenAI client for tool calling + final answer
+        openai_client = AsyncOpenAI(
+            api_key=settings.OPENAI_API_KEY,
+            base_url=settings.OPENAI_API_BASE,
+        )
+
+        # ── Step 2.5: Agentic tool calling (pre-answer) ───────────────────
+        # When TOOL_CALLING_ENABLED and NOT in synthesis mode (synthesis queries
+        # run their own guided tool loop inside Step 4), give the LLM a chance
+        # to invoke tools before the final RAG answer.
+        #
+        # Pre-compute synthesis_active here so we can skip Step 2.5 for synthesis
+        # queries (which use a structured tool loop via the synthesis prompt instead).
+        synthesis_active = (
+            settings.SYNTHESIS_MODE_ENABLED
+            and settings.TOOL_CALLING_ENABLED
+            and _is_synthesis_query(standalone_question, classification.type.value)
+        )
+
+        tool_trace: list = []
+        _iteration = 0  # guard: stays 0 if MAX_TOOL_ITERATIONS=0 or loop never runs
+        if settings.TOOL_CALLING_ENABLED and not synthesis_active:
+            import app.services.builtin_tools  # registers built-in tools on first import  # noqa: F401
+            from app.services.tool_registry import _registry, execute_tool as _execute_tool
+            import json as _json
+
+            tool_messages = [
+                {"role": "system", "content": (
+                    "You are a tool-calling assistant. "
+                    "Given the user question, decide which tools to call to gather information. "
+                    "When you have enough information, stop calling tools and respond with DONE."
+                )},
+                {"role": "user", "content": standalone_question},
+            ]
+            tool_schemas = _registry.list_tools()
+
+            for _iteration in range(settings.MAX_TOOL_ITERATIONS):
+                tool_resp = await openai_client.chat.completions.create(
+                    model=settings.OPENAI_MODEL,
+                    messages=tool_messages,
+                    tools=tool_schemas,
+                    tool_choice="auto",
+                    temperature=0,
+                    max_tokens=512,
+                )
+                tool_choice_msg = tool_resp.choices[0].message
+                finish_reason = tool_resp.choices[0].finish_reason
+
+                if finish_reason != "tool_calls" or not tool_choice_msg.tool_calls:
+                    # LLM decided no more tools needed
+                    break
+
+                # Execute each tool call
+                tool_messages.append(tool_choice_msg)
+                for tc in tool_choice_msg.tool_calls:
+                    fn_name = tc.function.name
+                    try:
+                        fn_args = _json.loads(tc.function.arguments or "{}")
+                    except Exception:
+                        fn_args = {}
+
+                    result = _execute_tool(fn_name, fn_args)
+                    tool_trace.append(result.to_dict())
+
+                    tool_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": _json.dumps(result.output if result.success else {"error": result.error}),
+                    })
+
+                    logger.info(
+                        "[TOOL] iter=%d tool=%s success=%s latency_ms=%.1f",
+                        _iteration + 1, fn_name, result.success, result.latency_ms,
+                    )
+
+            if tool_trace:
+                logger.info("[TOOL] tool_calling_complete | iterations=%d | tools_called=%d",
+                            _iteration + 1, len(tool_trace))
+
+        yield f'2:{json.dumps({"context": serializable_context, "confidence": confidence, "score": confidence_result.score, "suggestion": suggestion, "failed_legs": failed_legs, "breakdown": confidence_result.breakdown, "query_classification": {"type": classification.type.value, "confidence": classification.confidence, "latency_ms": classification.latency_ms, "fallback": classification.fallback}, "tool_trace": tool_trace, "synthesis_mode": synthesis_active})}\n'
 
         # ── Step 3: Emit base64 context chunk (legacy, for DB persistence) ─
         base64_context = base64.b64encode(
@@ -503,31 +621,39 @@ async def generate_response(
                 f"{existing_summary}"
             )
 
-        qa_system_prompt = (
-            "You are a professional AI-based Knowledge Assistant that answers questions using the provided context documents.\n\n"
-            "## Formatting\n"
-            "- Use **bold** for key terms, concepts, and important phrases.\n"
-            "- Use *italics* for definitions, technical terms, or emphasis.\n"
-            "- Use numbered lists (1. 2. 3.) for sequential steps or ordered items.\n"
-            "- Use bullet points (- or *) for non-ordered lists, features, or comparisons.\n"
-            "- Use headings (##, ###) for longer multi-section answers.\n"
-            "- Keep paragraphs short and well-separated for readability.\n\n"
-            "## Citations\n"
-            "You will be given context documents numbered sequentially starting from 1.\n"
-            "You MUST cite sources using EXACTLY this format: [citation:x] — for example: 'The sky is blue [citation:1].'\n"
-            "Do NOT use any other citation format such as [1], (1), Context [1], or footnotes.\n"
-            "WRONG: 'The answer is 42 [1].'  RIGHT: 'The answer is 42 [citation:1].'\n"
-            "If a sentence draws from multiple contexts, list all applicable citations: [citation:1] [citation:2].\n\n"
-            "## General\n"
-            "- Your answer must be correct, accurate, and written in a professional, unbiased tone.\n"
-            # "- Limit your response to 2048 tokens.\n"
-            "- Do not include information unrelated to the question, and do not repeat yourself.\n"
-            "- If the provided context does not contain sufficient information, say so briefly and professionally.\n"
-            "- Write in the same language as the question (except for code, citations, and proper nouns).\n"
-            "- Do not blindly repeat the contexts verbatim; synthesize and explain.\n\n"
-            f"Context:\n{formatted_context}"
-            f"{summary_section}"
-        )
+        # ── Synthesis mode: swap QA prompt for synthesis orchestration prompt ──
+        if synthesis_active:
+            qa_system_prompt = _SYNTHESIS_SYSTEM_PROMPT + summary_section
+            logger.info(
+                "[SYNTHESIS] mode=active | query=%.80s | query_type=%s",
+                standalone_question, classification.type.value,
+            )
+        else:
+            qa_system_prompt = (
+                "You are a professional AI-based Knowledge Assistant that answers questions using the provided context documents.\n\n"
+                "## Formatting\n"
+                "- Use **bold** for key terms, concepts, and important phrases.\n"
+                "- Use *italics* for definitions, technical terms, or emphasis.\n"
+                "- Use numbered lists (1. 2. 3.) for sequential steps or ordered items.\n"
+                "- Use bullet points (- or *) for non-ordered lists, features, or comparisons.\n"
+                "- Use headings (##, ###) for longer multi-section answers.\n"
+                "- Keep paragraphs short and well-separated for readability.\n\n"
+                "## Citations\n"
+                "You will be given context documents numbered sequentially starting from 1.\n"
+                "You MUST cite sources using EXACTLY this format: [citation:x] — for example: 'The sky is blue [citation:1].'\n"
+                "Do NOT use any other citation format such as [1], (1), Context [1], or footnotes.\n"
+                "WRONG: 'The answer is 42 [1].'  RIGHT: 'The answer is 42 [citation:1].'\n"
+                "If a sentence draws from multiple contexts, list all applicable citations: [citation:1] [citation:2].\n\n"
+                "## General\n"
+                "- Your answer must be correct, accurate, and written in a professional, unbiased tone.\n"
+                # "- Limit your response to 2048 tokens.\n"
+                "- Do not include information unrelated to the question, and do not repeat yourself.\n"
+                "- If the provided context does not contain sufficient information, say so briefly and professionally.\n"
+                "- Write in the same language as the question (except for code, citations, and proper nouns).\n"
+                "- Do not blindly repeat the contexts verbatim; synthesize and explain.\n\n"
+                f"Context:\n{formatted_context}"
+                f"{summary_section}"
+            )
 
         logger.info("[STEP 4] QA | model=%s | standalone=%r | context_chunks=%d | window_msgs=%d | has_summary=%s",
                     settings.OPENAI_MODEL, standalone_question, len(docs),
@@ -544,11 +670,6 @@ async def generate_response(
             elif isinstance(lc_msg, AIMessage):
                 openai_messages.append({"role": "assistant", "content": lc_msg.content})
         openai_messages.append({"role": "user", "content": standalone_question})
-
-        openai_client = AsyncOpenAI(
-            api_key=settings.OPENAI_API_KEY,
-            base_url=settings.OPENAI_API_BASE,
-        )
 
         stream = await openai_client.chat.completions.create(
             model=settings.OPENAI_MODEL,
@@ -627,7 +748,8 @@ async def generate_response(
     except Exception as e:
         error_message = f"Error generating response: {str(e)}"
         print(error_message)
-        yield '3:{text}\n'.format(text=error_message)
+        yield f'3:{json.dumps(error_message)}\n'
+        yield 'd:{"finishReason":"error"}\n'
         if 'bot_message' in locals():
             bot_message.content = error_message
             db.commit()

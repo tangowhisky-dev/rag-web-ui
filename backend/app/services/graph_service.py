@@ -23,12 +23,8 @@ The link between the two systems is the Qdrant point UUID, stored as
 No vectors are stored in Neo4j. All text retrieval goes through Qdrant. Neo4j
 is only traversed for graph topology.
 
-Extraction backends
--------------------
-  ReLiK  (default, GRAPHRAG_LLM unset):
-    Calls the dockerized ReLiK service (GET /api/relik).
-    Fast, local, deterministic, zero API cost.
-
+Extraction backend
+------------------
   LLM pipeline  (GRAPHRAG_LLM=<model_name>):
     neo4j-graphrag Pipeline + LLMEntityRelationExtractor with
     use_structured_output=True — JSON Schema-constrained output, no free-form
@@ -68,7 +64,7 @@ import logging
 import uuid
 from typing import Optional
 
-import httpx
+
 import neo4j
 from langchain_core.documents import Document as LangchainDocument
 
@@ -104,107 +100,6 @@ def _chunk_id_to_point_id(chunk_id: str) -> str:
     to Neo4j is always the exact UUID stored as the Qdrant point ID.
     """
     return str(uuid.uuid5(uuid.NAMESPACE_OID, chunk_id))
-
-
-# ── ReLiK extraction path ─────────────────────────────────────────────────────
-
-async def _call_relik(text: str) -> dict:
-    """
-    Call the dockerized ReLiK service.
-    GET /api/relik?text=...&annotation_type=char&relation_threshold=0.5
-    """
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        resp = await client.get(
-            f"{settings.RELIK_URL}/api/relik",
-            params={"text": text, "annotation_type": "char", "relation_threshold": 0.5},
-        )
-        resp.raise_for_status()
-        return resp.json()
-
-
-async def _extract_with_relik(
-    driver: neo4j.Driver,
-    loop,
-    document_id: int,
-    kb_id: int,
-    chunks: list[str],
-    qdrant_point_ids: list[str],
-) -> tuple[int, int]:
-    """
-    Run ReLiK on each chunk, write Entity nodes + typed relationships to Neo4j.
-    Links Entity nodes to Chunk nodes via FROM_CHUNK edges using qdrant_point_id.
-    All sync Neo4j writes are offloaded via run_in_executor.
-    Returns (total_entities, total_relations).
-    """
-    total_entities = 0
-    total_relations = 0
-
-    for idx, (text, point_id) in enumerate(zip(chunks, qdrant_point_ids)):
-        try:
-            out = await _call_relik(text)
-        except Exception as exc:
-            logger.warning(
-                "GraphService[relik]: call failed for doc %d chunk %d: %s",
-                document_id, idx, exc,
-            )
-            continue
-
-        spans = out.get("spans", [])
-        triplets = out.get("triplets", [])
-
-        def _write_entities_and_rels(spans=spans, triplets=triplets, pid=point_id, _kb_id=kb_id):
-            written_entities = 0
-            written_rels = 0
-            with driver.session() as session:
-                for span in spans:
-                    entity_name = (span.get("text") or "").strip()
-                    entity_type = span.get("label") or "Entity"
-                    if entity_type == "--NME--":
-                        entity_type = "Entity"
-                    if not entity_name:
-                        continue
-                    session.run(
-                        """
-                        MERGE (e:Entity {name: $name})
-                        SET e.type = $type
-                        WITH e
-                        MATCH (c:Chunk {qdrant_point_id: $point_id})
-                        MERGE (e)-[:FROM_CHUNK]->(c)
-                        """,
-                        name=entity_name,
-                        type=entity_type,
-                        point_id=pid,
-                    )
-                    written_entities += 1
-                for triplet in triplets:
-                    subj = (triplet.get("subject", {}).get("text") or "").strip()
-                    obj  = (triplet.get("object",  {}).get("text") or "").strip()
-                    rel  = triplet.get("relation", {}).get("label") or "RELATED_TO"
-                    rel  = rel.upper().replace(" ", "_")
-                    if not subj or not obj:
-                        continue
-                    rel_safe = "".join(c if c.isalnum() or c == "_" else "_" for c in rel)
-                    # kb_id is part of the MERGE key so each KB owns its copy of
-                    # the relationship. This lets delete_graph_for_kb sweep them
-                    # cleanly without touching relationships from other KBs.
-                    session.run(
-                        f"""
-                        MERGE (a:Entity {{name: $subj}})
-                        MERGE (b:Entity {{name: $obj}})
-                        MERGE (a)-[:`{rel_safe}` {{kb_id: $kb_id}}]->(b)
-                        """,
-                        subj=subj,
-                        obj=obj,
-                        kb_id=str(_kb_id),
-                    )
-                    written_rels += 1
-            return written_entities, written_rels
-
-        ents, rels = await loop.run_in_executor(None, _write_entities_and_rels)
-        total_entities += ents
-        total_relations += rels
-
-    return total_entities, total_relations
 
 
 # ── LLM pipeline path ─────────────────────────────────────────────────────────
@@ -503,15 +398,14 @@ async def build_graph_for_document(
 
     driver = _get_driver()
     loop = asyncio.get_event_loop()
-    backend = "llm" if settings.GRAPHRAG_LLM else "relik"
 
     # Convert SHA-256 chunk IDs → the actual UUIDs Qdrant uses as point IDs
     qdrant_point_ids = [_chunk_id_to_point_id(cid) for cid in chunk_ids]
     collection_name = f"kb_{kb_id}"
 
     logger.info(
-        "GraphService[%s]: writing %d Chunk nodes for doc %d (kb=%d)",
-        backend, len(chunks), document_id, kb_id,
+        "GraphService[llm]: writing %d Chunk nodes for doc %d (kb=%d)",
+        len(chunks), document_id, kb_id,
     )
 
     # Write Chunk nodes — sync Neo4j I/O, must run in executor to avoid
@@ -541,26 +435,16 @@ async def build_graph_for_document(
     # Extract entities and relationships — throttled by semaphore so we don't
     # run all 20 documents' extraction simultaneously on one local LLM.
     async with _graph_semaphore:
-        if settings.GRAPHRAG_LLM:
-            total_entities, total_relations = await _extract_with_llm(
-                document_id=document_id,
-                file_name=file_name,
-                chunks=chunks,
-                qdrant_point_ids=qdrant_point_ids,
-            )
-        else:
-                total_entities, total_relations = await _extract_with_relik(
-                    driver=driver,
-                    loop=loop,
-                    document_id=document_id,
-                    kb_id=kb_id,
-                    chunks=chunks,
-                    qdrant_point_ids=qdrant_point_ids,
-                )
+        total_entities, total_relations = await _extract_with_llm(
+            document_id=document_id,
+            file_name=file_name,
+            chunks=chunks,
+            qdrant_point_ids=qdrant_point_ids,
+        )
 
     logger.info(
-        "GraphService[%s]: doc %d — %d entities, %d relations written to Neo4j",
-        backend, document_id, total_entities, total_relations,
+        "GraphService[llm]: doc %d — %d entities, %d relations written to Neo4j",
+        document_id, total_entities, total_relations,
     )
 
 

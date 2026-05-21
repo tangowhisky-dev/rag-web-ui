@@ -120,15 +120,19 @@ class _Candidate:
     qdrant_sparse_rank: int = -1
     exact_rank: int = -1
 
-    @property
-    def rrf_score(self) -> float:
+    def rrf_score(
+        self,
+        dense_weight: float = 0.5,
+        sparse_weight: float = 0.3,
+        exact_weight: float = 0.2,
+    ) -> float:
         score = 0.0
         if self.dense_rank >= 0:
-            score += settings.HYBRID_DENSE_WEIGHT / (_RRF_K + self.dense_rank)
+            score += dense_weight / (_RRF_K + self.dense_rank)
         if self.qdrant_sparse_rank >= 0:
-            score += settings.HYBRID_QDRANT_SPARSE_WEIGHT / (_RRF_K + self.qdrant_sparse_rank)
+            score += sparse_weight / (_RRF_K + self.qdrant_sparse_rank)
         if self.exact_rank >= 0:
-            score += settings.HYBRID_EXACT_WEIGHT / (_RRF_K + self.exact_rank)
+            score += exact_weight / (_RRF_K + self.exact_rank)
         return score
 
 
@@ -292,6 +296,9 @@ def _rrf_merge_candidates(
     qdrant_sparse: Dict[str, "_Candidate"],
     exact: Dict[str, "_Candidate"],
     top_k: int,
+    dense_weight: float = 0.5,
+    sparse_weight: float = 0.3,
+    exact_weight: float = 0.2,
 ) -> list["_Candidate"]:
     merged: Dict[str, _Candidate] = {**dense}
 
@@ -307,13 +314,18 @@ def _rrf_merge_candidates(
         else:
             merged[h] = c
 
-    ranked = sorted(merged.values(), key=lambda c: c.rrf_score, reverse=True)
+    ranked = sorted(
+        merged.values(),
+        key=lambda c: c.rrf_score(dense_weight, sparse_weight, exact_weight),
+        reverse=True,
+    )
 
-    logger.info("[RRF] total unique candidates=%d | returning top_k=%d", len(ranked), top_k)
+    logger.info("[RRF] total unique candidates=%d | returning top_k=%d | weights=%.2f/%.2f/%.2f",
+                len(ranked), top_k, dense_weight, sparse_weight, exact_weight)
     for i, c in enumerate(ranked[:top_k]):
         logger.info(
             "  rrf[%d] score=%.5f dense_rank=%s sparse_rank=%s exact_rank=%s text=%r",
-            i, c.rrf_score,
+            i, c.rrf_score(dense_weight, sparse_weight, exact_weight),
             c.dense_rank if c.dense_rank >= 0 else "-",
             c.qdrant_sparse_rank if c.qdrant_sparse_rank >= 0 else "-",
             c.exact_rank if c.exact_rank >= 0 else "-",
@@ -368,12 +380,20 @@ async def hybrid_search_with_legs(
     default leg flags and weights.
     """
     # Apply query-type preset if provided
+    dense_weight = settings.HYBRID_DENSE_WEIGHT
+    sparse_weight = settings.HYBRID_QDRANT_SPARSE_WEIGHT
+    exact_weight = settings.HYBRID_EXACT_WEIGHT
+
     if query_type is not None:
         preset = get_retrieval_config(query_type)
         use_dense = preset["use_dense"]
         use_sparse = preset["use_sparse"]
         use_exact = preset["use_exact"]
         top_k = preset["top_k"]
+        # Apply per-preset weights (overrides global defaults when present)
+        dense_weight = preset.get("dense_weight", dense_weight)
+        sparse_weight = preset.get("sparse_weight", sparse_weight)
+        exact_weight = preset.get("exact_weight", exact_weight)
         logger.info("[RETRIEVAL] query_type=%s | config=%s", query_type.value, preset)
     else:
         top_k = settings.RETRIEVAL_TOP_K
@@ -417,7 +437,13 @@ async def hybrid_search_with_legs(
     if failed_legs:
         logger.warning("hybrid_search_with_legs: failed legs=%s", failed_legs)
 
-    candidates = _rrf_merge_candidates(dense, qdrant_sparse, exact, top_k)
+    candidates = _rrf_merge_candidates(
+        dense, qdrant_sparse, exact, top_k,
+        dense_weight=dense_weight,
+        sparse_weight=sparse_weight,
+        exact_weight=exact_weight,
+    )
+
 
     # Annotate each doc with which legs found it — used by confidence scoring.
     docs: List[LangchainDocument] = []
@@ -431,6 +457,16 @@ async def hybrid_search_with_legs(
 
     logger.info("hybrid_search_with_legs: RRF returned %d docs | failed_legs=%s", len(docs), failed_legs)
 
+    # ── Entity-aware boost (post-RRF, pre-graph) ───────────────────────────
+    # For ENTITY_CENTRIC queries: extract entities from query, expand via Neo4j,
+    # and boost chunks mentioning those entities.
+    if settings.ENTITY_AWARE_ENABLED and query_type == QueryType.ENTITY_CENTRIC and docs:
+        try:
+            from app.services.entity_extractor import extract_expand_boost
+            docs = extract_expand_boost(query, docs, kb_ids)
+        except Exception as exc:
+            logger.warning("hybrid_search_with_legs: entity boost failed (non-fatal): %s", exc)
+
     # ── Graph expansion (post-RRF, pre-reranker) ───────────────────────────
     # Traverse Neo4j to find entity-connected chunks NOT returned by vector
     # search. Fetch their text from Qdrant by UUID. Merge into candidate pool.
@@ -439,7 +475,7 @@ async def hybrid_search_with_legs(
     if enabled["graph"] and docs:
         try:
             from app.services.graph_service import expand_docs_via_graph
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             expanded = await loop.run_in_executor(None, lambda: expand_docs_via_graph(docs, kb_ids))
             if expanded:
                 existing_hashes = {_content_hash(d.page_content) for d in docs}
@@ -462,7 +498,7 @@ async def hybrid_search_with_legs(
     if enabled["graph"] and docs:
         try:
             from app.services.graph_service import enrich_docs_with_graph
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             docs = await loop.run_in_executor(None, lambda: enrich_docs_with_graph(docs))
             graph_enriched_count = sum(1 for d in docs if d.metadata.get("_graph_triples", 0) > 0)
             legs["graph"] = {
@@ -529,7 +565,7 @@ async def hybrid_search(
     if enabled["graph"] and docs:
         try:
             from app.services.graph_service import enrich_docs_with_graph
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             docs = await loop.run_in_executor(None, lambda: enrich_docs_with_graph(docs))
         except Exception as e:
             logger.warning("hybrid_search: graph enrichment failed (non-fatal): %s", e)

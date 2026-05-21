@@ -16,7 +16,7 @@
 
 RAG Web UI is a self-hosted knowledge base Q&A system. Upload your documents, then chat with them. Uses any **OpenAI-compatible API** for LLM and embeddings — works with OpenAI, LM Studio, or any local model server.
 
-Retrieval uses **3-leg hybrid search**: dense vector (Qdrant cosine), sparse vector (SPLADE via Qdrant), and exact keyword (MySQL full-text), combined with configurable weights. Optionally extended with **GraphRAG**: entity and relationship extraction into Neo4j, enabling graph-traversal retrieval expansion alongside vector search.
+Retrieval uses **3-leg hybrid search**: dense vector (Qdrant cosine), sparse vector (SPLADE via Qdrant), and exact keyword (MySQL full-text), combined by Reciprocal Rank Fusion (RRF) with per-query-type weight presets. An LLM **query classifier** routes each query (FACTUAL / ENTITY_CENTRIC / MULTI_PART / AMBIGUOUS) to the best retrieval config. A **cross-encoder reranker** refines the top candidates before answer generation. For complex queries the system enters **synthesis mode**, fanning out multiple sub-queries in parallel and producing a structured Markdown report. Optionally extended with **GraphRAG**: entity/relationship extraction into Neo4j enables graph-traversal expansion and **entity-aware retrieval** that boosts chunks mentioning query entities.
 
 > **Based on:** This is an opinionated, slimmed-down fork of [rag-web-ui/rag-web-ui](https://github.com/rag-web-ui/rag-web-ui). All credit for the original design and implementation goes to the original authors. The goal of this fork is to serve as a learning resource for understanding the RAG pipeline end-to-end — keeping minimal dependencies, removing abstraction layers, and adding visibility into individual RAG components (retrieval legs, reranking, prompt construction, token flow).
 
@@ -159,6 +159,18 @@ MATCH (c:Chunk)-[:FROM_CHUNK]-(e:__Entity__ {name: "Apple"}) RETURN c, e
 | `RETRIEVAL_QDRANT_SPARSE_ENABLED` | Enable/disable SPLADE sparse leg | `true` |
 | `RETRIEVAL_EXACT_ENABLED` | Enable/disable MySQL FTS leg | `true` |
 
+### Adaptive Retrieval & Agentic Features (M001)
+
+| Variable | Description | Default |
+|---|---|---|
+| `QUERY_CLASSIFIER_ENABLED` | Enable LLM query classifier (FACTUAL/ENTITY_CENTRIC/MULTI_PART/AMBIGUOUS). Disable to use default hybrid config for all queries. | `true` |
+| `RETRIEVAL_CONFIG_PRESETS` | JSON overrides per query type for leg weights and top-k. Leave blank to use global `HYBRID_*_WEIGHT` defaults. | *(see .env.example)* |
+| `ENTITY_AWARE_ENABLED` | Enable entity extraction + Neo4j expansion + score boost for ENTITY_CENTRIC queries. Requires Neo4j + `GRAPHRAG_LLM`. | `true` |
+| `ENTITY_BOOST_FACTOR` | Additive score boost per chunk per matching entity mention. | `0.1` |
+| `TOOL_CALLING_ENABLED` | Enable the pre-answer agentic tool-calling loop. LLM may call `search_documents`, `extract_entities`, `summarize_chunks`. | `true` |
+| `MAX_TOOL_ITERATIONS` | Maximum tool-call iterations per chat turn. | `5` |
+| `SYNTHESIS_MODE_ENABLED` | For MULTI_PART queries with synthesis keywords (summarize, compare, themes…), use the synthesis prompt and `synthesize_documents` for parallel multi-query retrieval. | `true` |
+
 ### Vector DB (Qdrant)
 
 | Variable | Description | Default |
@@ -287,10 +299,17 @@ docker compose -f docker-compose.dev.yml up -d --build backend
 - Optional OCR for scanned PDFs and embedded images via `markitdown-ocr` — enabled by setting `VISION_MODEL`
 - Separate model for query rewriting and summarisation via `QUERY_MODEL` (falls back to `OPENAI_MODEL`)
 - Automatic chunking, embedding, and incremental updates
-- 3-leg hybrid search: dense vector + SPLADE sparse + MySQL full-text
-- **GraphRAG** — optional entity/relationship extraction into Neo4j with graph-traversal retrieval expansion; two backends: ReLiK (local model) or LLM (`GRAPHRAG_LLM`)
+- **3-leg hybrid search**: dense vector + SPLADE sparse + MySQL full-text, combined by Reciprocal Rank Fusion (RRF)
+- **GraphRAG** — optional entity/relationship extraction into Neo4j with graph-traversal retrieval expansion; LLM-based extraction via `GRAPHRAG_LLM`
+- **Adaptive retrieval** — LLM query classifier (FACTUAL / ENTITY_CENTRIC / MULTI_PART / AMBIGUOUS) routes each query to a per-type retrieval preset (leg weights, top-k) via `RETRIEVAL_CONFIG_PRESETS`
+- **Entity-aware retrieval** — for ENTITY_CENTRIC queries, entities are extracted from the query via `GRAPHRAG_LLM`, matched against the Neo4j entity graph with 1-hop expansion, and used to boost chunk scores that contain entity mentions
+- **Cross-encoder reranking** — retrieved candidates re-ranked by a local cross-encoder model (`RERANKER_MODEL`) before context assembly
+- **Retrieval confidence scoring** — every answer shows a 4-level confidence indicator (High/Medium/Low/None) based on score distribution, leg overlap, and entity signals; actionable suggestions when confidence is low
+- **Agentic tool calling** — LLM can call `search_documents`, `extract_entities`, and `summarize_chunks` in a pre-answer loop (up to `MAX_TOOL_ITERATIONS`); tool trace visible per message
+- **Multi-document synthesis** — for synthesis queries (summarize / compare / themes), the LLM uses `synthesize_documents` for parallel multi-query fan-out and produces a structured Markdown report with citations
 - Multi-turn chat with source citations
 - Streaming responses with think-block collapsing for reasoning models
+- Query classification badge, tool trace timeline, and synthesis mode indicator in the chat UI
 - Retrieval quality testing UI
 - Route protection: unauthenticated users are redirected to `/login`
 - JWT invalidated on container restart (ephemeral secret key in dev)

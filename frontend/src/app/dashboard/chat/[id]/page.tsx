@@ -33,6 +33,20 @@ interface Message {
   confidenceBreakdown?: Record<string, unknown>;
   suggestion?: string | null;
   failedLegs?: string[];
+  queryClassification?: {
+    type: string;
+    confidence: number;
+    latency_ms: number;
+    fallback: boolean;
+  };
+  toolTrace?: Array<{
+    tool_name: string;
+    params?: Record<string, unknown>;
+    output?: unknown;
+    error?: string | null;
+    latency_ms: number;
+  }>;
+  synthesisMode?: boolean;
 }
 
 interface ChatMessage {
@@ -262,26 +276,46 @@ export default function ChatPage({ params }: { params: { id: string } }) {
       try {
         const payload = JSON.parse(trimmedLine.slice(2)) as {
           context: Array<{ page_content: string; metadata: Record<string, any> }>;
-          confidence?: "very_high" | "high" | "medium" | "low" | "none";
+          confidence?: string;
           score?: number;
           suggestion?: string | null;
           failed_legs?: string[];
           breakdown?: Record<string, unknown>;
+          query_classification?: {
+            type: string;
+            confidence: number;
+            latency_ms: number;
+            fallback: boolean;
+          };
+          tool_trace?: Array<{
+            tool_name: string;
+            params?: Record<string, unknown>;
+            output?: unknown;
+            error?: string | null;
+            latency_ms: number;
+          }>;
+          synthesis_mode?: boolean;
         };
         const citations: Citation[] = payload.context.map((doc, index) => ({
           id: index + 1,
           text: doc.page_content,
           metadata: doc.metadata,
         }));
+        // Normalize confidence level: backend sends uppercase (HIGH/MEDIUM/LOW),
+        // frontend type uses lowercase. Map backend values → frontend enum.
+        const rawConfidence = payload.confidence?.toLowerCase() as Message["confidence"] | undefined;
         appendAssistantChunk(assistantId, (message) => ({
           ...message,
           citations,
           retrievedContext: payload.context,
-          confidence: payload.confidence,
+          confidence: rawConfidence,
           confidenceScore: payload.score,
           confidenceBreakdown: payload.breakdown,
           suggestion: payload.suggestion,
           failedLegs: payload.failed_legs,
+          queryClassification: payload.query_classification,
+          toolTrace: payload.tool_trace,
+          synthesisMode: payload.synthesis_mode,
         }));
       } catch (e) {
         console.error("Failed to parse context event:", e);
@@ -484,6 +518,18 @@ export default function ChatPage({ params }: { params: { id: string } }) {
                       confidenceScore={message.confidenceScore}
                       confidenceBreakdown={message.confidenceBreakdown}
                       suggestion={message.suggestion}
+                      failedLegs={message.failedLegs}
+                      queryClassification={
+                        message.id === lastAssistantId
+                          ? message.queryClassification
+                          : undefined
+                      }
+                      toolTrace={
+                        message.id === lastAssistantId
+                          ? message.toolTrace
+                          : undefined
+                      }
+                      synthesisMode={message.synthesisMode}
                       onDelete={(id) =>
                         setMessages((prev) => prev.filter((m) => m.id !== id))
                       }

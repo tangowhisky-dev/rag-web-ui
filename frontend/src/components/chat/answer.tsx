@@ -249,7 +249,143 @@ interface CitationInfo {
   document: DocumentInfo;
 }
 
-// ── Confidence bar ─────────────────────────────────────────────────────────────
+// ── Query Classification badge ─────────────────────────────────────────────
+
+interface QueryClassification {
+  type: string;
+  confidence: number;
+  latency_ms: number;
+  fallback: boolean;
+}
+
+const QUERY_TYPE_COLORS: Record<string, { bg: string; text: string; border: string }> = {
+  FACTUAL:        { bg: "bg-blue-50 dark:bg-blue-900/20",   text: "text-blue-700 dark:text-blue-300",   border: "border-blue-200 dark:border-blue-800"   },
+  ENTITY_CENTRIC: { bg: "bg-purple-50 dark:bg-purple-900/20", text: "text-purple-700 dark:text-purple-300", border: "border-purple-200 dark:border-purple-800" },
+  MULTI_PART:     { bg: "bg-orange-50 dark:bg-orange-900/20", text: "text-orange-700 dark:text-orange-300", border: "border-orange-200 dark:border-orange-800" },
+  AMBIGUOUS:      { bg: "bg-zinc-50 dark:bg-zinc-800/40",   text: "text-zinc-600 dark:text-zinc-300",    border: "border-zinc-200 dark:border-zinc-700"    },
+};
+
+const QueryClassificationBlock: FC<{ classification: QueryClassification; synthesisMode?: boolean }> = ({
+  classification,
+  synthesisMode,
+}) => {
+  const colors = QUERY_TYPE_COLORS[classification.type] ?? QUERY_TYPE_COLORS["AMBIGUOUS"];
+  const pct = Math.round(classification.confidence * 100);
+
+  return (
+    <div className={`flex items-center gap-2 rounded-md border ${colors.border} ${colors.bg} px-2.5 py-1 text-[11px] not-prose`}>
+      <span className={`font-semibold tracking-wide ${colors.text}`}>
+        {classification.type.replace("_", " ")}
+      </span>
+      <span className={`opacity-70 ${colors.text}`}>·</span>
+      <span className={`${colors.text} opacity-80`}>{pct}% confidence</span>
+      <span className={`opacity-70 ${colors.text}`}>·</span>
+      <span className={`${colors.text} opacity-70`}>{Math.round(classification.latency_ms)}ms</span>
+      {classification.fallback && (
+        <>
+          <span className={`opacity-70 ${colors.text}`}>·</span>
+          <span className="text-amber-600 dark:text-amber-400 opacity-90">fallback</span>
+        </>
+      )}
+      {synthesisMode && (
+        <>
+          <span className={`opacity-70 ${colors.text}`}>·</span>
+          <span className="text-emerald-600 dark:text-emerald-400 font-medium">⊕ Synthesis</span>
+        </>
+      )}
+    </div>
+  );
+};
+
+// ── Tool trace timeline ────────────────────────────────────────────────────
+
+interface ToolTraceEntry {
+  tool_name: string;
+  params?: Record<string, unknown>;
+  output?: unknown;
+  error?: string | null;
+  latency_ms: number;
+}
+
+const TOOL_ICONS: Record<string, string> = {
+  search_documents:    "🔍",
+  extract_entities:    "🏷",
+  summarize_chunks:    "📝",
+  synthesize_documents:"⊕",
+};
+
+const ToolTraceBlock: FC<{ trace: ToolTraceEntry[] }> = ({ trace }) => {
+  const [isExpanded, setIsExpanded] = useState(false);
+
+  if (trace.length === 0) return null;
+
+  return (
+    <div className="my-2 rounded-md border border-gray-100 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/40 w-full not-prose">
+      <button
+        onClick={() => setIsExpanded(!isExpanded)}
+        className="flex items-center gap-1.5 w-full px-3 py-1.5 text-left rounded-t-md hover:bg-gray-100 dark:hover:bg-gray-700/40 transition-colors"
+      >
+        {isExpanded ? (
+          <ChevronDown className="h-3 w-3 text-gray-400 shrink-0" />
+        ) : (
+          <ChevronRight className="h-3 w-3 text-gray-400 shrink-0" />
+        )}
+        <span className="text-xs text-gray-400 font-medium select-none">
+          Tool calls ({trace.length})
+        </span>
+        <span className="ml-auto text-[10px] text-gray-400 select-none">
+          {trace.reduce((s, t) => s + t.latency_ms, 0).toFixed(0)}ms total
+        </span>
+      </button>
+      {isExpanded && (
+        <div className="px-3 pb-2 pt-1 border-t border-gray-100 dark:border-gray-700 space-y-2 max-h-72 overflow-y-auto">
+          {trace.map((entry, i) => (
+            <div key={i} className="text-[11px] font-sans">
+              <div className="flex items-center gap-2">
+                <span>{TOOL_ICONS[entry.tool_name] ?? "🔧"}</span>
+                <span className="font-semibold text-gray-600 dark:text-gray-300">{entry.tool_name}</span>
+                <span className="text-gray-400">{entry.latency_ms.toFixed(0)}ms</span>
+                {entry.error ? (
+                  <span className="text-red-500 text-[10px]">✗ error</span>
+                ) : (
+                  <span className="text-emerald-500 text-[10px]">✓</span>
+                )}
+              </div>
+              {entry.error && (
+                <p className="mt-0.5 ml-5 text-red-500 dark:text-red-400">{entry.error}</p>
+              )}
+              {!entry.error && entry.output !== undefined && (
+                <pre className="mt-0.5 ml-5 text-gray-400 dark:text-gray-500 whitespace-pre-wrap break-all overflow-hidden max-h-20">
+                  {JSON.stringify(entry.output, null, 2).slice(0, 400)}
+                  {JSON.stringify(entry.output).length > 400 ? "…" : ""}
+                </pre>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ── Failed legs warning ───────────────────────────────────────────────────────
+
+const FailedLegsWarning: FC<{ legs: string[] }> = ({ legs }) => {
+  if (legs.length === 0) return null;
+  const names: Record<string, string> = {
+    dense: "vector",
+    qdrant_sparse: "sparse",
+    exact: "keyword",
+    graph: "graph",
+  };
+  return (
+    <div className="flex items-center gap-1.5 rounded border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 px-2.5 py-1 text-[11px] text-amber-700 dark:text-amber-400 not-prose">
+      <span>⚠</span>
+      <span>Retrieval leg{legs.length > 1 ? "s" : ""} failed: {legs.map(l => names[l] ?? l).join(", ")}</span>
+    </div>
+  );
+};
+
 
 type ConfidenceLevel = "very_high" | "high" | "medium" | "low" | "none";
 
@@ -348,8 +484,12 @@ export const Answer: FC<{
   confidenceScore?: number;
   confidenceBreakdown?: Record<string, unknown>;
   suggestion?: string | null;
+  failedLegs?: string[];
+  queryClassification?: QueryClassification;
+  toolTrace?: ToolTraceEntry[];
+  synthesisMode?: boolean;
   onDelete?: (id: string) => void;
-}> = ({ messageId, chatId, markdown, citations = [], rewrittenQuery, retrievedContext, confidence, confidenceScore, confidenceBreakdown, suggestion, onDelete }) => {
+}> = ({ messageId, chatId, markdown, citations = [], rewrittenQuery, retrievedContext, confidence, confidenceScore, confidenceBreakdown, suggestion, failedLegs, queryClassification, toolTrace, synthesisMode, onDelete }) => {
   const [citationInfoMap, setCitationInfoMap] = useState<
     Record<string, CitationInfo>
   >({});
@@ -585,6 +725,14 @@ export const Answer: FC<{
   return (
     <div className="prose prose-sm max-w-full">
       {rewrittenQuery && <RewrittenQueryBlock query={rewrittenQuery} />}
+      {queryClassification && (
+        <QueryClassificationBlock
+          classification={queryClassification}
+          synthesisMode={synthesisMode}
+        />
+      )}
+      {toolTrace && toolTrace.length > 0 && <ToolTraceBlock trace={toolTrace} />}
+      {failedLegs && failedLegs.length > 0 && <FailedLegsWarning legs={failedLegs} />}
       {confidence === "none" && suggestion && (
         <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 mb-2">
           <span className="mt-0.5 shrink-0">⚠</span>

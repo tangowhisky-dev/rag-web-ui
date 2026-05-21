@@ -57,42 +57,58 @@ chat_service.py
     ├── Standalone question (context folded in → self-contained query; uses QUERY_MODEL if set)
     │
     ▼
-retrieval.py — hybrid_search()
+classifier.py — classify_query()  [QUERY_CLASSIFIER_ENABLED]
+    └── LLM-based 4-way classification: FACTUAL / ENTITY_CENTRIC / MULTI_PART / AMBIGUOUS
+        → emitted in stream frame 1: alongside rewritten query
+    │
+    ▼
+retrieval.py — hybrid_search_with_legs()
+    ├── get_retrieval_config(query_type) → per-type leg weights + top-k (RETRIEVAL_CONFIG_PRESETS)
     ├── Leg 1: _dense_search()          → Qdrant cosine similarity (dense)
     ├── Leg 2: _qdrant_sparse_search()  → Qdrant SPLADE sparse vectors
-    └── Leg 3: _exact_search()          → MySQL FULLTEXT NATURAL LANGUAGE MODE
-                        │
-                        ▼
-                   _rrf_merge_candidates()  — weighted Reciprocal Rank Fusion
-                        │
-                        ▼
-    top-K LangchainDocuments
-                        │
-                        ▼ (optional, when GRAPHRAG_ENABLED + use_graph_rag)
-    graph_service.py — expand_docs_via_graph()
-        └── Extract qdrant_point_ids from seed docs
-            → MATCH (Chunk)-[:FROM_CHUNK]→(Entity)-[r]→(Entity)←[:FROM_CHUNK]-(Chunk2)
-            → collect new Chunk2.qdrant_point_ids (not already in seed set)
-            → fetch new chunk texts from Qdrant by UUID (direct key lookup, no re-embedding)
-            → merge new chunks into candidate pool
-                        │
-                        ▼
-    graph_service.py — enrich_docs_with_graph()
-        └── For each candidate chunk (seed + graph-expanded):
-            MATCH (Chunk {qdrant_point_id})-[:FROM_CHUNK]→(Entity)-[r]→(Entity)
-            → append [Graph context] triples to chunk text
-                        │
-                        ▼
-    reranker.py — cross-encoder reranking (optional, RERANKER_ENABLED)
-                        │
-                        ▼
-    enriched + reranked docs
+    ├── Leg 3: _exact_search()          → MySQL FULLTEXT NATURAL LANGUAGE MODE
+    │                   │
+    │                   ▼
+    │              _rrf_merge_candidates()
+    │                   └── Weighted Reciprocal Rank Fusion using per-preset weights
+    │                   │
+    │                   ▼ (optional, GRAPHRAG_ENABLED + use_graph_rag)
+    │         graph_service.py — expand_docs_via_graph() + enrich_docs_with_graph()
+    │                   │
+    │                   ▼ (optional, RERANKER_ENABLED)
+    │         reranker.py — cross-encoder reranking
+    │                   │
+    │                   ▼ (ENTITY_AWARE_ENABLED + ENTITY_CENTRIC query)
+    │         entity_extractor.py — extract_expand_boost()
+    │             ├── extract_entities_from_query() — LLM (GRAPHRAG_LLM) extracts entities
+    │             ├── expand_query_entities()       — Neo4j 1-hop CONTAINS match + expansion
+    │             └── apply_entity_boost()          — additive score boost (ENTITY_BOOST_FACTOR)
+    │
+    ▼
+confidence.py — score_retrieval()
+    └── 4-level confidence: HIGH/MEDIUM/LOW/NONE + suggestion
+    │
+    ▼  [stream frame 2: emitted to UI — context, confidence, query_classification, tool_trace, synthesis_mode]
+    │
+    ▼ (TOOL_CALLING_ENABLED + non-synthesis query — Step 2.5)
+tool_registry.py / builtin_tools.py
+    ├── search_documents(query, kb_ids, top_k)
+    ├── extract_entities(text)
+    └── summarize_chunks(chunks, instruction)
+    └── Loop up to MAX_TOOL_ITERATIONS — tool results fed back into conversation
+    │
+    ▼ (SYNTHESIS_MODE_ENABLED + MULTI_PART/AMBIGUOUS + synthesis keywords — Step 4 with synthesis prompt)
+builtin_tools.py — synthesize_documents(topic, sub_queries, kb_ids, top_k_per_query)
+    └── asyncio.gather N sub-queries in parallel → MD5 content-hash dedup → score-sorted
     │
     ▼
 chat_service.py
-    ├── Build prompt with retrieved chunks as context
+    ├── QA prompt (standard) OR synthesis orchestration prompt (synthesis mode)
     ├── Stream response via AsyncOpenAI
     └── Strip <think> blocks (reasoning model support)
+    │
+export_service.py — generate_synthesis_report() [synthesis mode]
+    └── Structured Markdown: header + answer + ## Sources from tool_trace
 ```
 
 #### GraphRAG architecture note
@@ -111,23 +127,21 @@ Vectors are never stored in Neo4j. Neo4j Chunk nodes are keyed by `qdrant_point_
 - **Expansion** (`expand_docs_via_graph`) — finds chunks NOT in the vector search results by traversing entity connections. A query surface 5 chunks; expansion may add 3 more that are entity-connected but not in the top-K by similarity.
 - **Enrichment** (`enrich_docs_with_graph`) — appends entity/relationship triples as `[Graph context]` text to every candidate chunk (seed + expanded), giving the reranker and LLM explicit graph signal.
 
-**Extraction backends** (controlled by `.env`, mutually exclusive):
+**Entity-aware retrieval** (`entity_extractor.py`, M001):
+
+- For ENTITY_CENTRIC queries, `extract_entities_from_query()` calls the `GRAPHRAG_LLM` model with a JSON-schema prompt to extract named entities.
+- `expand_query_entities()` fuzzy-matches extracted entities against Neo4j `__Entity__` nodes (CONTAINS match), then fetches 1-hop neighbors.
+- `apply_entity_boost()` adds `ENTITY_BOOST_FACTOR` to the RRF score of chunks whose text mentions any matched entity.
+
+**Extraction backends** (controlled by `.env`):
 
 | Mode | Trigger | Notes |
 |---|---|---|
-| ReLiK | `COMPOSE_PROFILES=relik` | Local NER+RE model; 12–16 GB RAM for Wikipedia-scale indexes |
 | LLM | `GRAPHRAG_LLM=<model>` | `LLMEntityRelationExtractor` + `use_structured_output=True`; JSON Schema-constrained |
 | Disabled | both unset | Extraction silently skipped; retrieval graph leg also inactive |
 
-`GRAPHRAG_LLM` takes precedence over ReLiK when both are set.
-
 **Explore the graph:** Neo4j Browser — http://localhost:7474/browser/ (login: `neo4j` / `ragwebui_neo4j`)
 
----
-
-## Component Breakdown
-
-### Backend Structure (`backend/`)
 
 ```
 app/
@@ -155,8 +169,14 @@ app/
 │   └── token.py
 ├── services/
 │   ├── document_processor.py  # Ingestion: parse → chunk → embed → index
-│   ├── retrieval.py           # 3-leg hybrid search + RRF merge
-│   ├── chat_service.py        # Conversation context, prompt, LLM streaming
+│   ├── retrieval.py           # 3-leg hybrid search + weighted RRF merge + adaptive config
+│   ├── reranker.py            # Cross-encoder reranking (RERANKER_ENABLED)
+│   ├── entity_extractor.py    # LLM entity extraction, Neo4j expansion, score boost (M001)
+│   ├── tool_registry.py       # Tool registry + execute_tool() (M001)
+│   ├── builtin_tools.py       # search_documents, extract_entities, summarize_chunks, synthesize_documents (M001)
+│   ├── chat_service.py        # Conversation context, prompt, LLM streaming, synthesis mode
+│   ├── export_service.py      # Export to PDF/Word/Image + generate_synthesis_report
+│   ├── confidence.py          # 4-level retrieval confidence scoring
 │   └── chunk_record.py        # MySQL chunk upsert helpers
 └── startup/                   # Startup utilities (Alembic auto-migrate etc.)
 
@@ -184,8 +204,7 @@ src/
 | `frontend` | custom (Next.js) | Web UI; Next.js dev server or production build |
 | `qdrant` | `qdrant/qdrant` | Vector database (dense + sparse collections) |
 | `db` | `mysql:8` | Relational data + FULLTEXT chunk index |
-| `neo4j` | `neo4j:2026.04` | Graph DB — entity/relationship storage for GraphRAG; browser at http://localhost:7474/browser/ |
-| `relik` | custom (arm64, CPU torch) | ReLiK NER+RE service — optional, start with `COMPOSE_PROFILES=relik`; requires 12–16 GB RAM |
+| `neo4j` | `neo4j:2026.04` | Graph DB — entity/relationship storage for GraphRAG + entity-aware retrieval; browser at http://localhost:7474/browser/ |
 | `adminer` | `adminer` | MySQL web GUI (dev compose only) |
 
 ---
@@ -229,6 +248,18 @@ Four distinct model roles are supported, all pointing at OpenAI-compatible endpo
 - JWT tokens with configurable expiration (default 7 days)
 - Ephemeral `SECRET_KEY` in dev — tokens are invalidated on container restart
 
+### 7. LLM Query Classifier for Adaptive Retrieval
+Rather than using the same retrieval config for every query, an LLM classifier (using `QUERY_MODEL` or `OPENAI_MODEL`) assigns each query to one of four types. Each type maps to a tunable retrieval preset (leg weights + top-k) stored in `RETRIEVAL_CONFIG_PRESETS`. This allows ENTITY_CENTRIC queries to rely more on dense search, MULTI_PART queries to blend dense + sparse, and AMBIGUOUS queries to retrieve broader candidate sets — without any retraining.
+
+### 8. Entity-Aware Retrieval via Neo4j
+For ENTITY_CENTRIC queries, named entities are extracted from the query using the `GRAPHRAG_LLM` model, matched against existing Neo4j entities with fuzzy CONTAINS matching and 1-hop expansion, and used to boost chunk scores. This integrates the graph's entity knowledge into the retrieval scoring without a separate retrieval leg.
+
+### 9. Agentic Tool Calling Substrate
+A global tool registry (`tool_registry.py`) lets any code register callable tools as structured JSON schemas. `execute_tool()` always returns a `ToolResult` — it never raises — so one tool failure never breaks the loop. The pre-answer tool-calling loop in `chat_service.py` is gated by `TOOL_CALLING_ENABLED` and skipped entirely for synthesis queries (which use a structured synthesis prompt instead, avoiding double tool execution).
+
+### 10. Synthesis Mode for Multi-Document Queries
+Synthesis queries (MULTI_PART/AMBIGUOUS + synthesis keywords) bypass the standard QA prompt and enter synthesis mode. The LLM is given a structured synthesis prompt that directs it to call `synthesize_documents` (parallel sub-query fan-out with MD5 deduplication), then produce a structured Markdown report. The `synthesize_documents` tool runs sub-queries in a separate thread (`ThreadPoolExecutor`) with `asyncio.run()` to avoid the "event loop already running" error that would occur with `loop.run_until_complete()` inside a running FastAPI context.
+
 ---
 
 ## Technology Stack Summary
@@ -239,8 +270,9 @@ Four distinct model roles are supported, all pointing at OpenAI-compatible endpo
 | Frontend | Next.js 14, TypeScript, Tailwind CSS, shadcn/ui, Vercel AI SDK |
 | Backend | Python FastAPI, LangChain, SQLAlchemy, Alembic |
 | Vector DB | Qdrant (dense + sparse named vectors) |
-| Graph DB | Neo4j (entity/relationship graph; neo4j-graphrag pipeline) |
+| Graph DB | Neo4j (entity/relationship graph; neo4j-graphrag pipeline; entity-aware retrieval) |
 | Sparse Embeddings | SPLADE via FastEmbed (CPU, ONNX, local) |
+| Cross-Encoder Reranking | HuggingFace cross-encoder (RERANKER_MODEL) — CPU inference |
 | File Storage | Local filesystem (Docker volume mount) |
 | Database | MySQL 8 (ORM data + FULLTEXT index) |
 | Auth | JWT (python-jose, bcrypt) |
