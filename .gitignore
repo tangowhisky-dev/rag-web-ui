@@ -81,3 +81,5 @@ vendor/
 coverage/
 .cache/
 tmp/
+/.agents
+/.hermes
