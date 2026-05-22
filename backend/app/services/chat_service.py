@@ -499,25 +499,32 @@ async def generate_response(
                     classification.type.value, classification.confidence, classification.latency_ms)
 
         # ── Step 2: Hybrid retrieval ───────────────────────────────────────
-        logger.info("[STEP 2] hybrid_search | query=%r | query_type=%s",
-                    standalone_question, classification.type.value)
-        retrieval_result = await hybrid_search_with_legs(
-            query=standalone_question,
-            kb_ids=knowledge_base_ids,
-            db=db,
-            use_dense=use_dense,
-            use_sparse=use_sparse,
-            use_exact=use_exact,
-            use_graph_rag=use_graph_rag,
-            query_type=classification.type,
-        )
-        docs = retrieval_result["docs"]
-        retrieval_info = retrieval_result["retrieval_info"]
-        failed_legs = retrieval_info["failed_legs"]
-        logger.info("[STEP 2] returned %d docs | failed_legs=%s", len(docs), failed_legs)
-        for i, doc in enumerate(docs):
-            snippet = doc.page_content[:120].replace("\n", " ")
-            logger.info("  chunk[%d] meta=%s | text=%r", i, doc.metadata, snippet)
+        # Skip KB retrieval when file content is provided — the file IS the context.
+        if file_markdown:
+            logger.info("[STEP 2] skipped — file_markdown present, using file as context")
+            docs = []
+            retrieval_info = {"legs": {}, "failed_legs": []}
+            failed_legs = []
+        else:
+            logger.info("[STEP 2] hybrid_search | query=%r | query_type=%s",
+                        standalone_question, classification.type.value)
+            retrieval_result = await hybrid_search_with_legs(
+                query=standalone_question,
+                kb_ids=knowledge_base_ids,
+                db=db,
+                use_dense=use_dense,
+                use_sparse=use_sparse,
+                use_exact=use_exact,
+                use_graph_rag=use_graph_rag,
+                query_type=classification.type,
+            )
+            docs = retrieval_result["docs"]
+            retrieval_info = retrieval_result["retrieval_info"]
+            failed_legs = retrieval_info["failed_legs"]
+            logger.info("[STEP 2] returned %d docs | failed_legs=%s", len(docs), failed_legs)
+            for i, doc in enumerate(docs):
+                snippet = doc.page_content[:120].replace("\n", " ")
+                logger.info("  chunk[%d] meta=%s | text=%r", i, doc.metadata, snippet)
 
         # ── Confidence scoring ─────────────────────────────────────────────
         confidence_result = score_retrieval(docs, retrieval_info)
@@ -543,8 +550,11 @@ async def generate_response(
         #
         # Pre-compute synthesis_active here so we can skip Step 2.5 for synthesis
         # queries (which use a structured tool loop via the synthesis prompt instead).
+        # File-based queries: never use synthesis mode — the file IS the context.
+        # Synthesis mode triggers its own tool loop that has no access to file markdown.
         synthesis_active = (
-            settings.SYNTHESIS_MODE_ENABLED
+            not file_markdown
+            and settings.SYNTHESIS_MODE_ENABLED
             and settings.TOOL_CALLING_ENABLED
             and _is_synthesis_query(standalone_question, classification.type.value)
         )
