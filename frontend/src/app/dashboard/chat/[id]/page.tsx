@@ -684,9 +684,6 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                 ) : (
                   <div key={message.id} className="flex justify-end items-start gap-2 group">
                     <div className="flex flex-col items-end gap-1 max-w-[70%]">
-                      <div className="bg-primary text-primary-foreground rounded-2xl rounded-tr-sm px-4 py-2.5 text-sm">
-                        {message.content}
-                      </div>
                       {message.file_name && message.file_id && (
                         <MessageFileChip
                           fileName={message.file_name}
@@ -694,6 +691,9 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                           chatId={params.id}
                         />
                       )}
+                      <div className="bg-primary text-primary-foreground rounded-2xl rounded-tr-sm px-4 py-2.5 text-sm">
+                        {message.content}
+                      </div>
                       {/* Hover actions */}
                       <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                         <button
