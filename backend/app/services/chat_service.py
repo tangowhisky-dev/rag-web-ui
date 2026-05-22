@@ -404,13 +404,14 @@ async def generate_response(
     use_graph_rag: bool = False,
     temperature:   float = 0.0,
     model_name:    Optional[str] = None,
+    display_query: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     logger.info("=" * 70)
     logger.info("[CHAT] chat_id=%s | kb_ids=%s | query=%r", chat_id, knowledge_base_ids, query)
 
     try:
-        # Persist user message
-        user_message = Message(content=query, role="user", chat_id=chat_id)
+        # Persist user message — use display_query if provided (hides augmented file content)
+        user_message = Message(content=display_query or query, role="user", chat_id=chat_id)
         db.add(user_message)
         db.commit()
 

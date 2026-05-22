@@ -230,6 +230,7 @@ async def create_message_with_file(
             use_sparse=chat.use_sparse,
             use_exact=chat.use_exact,
             use_graph_rag=chat.use_graph_rag,
+            display_query=message,
         ):
             yield chunk
 
