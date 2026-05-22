@@ -684,16 +684,18 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                 ) : (
                   <div key={message.id} className="flex justify-end items-start gap-2 group">
                     <div className="flex flex-col items-end gap-1 max-w-[70%]">
-                      {message.file_name && message.file_id && (
-                        <MessageFileChip
-                          fileName={message.file_name}
-                          fileId={message.file_id}
-                          chatId={params.id}
-                        />
-                      )}
-                      <div className="bg-primary text-primary-foreground rounded-2xl rounded-tr-sm px-4 py-2.5 text-sm">
-                        {message.content}
-                      </div>
+                      <div className="flex flex-row items-center gap-2">
+                        {message.file_name && message.file_id && (
+                          <MessageFileChip
+                            fileName={message.file_name}
+                            fileId={message.file_id}
+                            chatId={params.id}
+                          />
+                        )}
+                        <div className="bg-primary text-primary-foreground rounded-2xl rounded-tr-sm px-4 py-2.5 text-sm">
+                          {message.content}
+                        </div>
+                      </div>{/* end flex-row bubble+chip */}
                       {/* Hover actions */}
                       <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                         <button
