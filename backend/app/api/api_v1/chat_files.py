@@ -10,7 +10,6 @@ Flow:
 import asyncio
 import logging
 import os
-import tempfile
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
@@ -18,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.api.api_v1.auth import get_current_user
 from app.core.config import settings
+from app.core.storage import save_ephemeral_file, delete_ephemeral_chat_files
 from app.db.session import get_db
 from app.models.chat import Chat, ChatFile
 from app.models.user import User
@@ -111,6 +111,7 @@ async def _process_file(db_session_factory, file_id: int, tmp_path: str, filenam
             pass
     finally:
         db.close()
+        # Individual file cleaned up after markdown extraction; ephemeral dir removed on chat delete
         try:
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
@@ -146,11 +147,8 @@ async def upload_chat_file(
             detail=f"File exceeds 10 MB limit ({len(file_bytes) / 1024 / 1024:.1f} MB).",
         )
 
-    # Persist to temp file (background task reads it)
-    suffix = ext or ".tmp"
-    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
-    tmp.write(file_bytes)
-    tmp.close()
+    # Persist to uploads/ephemeral/{chat_id}/ so markitdown can read it
+    stored_path = save_ephemeral_file(chat_id, filename, file_bytes)
 
     chat_file = ChatFile(
         chat_id=chat_id,
@@ -163,7 +161,7 @@ async def upload_chat_file(
     db.commit()
     db.refresh(chat_file)
 
-    background_tasks.add_task(_process_file, None, chat_file.id, tmp.name, filename)
+    background_tasks.add_task(_process_file, None, chat_file.id, stored_path, filename)
 
     return {
         "id": chat_file.id,

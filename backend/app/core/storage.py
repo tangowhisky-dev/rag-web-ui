@@ -76,3 +76,32 @@ def list_files(prefix: str) -> list[str]:
         if p.is_file():
             results.append(str(p.relative_to(base)))
     return results
+
+
+# ── Ephemeral chat-file uploads ───────────────────────────────────────────────
+
+def ephemeral_chat_dir(chat_id: int) -> Path:
+    """Return (and create) the ephemeral upload dir for a chat."""
+    d = _base() / "ephemeral" / str(chat_id)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def save_ephemeral_file(chat_id: int, filename: str, content: bytes) -> str:
+    """Write file bytes to uploads/ephemeral/{chat_id}/{filename}.
+    Returns the absolute path so markitdown can read it."""
+    dest = ephemeral_chat_dir(chat_id) / filename
+    dest.write_bytes(content)
+    logger.info("[chat_files] saved ephemeral file: %s", dest)
+    return str(dest)
+
+
+def delete_ephemeral_chat_files(chat_id: int) -> None:
+    """Remove the entire uploads/ephemeral/{chat_id}/ directory tree.
+    Called when the parent chat is deleted."""
+    d = _base() / "ephemeral" / str(chat_id)
+    if d.exists():
+        shutil.rmtree(d)
+        logger.info("[chat_files] deleted ephemeral dir: %s", d)
+    else:
+        logger.debug("[chat_files] ephemeral dir not found (skip): %s", d)

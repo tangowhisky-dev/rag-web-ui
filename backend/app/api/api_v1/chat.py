@@ -469,4 +469,6 @@ def delete_chat(
 
     db.delete(chat)
     db.commit()
+    # Clean up ephemeral uploaded files for this chat
+    delete_ephemeral_chat_files(chat_id)
     return {"status": "success"}
