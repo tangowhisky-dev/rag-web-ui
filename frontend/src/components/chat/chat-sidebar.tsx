@@ -220,31 +220,30 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
         {/* ── Expanded view ──────────────────────────────────────────── */}
         {!collapsed && (
           <>
-            {/* Mobile close */}
-            <div className="flex items-center justify-between px-3 pt-3 pb-1 lg:pt-2 lg:pb-0 shrink-0">
+            {/* Collapse + New Chat row */}
+            <div className="flex items-center gap-1 px-3 pt-3 pb-2 shrink-0">
+              {/* Desktop: collapse button */}
               <button
                 onClick={toggleCollapse}
-                className="hidden lg:flex p-1.5 rounded-lg hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
+                className="hidden lg:flex p-1.5 rounded-lg hover:bg-muted transition-colors text-muted-foreground hover:text-foreground shrink-0"
                 aria-label="Collapse sidebar"
               >
                 <PanelLeftClose className="h-4 w-4" />
               </button>
+              {/* Mobile: close button */}
               <button
                 onClick={onClose}
-                className="lg:hidden p-1 rounded hover:bg-muted transition-colors ml-auto"
+                className="lg:hidden p-1.5 rounded-lg hover:bg-muted transition-colors text-muted-foreground hover:text-foreground shrink-0"
                 aria-label="Close sidebar"
               >
                 <X className="h-4 w-4" />
               </button>
-            </div>
-
-            {/* New Chat */}
-            <div className="px-3 pb-2 shrink-0">
+              {/* New Chat */}
               <Link
                 href="/dashboard/chat/new"
                 onClick={onClose}
                 data-testid="new-chat-button"
-                className="flex items-center gap-2 w-full rounded-lg px-3 py-2 text-sm font-medium hover:bg-accent transition-colors"
+                className="flex items-center gap-2 flex-1 rounded-lg px-3 py-2 text-sm font-medium hover:bg-accent transition-colors"
               >
                 <Plus className="h-4 w-4 shrink-0" />
                 New Chat
