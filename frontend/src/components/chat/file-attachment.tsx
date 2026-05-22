@@ -127,10 +127,10 @@ export function MessageFileChip({ fileName, fileId, chatId }: MessageFileChipPro
       title={fileName}
       className="group inline-flex items-center gap-1 mt-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
     >
-      <Paperclip className="h-3 w-3 shrink-0 group-hover:text-primary transition-colors" />
       <span className="max-w-[200px] truncate opacity-0 group-hover:opacity-100 transition-opacity">
         {fileName}
       </span>
+      <Paperclip className="h-3 w-3 shrink-0 group-hover:text-primary transition-colors" />
     </button>
   );
 }

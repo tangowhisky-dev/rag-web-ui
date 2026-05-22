@@ -116,12 +116,9 @@ export default function NewChatPage() {
 
   return (
     <ChatLayout>
-      <div className="max-w-2xl mx-auto space-y-8">
+      <div className="max-w-2xl mx-auto space-y-4">
         <div>
           <h2 className="text-3xl font-bold tracking-tight">Start New Chat</h2>
-          <p className="text-muted-foreground">
-            Select a knowledge base to chat with
-          </p>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-6">
@@ -143,9 +140,9 @@ export default function NewChatPage() {
             />
           </div>
 
-          <div className="space-y-2">
+          <div className="space-y-1">
             <label className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70">
-              Knowledge Base
+              Select a knowledge base to chat with
             </label>
             <div className="text-xs text-muted-foreground">
               Multiple selection coming soon...
@@ -190,12 +187,12 @@ export default function NewChatPage() {
 
           {error && <div className="text-sm text-red-500">{error}</div>}
 
-          <div className="space-y-3">
+          <div className="space-y-1">
             <label className="text-sm font-medium leading-none">
               Retrieval Sources
             </label>
             <p className="text-xs text-muted-foreground">
-              Select which sources to use for retrieval. Keyword search is always reliable; enable additional sources to benchmark their effect.
+              Select which techniques/ sources to use for retrieval.
             </p>
             <div className="grid gap-2">
               {([
