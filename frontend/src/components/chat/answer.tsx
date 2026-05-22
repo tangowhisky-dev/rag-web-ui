@@ -653,7 +653,7 @@ export const Answer: FC<{
             className="max-w-2xl w-[calc(100vw-100px)] p-0 rounded-lg shadow-lg overflow-hidden"
           >
             {/* Scrollable inner body — capped height so it never overflows viewport */}
-            <div className="text-sm space-y-3 max-h-[min(70vh,520px)] overflow-y-auto p-4">
+            <div className="text-sm space-y-3 max-h-[min(70vh,520px)] overflow-y-auto p-4" style={{ scrollbarGutter: "stable" }}>
               {citationInfo && (
                 <div className="flex items-center gap-2 text-xs font-medium text-foreground bg-muted p-2 rounded">
                   <div className="w-5 h-5 flex items-center justify-center">
@@ -738,19 +738,22 @@ export const Answer: FC<{
               </div>
               <Divider />
               {Object.keys(citation.metadata).length > 0 && (
-                <div className="text-xs text-muted-foreground bg-muted p-2 rounded">
-                  <div className="font-medium mb-2">Debug Info:</div>
-                  <div className="space-y-1">
+                <details className="text-xs group">
+                  <summary className="cursor-pointer select-none list-none flex items-center gap-1 text-muted-foreground hover:text-foreground transition-colors py-0.5">
+                    <svg className="h-3 w-3 transition-transform group-open:rotate-90 shrink-0" viewBox="0 0 12 12" fill="currentColor">
+                      <path d="M4.5 2 L9 6 L4.5 10" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round"/>
+                    </svg>
+                    Debug Info
+                  </summary>
+                  <div className="mt-1.5 bg-muted text-muted-foreground p-2 rounded space-y-1">
                     {Object.entries(citation.metadata).map(([key, value]) => (
                       <div key={key} className="flex">
-                        <span className="font-medium min-w-[100px]">
-                          {key}:
-                        </span>
-                        <span className="text-foreground/80">{String(value)}</span>
+                        <span className="font-medium min-w-[100px] shrink-0">{key}:</span>
+                        <span className="text-foreground/80 break-all">{String(value)}</span>
                       </div>
                     ))}
                   </div>
-                </div>
+                </details>
               )}
             </div>
           </PopoverContent>
