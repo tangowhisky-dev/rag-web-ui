@@ -17,7 +17,7 @@ import { flushSync } from "react-dom";
 import { useRouter } from "next/navigation";
 import { User, Copy, Trash2, Settings, Download } from "lucide-react";
 import ChatLayout from "@/components/layout/chat-layout";
-import { useChatContext } from "@/contexts/chat-context";
+import { useChatContext, ChatProvider } from "@/contexts/chat-context";
 import ChatSettings from "@/components/chat/chat-settings";
 import type { ChatPatch } from "@/components/chat/chat-settings";
 import { api, ApiError } from "@/lib/api";
@@ -76,7 +76,7 @@ interface Citation {
   metadata: Record<string, any>;
 }
 
-export default function ChatPage({ params }: { params: { id: string } }) {
+function ChatPageInner({ params }: { params: { id: string } }) {
   const router = useRouter();
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const { toast } = useToast();
@@ -705,5 +705,13 @@ export default function ChatPage({ params }: { params: { id: string } }) {
         </div>
       </div>
     </ChatLayout>
+  );
+}
+
+export default function ChatPage({ params }: { params: { id: string } }) {
+  return (
+    <ChatProvider>
+      <ChatPageInner params={params} />
+    </ChatProvider>
   );
 }
