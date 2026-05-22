@@ -59,13 +59,18 @@ def search_documents(
     event loop, e.g. during tool-calling in chat_service).
     """
     from app.services.retrieval import hybrid_search_with_legs
+    from app.db.session import SessionLocal
     import concurrent.futures
 
     def _run():
         import asyncio
-        return asyncio.run(
-            hybrid_search_with_legs(query=query, kb_ids=kb_ids, top_k=top_k)
-        )
+        _db = SessionLocal()
+        try:
+            return asyncio.run(
+                hybrid_search_with_legs(query=query, kb_ids=kb_ids, db=_db)
+            )
+        finally:
+            _db.close()
 
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
@@ -243,15 +248,19 @@ def synthesize_documents(
 
     def _run_all():
         import asyncio
+        from app.db.session import SessionLocal
+        _db = SessionLocal()
+        try:
+            async def _gather():
+                tasks = [
+                    hybrid_search_with_legs(query=q, kb_ids=kb_ids, db=_db)
+                    for q in sub_queries
+                ]
+                return await asyncio.gather(*tasks, return_exceptions=True)
 
-        async def _gather():
-            tasks = [
-                hybrid_search_with_legs(query=q, kb_ids=kb_ids, top_k=top_k_per_query)
-                for q in sub_queries
-            ]
-            return await asyncio.gather(*tasks, return_exceptions=True)
-
-        return asyncio.run(_gather())
+            return asyncio.run(_gather())
+        finally:
+            _db.close()
 
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:

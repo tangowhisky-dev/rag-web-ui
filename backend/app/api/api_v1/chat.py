@@ -152,6 +152,7 @@ async def create_message(
     file_context_parts: list[str] = []
 
     # Current-turn file
+    current_file_markdown: Optional[str] = None
     if file_id:
         chat_file = (
             db.query(ChatFile)
@@ -165,6 +166,7 @@ async def create_message(
         if chat_file.status == "error":
             raise HTTPException(status_code=422, detail=chat_file.error_message or "File processing failed.")
         if chat_file.markdown_content:
+            current_file_markdown = chat_file.markdown_content
             file_context_parts.append(f"## Attached File: {chat_file.file_name}\n\n{chat_file.markdown_content}")
 
     # Prior-turn files in this chat (multi-turn context)
@@ -205,6 +207,7 @@ async def create_message(
             model_name=model_name,
             display_query=display_query,
             file_id=file_id,
+            file_markdown=current_file_markdown,
         ):
             yield chunk
 

@@ -406,6 +406,7 @@ async def generate_response(
     model_name:    Optional[str] = None,
     display_query: Optional[str] = None,
     file_id: Optional[int] = None,
+    file_markdown: Optional[str] = None,  # pre-loaded file content to inject into QA context
 ) -> AsyncGenerator[str, None]:
     logger.info("=" * 70)
     logger.info("[CHAT] chat_id=%s | kb_ids=%s | query=%r", chat_id, knowledge_base_ids, query)
@@ -481,8 +482,12 @@ async def generate_response(
                     len(window_messages), older_count, bool(existing_summary))
 
         # ── Step 1: Rewrite query using sliding window ─────────────────────
-        logger.info("[STEP 1] condense | window_turns=%d", len(recent_lc_history))
-        standalone_question = await _rewrite_query(query, recent_lc_history)
+        # When file content is injected into query, use display_query (the real user
+        # question text) for rewrite — the markdown should never reach the rewriter.
+        rewrite_input = display_query if (file_markdown and display_query) else query
+        logger.info("[STEP 1] condense | window_turns=%d | using_display_query=%s",
+                    len(recent_lc_history), bool(file_markdown and display_query))
+        standalone_question = await _rewrite_query(rewrite_input, recent_lc_history)
         logger.info("[STEP 1] standalone_question=%r", standalone_question)
 
         # Emit rewritten query immediately — UI shows it without waiting for LLM
@@ -664,7 +669,14 @@ async def generate_response(
                 "- Write in the same language as the question (except for code, citations, and proper nouns).\n"
                 "- Do not blindly repeat the contexts verbatim; synthesize and explain.\n\n"
                 f"Context:\n{formatted_context}"
-                f"{summary_section}"
+                + (
+                    f"\n\n## Uploaded File Context\n"
+                    f"The user has uploaded a file whose full contents are provided below. "
+                    f"Use this as the primary source for answering the question.\n\n"
+                    f"{file_markdown}"
+                    if file_markdown else ""
+                )
+                + f"{summary_section}"
             )
 
         logger.info("[STEP 4] QA | model=%s | standalone=%r | context_chunks=%d | window_msgs=%d | has_summary=%s",
