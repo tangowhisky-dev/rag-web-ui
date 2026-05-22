@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
-import { Plus, Pencil, Trash2, X, MessageSquare, Pin, Search, LogOut, Book } from "lucide-react";
+import { Plus, Pencil, Trash2, X, MessageSquare, Pin, Search, Book } from "lucide-react";
 import { useChatContext } from "@/contexts/chat-context";
 
 interface ChatSidebarProps {
@@ -20,12 +20,6 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
   const [editingValue, setEditingValue] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
-
-  const handleLogout = () => {
-    localStorage.removeItem("token");
-    document.cookie = "token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT";
-    router.push("/login");
-  };
 
   useEffect(() => {
     if (editingId !== null) {
@@ -227,8 +221,8 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
           {unpinned.map(renderChatItem)}
         </nav>
 
-        {/* Bottom: KB link + Sign out */}
-        <div className="border-t px-3 py-3 shrink-0 space-y-0.5">
+        {/* Bottom: KB link */}
+        <div className="border-t px-3 py-3 shrink-0">
           <Link
             href="/dashboard/knowledge"
             className="flex items-center gap-2 w-full rounded-lg px-3 py-2 text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
@@ -236,13 +230,6 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
             <Book className="h-4 w-4 shrink-0" />
             Knowledge Base
           </Link>
-          <button
-            onClick={handleLogout}
-            className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
-          >
-            <LogOut className="h-4 w-4 shrink-0" />
-            Sign out
-          </button>
         </div>
       </aside>
     </>

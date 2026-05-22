@@ -541,18 +541,10 @@ function ChatPageInner({ params }: { params: { id: string } }) {
   };
 
   return (
-    <ChatLayout graphRagActive={useGraphRag}>
+    <ChatLayout pageTitle={chatTitle ?? undefined} graphRagActive={useGraphRag}>
       <div className="flex flex-col h-full relative">
-        {/* Minimal top strip: title + action icons */}
-        <div className="flex items-center gap-2 px-4 pt-3 pb-2 shrink-0">
-          <span className="flex-1 text-sm font-medium text-muted-foreground truncate pl-8 lg:pl-0">
-            {chatTitle ?? ""}
-          </span>
-          {useGraphRag && (
-            <span className="inline-flex items-center rounded-full border border-violet-400/50 bg-violet-500/10 px-2 py-0.5 text-xs font-medium text-violet-400">
-              ⬡ GraphRAG
-            </span>
-          )}
+        {/* Action icons row (export + settings) */}
+        <div className="flex items-center justify-end gap-1 px-4 pt-2 pb-1 shrink-0">
           <button
             data-testid="export-chat"
             onClick={handleExport}
