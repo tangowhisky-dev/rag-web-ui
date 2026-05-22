@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "milestoneId": "M002",
+  "sliceId": "S03",
+  "timestamp": 1779374528931,
+  "status": "fail",
+  "durationMs": 1,
+  "checks": [
+    {
+      "category": "tool",
+      "target": "T01 Verify",
+      "passed": false,
+      "message": "Unsafe or non-runnable Verify command: grep -n 'MarkItDown\\|markitdown' backend/app/api/api_v1/chat.py (contains shell control syntax such as pipes, redirects, semicolons, backticks, or command substitution)",
+      "blocking": true
+    },
+    {
+      "category": "tool",
+      "target": "T01 Verify",
+      "passed": false,
+      "message": "Unsafe or non-runnable Verify command: python -c \"import ast; ast.parse(open('backend/app/api/api_v1/chat.py').read()); print('syntax OK')\" (contains shell control syntax such as pipes, redirects, semicolons, backticks, or command substitution)",
+      "blocking": true
+    },
+    {
+      "category": "tool",
+      "target": "T02 Verify",
+      "passed": false,
+      "message": "Unsafe or non-runnable Verify command: npx tsc --noEmit 2>&1 | head -30 (contains shell control syntax such as pipes, redirects, semicolons, backticks, or command substitution)",
+      "blocking": true
+    },
+    {
+      "category": "tool",
+      "target": "T03 Verify",
+      "passed": false,
+      "message": "Unsafe or non-runnable Verify command: npx jest src/components/chat/__tests__/ --passWithNoTests 2>&1 | tail -20 (contains shell control syntax such as pipes, redirects, semicolons, backticks, or command substitution)",
+      "blocking": true
+    },
+    {
+      "category": "tool",
+      "target": "T03 Verify",
+      "passed": false,
+      "message": "Unsafe or non-runnable Verify command: npx tsc --noEmit 2>&1 | head -20 (contains shell control syntax such as pipes, redirects, semicolons, backticks, or command substitution)",
+      "blocking": true
+    }
+  ]
+}
