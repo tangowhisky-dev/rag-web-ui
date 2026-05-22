@@ -200,6 +200,8 @@ function ChatPageInner({ params }: { params: { id: string } }) {
             id: msg.id.toString(),
             role: msg.role,
             content: msg.content,
+            file_name: msg.file_name ?? undefined,
+            file_id: msg.file_id ?? undefined,
           };
 
         try {
@@ -240,6 +242,8 @@ function ChatPageInner({ params }: { params: { id: string } }) {
             confidenceBreakdown: msg.confidence_breakdown
               ? JSON.parse(msg.confidence_breakdown)
               : undefined,
+            file_name: msg.file_name ?? undefined,
+            file_id: msg.file_id ?? undefined,
           };
         } catch (e) {
           console.error("Failed to process message:", e);
@@ -247,6 +251,8 @@ function ChatPageInner({ params }: { params: { id: string } }) {
             id: msg.id.toString(),
             role: msg.role,
             content: msg.content,
+            file_name: msg.file_name ?? undefined,
+            file_id: msg.file_id ?? undefined,
           };
         }
       });
