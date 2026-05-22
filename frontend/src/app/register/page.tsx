@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { api, ApiError } from "@/lib/api";
+import { APP_NAME } from "@/lib/app-config";
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -72,7 +73,7 @@ export default function RegisterPage() {
       <div className="w-full max-w-md">
         <div className="bg-card text-card-foreground rounded-lg border shadow-md p-8 space-y-6">
           <div className="text-center">
-            <h1 className="text-3xl font-bold">Welcome To InsightCore</h1>
+            <h1 className="text-3xl font-bold">Welcome To {APP_NAME}</h1>
             <p className="mt-2 text-sm text-muted-foreground">Create your account to get started</p>
           </div>
 

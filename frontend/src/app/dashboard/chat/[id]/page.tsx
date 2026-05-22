@@ -21,6 +21,7 @@ import { useChatContext, ChatProvider } from "@/contexts/chat-context";
 import ChatSettings from "@/components/chat/chat-settings";
 import type { ChatPatch } from "@/components/chat/chat-settings";
 import { api, ApiError } from "@/lib/api";
+import { APP_LOGO_SRC } from "@/lib/app-config";
 import { useToast } from "@/components/ui/use-toast";
 import { Answer } from "@/components/chat/answer";
 import { InputBar } from "@/components/chat/chat-input";
@@ -567,7 +568,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
           {processedMessages.length === 0 && !isLoading ? (
             /* Welcome / empty state */
             <div className="flex flex-col items-center justify-center h-full gap-4 px-4 text-center">
-              <img src="/logo.png" alt="logo" className="w-16 h-16 rounded-2xl" />
+              <img src={APP_LOGO_SRC} alt="logo" className="w-16 h-16 rounded-2xl" />
               <h2 className="text-2xl font-semibold">How can I help you today?</h2>
               <p className="text-sm text-muted-foreground">Ask anything about your knowledge base</p>
             </div>
@@ -578,7 +579,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                   <div key={message.id} className="flex items-start gap-3">
                     {/* Avatar */}
                     <img
-                      src="/logo.png"
+                      src={APP_LOGO_SRC}
                       className="h-7 w-7 rounded-full shrink-0 mt-0.5"
                       alt="assistant"
                     />

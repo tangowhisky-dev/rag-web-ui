@@ -1,6 +1,7 @@
 "use client";
 
 import { ChevronRight, Home } from "lucide-react";
+import { APP_NAME, APP_ICON_SRC } from "@/lib/app-config";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
@@ -38,8 +39,8 @@ const Breadcrumb = ({ overrideLastLabel }: BreadcrumbProps) => {
         href="/dashboard"
         className="flex items-center gap-2 rounded-lg px-2 py-1 hover:bg-accent hover:text-foreground transition-colors"
       >
-        <img src="/logo.svg" alt="Logo" className="h-5 w-5 rounded" />
-        <span className="font-semibold text-foreground hidden sm:inline">InsightCore</span>
+        <img src={APP_ICON_SRC} alt={APP_NAME} className="h-5 w-5 rounded" />
+        <span className="font-semibold text-foreground hidden sm:inline">{APP_NAME}</span>
         <Home className="h-3.5 w-3.5" />
       </Link>
 

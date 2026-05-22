@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { api, ApiError } from "@/lib/api";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
+import { APP_NAME, APP_DESCRIPTION, APP_ICON_SRC } from "@/lib/app-config";
 import {
   Brain,
   Upload,
@@ -55,8 +56,8 @@ export default function Home() {
       <header className="sticky top-0 z-50 w-full border-b bg-card/80 backdrop-blur-sm">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 flex h-14 items-center gap-4">
           <Link href="/" className="flex items-center gap-2 font-semibold text-sm">
-            <img src="/logo.svg" alt="Logo" className="h-7 w-7 rounded-lg" />
-            InsightCore
+            <img src={APP_ICON_SRC} alt={APP_NAME} className="h-7 w-7 rounded-lg" />
+            {APP_NAME}
           </Link>
           <nav className="hidden md:flex items-center gap-6 ml-8 text-sm text-muted-foreground">
             <a href="#features" className="hover:text-foreground transition-colors">Features</a>
@@ -64,12 +65,12 @@ export default function Home() {
           </nav>
           <div className="ml-auto flex items-center gap-2">
             <ThemeToggle />
-            <Link
+            {/* <Link
               href="/register"
               className="text-sm px-4 py-1.5 rounded-full border hover:bg-muted transition-colors"
             >
               Create account
-            </Link>
+            </Link> */}
           </div>
         </div>
       </header>
@@ -86,11 +87,11 @@ export default function Home() {
                 AI-Powered Enterprise Knowledge Platform
               </div>
               <h1 className="text-5xl sm:text-6xl font-bold tracking-tight leading-[1.1]">
-                Your knowledge.<br />
+                {APP_NAME}.<br />
                 <span className="text-muted-foreground">Instantly searchable.</span>
               </h1>
               <p className="text-lg text-muted-foreground leading-relaxed max-w-lg">
-                InsightCore transforms your enterprise documents into an intelligent knowledge base.
+                {APP_NAME} transforms your enterprise documents into an intelligent knowledge base.
                 Ask questions in plain language and get precise, cited answers in seconds.
               </p>
               <div className="flex flex-col sm:flex-row gap-3">
@@ -98,7 +99,7 @@ export default function Home() {
                   href="/register"
                   className="inline-flex items-center justify-center gap-2 rounded-full bg-primary text-primary-foreground px-6 py-3 text-sm font-semibold hover:bg-primary/90 transition-colors"
                 >
-                  Get started free
+                  Create Account
                   <ChevronRight className="h-4 w-4" />
                 </Link>
               </div>
@@ -158,7 +159,7 @@ export default function Home() {
                 <p className="text-center text-sm text-muted-foreground">
                   No account?{" "}
                   <Link href="/register" className="text-foreground font-medium hover:underline">
-                    Create one free
+                    Create one now
                   </Link>
                 </p>
               </div>
@@ -247,10 +248,10 @@ export default function Home() {
       <footer className="border-t py-8">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-muted-foreground">
           <div className="flex items-center gap-2">
-            <img src="/logo.svg" alt="Logo" className="h-5 w-5 rounded" />
-            <span>InsightCore — Enterprise Knowledge Assistant</span>
+            <img src={APP_ICON_SRC} alt={APP_NAME} className="h-5 w-5 rounded" />
+            <span>{APP_NAME} — {APP_DESCRIPTION}</span>
           </div>
-          <Link href="/register" className="hover:text-foreground transition-colors">Create account</Link>
+          {/* <Link href="/register" className="hover:text-foreground transition-colors">Create account</Link> */}
         </div>
       </footer>
     </div>

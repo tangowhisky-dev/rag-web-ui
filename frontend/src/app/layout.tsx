@@ -4,12 +4,13 @@ import "./globals.css";
 import "highlight.js/styles/github.css";
 import { Toaster } from "@/components/ui/toaster";
 import { ThemeProvider } from "@/components/theme-provider";
+import { APP_NAME, APP_DESCRIPTION } from "@/lib/app-config";
 
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "InsightCore",
-  description: "AI-Powered Knowledge Assistant",
+  title: APP_NAME,
+  description: APP_DESCRIPTION,
 };
 
 export default function RootLayout({
