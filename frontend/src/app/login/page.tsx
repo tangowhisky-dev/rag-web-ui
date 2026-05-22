@@ -36,9 +36,7 @@ export default function LoginPage() {
       formUrlEncoded.append("password", password as string);
 
       const data = await api.post("/api/auth/token", formUrlEncoded, {
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
       });
 
       localStorage.setItem("token", data.access_token);
@@ -56,25 +54,18 @@ export default function LoginPage() {
   };
 
   return (
-    <main className="min-h-screen bg-gray-50 flex items-center justify-center px-4 sm:px-6 lg:px-8">
+    <main className="min-h-screen bg-background flex items-center justify-center px-4 sm:px-6 lg:px-8">
       <div className="w-full max-w-md">
-        <div className="bg-white rounded-lg shadow-md p-8 space-y-6">
+        <div className="bg-card text-card-foreground rounded-lg border shadow-md p-8 space-y-6">
           <div className="text-center">
-            <h1 className="text-3xl font-bold text-gray-900">
-              Welcome To InsightCore
-            </h1>
-            <p className="mt-2 text-sm text-gray-600">
-              Please sign in to continue
-            </p>
+            <h1 className="text-3xl font-bold">Welcome To InsightCore</h1>
+            <p className="mt-2 text-sm text-muted-foreground">Please sign in to continue</p>
           </div>
 
           <form className="space-y-6" onSubmit={handleSubmit}>
             <div className="space-y-4">
               <div>
-                <label
-                  htmlFor="username"
-                  className="block text-sm font-medium text-gray-700"
-                >
+                <label htmlFor="username" className="block text-sm font-medium mb-1">
                   Username
                 </label>
                 <input
@@ -83,16 +74,13 @@ export default function LoginPage() {
                   type="text"
                   required
                   disabled={loading}
-                  className="mt-1 block w-full px-3 py-2 rounded-md border border-gray-300 shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full px-3 py-2 rounded-md border border-input bg-background text-foreground shadow-sm focus:outline-none focus:ring-2 focus:ring-ring placeholder:text-muted-foreground"
                   placeholder="Enter your username"
                 />
               </div>
 
               <div>
-                <label
-                  htmlFor="password"
-                  className="block text-sm font-medium text-gray-700"
-                >
+                <label htmlFor="password" className="block text-sm font-medium mb-1">
                   Password
                 </label>
                 <input
@@ -101,14 +89,14 @@ export default function LoginPage() {
                   type="password"
                   required
                   disabled={loading}
-                  className="mt-1 block w-full px-3 py-2 rounded-md border border-gray-300 shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className="w-full px-3 py-2 rounded-md border border-input bg-background text-foreground shadow-sm focus:outline-none focus:ring-2 focus:ring-ring placeholder:text-muted-foreground"
                   placeholder="Enter your password"
                 />
               </div>
             </div>
 
             {error && (
-              <div className="p-3 rounded-md bg-red-50 text-red-700 text-sm">
+              <div className="p-3 rounded-md bg-destructive/10 text-destructive text-sm">
                 {error}
               </div>
             )}
@@ -116,18 +104,15 @@ export default function LoginPage() {
             <button
               type="submit"
               disabled={loading}
-              className="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-gray-600 hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="w-full flex justify-center py-2 px-4 rounded-md text-sm font-medium bg-primary text-primary-foreground hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
-              {loading ? "Signing in..." : "Sign in"}
+              {loading ? "Signing in…" : "Sign in"}
             </button>
           </form>
 
           <div className="text-center">
-            <Link
-              href="/register"
-              className="text-sm font-medium text-gray-600 hover:text-gray-500"
-            >
-              Don't have an account? Create one now
+            <Link href="/register" className="text-sm text-muted-foreground hover:text-foreground transition-colors">
+              Don&apos;t have an account? Create one now
             </Link>
           </div>
         </div>

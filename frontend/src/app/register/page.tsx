@@ -17,10 +17,7 @@ export default function RegisterPage() {
   const validateEmail = (email: string) => {
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(email)) {
-      setValidationErrors((prev) => ({
-        ...prev,
-        email: "Please enter a valid email address",
-      }));
+      setValidationErrors((prev) => ({ ...prev, email: "Please enter a valid email address" }));
       return false;
     }
     setValidationErrors((prev) => ({ ...prev, email: "" }));
@@ -29,10 +26,7 @@ export default function RegisterPage() {
 
   const validatePassword = (password: string) => {
     if (password.length < 6) {
-      setValidationErrors((prev) => ({
-        ...prev,
-        password: "Password must be at least 6 characters long",
-      }));
+      setValidationErrors((prev) => ({ ...prev, password: "Password must be at least 6 characters long" }));
       return false;
     }
     setValidationErrors((prev) => ({ ...prev, password: "" }));
@@ -50,29 +44,17 @@ export default function RegisterPage() {
     const password = formData.get("password") as string;
     const confirmPassword = formData.get("confirmPassword") as string;
 
-    // Validate email and password
     const isEmailValid = validateEmail(email);
     const isPasswordValid = validatePassword(password);
 
     if (password !== confirmPassword) {
-      setValidationErrors((prev) => ({
-        ...prev,
-        confirmPassword: "Passwords do not match",
-      }));
+      setValidationErrors((prev) => ({ ...prev, confirmPassword: "Passwords do not match" }));
       return;
     }
-
-    if (!isEmailValid || !isPasswordValid) {
-      return;
-    }
+    if (!isEmailValid || !isPasswordValid) return;
 
     try {
-      await api.post("/api/auth/register", {
-        username,
-        email,
-        password,
-      });
-
+      await api.post("/api/auth/register", { username, email, password });
       router.push("/login");
     } catch (err) {
       if (err instanceof ApiError) {
@@ -83,138 +65,71 @@ export default function RegisterPage() {
     }
   };
 
+  const inputBase = "w-full px-3 py-2 rounded-md border bg-background text-foreground shadow-sm focus:outline-none focus:ring-2 focus:ring-ring placeholder:text-muted-foreground";
+
   return (
-    <main className="min-h-screen bg-gray-50 flex items-center justify-center px-4 sm:px-6 lg:px-8">
+    <main className="min-h-screen bg-background flex items-center justify-center px-4 sm:px-6 lg:px-8">
       <div className="w-full max-w-md">
-        <div className="bg-white rounded-lg shadow-md p-8 space-y-6">
+        <div className="bg-card text-card-foreground rounded-lg border shadow-md p-8 space-y-6">
           <div className="text-center">
-            <h1 className="text-3xl font-bold text-gray-900">
-              Welcome To InsightCore
-            </h1>
-            <p className="mt-2 text-sm text-gray-600">
-              Create your account to get started
-            </p>
+            <h1 className="text-3xl font-bold">Welcome To InsightCore</h1>
+            <p className="mt-2 text-sm text-muted-foreground">Create your account to get started</p>
           </div>
 
           <form className="space-y-6" onSubmit={handleSubmit}>
             <div className="space-y-4">
               <div>
-                <label
-                  htmlFor="username"
-                  className="block text-sm font-medium text-gray-700"
-                >
-                  Username
-                </label>
-                <input
-                  id="username"
-                  name="username"
-                  type="text"
-                  required
-                  className="mt-1 block w-full px-3 py-2 rounded-md border border-gray-300 shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  placeholder="Enter your username"
-                />
+                <label htmlFor="username" className="block text-sm font-medium mb-1">Username</label>
+                <input id="username" name="username" type="text" required
+                  className={inputBase + " border-input"}
+                  placeholder="Enter your username" />
               </div>
 
               <div>
-                <label
-                  htmlFor="email"
-                  className="block text-sm font-medium text-gray-700"
-                >
-                  Email
-                </label>
-                <input
-                  id="email"
-                  name="email"
-                  type="email"
-                  required
-                  className={`mt-1 block w-full px-3 py-2 rounded-md border ${
-                    validationErrors.email
-                      ? "border-red-300"
-                      : "border-gray-300"
-                  } shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500`}
+                <label htmlFor="email" className="block text-sm font-medium mb-1">Email</label>
+                <input id="email" name="email" type="email" required
+                  className={inputBase + (validationErrors.email ? " border-destructive" : " border-input")}
                   placeholder="Enter your email"
-                  onChange={(e) => validateEmail(e.target.value)}
-                />
+                  onChange={(e) => validateEmail(e.target.value)} />
                 {validationErrors.email && (
-                  <p className="mt-1 text-sm text-red-600">
-                    {validationErrors.email}
-                  </p>
+                  <p className="mt-1 text-sm text-destructive">{validationErrors.email}</p>
                 )}
               </div>
 
               <div>
-                <label
-                  htmlFor="password"
-                  className="block text-sm font-medium text-gray-700"
-                >
-                  Password
-                </label>
-                <input
-                  id="password"
-                  name="password"
-                  type="password"
-                  required
-                  className={`mt-1 block w-full px-3 py-2 rounded-md border ${
-                    validationErrors.password
-                      ? "border-red-300"
-                      : "border-gray-300"
-                  } shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500`}
+                <label htmlFor="password" className="block text-sm font-medium mb-1">Password</label>
+                <input id="password" name="password" type="password" required
+                  className={inputBase + (validationErrors.password ? " border-destructive" : " border-input")}
                   placeholder="Create a password"
-                  onChange={(e) => validatePassword(e.target.value)}
-                />
+                  onChange={(e) => validatePassword(e.target.value)} />
                 {validationErrors.password && (
-                  <p className="mt-1 text-sm text-red-600">
-                    {validationErrors.password}
-                  </p>
+                  <p className="mt-1 text-sm text-destructive">{validationErrors.password}</p>
                 )}
               </div>
 
               <div>
-                <label
-                  htmlFor="confirmPassword"
-                  className="block text-sm font-medium text-gray-700"
-                >
-                  Confirm Password
-                </label>
-                <input
-                  id="confirmPassword"
-                  name="confirmPassword"
-                  type="password"
-                  required
-                  className={`mt-1 block w-full px-3 py-2 rounded-md border ${
-                    validationErrors.confirmPassword
-                      ? "border-red-300"
-                      : "border-gray-300"
-                  } shadow-sm focus:ring-2 focus:ring-gray-500 focus:border-gray-500`}
-                  placeholder="Confirm your password"
-                />
+                <label htmlFor="confirmPassword" className="block text-sm font-medium mb-1">Confirm Password</label>
+                <input id="confirmPassword" name="confirmPassword" type="password" required
+                  className={inputBase + (validationErrors.confirmPassword ? " border-destructive" : " border-input")}
+                  placeholder="Confirm your password" />
                 {validationErrors.confirmPassword && (
-                  <p className="mt-1 text-sm text-red-600">
-                    {validationErrors.confirmPassword}
-                  </p>
+                  <p className="mt-1 text-sm text-destructive">{validationErrors.confirmPassword}</p>
                 )}
               </div>
             </div>
 
             {error && (
-              <div className="p-3 rounded-md bg-red-50 text-red-700 text-sm">
-                {error}
-              </div>
+              <div className="p-3 rounded-md bg-destructive/10 text-destructive text-sm">{error}</div>
             )}
 
-            <button
-              type="submit"
-              className="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-gray-600 hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500"
-            >
+            <button type="submit"
+              className="w-full flex justify-center py-2 px-4 rounded-md text-sm font-medium bg-primary text-primary-foreground hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-ring transition-colors">
               Create Account
             </button>
           </form>
 
           <div className="text-center">
-            <Link
-              href="/login"
-              className="text-sm font-medium text-gray-600 hover:text-gray-500"
-            >
+            <Link href="/login" className="text-sm text-muted-foreground hover:text-foreground transition-colors">
               Already have an account? Sign in
             </Link>
           </div>
