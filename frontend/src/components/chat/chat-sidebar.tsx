@@ -3,7 +3,10 @@
 import { useState, useRef, useEffect } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
-import { Plus, Pencil, Trash2, X, MessageSquare, Pin, Search, Settings, Download } from "lucide-react";
+import {
+  Plus, Pencil, Trash2, X, MessageSquare, Pin, Search,
+  Settings, Download, PanelLeftClose, PanelLeftOpen,
+} from "lucide-react";
 import { useChatContext } from "@/contexts/chat-context";
 
 interface ChatSidebarProps {
@@ -16,6 +19,11 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
   const pathname = usePathname();
   const { chatList, activeChat, renameChat, deleteChat, patchChat } = useChatContext();
 
+  const [collapsed, setCollapsed] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return localStorage.getItem("chat-sidebar-collapsed") === "true";
+  });
+
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editingValue, setEditingValue] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
@@ -27,6 +35,13 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
       inputRef.current?.select();
     }
   }, [editingId]);
+
+  const toggleCollapse = () => {
+    setCollapsed((prev) => {
+      localStorage.setItem("chat-sidebar-collapsed", String(!prev));
+      return !prev;
+    });
+  };
 
   const startEdit = (id: number, title: string) => {
     setEditingId(id);
@@ -58,13 +73,6 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
     await patchChat(id, { pinned: !pinned }).catch(() => {});
   };
 
-  const filtered = chatList.filter((c) => {
-    if (!searchQuery.trim()) return true;
-    return c.title.toLowerCase().includes(searchQuery.toLowerCase());
-  });
-  const pinned = filtered.filter((c) => c.pinned);
-  const unpinned = filtered.filter((c) => !c.pinned);
-
   const handleExport = async (id: number) => {
     try {
       const res = await fetch(`/api/chat/${id}/export`, {
@@ -84,6 +92,13 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
       console.error("Export failed", e);
     }
   };
+
+  const filtered = chatList.filter((c) => {
+    if (!searchQuery.trim()) return true;
+    return c.title.toLowerCase().includes(searchQuery.toLowerCase());
+  });
+  const pinned = filtered.filter((c) => c.pinned);
+  const unpinned = filtered.filter((c) => !c.pinned);
 
   const renderChatItem = (chat: (typeof chatList)[0]) => {
     const isActive =
@@ -170,87 +185,123 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
 
       <aside
         className={[
-          // Mobile: fixed overlay sliding from left
-          // Desktop: static in-flow, full height of parent flex row
-          "fixed inset-y-0 left-0 z-30 w-64 bg-card border-r flex flex-col",
-          "transition-transform duration-200 ease-in-out",
+          "fixed inset-y-0 left-0 z-30 bg-card border-r flex flex-col",
+          "transition-all duration-200 ease-in-out",
           "lg:relative lg:inset-auto lg:translate-x-0 lg:z-auto lg:h-full",
-          isOpen ? "translate-x-0" : "-translate-x-full",
+          // Width: collapsed = icon rail, expanded = full
+          collapsed ? "w-12" : "w-64",
+          // Mobile show/hide
+          isOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0",
         ].join(" ")}
       >
-        {/* Mobile close button */}
-        <div className="flex items-center justify-end px-3 pt-3 lg:hidden shrink-0">
-          <button
-            onClick={onClose}
-            className="p-1 rounded hover:bg-muted transition-colors"
-            aria-label="Close sidebar"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-
-        {/* New Chat */}
-        <div className="px-3 pb-2 shrink-0">
-          <Link
-            href="/dashboard/chat/new"
-            onClick={onClose}
-            data-testid="new-chat-button"
-            className="flex items-center gap-2 w-full rounded-lg px-3 py-2 text-sm font-medium hover:bg-accent transition-colors"
-          >
-            <Plus className="h-4 w-4 shrink-0" />
-            New Chat
-          </Link>
-        </div>
-
-        {/* Search */}
-        <div className="px-3 pb-3 shrink-0">
-          <div className="flex items-center gap-1.5 rounded-lg border bg-muted/40 px-2.5 py-1.5">
-            <Search className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-            <input
-              data-testid="chat-search"
-              type="text"
-              placeholder="Search chats…"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
-            />
+        {/* ── Collapsed view ─────────────────────────────────────────── */}
+        {collapsed && (
+          <div className="flex flex-col items-center gap-2 py-3 flex-1">
+            {/* Expand button */}
+            <button
+              onClick={toggleCollapse}
+              className="p-2 rounded-lg hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
+              aria-label="Expand sidebar"
+            >
+              <PanelLeftOpen className="h-4 w-4" />
+            </button>
+            <div className="flex-1" />
+            {/* Settings */}
+            <Link
+              href="/dashboard/settings"
+              className="p-2 rounded-lg hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
+              aria-label="Settings"
+            >
+              <Settings className="h-4 w-4" />
+            </Link>
           </div>
-        </div>
+        )}
 
-        {/* Chat list */}
-        <nav
-          data-testid="chat-list"
-          className="flex-1 overflow-y-auto px-2 space-y-0.5"
-        >
-          {filtered.length === 0 && (
-            <p className="text-xs text-muted-foreground text-center mt-6 px-4">
-              {searchQuery ? "No matching chats." : "No conversations yet."}
-            </p>
-          )}
-          {pinned.length > 0 && (
-            <p className="text-xs text-muted-foreground px-2 pt-1 pb-0.5 uppercase tracking-wide">
-              Pinned
-            </p>
-          )}
-          {pinned.map(renderChatItem)}
-          {pinned.length > 0 && unpinned.length > 0 && (
-            <p className="text-xs text-muted-foreground px-2 pt-3 pb-0.5 uppercase tracking-wide">
-              Recent
-            </p>
-          )}
-          {unpinned.map(renderChatItem)}
-        </nav>
+        {/* ── Expanded view ──────────────────────────────────────────── */}
+        {!collapsed && (
+          <>
+            {/* Mobile close */}
+            <div className="flex items-center justify-between px-3 pt-3 pb-1 lg:pt-2 lg:pb-0 shrink-0">
+              <button
+                onClick={toggleCollapse}
+                className="hidden lg:flex p-1.5 rounded-lg hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
+                aria-label="Collapse sidebar"
+              >
+                <PanelLeftClose className="h-4 w-4" />
+              </button>
+              <button
+                onClick={onClose}
+                className="lg:hidden p-1 rounded hover:bg-muted transition-colors ml-auto"
+                aria-label="Close sidebar"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
 
-        {/* Bottom: Settings link */}
-        <div className="border-t px-3 py-3 shrink-0">
-          <Link
-            href="/dashboard/settings"
-            className="flex items-center gap-2 w-full rounded-lg px-3 py-2 text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-          >
-            <Settings className="h-4 w-4 shrink-0" />
-            Settings
-          </Link>
-        </div>
+            {/* New Chat */}
+            <div className="px-3 pb-2 shrink-0">
+              <Link
+                href="/dashboard/chat/new"
+                onClick={onClose}
+                data-testid="new-chat-button"
+                className="flex items-center gap-2 w-full rounded-lg px-3 py-2 text-sm font-medium hover:bg-accent transition-colors"
+              >
+                <Plus className="h-4 w-4 shrink-0" />
+                New Chat
+              </Link>
+            </div>
+
+            {/* Search */}
+            <div className="px-3 pb-3 shrink-0">
+              <div className="flex items-center gap-1.5 rounded-lg border bg-muted/40 px-2.5 py-1.5">
+                <Search className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                <input
+                  data-testid="chat-search"
+                  type="text"
+                  placeholder="Search chats…"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+                />
+              </div>
+            </div>
+
+            {/* Chat list */}
+            <nav
+              data-testid="chat-list"
+              className="flex-1 overflow-y-auto px-2 space-y-0.5"
+            >
+              {filtered.length === 0 && (
+                <p className="text-xs text-muted-foreground text-center mt-6 px-4">
+                  {searchQuery ? "No matching chats." : "No conversations yet."}
+                </p>
+              )}
+              {pinned.length > 0 && (
+                <p className="text-xs text-muted-foreground px-2 pt-1 pb-0.5 uppercase tracking-wide">
+                  Pinned
+                </p>
+              )}
+              {pinned.map(renderChatItem)}
+              {pinned.length > 0 && unpinned.length > 0 && (
+                <p className="text-xs text-muted-foreground px-2 pt-3 pb-0.5 uppercase tracking-wide">
+                  Recent
+                </p>
+              )}
+              {unpinned.map(renderChatItem)}
+            </nav>
+
+            {/* Bottom: Settings */}
+            <div className="border-t px-3 py-3 shrink-0">
+              <Link
+                href="/dashboard/settings"
+                className="flex items-center gap-2 w-full rounded-lg px-3 py-2 text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+              >
+                <Settings className="h-4 w-4 shrink-0" />
+                Settings
+              </Link>
+            </div>
+          </>
+        )}
       </aside>
     </>
   );
