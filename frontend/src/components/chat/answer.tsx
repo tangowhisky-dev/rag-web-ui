@@ -648,9 +648,12 @@ export const Answer: FC<{
           <PopoverContent
             side="top"
             align="start"
-            className="max-w-2xl w-[calc(100vw-100px)] p-4 rounded-lg shadow-lg"
+            sideOffset={6}
+            collisionPadding={12}
+            className="max-w-2xl w-[calc(100vw-100px)] p-0 rounded-lg shadow-lg overflow-hidden"
           >
-            <div className="text-sm space-y-3">
+            {/* Scrollable inner body — capped height so it never overflows viewport */}
+            <div className="text-sm space-y-3 max-h-[min(70vh,520px)] overflow-y-auto p-4">
               {citationInfo && (
                 <div className="flex items-center gap-2 text-xs font-medium text-foreground bg-muted p-2 rounded">
                   <div className="w-5 h-5 flex items-center justify-center">
@@ -874,17 +877,9 @@ export const Answer: FC<{
               <span>{copied ? "Copied" : "Copy"}</span>
             </button>
             <button
-              onClick={handleDelete}
-              title="Delete message"
-              className="flex items-center gap-1 px-2 py-1 rounded text-xs text-zinc-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
-            >
-              <Trash2 className="h-3.5 w-3.5" />
-              <span>Delete</span>
-            </button>
-            <button
               onClick={() => handleExport("word")}
               title="Export as Word"
-              className="flex items-center gap-1 px-2 py-1 rounded text-xs text-zinc-500 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors"
+              className="flex items-center gap-1 px-2 py-1 rounded text-xs text-zinc-500 hover:text-blue-600 hover:bg-zinc-100 dark:hover:text-zinc-200 dark:hover:bg-zinc-800 transition-colors"
             >
               <FileText className="h-3.5 w-3.5" />
               <span>Word</span>
@@ -892,7 +887,7 @@ export const Answer: FC<{
             <button
               onClick={() => handleExport("pdf")}
               title="Export as PDF"
-              className="flex items-center gap-1 px-2 py-1 rounded text-xs text-zinc-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+              className="flex items-center gap-1 px-2 py-1 rounded text-xs text-zinc-500 hover:text-red-600 hover:bg-zinc-100 dark:hover:text-zinc-200 dark:hover:bg-zinc-800 transition-colors"
             >
               <FileType className="h-3.5 w-3.5" />
               <span>PDF</span>
@@ -900,10 +895,18 @@ export const Answer: FC<{
             <button
               onClick={() => handleExport("image")}
               title="Export as image"
-              className="flex items-center gap-1 px-2 py-1 rounded text-xs text-zinc-500 hover:text-purple-600 hover:bg-purple-50 dark:hover:bg-purple-900/20 transition-colors"
+              className="flex items-center gap-1 px-2 py-1 rounded text-xs text-zinc-500 hover:text-purple-600 hover:bg-zinc-100 dark:hover:text-zinc-200 dark:hover:bg-zinc-800 transition-colors"
             >
               <FileImage className="h-3.5 w-3.5" />
               <span>Image</span>
+            </button>
+            <button
+              onClick={handleDelete}
+              title="Delete message"
+              className="flex items-center gap-1 px-2 py-1 rounded text-xs text-zinc-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              <span>Delete</span>
             </button>
           </div>
 
