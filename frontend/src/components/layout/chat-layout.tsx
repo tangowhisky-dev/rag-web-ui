@@ -65,7 +65,7 @@ export default function ChatLayout({
         </header>
 
         {/* Sidebar + content row — fills full height; content scrolls under frosted header */}
-        <div className="absolute inset-0 flex pt-12">
+        <div className="absolute inset-0 flex">
           <ChatSidebar
             isOpen={isChatSidebarOpen}
             onClose={() => setIsChatSidebarOpen(false)}
