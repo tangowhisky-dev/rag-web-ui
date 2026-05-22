@@ -155,9 +155,8 @@ async def upload_chat_file(
     db.commit()
     db.refresh(chat_file)
 
-    # Stored as {file_id}_{original_filename} — unique even if the same name is re-uploaded
-    stored_name = f"{chat_file.id}_{filename}"
-    stored_path = save_ephemeral_file(chat_id, stored_name, file_bytes)
+    # save_ephemeral_file appends _1, _2 … if the same filename already exists in the dir
+    stored_path = save_ephemeral_file(chat_id, filename, file_bytes)
 
     background_tasks.add_task(_process_file, None, chat_file.id, stored_path, filename)
 

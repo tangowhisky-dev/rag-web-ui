@@ -89,11 +89,22 @@ def ephemeral_chat_dir(chat_id: int) -> Path:
 
 def save_ephemeral_file(chat_id: int, filename: str, content: bytes) -> str:
     """Write file bytes to uploads/ephemeral/{chat_id}/{filename}.
-    Returns the absolute path so markitdown can read it."""
-    dest = ephemeral_chat_dir(chat_id) / filename
-    dest.write_bytes(content)
-    logger.info("[chat_files] saved ephemeral file: %s", dest)
-    return str(dest)
+
+    If a file with the same name already exists in the directory, appends _1, _2, …
+    before the extension until a free slot is found.
+    Returns the absolute path so markitdown can read it.
+    """
+    d = ephemeral_chat_dir(chat_id)
+    stem = Path(filename).stem
+    suffix = Path(filename).suffix
+    candidate = d / filename
+    counter = 1
+    while candidate.exists():
+        candidate = d / f"{stem}_{counter}{suffix}"
+        counter += 1
+    candidate.write_bytes(content)
+    logger.info("[chat_files] saved ephemeral file: %s", candidate)
+    return str(candidate)
 
 
 def delete_ephemeral_chat_files(chat_id: int) -> None:
