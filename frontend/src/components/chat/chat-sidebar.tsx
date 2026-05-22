@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
-import { Plus, Pencil, Trash2, X, MessageSquare, Pin, Search } from "lucide-react";
+import { Plus, Pencil, Trash2, X, MessageSquare, Pin, Search, LogOut } from "lucide-react";
 import { useChatContext } from "@/contexts/chat-context";
 
 interface ChatSidebarProps {
@@ -13,6 +13,12 @@ interface ChatSidebarProps {
 
 export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
   const router = useRouter();
+
+  const handleLogout = () => {
+    localStorage.removeItem("token");
+    document.cookie = 'token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT';
+    router.push("/login");
+  };
   const pathname = usePathname();
   const { chatList, activeChat, renameChat, deleteChat, patchChat } = useChatContext();
 
@@ -218,6 +224,16 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
           )}
           {unpinned.map(renderChatItem)}
         </nav>
+        {/* Sign out */}
+        <div className="border-t p-3 shrink-0">
+          <button
+            onClick={handleLogout}
+            className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-destructive hover:bg-destructive/10 transition-colors"
+          >
+            <LogOut className="h-4 w-4" />
+            Sign out
+          </button>
+        </div>
       </aside>
     </>
   );
