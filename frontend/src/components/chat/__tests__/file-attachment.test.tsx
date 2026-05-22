@@ -15,33 +15,33 @@ function makeFile(name: string, type: string, sizeBytes = 1024): File {
 describe("FileChip", () => {
   it("renders the filename", () => {
     const file = makeFile("report.pdf", "application/pdf");
-    render(<FileChip file={file} onRemove={jest.fn()} />);
+    render(<FileChip uploadedFile={{ id: 1, file_name: file.name, file_size: file.size, status: "ready" }} onRemove={jest.fn()} />);
     expect(screen.getByTestId("file-chip")).toBeInTheDocument();
     expect(screen.getByText(/report\.pdf/)).toBeInTheDocument();
   });
 
   it("renders formatted file size in bytes", () => {
     const file = makeFile("tiny.txt", "text/plain", 512);
-    render(<FileChip file={file} onRemove={jest.fn()} />);
+    render(<FileChip uploadedFile={{ id: 1, file_name: file.name, file_size: file.size, status: "ready" }} onRemove={jest.fn()} />);
     expect(screen.getByText(/512 B/)).toBeInTheDocument();
   });
 
   it("renders formatted file size in KB", () => {
     const file = makeFile("small.txt", "text/plain", 2048);
-    render(<FileChip file={file} onRemove={jest.fn()} />);
+    render(<FileChip uploadedFile={{ id: 1, file_name: file.name, file_size: file.size, status: "ready" }} onRemove={jest.fn()} />);
     expect(screen.getByText(/2\.0 KB/)).toBeInTheDocument();
   });
 
   it("renders formatted file size in MB", () => {
     const file = makeFile("big.pdf", "application/pdf", 2 * 1024 * 1024);
-    render(<FileChip file={file} onRemove={jest.fn()} />);
+    render(<FileChip uploadedFile={{ id: 1, file_name: file.name, file_size: file.size, status: "ready" }} onRemove={jest.fn()} />);
     expect(screen.getByText(/2\.0 MB/)).toBeInTheDocument();
   });
 
   it("calls onRemove when X button is clicked", () => {
     const onRemove = jest.fn();
     const file = makeFile("doc.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
-    render(<FileChip file={file} onRemove={onRemove} />);
+    render(<FileChip uploadedFile={{ id: 1, file_name: file.name, file_size: file.size, status: "ready" }} onRemove={onRemove} />);
     fireEvent.click(screen.getByTestId("file-chip-remove"));
     expect(onRemove).toHaveBeenCalledTimes(1);
   });
@@ -49,7 +49,7 @@ describe("FileChip", () => {
   it("truncates long filenames", () => {
     const longName = "a".repeat(40) + ".pdf";
     const file = makeFile(longName, "application/pdf");
-    render(<FileChip file={file} onRemove={jest.fn()} />);
+    render(<FileChip uploadedFile={{ id: 1, file_name: file.name, file_size: file.size, status: "ready" }} onRemove={jest.fn()} />);
     // Full name should not appear verbatim (it gets truncated)
     const chip = screen.getByTestId("file-chip");
     const nameSpan = chip.querySelector("span[title]") as HTMLElement;

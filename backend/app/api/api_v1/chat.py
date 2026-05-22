@@ -7,7 +7,7 @@ from fastapi.responses import StreamingResponse, Response
 from sqlalchemy.orm import Session, joinedload
 from app.db.session import get_db
 from app.models.user import User
-from app.models.chat import Chat, Message
+from app.models.chat import Chat, Message, ChatFile
 from app.models.knowledge import KnowledgeBase
 from app.schemas.chat import (
     ChatCreate,
@@ -96,6 +96,22 @@ def get_chat(
     )
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
+
+    # Build a file_name lookup: message_id → file_name
+    file_map: dict[int, str] = {}
+    chat_files = (
+        db.query(ChatFile)
+        .filter(ChatFile.chat_id == chat_id, ChatFile.message_id.isnot(None))
+        .all()
+    )
+    for cf in chat_files:
+        if cf.message_id:
+            file_map[cf.message_id] = cf.file_name
+
+    # Inject file_name onto each message as a transient attribute
+    for msg in chat.messages:
+        msg.file_name = file_map.get(msg.id)  # type: ignore[attr-defined]
+
     return chat
 
 @router.post("/{chat_id}/messages")
@@ -117,22 +133,74 @@ async def create_message(
     )
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
-    
+
     # Get the last user message
     last_message = messages["messages"][-1]
     if last_message["role"] != "user":
         raise HTTPException(status_code=400, detail="Last message must be from user")
-    
+
     # Optional per-request overrides
     temperature: float = float(messages.get("temperature", 0.0))
     model_name: Optional[str] = messages.get("model_name") or None
+    file_id: Optional[int] = messages.get("file_id") or None
 
-    # Get knowledge base IDs
+    # ── File context injection ─────────────────────────────────────────────────
+    # Build augmented query from: attached file (current turn) + any files from
+    # prior turns in the same chat (multi-turn context).
+    query_text = last_message["content"]
+    display_query = query_text          # shown in UI / stored in DB
+    file_context_parts: list[str] = []
+
+    # Current-turn file
+    if file_id:
+        chat_file = (
+            db.query(ChatFile)
+            .filter(ChatFile.id == file_id, ChatFile.chat_id == chat_id)
+            .first()
+        )
+        if not chat_file:
+            raise HTTPException(status_code=404, detail="File not found")
+        if chat_file.status == "processing":
+            raise HTTPException(status_code=409, detail="File is still processing. Please wait and retry.")
+        if chat_file.status == "error":
+            raise HTTPException(status_code=422, detail=chat_file.error_message or "File processing failed.")
+        if chat_file.markdown_content:
+            file_context_parts.append(f"## Attached File: {chat_file.file_name}
+
+{chat_file.markdown_content}")
+
+    # Prior-turn files in this chat (multi-turn context)
+    prior_files = (
+        db.query(ChatFile)
+        .filter(
+            ChatFile.chat_id == chat_id,
+            ChatFile.status == "ready",
+            ChatFile.message_id.isnot(None),   # already linked to a sent message
+            ChatFile.id != file_id if file_id else True,
+        )
+        .order_by(ChatFile.id.asc())
+        .all()
+    )
+    for pf in prior_files:
+        if pf.markdown_content:
+            file_context_parts.append(f"## Previously Uploaded File: {pf.file_name}
+
+{pf.markdown_content}")
+
+    if file_context_parts:
+        query_text = "
+
+".join(file_context_parts) + "
+
+" + query_text
+
     knowledge_base_ids = [kb.id for kb in chat.knowledge_bases]
 
     async def response_stream():
+        # After generate_response creates the user Message, link the chat_file to it
+        user_msg_id: Optional[int] = None
         async for chunk in generate_response(
-            query=last_message["content"],
+            query=query_text,
             messages=messages,
             knowledge_base_ids=knowledge_base_ids,
             chat_id=chat_id,
@@ -143,15 +211,15 @@ async def create_message(
             use_graph_rag=chat.use_graph_rag,
             temperature=temperature,
             model_name=model_name,
+            display_query=display_query,
+            file_id=file_id,
         ):
             yield chunk
 
     return StreamingResponse(
         response_stream(),
         media_type="text/event-stream",
-        headers={
-            "x-vercel-ai-data-stream": "v1"
-        }
+        headers={"x-vercel-ai-data-stream": "v1"},
     )
 
 @router.post("/{chat_id}/messages/with-file")

@@ -11,7 +11,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { api } from "@/lib/api";
-import { FileAttachButton, FileChip, useFileDropzone } from "./file-attachment";
+import { FileAttachButton, FileChip, useFileDropzone, type UploadedFile } from "./file-attachment";
 
 interface KnowledgeBase {
   id: number;
@@ -25,13 +25,15 @@ interface InputBarProps {
   onSubmit: () => void;
   disabled: boolean;
   placeholder?: string;
-  /** Currently attached file (controlled from parent) */
-  file?: File | null;
-  /** Called when the user picks or clears a file */
-  onFileChange?: (file: File | null) => void;
-  /** Inline error message (oversized / unsupported type) */
+  /** Uploaded file record (processing/ready/error) */
+  uploadedFile?: UploadedFile | null;
+  /** Called when user selects a file to upload */
+  onFileAccepted?: (file: File) => void;
+  /** Called when user removes the file chip */
+  onFileRemove?: () => void;
+  /** Inline error message */
   fileError?: string;
-  /** Setter for fileError (parent can clear it) */
+  /** Setter for fileError */
   onFileError?: (msg: string) => void;
 }
 
@@ -82,8 +84,9 @@ export function InputBar({
   onSubmit,
   disabled,
   placeholder = "Type your message...",
-  file = null,
-  onFileChange,
+  uploadedFile = null,
+  onFileAccepted: onFileAcceptedProp,
+  onFileRemove: onFileRemoveProp,
   fileError = "",
   onFileError,
 }: InputBarProps) {
@@ -92,30 +95,21 @@ export function InputBar({
   const [selectedKbIds, setSelectedKbIds] = useState<number[]>([]);
   const { textareaRef, hiddenSpanRef } = useAutoResize(value);
 
-  // Internal file state when used uncontrolled
-  const [internalFile, setInternalFile] = useState<File | null>(null);
   const [internalError, setInternalError] = useState("");
-
-  const activeFile = onFileChange !== undefined ? file : internalFile;
   const activeError = onFileError !== undefined ? fileError : internalError;
 
   const handleFileAccepted = (f: File) => {
-    if (onFileChange) onFileChange(f);
-    else setInternalFile(f);
-    if (onFileError) onFileError("");
-    else setInternalError("");
+    if (onFileAcceptedProp) onFileAcceptedProp(f);
+    if (onFileError) onFileError(""); else setInternalError("");
   };
 
   const handleFileError = (msg: string) => {
-    if (onFileError) onFileError(msg);
-    else setInternalError(msg);
+    if (onFileError) onFileError(msg); else setInternalError(msg);
   };
 
   const handleFileRemove = () => {
-    if (onFileChange) onFileChange(null);
-    else setInternalFile(null);
-    if (onFileError) onFileError("");
-    else setInternalError("");
+    if (onFileRemoveProp) onFileRemoveProp();
+    if (onFileError) onFileError(""); else setInternalError("");
   };
 
   // Drag-and-drop on the whole input bar container
@@ -189,9 +183,9 @@ export function InputBar({
       />
 
       {/* File chip (inside card, above textarea) */}
-      {activeFile && (
+      {uploadedFile && (
         <div className="px-3 pt-3">
-          <FileChip file={activeFile} onRemove={handleFileRemove} />
+          <FileChip uploadedFile={uploadedFile} onRemove={handleFileRemove} />
         </div>
       )}
 
@@ -236,7 +230,7 @@ export function InputBar({
               disabled={disabled}
               onChange={(e) => {
                 const file = e.target.files?.[0];
-                if (file) handleFileAccepted(file);
+
                 e.target.value = "";
               }}
             />
@@ -281,7 +275,7 @@ export function InputBar({
         <button
           type="button"
           onClick={onSubmit}
-          disabled={disabled || !value.trim()}
+          disabled={disabled || !value.trim() || uploadedFile?.status === "processing"}
           className={cn(
             "h-8 w-8 rounded-full flex items-center justify-center transition-all shrink-0",
             disabled || !value.trim()

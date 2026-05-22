@@ -25,6 +25,7 @@ import { APP_LOGO_SRC } from "@/lib/app-config";
 import { useToast } from "@/components/ui/use-toast";
 import { Answer } from "@/components/chat/answer";
 import { InputBar } from "@/components/chat/chat-input";
+import { MessageFileChip, type UploadedFile } from "@/components/chat/file-attachment";
 
 interface Message {
   id: string;
@@ -52,6 +53,7 @@ interface Message {
     latency_ms: number;
   }>;
   synthesisMode?: boolean;
+  file_name?: string;  // filename of attached chat file, if any
 }
 
 interface ChatMessage {
@@ -62,6 +64,7 @@ interface ChatMessage {
   confidence_level?: string;
   confidence_score?: number;
   confidence_breakdown?: string;
+  file_name?: string;
 }
 
 interface Chat {
@@ -94,8 +97,72 @@ function ChatPageInner({ params }: { params: { id: string } }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-  const [attachedFile, setAttachedFile] = useState<File | null>(null);
+  const [uploadedFile, setUploadedFile] = useState<UploadedFile | null>(null);
   const [fileError, setFileError] = useState<string>("");
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Poll file status until ready or error
+  const startPolling = (fileId: number) => {
+    if (pollRef.current) clearInterval(pollRef.current);
+    pollRef.current = setInterval(async () => {
+      try {
+        const token = localStorage.getItem("token");
+        const res = await fetch(`/api/chat/${params.id}/files/${fileId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        setUploadedFile((prev) => prev ? { ...prev, ...data } : null);
+        if (data.status === "ready" || data.status === "error") {
+          clearInterval(pollRef.current!);
+          pollRef.current = null;
+          if (data.status === "error") {
+            setFileError(data.error_message || "File processing failed.");
+          }
+        }
+      } catch { /* ignore */ }
+    }, 1200);
+  };
+
+  // Upload file immediately on attach
+  const handleFileAccepted = async (file: File) => {
+    setFileError("");
+    const token = localStorage.getItem("token");
+    const formData = new FormData();
+    formData.append("file", file);
+    try {
+      const res = await fetch(`/api/chat/${params.id}/files`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData,
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setFileError(err.detail || "Upload failed.");
+        return;
+      }
+      const data: UploadedFile = await res.json();
+      setUploadedFile(data);
+      if (data.status === "processing") startPolling(data.id);
+    } catch (err) {
+      setFileError("Upload failed. Please try again.");
+    }
+  };
+
+  const handleFileRemove = async () => {
+    if (uploadedFile) {
+      const token = localStorage.getItem("token");
+      fetch(`/api/chat/${params.id}/files/${uploadedFile.id}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      }).catch(() => {});
+    }
+    setUploadedFile(null);
+    setFileError("");
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+  };
+
+  useEffect(() => { return () => { if (pollRef.current) clearInterval(pollRef.current); }; }, []);
 
   useEffect(() => {
     setActiveChat(Number(params.id));
@@ -415,35 +482,24 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       });
 
     setInput("");
-    setAttachedFile(null);
+    const sentFile = uploadedFile;
+    setUploadedFile(null);
     setFileError("");
     setIsLoading(true);
     setMessages((prev) => [...prev, userMessage, assistantMessage]);
 
     try {
-      let response: Response;
-      if (attachedFile) {
-        const formData = new FormData();
-        formData.append("file", attachedFile);
-        formData.append("message", trimmedInput);
-        formData.append("messages", JSON.stringify({ messages: requestMessages }));
-        response = await fetch(`/api/chat/${params.id}/messages/with-file`, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-          body: formData,
-        });
-      } else {
-        response = await fetch(`/api/chat/${params.id}/messages`, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ messages: requestMessages }),
-        });
-      }
+      const response = await fetch(`/api/chat/${params.id}/messages`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          messages: requestMessages,
+          ...(sentFile ? { file_id: sentFile.id } : {}),
+        }),
+      });
 
       if (!response.ok || !response.body) {
         throw new Error(`Request failed with status ${response.status}`);
@@ -621,6 +677,9 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                       <div className="bg-primary text-primary-foreground rounded-2xl rounded-tr-sm px-4 py-2.5 text-sm">
                         {message.content}
                       </div>
+                      {message.file_name && (
+                        <MessageFileChip fileName={message.file_name} />
+                      )}
                       {/* Hover actions */}
                       <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                         <button
@@ -666,8 +725,9 @@ function ChatPageInner({ params }: { params: { id: string } }) {
               onSubmit={handleSubmit}
               disabled={isLoading}
               placeholder="Type your message..."
-              file={attachedFile}
-              onFileChange={setAttachedFile}
+              uploadedFile={uploadedFile}
+              onFileAccepted={handleFileAccepted}
+              onFileRemove={handleFileRemove}
               fileError={fileError}
               onFileError={setFileError}
             />

@@ -42,6 +42,7 @@ class MessageResponse(MessageBase):
     confidence_score: Optional[int] = None
     confidence_breakdown: Optional[str] = None  # JSON string, parsed by frontend
     query_classification: Optional[QueryClassification] = None
+    file_name: Optional[str] = None  # filename if a chat file was attached to this message
 
     @field_serializer("created_at", "updated_at")
     def serialise_datetimes(self, v): return _as_utc_iso(v)

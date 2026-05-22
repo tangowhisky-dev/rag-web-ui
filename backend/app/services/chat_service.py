@@ -405,6 +405,7 @@ async def generate_response(
     temperature:   float = 0.0,
     model_name:    Optional[str] = None,
     display_query: Optional[str] = None,
+    file_id: Optional[int] = None,
 ) -> AsyncGenerator[str, None]:
     logger.info("=" * 70)
     logger.info("[CHAT] chat_id=%s | kb_ids=%s | query=%r", chat_id, knowledge_base_ids, query)
@@ -414,6 +415,14 @@ async def generate_response(
         user_message = Message(content=display_query or query, role="user", chat_id=chat_id)
         db.add(user_message)
         db.commit()
+
+        # Link chat_file to the user message so UI can show the filename
+        if file_id:
+            from app.models.chat import ChatFile
+            chat_file = db.query(ChatFile).filter(ChatFile.id == file_id).first()
+            if chat_file:
+                chat_file.message_id = user_message.id
+                db.commit()
 
         # Persist bot placeholder
         bot_message = Message(content="", role="assistant", chat_id=chat_id)

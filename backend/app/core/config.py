@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     # Chat / response-generation model
     OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "local-model")
 
+    # Total context window size of OPENAI_MODEL in tokens.
+    # 25% is reserved for injected chat-file content.
+    OPENAI_MODEL_CONTEXT_SIZE: int = int(os.getenv("OPENAI_MODEL_CONTEXT_SIZE", "131072"))
+
     # Query-rewriting model (used for standalone-question condensation and
     # rolling-summary generation). Falls back to OPENAI_MODEL when unset.
     # A smaller/faster model works well here — the task is mechanical rewording,

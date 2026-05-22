@@ -179,25 +179,25 @@ describe("InputBar", () => {
   });
 
   describe("file chip", () => {
-    it("renders file chip when file prop is provided", () => {
-      const file = new File(["hello"], "test.pdf", { type: "application/pdf" });
-      render(<InputBar {...defaultProps} file={file} onFileChange={jest.fn()} />);
+    it("renders file chip when uploadedFile prop is provided", () => {
+      const uf = { id: 1, file_name: "test.pdf", file_size: 1024, status: "ready" as const };
+      render(<InputBar {...defaultProps} uploadedFile={uf} onFileAccepted={jest.fn()} />);
       expect(screen.getByTestId("file-chip")).toBeInTheDocument();
       expect(screen.getByText(/test\.pdf/)).toBeInTheDocument();
     });
 
-    it("does not render file chip when no file", () => {
-      render(<InputBar {...defaultProps} file={null} onFileChange={jest.fn()} />);
+    it("does not render file chip when no uploadedFile", () => {
+      render(<InputBar {...defaultProps} uploadedFile={null} onFileAccepted={jest.fn()} />);
       expect(screen.queryByTestId("file-chip")).not.toBeInTheDocument();
     });
 
-    it("X button on file chip calls onFileChange with null", () => {
-      const onFileChange = jest.fn();
-      const file = new File(["hello"], "report.pdf", { type: "application/pdf" });
-      render(<InputBar {...defaultProps} file={file} onFileChange={onFileChange} />);
+    it("X button on file chip calls onFileRemove", () => {
+      const onFileRemove = jest.fn();
+      const uf = { id: 1, file_name: "report.pdf", file_size: 1024, status: "ready" as const };
+      render(<InputBar {...defaultProps} uploadedFile={uf} onFileRemove={onFileRemove} />);
       const removeBtn = screen.getByTestId("file-chip-remove");
       fireEvent.click(removeBtn);
-      expect(onFileChange).toHaveBeenCalledWith(null);
+      expect(onFileRemove).toHaveBeenCalled();
     });
   });
 
