@@ -657,7 +657,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
         </div>
 
         {/* Floating input bar */}
-        <div className="absolute bottom-0 left-0 right-0 z-10 bg-background/80 backdrop-blur-sm pb-4 pt-2 px-4">
+        <div className="absolute bottom-0 left-0 right-0 z-10 pb-4 pt-2 px-4">
           <div className="max-w-3xl mx-auto">
             <InputBar
               value={input}

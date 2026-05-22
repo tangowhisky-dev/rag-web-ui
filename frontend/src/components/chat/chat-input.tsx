@@ -176,7 +176,7 @@ export function InputBar({
     <div
       {...getRootProps()}
       className={cn(
-        "flex flex-col rounded-2xl border border-border bg-background shadow-md",
+        "flex flex-col rounded-2xl border border-border bg-background/80 backdrop-blur-sm shadow-md",
         isDragActive && "ring-2 ring-primary ring-offset-1"
       )}
       data-testid="chat-input-container"
