@@ -111,12 +111,7 @@ async def _process_file(db_session_factory, file_id: int, tmp_path: str, filenam
             pass
     finally:
         db.close()
-        # Individual file cleaned up after markdown extraction; ephemeral dir removed on chat delete
-        try:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-        except Exception:
-            pass
+        # Original file kept; entire ephemeral/{chat_id}/ dir is removed on chat delete
 
 
 @router.post("/{chat_id}/files")
