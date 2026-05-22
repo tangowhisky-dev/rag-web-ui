@@ -18,6 +18,7 @@ interface ChatContextValue {
   renameChat: (id: number, title: string) => Promise<void>;
   deleteChat: (id: number) => Promise<void>;
   patchChat: (id: number, patch: Partial<Chat>) => Promise<void>;
+  addChat: (chat: Chat) => void;
 }
 
 const ChatContext = createContext<ChatContextValue | null>(null);
@@ -29,7 +30,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     api
       .get("/api/chat")
-      .then((data: Chat[]) => setChatList(data))
+      .then((data: Chat[]) => setChatList([...data].sort((a, b) => b.id - a.id)))
       .catch(() => {
         // silently ignore; user may not be authenticated yet
       });
@@ -54,9 +55,14 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     );
   }, []);
 
+  // Prepend a newly created chat to the sorted list
+  const addChat = useCallback((chat: Chat) => {
+    setChatList((prev) => [chat, ...prev]);
+  }, []);
+
   return (
     <ChatContext.Provider
-      value={{ chatList, activeChat, setChatList, setActiveChat, renameChat, deleteChat, patchChat }}
+      value={{ chatList, activeChat, setChatList, setActiveChat, renameChat, deleteChat, patchChat, addChat }}
     >
       {children}
     </ChatContext.Provider>
