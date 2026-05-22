@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.db.session import get_db
 from app.models.user import User
 from app.models.chat import Chat, Message, ChatFile
+from app.core.storage import delete_ephemeral_chat_files
 from app.models.knowledge import KnowledgeBase
 from app.schemas.chat import (
     ChatCreate,
