@@ -16,7 +16,7 @@ COPY package.json pnpm-lock.yaml ./
 
 # Cache mount for pnpm content-addressable store
 RUN --mount=type=cache,target=/pnpm/store \
-    pnpm install --frozen-lockfile
+    pnpm install --force
 
 # Builder
 FROM base AS builder
