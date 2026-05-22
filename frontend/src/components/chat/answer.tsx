@@ -640,7 +640,7 @@ export const Answer: FC<{
               {...props}
               href="#"
               role="button"
-              className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs font-medium text-blue-600 bg-blue-50 rounded hover:bg-blue-100 transition-colors relative"
+              className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/50 rounded hover:bg-blue-100 dark:hover:bg-blue-900/60 transition-colors relative"
             >
               <span className="absolute -top-3 -right-1">[{props.href}]</span>
             </a>
@@ -652,7 +652,7 @@ export const Answer: FC<{
           >
             <div className="text-sm space-y-3">
               {citationInfo && (
-                <div className="flex items-center gap-2 text-xs font-medium text-gray-700 bg-gray-50 p-2 rounded">
+                <div className="flex items-center gap-2 text-xs font-medium text-foreground bg-muted p-2 rounded">
                   <div className="w-5 h-5 flex items-center justify-center">
                     <FileIcon
                       extension={
@@ -673,14 +673,14 @@ export const Answer: FC<{
                 <div className="flex items-center gap-2 flex-wrap">
                   {citation.score !== undefined && (
                     <div className="flex items-center gap-1.5 flex-1 min-w-[120px]">
-                      <span className="text-xs text-gray-500 shrink-0">Score:</span>
-                      <div className="flex-1 h-1.5 rounded-full bg-gray-200 overflow-hidden">
+                      <span className="text-xs text-muted-foreground shrink-0">Score:</span>
+                      <div className="flex-1 h-1.5 rounded-full bg-muted overflow-hidden">
                         <div
                           className="h-full rounded-full bg-blue-500 transition-all"
                           style={{ width: `${Math.round(citation.score * 100)}%` }}
                         />
                       </div>
-                      <span className="text-xs text-gray-600 shrink-0 font-medium">
+                      <span className="text-xs text-foreground shrink-0 font-medium">
                         {Math.round(citation.score * 100)}%
                       </span>
                     </div>
@@ -688,14 +688,14 @@ export const Answer: FC<{
                   {citation.retrieval_leg && (
                     <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded uppercase tracking-wide ${
                       citation.retrieval_leg === "dense"
-                        ? "bg-blue-100 text-blue-700"
+                        ? "bg-blue-100 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300"
                         : citation.retrieval_leg === "sparse" || citation.retrieval_leg === "qdrant_sparse"
-                        ? "bg-purple-100 text-purple-700"
+                        ? "bg-purple-100 dark:bg-purple-950/60 text-purple-700 dark:text-purple-300"
                         : citation.retrieval_leg === "exact"
-                        ? "bg-emerald-100 text-emerald-700"
+                        ? "bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300"
                         : citation.retrieval_leg === "graph"
-                        ? "bg-orange-100 text-orange-700"
-                        : "bg-gray-100 text-gray-600"
+                        ? "bg-orange-100 dark:bg-orange-950/60 text-orange-700 dark:text-orange-300"
+                        : "bg-muted text-muted-foreground"
                     }`}>
                       {citation.retrieval_leg.replace("qdrant_", "")}
                     </span>
@@ -708,34 +708,34 @@ export const Answer: FC<{
                 citation.exact_rank !== undefined) && (
                 <div className="grid grid-cols-3 gap-1 text-[10px]">
                   {citation.dense_rank !== undefined && (
-                    <div className="flex flex-col items-center rounded bg-blue-50 px-1.5 py-1">
-                      <span className="text-blue-500 font-medium">Dense</span>
-                      <span className="text-blue-700 font-semibold">#{citation.dense_rank}</span>
+                    <div className="flex flex-col items-center rounded bg-blue-50 dark:bg-blue-950/40 px-1.5 py-1">
+                      <span className="text-blue-600 dark:text-blue-400 font-medium">Dense</span>
+                      <span className="text-blue-800 dark:text-blue-200 font-semibold">#{citation.dense_rank}</span>
                     </div>
                   )}
                   {citation.qdrant_sparse_rank !== undefined && (
-                    <div className="flex flex-col items-center rounded bg-purple-50 px-1.5 py-1">
-                      <span className="text-purple-500 font-medium">Sparse</span>
-                      <span className="text-purple-700 font-semibold">#{citation.qdrant_sparse_rank}</span>
+                    <div className="flex flex-col items-center rounded bg-purple-50 dark:bg-purple-950/40 px-1.5 py-1">
+                      <span className="text-purple-600 dark:text-purple-400 font-medium">Sparse</span>
+                      <span className="text-purple-800 dark:text-purple-200 font-semibold">#{citation.qdrant_sparse_rank}</span>
                     </div>
                   )}
                   {citation.exact_rank !== undefined && (
-                    <div className="flex flex-col items-center rounded bg-emerald-50 px-1.5 py-1">
-                      <span className="text-emerald-500 font-medium">Exact</span>
-                      <span className="text-emerald-700 font-semibold">#{citation.exact_rank}</span>
+                    <div className="flex flex-col items-center rounded bg-emerald-50 dark:bg-emerald-950/40 px-1.5 py-1">
+                      <span className="text-emerald-600 dark:text-emerald-400 font-medium">Exact</span>
+                      <span className="text-emerald-800 dark:text-emerald-200 font-semibold">#{citation.exact_rank}</span>
                     </div>
                   )}
                 </div>
               )}
               <Divider />
-              <div className="text-gray-700 leading-relaxed prose prose-sm dark:prose-invert max-w-none">
+              <div className="text-foreground leading-relaxed prose prose-sm dark:prose-invert max-w-none">
                 <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeHighlight, [rehypeKatex, { throwOnError: false }]]}>
                   {cleanChunkText(citation.text)}
                 </Markdown>
               </div>
               <Divider />
               {Object.keys(citation.metadata).length > 0 && (
-                <div className="text-xs text-gray-500 bg-gray-50 p-2 rounded">
+                <div className="text-xs text-muted-foreground bg-muted p-2 rounded">
                   <div className="font-medium mb-2">Debug Info:</div>
                   <div className="space-y-1">
                     {Object.entries(citation.metadata).map(([key, value]) => (
@@ -743,7 +743,7 @@ export const Answer: FC<{
                         <span className="font-medium min-w-[100px]">
                           {key}:
                         </span>
-                        <span className="text-gray-600">{String(value)}</span>
+                        <span className="text-foreground/80">{String(value)}</span>
                       </div>
                     ))}
                   </div>
