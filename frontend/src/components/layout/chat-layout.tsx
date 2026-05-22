@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { Menu, LogOut } from "lucide-react";
+import { ThemeToggle } from "@/components/ui/theme-toggle";
 import { useRouter } from "next/navigation";
 import ChatSidebar from "@/components/chat/chat-sidebar";
 import { ChatProvider } from "@/contexts/chat-context";
@@ -50,7 +51,8 @@ export default function ChatLayout({
               </span>
             )}
 
-            <div className="ml-auto">
+            <div className="ml-auto flex items-center gap-1">
+              <ThemeToggle />
               <button
                 onClick={handleLogout}
                 className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"

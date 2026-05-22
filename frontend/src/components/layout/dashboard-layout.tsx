@@ -3,6 +3,7 @@
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { LogOut } from "lucide-react";
+import { ThemeToggle } from "@/components/ui/theme-toggle";
 import Breadcrumb from "@/components/ui/breadcrumb";
 
 export default function DashboardLayout({
@@ -40,7 +41,8 @@ export default function DashboardLayout({
               ⬡ GraphRAG
             </span>
           )}
-          <div className="ml-auto">
+          <div className="ml-auto flex items-center gap-1">
+            <ThemeToggle />
             <button
               onClick={handleLogout}
               className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
