@@ -564,7 +564,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
         )}
 
         {/* Scroll area */}
-        <div className="flex-1 overflow-y-auto min-h-0 pt-12 pb-28">
+        <div className="flex-1 overflow-y-auto min-h-0 pt-6 pb-28">
           {processedMessages.length === 0 && !isLoading ? (
             /* Welcome / empty state */
             <div className="flex flex-col items-center justify-center h-full gap-4 px-4 text-center">
