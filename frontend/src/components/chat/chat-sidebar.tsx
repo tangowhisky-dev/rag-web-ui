@@ -19,10 +19,11 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
   const pathname = usePathname();
   const { chatList, activeChat, renameChat, deleteChat, patchChat } = useChatContext();
 
-  const [collapsed, setCollapsed] = useState(() => {
-    if (typeof window === "undefined") return false;
-    return localStorage.getItem("chat-sidebar-collapsed") === "true";
-  });
+  // Always start uncollapsed on SSR; sync from localStorage after mount to avoid hydration mismatch
+  const [collapsed, setCollapsed] = useState(false);
+  useEffect(() => {
+    setCollapsed(localStorage.getItem("chat-sidebar-collapsed") === "true");
+  }, []);
 
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editingValue, setEditingValue] = useState("");
@@ -222,6 +223,16 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
           <>
             {/* Collapse + New Chat row */}
             <div className="flex items-center gap-1 px-3 pt-3 pb-2 shrink-0">
+              {/* New Chat */}
+              <Link
+                href="/dashboard/chat/new"
+                onClick={onClose}
+                data-testid="new-chat-button"
+                className="flex items-center gap-2 flex-1 rounded-lg px-3 py-2 text-sm font-medium hover:bg-accent transition-colors"
+              >
+                <Plus className="h-4 w-4 shrink-0" />
+                New Chat
+              </Link>
               {/* Desktop: collapse button */}
               <button
                 onClick={toggleCollapse}
@@ -238,16 +249,6 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
               >
                 <X className="h-4 w-4" />
               </button>
-              {/* New Chat */}
-              <Link
-                href="/dashboard/chat/new"
-                onClick={onClose}
-                data-testid="new-chat-button"
-                className="flex items-center gap-2 flex-1 rounded-lg px-3 py-2 text-sm font-medium hover:bg-accent transition-colors"
-              >
-                <Plus className="h-4 w-4 shrink-0" />
-                New Chat
-              </Link>
             </div>
 
             {/* Search */}
