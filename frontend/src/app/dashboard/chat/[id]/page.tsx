@@ -54,6 +54,7 @@ interface Message {
   }>;
   synthesisMode?: boolean;
   file_name?: string;  // filename of attached chat file, if any
+  file_id?: number;    // chat_files.id — needed for download URL
 }
 
 interface ChatMessage {
@@ -65,6 +66,7 @@ interface ChatMessage {
   confidence_score?: number;
   confidence_breakdown?: string;
   file_name?: string;
+  file_id?: number;
 }
 
 interface Chat {
@@ -677,8 +679,12 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                       <div className="bg-primary text-primary-foreground rounded-2xl rounded-tr-sm px-4 py-2.5 text-sm">
                         {message.content}
                       </div>
-                      {message.file_name && (
-                        <MessageFileChip fileName={message.file_name} />
+                      {message.file_name && message.file_id && (
+                        <MessageFileChip
+                          fileName={message.file_name}
+                          fileId={message.file_id}
+                          chatId={params.id}
+                        />
                       )}
                       {/* Hover actions */}
                       <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">

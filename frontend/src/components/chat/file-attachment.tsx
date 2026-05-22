@@ -96,18 +96,42 @@ export function FileChip({ uploadedFile, onRemove }: FileChipProps) {
   );
 }
 
-// ── MessageFileChip: readonly chip shown under a sent message ────────────────
+// ── MessageFileChip: clickable download icon shown under a sent message ─────
 
 interface MessageFileChipProps {
   fileName: string;
+  fileId: number;
+  chatId: string | number;
 }
 
-export function MessageFileChip({ fileName }: MessageFileChipProps) {
+export function MessageFileChip({ fileName, fileId, chatId }: MessageFileChipProps) {
+  const handleDownload = async () => {
+    const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
+    const res = await fetch(`/api/chat/${chatId}/files/${fileId}/download`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) return;
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = fileName;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
-    <div className="inline-flex items-center gap-1 mt-1 text-xs text-muted-foreground">
-      <FileText className="h-3 w-3 shrink-0" />
-      <span>{fileName}</span>
-    </div>
+    <button
+      type="button"
+      onClick={handleDownload}
+      title={fileName}
+      className="group inline-flex items-center gap-1 mt-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+    >
+      <Paperclip className="h-3 w-3 shrink-0 group-hover:text-primary transition-colors" />
+      <span className="max-w-[200px] truncate opacity-0 group-hover:opacity-100 transition-opacity">
+        {fileName}
+      </span>
+    </button>
   );
 }
 

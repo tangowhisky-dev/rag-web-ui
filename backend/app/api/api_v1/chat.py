@@ -97,8 +97,8 @@ def get_chat(
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
 
-    # Build a file_name lookup: message_id → file_name
-    file_map: dict[int, str] = {}
+    # Build a file info lookup: message_id → (file_id, file_name)
+    file_map: dict[int, tuple[int, str]] = {}
     chat_files = (
         db.query(ChatFile)
         .filter(ChatFile.chat_id == chat_id, ChatFile.message_id.isnot(None))
@@ -106,11 +106,13 @@ def get_chat(
     )
     for cf in chat_files:
         if cf.message_id:
-            file_map[cf.message_id] = cf.file_name
+            file_map[cf.message_id] = (cf.id, cf.file_name)
 
     # Inject file_name onto each message as a transient attribute
     for msg in chat.messages:
-        msg.file_name = file_map.get(msg.id)  # type: ignore[attr-defined]
+        info = file_map.get(msg.id)
+        msg.file_name = info[1] if info else None  # type: ignore[attr-defined]
+        msg.file_id = info[0] if info else None      # type: ignore[attr-defined]
 
     return chat
 

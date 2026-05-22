@@ -58,6 +58,7 @@ class ChatFile(Base):
     chat_id = Column(Integer, ForeignKey("chats.id", ondelete="CASCADE"), nullable=False, index=True)
     message_id = Column(Integer, ForeignKey("messages.id", ondelete="SET NULL"), nullable=True, index=True)
     file_name = Column(String(255), nullable=False)
+    stored_path = Column(String(512), nullable=True)  # absolute path on disk
     file_size = Column(BigInteger, nullable=False)
     content_type = Column(String(100), nullable=False)
     markdown_content = Column(Text, nullable=True)   # extracted markdown; set after processing

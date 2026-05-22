@@ -158,6 +158,10 @@ async def upload_chat_file(
     # save_ephemeral_file appends _1, _2 … if the same filename already exists in the dir
     stored_path = save_ephemeral_file(chat_id, filename, file_bytes)
 
+    # Persist the actual on-disk path so we can serve downloads later
+    chat_file.stored_path = stored_path
+    db.commit()
+
     background_tasks.add_task(_process_file, None, chat_file.id, stored_path, filename)
 
     return {
@@ -215,3 +219,30 @@ def delete_chat_file(
     if chat_file:
         db.delete(chat_file)
         db.commit()
+
+
+@router.get("/{chat_id}/files/{file_id}/download")
+def download_chat_file(
+    chat_id: int,
+    file_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Download the original uploaded file."""
+    chat = db.query(Chat).filter(Chat.id == chat_id, Chat.user_id == current_user.id).first()
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    chat_file = db.query(ChatFile).filter(ChatFile.id == file_id, ChatFile.chat_id == chat_id).first()
+    if not chat_file:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    if not chat_file.stored_path or not os.path.exists(chat_file.stored_path):
+        raise HTTPException(status_code=404, detail="File no longer available on disk")
+
+    from fastapi.responses import FileResponse
+    return FileResponse(
+        path=chat_file.stored_path,
+        filename=chat_file.file_name,
+        media_type=chat_file.content_type or "application/octet-stream",
+    )
