@@ -564,7 +564,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
         )}
 
         {/* Scroll area */}
-        <div className="flex-1 overflow-y-auto min-h-0">
+        <div className="flex-1 overflow-y-auto min-h-0 pb-28">
           {processedMessages.length === 0 && !isLoading ? (
             /* Welcome / empty state */
             <div className="flex flex-col items-center justify-center h-full gap-4 px-4 text-center">
@@ -657,7 +657,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
         </div>
 
         {/* Floating input bar */}
-        <div className="sticky bottom-0 bg-background/80 backdrop-blur-sm pb-4 pt-2 px-4 shrink-0">
+        <div className="absolute bottom-0 left-0 right-0 z-10 bg-background/80 backdrop-blur-sm pb-4 pt-2 px-4">
           <div className="max-w-3xl mx-auto">
             <InputBar
               value={input}

@@ -30,9 +30,9 @@ export default function ChatLayout({
 
   return (
     <ChatProvider>
-      <div className="flex flex-col h-screen bg-background overflow-hidden">
-        {/* Full-width breadcrumb bar */}
-        <header className="w-full border-b bg-card/80 backdrop-blur-sm shrink-0 z-30">
+      <div className="relative h-screen bg-background overflow-hidden">
+        {/* Full-width breadcrumb bar — positioned on top so content scrolls behind it */}
+        <header className="absolute top-0 left-0 right-0 z-30 border-b bg-card/80 backdrop-blur-sm">
           <div className="flex h-12 items-center gap-2 px-4">
             {/* Mobile hamburger */}
             <button
@@ -64,8 +64,8 @@ export default function ChatLayout({
           </div>
         </header>
 
-        {/* Sidebar + content row */}
-        <div className="flex flex-1 min-h-0">
+        {/* Sidebar + content row — fills full height; content scrolls under frosted header */}
+        <div className="absolute inset-0 flex pt-12">
           <ChatSidebar
             isOpen={isChatSidebarOpen}
             onClose={() => setIsChatSidebarOpen(false)}
