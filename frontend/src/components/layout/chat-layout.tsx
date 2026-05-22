@@ -32,7 +32,7 @@ export default function ChatLayout({
     <ChatProvider>
       <div className="flex flex-col h-screen bg-background overflow-hidden">
         {/* Full-width breadcrumb bar */}
-        <header className="w-full border-b bg-card shrink-0 z-30">
+        <header className="w-full border-b bg-card/80 backdrop-blur-sm shrink-0 z-30">
           <div className="flex h-12 items-center gap-2 px-4">
             {/* Mobile hamburger */}
             <button
