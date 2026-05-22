@@ -64,12 +64,14 @@ export default function ChatLayout({
           </div>
         </header>
 
-        {/* Sidebar + content row — fills full height; pt-12 clears the frosted header */}
-        <div className="absolute inset-0 flex pt-12">
-          <ChatSidebar
-            isOpen={isChatSidebarOpen}
-            onClose={() => setIsChatSidebarOpen(false)}
-          />
+        {/* Sidebar + content row — fills full height; sidebar offset by pt-12, main from top-0 so blur works */}
+        <div className="absolute inset-0 flex">
+          <div className="pt-12 flex-shrink-0 h-full">
+            <ChatSidebar
+              isOpen={isChatSidebarOpen}
+              onClose={() => setIsChatSidebarOpen(false)}
+            />
+          </div>
           <main className="flex-1 min-w-0 overflow-hidden">
             {children}
           </main>
