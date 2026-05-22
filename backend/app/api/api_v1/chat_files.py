@@ -155,10 +155,13 @@ async def upload_chat_file(
     db.commit()
     db.refresh(chat_file)
 
-    # save_ephemeral_file appends _1, _2 … if the same filename already exists in the dir
+    # save_ephemeral_file appends _1, _2 … if the same filename already exists in the dir.
+    # Use the returned basename as the canonical file_name so the DB reflects what's on disk.
     stored_path = save_ephemeral_file(chat_id, filename, file_bytes)
+    final_filename = os.path.basename(stored_path)
 
-    # Persist the actual on-disk path so we can serve downloads later
+    # Update file_name to the finalized (potentially deduplicated) name and persist stored_path
+    chat_file.file_name = final_filename
     chat_file.stored_path = stored_path
     db.commit()
 
