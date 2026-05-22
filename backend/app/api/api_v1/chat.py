@@ -108,13 +108,19 @@ def get_chat(
         if cf.message_id:
             file_map[cf.message_id] = (cf.id, cf.file_name)
 
-    # Inject file_name onto each message as a transient attribute
-    for msg in chat.messages:
-        info = file_map.get(msg.id)
-        msg.file_name = info[1] if info else None  # type: ignore[attr-defined]
-        msg.file_id = info[0] if info else None      # type: ignore[attr-defined]
+    # Build the response manually so file_name/file_id are reliably serialized.
+    # Relying on transient attributes on SQLAlchemy objects is not safe with FastAPI's
+    # jsonable_encoder when no response_model is declared.
+    from app.schemas.chat import ChatResponse, MessageResponse
 
-    return chat
+    # Serialize via Pydantic, then patch file info into message dicts
+    chat_data = ChatResponse.model_validate(chat).model_dump()
+    for msg_dict in chat_data.get("messages", []):
+        info = file_map.get(msg_dict["id"])
+        msg_dict["file_name"] = info[1] if info else None
+        msg_dict["file_id"]   = info[0] if info else None
+
+    return chat_data
 
 @router.post("/{chat_id}/messages")
 async def create_message(

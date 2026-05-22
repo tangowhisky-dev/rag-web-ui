@@ -464,6 +464,8 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       id: generateId(),
       role: "user",
       content: trimmedInput,
+      // Optimistically show the attachment chip before the message is persisted
+      ...(uploadedFile ? { file_name: uploadedFile.file_name, file_id: uploadedFile.id } : {}),
     };
     const assistantMessage: Message = {
       id: assistantId,
