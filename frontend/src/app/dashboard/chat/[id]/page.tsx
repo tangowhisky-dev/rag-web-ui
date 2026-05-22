@@ -15,11 +15,15 @@ function generateId(): string {
 import { useEffect, useRef, useState, useMemo } from "react";
 import { flushSync } from "react-dom";
 import { useRouter } from "next/navigation";
-import { Send, User, Copy, Trash2 } from "lucide-react";
-import DashboardLayout from "@/components/layout/dashboard-layout";
+import { User, Copy, Trash2, Settings, Download } from "lucide-react";
+import ChatLayout from "@/components/layout/chat-layout";
+import { useChatContext } from "@/contexts/chat-context";
+import ChatSettings from "@/components/chat/chat-settings";
+import type { ChatPatch } from "@/components/chat/chat-settings";
 import { api, ApiError } from "@/lib/api";
 import { useToast } from "@/components/ui/use-toast";
 import { Answer } from "@/components/chat/answer";
+import { InputBar } from "@/components/chat/chat-input";
 
 interface Message {
   id: string;
@@ -76,12 +80,26 @@ export default function ChatPage({ params }: { params: { id: string } }) {
   const router = useRouter();
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const { toast } = useToast();
+  const { setActiveChat } = useChatContext();
   const [isInitialLoad, setIsInitialLoad] = useState(true);
   const [chatTitle, setChatTitle] = useState<string | undefined>();
   const [useGraphRag, setUseGraphRag] = useState(false);
+  const [useDense, setUseDense] = useState(true);
+  const [useSparse, setUseSparse] = useState(true);
+  const [useExact, setUseExact] = useState(false);
+  const [temperature, setTemperature] = useState(0.7);
+  const [modelName, setModelName] = useState("gpt-4o");
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [attachedFile, setAttachedFile] = useState<File | null>(null);
+  const [fileError, setFileError] = useState<string>("");
+
+  useEffect(() => {
+    setActiveChat(Number(params.id));
+    return () => setActiveChat(null);
+  }, [params.id, setActiveChat]);
 
   useEffect(() => {
     if (isInitialLoad) {
@@ -101,6 +119,11 @@ export default function ChatPage({ params }: { params: { id: string } }) {
       const data: Chat = await api.get(`/api/chat/${params.id}`);
       setChatTitle(data.title);
       setUseGraphRag(data.use_graph_rag ?? false);
+      setUseDense((data as any).use_dense ?? true);
+      setUseSparse((data as any).use_sparse ?? true);
+      setUseExact((data as any).use_exact ?? false);
+      setTemperature((data as any).temperature ?? 0.7);
+      setModelName((data as any).model_name ?? "gpt-4o");
       const formattedMessages = data.messages.map((msg) => {
         if (msg.role !== "assistant" || !msg.content)
           return {
@@ -354,8 +377,7 @@ export default function ChatPage({ params }: { params: { id: string } }) {
     }
   };
 
-  const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
+  const handleSubmit = async () => {
 
     const trimmedInput = input.trim();
     if (!trimmedInput || isLoading) {
@@ -392,18 +414,34 @@ export default function ChatPage({ params }: { params: { id: string } }) {
       });
 
     setInput("");
+    setAttachedFile(null);
+    setFileError("");
     setIsLoading(true);
     setMessages((prev) => [...prev, userMessage, assistantMessage]);
 
     try {
-      const response = await fetch(`/api/chat/${params.id}/messages`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ messages: requestMessages }),
-      });
+      let response: Response;
+      if (attachedFile) {
+        const formData = new FormData();
+        formData.append("file", attachedFile);
+        formData.append("messages", JSON.stringify(requestMessages));
+        response = await fetch(`/api/chat/${params.id}/messages/with-file`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+          body: formData,
+        });
+      } else {
+        response = await fetch(`/api/chat/${params.id}/messages`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ messages: requestMessages }),
+        });
+      }
 
       if (!response.ok || !response.body) {
         throw new Error(`Request failed with status ${response.status}`);
@@ -473,9 +511,75 @@ export default function ChatPage({ params }: { params: { id: string } }) {
     return assistants[assistants.length - 1]?.id;
   }, [processedMessages]);
 
+  const handleExport = async () => {
+    try {
+      const res = await fetch(`/api/chat/${params.id}/export`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem("token") ?? ""}` },
+      });
+      if (!res.ok) throw new Error("Export failed");
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `chat-${params.id}.md`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error("Export failed", e);
+    }
+  };
+
+  const handleSettingsUpdate = (patch: Partial<ChatPatch>) => {
+    if (patch.use_graph_rag !== undefined) setUseGraphRag(patch.use_graph_rag);
+    if (patch.use_dense !== undefined) setUseDense(patch.use_dense);
+    if (patch.use_sparse !== undefined) setUseSparse(patch.use_sparse);
+    if (patch.use_exact !== undefined) setUseExact(patch.use_exact);
+    if (patch.temperature !== undefined) setTemperature(patch.temperature);
+    if (patch.model_name !== undefined) setModelName(patch.model_name);
+  };
+
   return (
-    <DashboardLayout pageTitle={chatTitle} graphRagActive={useGraphRag}>
+    <ChatLayout pageTitle={chatTitle} graphRagActive={useGraphRag}>
       <div className="flex flex-col h-[calc(100vh-5rem)] relative">
+        {/* Chat action buttons */}
+        <div className="flex items-center justify-end gap-1 px-4 py-2 border-b shrink-0">
+          <button
+            data-testid="export-chat"
+            onClick={handleExport}
+            className="flex items-center gap-1.5 px-2 py-1 rounded text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+            aria-label="Export chat as Markdown"
+          >
+            <Download className="h-4 w-4" />
+            Export
+          </button>
+          <button
+            data-testid="open-settings"
+            onClick={() => setIsSettingsOpen((v) => !v)}
+            className="flex items-center gap-1.5 px-2 py-1 rounded text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+            aria-label="Chat settings"
+          >
+            <Settings className="h-4 w-4" />
+            Settings
+          </button>
+        </div>
+        {isSettingsOpen && (
+          <ChatSettings
+            chat={{
+              id: Number(params.id),
+              title: chatTitle ?? "",
+              temperature,
+              model_name: modelName,
+              use_dense: useDense,
+              use_sparse: useSparse,
+              use_exact: useExact,
+              use_graph_rag: useGraphRag,
+            }}
+            onClose={() => setIsSettingsOpen(false)}
+            onUpdate={handleSettingsUpdate}
+          />
+        )}
         <div className="flex-1 overflow-y-auto p-4 space-y-4 pb-[80px]">
           {processedMessages.map((message) =>
             message.role === "assistant" ? (
@@ -530,6 +634,7 @@ export default function ChatPage({ params }: { params: { id: string } }) {
                           : undefined
                       }
                       synthesisMode={message.synthesisMode}
+                      isStreaming={isLoading && message.id === lastAssistantId}
                       onDelete={(id) =>
                         setMessages((prev) => prev.filter((m) => m.id !== id))
                       }
@@ -585,25 +690,20 @@ export default function ChatPage({ params }: { params: { id: string } }) {
           )}
           <div ref={messagesEndRef} />
         </div>
-        <form
-          onSubmit={handleSubmit}
-          className="border-t p-4 flex items-center space-x-4 bg-background absolute bottom-0 left-0 right-0"
-        >
-          <input
+        <div className="border-t p-4 flex items-center space-x-4 bg-background absolute bottom-0 left-0 right-0">
+          <InputBar
             value={input}
-            onChange={(event) => setInput(event.target.value)}
+            onChange={setInput}
+            onSubmit={handleSubmit}
+            disabled={isLoading}
             placeholder="Type your message..."
-            className="flex-1 min-w-0 h-10 rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+            file={attachedFile}
+            onFileChange={setAttachedFile}
+            fileError={fileError}
+            onFileError={setFileError}
           />
-          <button
-            type="submit"
-            disabled={isLoading || !input.trim()}
-            className="inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-4 py-2"
-          >
-            <Send className="h-4 w-4" />
-          </button>
-        </form>
+        </div>
       </div>
-    </DashboardLayout>
+    </ChatLayout>
   );
 }

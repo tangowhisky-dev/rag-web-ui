@@ -22,6 +22,7 @@ class Chat(Base, TimestampMixin):
     use_dense     = Column(Boolean, nullable=False, default=True,  server_default="1")
     use_sparse    = Column(Boolean, nullable=False, default=True,  server_default="1")
     use_exact     = Column(Boolean, nullable=False, default=True,  server_default="1")
+    pinned        = Column(Boolean, nullable=False, default=False, server_default="0")
 
     # Relationships
     messages = relationship("Message", back_populates="chat", cascade="all, delete-orphan")

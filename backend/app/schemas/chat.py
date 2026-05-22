@@ -59,7 +59,13 @@ class ChatCreate(ChatBase):
     use_sparse:    bool = True
     use_exact:     bool = True
 
-class ChatUpdate(ChatBase):
+class ChatUpdate(BaseModel):
+    title: Optional[str] = None
+    pinned: Optional[bool] = None
+    use_dense: Optional[bool] = None
+    use_sparse: Optional[bool] = None
+    use_exact: Optional[bool] = None
+    use_graph_rag: Optional[bool] = None
     knowledge_base_ids: Optional[List[int]] = None
 
 class ChatResponse(ChatBase):
@@ -69,6 +75,9 @@ class ChatResponse(ChatBase):
     use_dense:     bool = True
     use_sparse:    bool = True
     use_exact:     bool = True
+    pinned:        bool = False
+    temperature:   Optional[float] = None
+    model_name:    Optional[str] = None
     created_at: datetime
     updated_at: datetime
     messages: List[MessageResponse] = []

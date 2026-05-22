@@ -4,7 +4,7 @@ import base64
 import logging
 import re
 import time
-from typing import List, AsyncGenerator
+from typing import List, AsyncGenerator, Optional
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
@@ -402,6 +402,8 @@ async def generate_response(
     use_sparse:    bool = True,
     use_exact:     bool = True,
     use_graph_rag: bool = False,
+    temperature:   float = 0.0,
+    model_name:    Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     logger.info("=" * 70)
     logger.info("[CHAT] chat_id=%s | kb_ids=%s | query=%r", chat_id, knowledge_base_ids, query)
@@ -672,9 +674,9 @@ async def generate_response(
         openai_messages.append({"role": "user", "content": standalone_question})
 
         stream = await openai_client.chat.completions.create(
-            model=settings.OPENAI_MODEL,
+            model=model_name or settings.OPENAI_MODEL,
             messages=openai_messages,
-            temperature=0,
+            temperature=temperature,
             stream=True,
         )
 

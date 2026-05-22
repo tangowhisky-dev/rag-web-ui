@@ -9,6 +9,7 @@ import React, {
 } from "react";
 import { AnchorHTMLAttributes } from "react";
 import { ChevronDown, ChevronRight, Brain, Search, BookOpen, Share2, Copy, Trash2, FileText, FileImage, FileType } from "lucide-react";
+import { AgentTimeline } from "./agent-timeline";
 import {
   Popover,
   PopoverContent,
@@ -19,6 +20,15 @@ import { Divider } from "@/components/ui/divider";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import "katex/dist/katex.min.css";
+import dynamic from "next/dynamic";
+
+const MermaidDiagramDynamic = dynamic(
+  () => import("./mermaid-diagram"),
+  { ssr: false }
+);
 import { api } from "@/lib/api";
 import { cleanChunkText } from "@/lib/utils";
 import { FileIcon } from "react-file-icon";
@@ -193,6 +203,11 @@ interface Citation {
   id: number;
   text: string;
   metadata: Record<string, any>;
+  score?: number;
+  dense_rank?: number;
+  qdrant_sparse_rank?: number;
+  exact_rank?: number;
+  retrieval_leg?: string;
 }
 
 interface KnowledgeBaseInfo {
@@ -473,6 +488,28 @@ const ConfidenceCollapsible: FC<{
   );
 };
 
+// ── CodeBlock: renders mermaid fences as diagrams, others as <code> ─────────
+
+const CodeBlock: FC<React.HTMLAttributes<HTMLElement> & { inline?: boolean }> = ({
+  className,
+  children,
+  inline,
+  ...rest
+}) => {
+  if (!inline && className?.includes("language-mermaid")) {
+    return (
+      <MermaidDiagramDynamic
+        code={String(children).replace(/\n$/, "")}
+      />
+    );
+  }
+  return (
+    <code className={className} {...rest}>
+      {children}
+    </code>
+  );
+};
+
 export const Answer: FC<{
   messageId?: string;
   chatId?: string;
@@ -488,8 +525,9 @@ export const Answer: FC<{
   queryClassification?: QueryClassification;
   toolTrace?: ToolTraceEntry[];
   synthesisMode?: boolean;
+  isStreaming?: boolean;
   onDelete?: (id: string) => void;
-}> = ({ messageId, chatId, markdown, citations = [], rewrittenQuery, retrievedContext, confidence, confidenceScore, confidenceBreakdown, suggestion, failedLegs, queryClassification, toolTrace, synthesisMode, onDelete }) => {
+}> = ({ messageId, chatId, markdown, citations = [], rewrittenQuery, retrievedContext, confidence, confidenceScore, confidenceBreakdown, suggestion, failedLegs, queryClassification, toolTrace, synthesisMode, isStreaming = false, onDelete }) => {
   const [citationInfoMap, setCitationInfoMap] = useState<
     Record<string, CitationInfo>
   >({});
@@ -630,9 +668,68 @@ export const Answer: FC<{
                   </span>
                 </div>
               )}
+              {/* Score + retrieval leg */}
+              {(citation.score !== undefined || citation.retrieval_leg) && (
+                <div className="flex items-center gap-2 flex-wrap">
+                  {citation.score !== undefined && (
+                    <div className="flex items-center gap-1.5 flex-1 min-w-[120px]">
+                      <span className="text-xs text-gray-500 shrink-0">Score:</span>
+                      <div className="flex-1 h-1.5 rounded-full bg-gray-200 overflow-hidden">
+                        <div
+                          className="h-full rounded-full bg-blue-500 transition-all"
+                          style={{ width: `${Math.round(citation.score * 100)}%` }}
+                        />
+                      </div>
+                      <span className="text-xs text-gray-600 shrink-0 font-medium">
+                        {Math.round(citation.score * 100)}%
+                      </span>
+                    </div>
+                  )}
+                  {citation.retrieval_leg && (
+                    <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded uppercase tracking-wide ${
+                      citation.retrieval_leg === "dense"
+                        ? "bg-blue-100 text-blue-700"
+                        : citation.retrieval_leg === "sparse" || citation.retrieval_leg === "qdrant_sparse"
+                        ? "bg-purple-100 text-purple-700"
+                        : citation.retrieval_leg === "exact"
+                        ? "bg-emerald-100 text-emerald-700"
+                        : citation.retrieval_leg === "graph"
+                        ? "bg-orange-100 text-orange-700"
+                        : "bg-gray-100 text-gray-600"
+                    }`}>
+                      {citation.retrieval_leg.replace("qdrant_", "")}
+                    </span>
+                  )}
+                </div>
+              )}
+              {/* Per-leg rank breakdown */}
+              {(citation.dense_rank !== undefined ||
+                citation.qdrant_sparse_rank !== undefined ||
+                citation.exact_rank !== undefined) && (
+                <div className="grid grid-cols-3 gap-1 text-[10px]">
+                  {citation.dense_rank !== undefined && (
+                    <div className="flex flex-col items-center rounded bg-blue-50 px-1.5 py-1">
+                      <span className="text-blue-500 font-medium">Dense</span>
+                      <span className="text-blue-700 font-semibold">#{citation.dense_rank}</span>
+                    </div>
+                  )}
+                  {citation.qdrant_sparse_rank !== undefined && (
+                    <div className="flex flex-col items-center rounded bg-purple-50 px-1.5 py-1">
+                      <span className="text-purple-500 font-medium">Sparse</span>
+                      <span className="text-purple-700 font-semibold">#{citation.qdrant_sparse_rank}</span>
+                    </div>
+                  )}
+                  {citation.exact_rank !== undefined && (
+                    <div className="flex flex-col items-center rounded bg-emerald-50 px-1.5 py-1">
+                      <span className="text-emerald-500 font-medium">Exact</span>
+                      <span className="text-emerald-700 font-semibold">#{citation.exact_rank}</span>
+                    </div>
+                  )}
+                </div>
+              )}
               <Divider />
               <div className="text-gray-700 leading-relaxed prose prose-sm dark:prose-invert max-w-none">
-                <Markdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+                <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeHighlight, [rehypeKatex, { throwOnError: false }]]}>
                   {cleanChunkText(citation.text)}
                 </Markdown>
               </div>
@@ -661,7 +758,7 @@ export const Answer: FC<{
   );
 
   // Memoize the components object so react-markdown never sees a new reference
-  const markdownComponents = useMemo(() => ({ a: CitationLink }), [CitationLink]);
+  const markdownComponents = useMemo(() => ({ a: CitationLink, code: CodeBlock }), [CitationLink]);
 
   // Key changes only when citation info is first fetched; this forces a single
   // controlled remount of <Markdown> (so popover content updates after the
@@ -724,26 +821,20 @@ export const Answer: FC<{
 
   return (
     <div className="prose prose-sm max-w-full">
-      {rewrittenQuery && <RewrittenQueryBlock query={rewrittenQuery} />}
-      {queryClassification && (
-        <QueryClassificationBlock
-          classification={queryClassification}
-          synthesisMode={synthesisMode}
-        />
-      )}
-      {toolTrace && toolTrace.length > 0 && <ToolTraceBlock trace={toolTrace} />}
-      {failedLegs && failedLegs.length > 0 && <FailedLegsWarning legs={failedLegs} />}
+      {/* AgentTimeline consolidates: rewrittenQuery, queryClassification, toolTrace, failedLegs, retrievedContext */}
+      <AgentTimeline
+        rewrittenQuery={rewrittenQuery}
+        retrievedContext={retrievedContext}
+        queryClassification={queryClassification}
+        toolTrace={toolTrace}
+        failedLegs={failedLegs}
+        isStreaming={isStreaming}
+      />
       {confidence === "none" && suggestion && (
         <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 mb-2">
           <span className="mt-0.5 shrink-0">⚠</span>
           <span>{suggestion}</span>
         </div>
-      )}
-      {retrievedContext && retrievedContext.filter(d => d.metadata?.source !== "graph").length > 0 && (
-        <RetrievedContextBlock docs={retrievedContext.filter(d => d.metadata?.source !== "graph")} />
-      )}
-      {retrievedContext && retrievedContext.filter(d => d.metadata?.source === "graph").length > 0 && (
-        <RetrievedGraphBlock docs={retrievedContext.filter(d => d.metadata?.source === "graph")} />
       )}
       {!markdown && (
         <div className="flex flex-col gap-2 mt-2">
@@ -761,8 +852,8 @@ export const Answer: FC<{
       {parsedContent.answerText && (
         <Markdown
           key={citationInfoKey}
-          remarkPlugins={[remarkGfm]}
-          rehypePlugins={[rehypeHighlight]}
+          remarkPlugins={[remarkGfm, remarkMath]}
+          rehypePlugins={[rehypeHighlight, [rehypeKatex, { throwOnError: false }]]}
           components={markdownComponents}
         >
           {parsedContent.answerText}

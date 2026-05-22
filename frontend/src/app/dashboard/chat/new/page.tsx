@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import DashboardLayout from "@/components/layout/dashboard-layout";
+import ChatLayout from "@/components/layout/chat-layout";
 import { api, ApiError } from "@/lib/api";
 import { useToast } from "@/components/ui/use-toast";
 import { Plus } from "lucide-react";
@@ -93,7 +93,7 @@ export default function NewChatPage() {
 
   if (!isLoading && knowledgeBases.length === 0) {
     return (
-      <DashboardLayout>
+      <ChatLayout>
         <div className="max-w-2xl mx-auto text-center py-16">
           <h2 className="text-3xl font-bold tracking-tight mb-4">
             No Knowledge Bases Found
@@ -110,12 +110,12 @@ export default function NewChatPage() {
             Create Knowledge Base
           </Link>
         </div>
-      </DashboardLayout>
+      </ChatLayout>
     );
   }
 
   return (
-    <DashboardLayout>
+    <ChatLayout>
       <div className="max-w-2xl mx-auto space-y-8">
         <div>
           <h2 className="text-3xl font-bold tracking-tight">Start New Chat</h2>
@@ -251,6 +251,6 @@ export default function NewChatPage() {
           </div>
         </form>
       </div>
-    </DashboardLayout>
+    </ChatLayout>
   );
 }
