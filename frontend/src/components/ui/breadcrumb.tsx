@@ -13,23 +13,18 @@ const Breadcrumb = ({ overrideLastLabel }: BreadcrumbProps) => {
 
   const generateBreadcrumbs = () => {
     const paths = pathname.split("/").filter(Boolean);
-    const breadcrumbs = paths.map((path, index) => {
+    return paths.map((path, index) => {
       const href = "/" + paths.slice(0, index + 1).join("/");
       const label =
         path.charAt(0).toUpperCase() + path.slice(1).replace(/-/g, " ");
       const isLast = index === paths.length - 1;
-
-      // Handle dynamic routes with [id]
       const displayLabel = path.match(/^\[.*\]$/) ? "Details" : label;
-
       return {
         href,
         label: isLast && overrideLastLabel ? overrideLastLabel : displayLabel,
         isLast,
       };
     });
-
-    return breadcrumbs;
   };
 
   const breadcrumbs = generateBreadcrumbs();
@@ -37,25 +32,28 @@ const Breadcrumb = ({ overrideLastLabel }: BreadcrumbProps) => {
   if (pathname === "/") return null;
 
   return (
-    <nav className="flex items-center space-x-2 text-base text-muted-foreground mb-6">
+    <nav className="flex items-center space-x-1 text-sm text-muted-foreground">
+      {/* Home button: logo + app name on left, Home icon on right */}
       <Link
         href="/dashboard"
-        className="flex items-center hover:text-foreground transition-colors"
+        className="flex items-center gap-2 rounded-lg px-2 py-1 hover:bg-accent hover:text-foreground transition-colors"
       >
-        <Home className="h-4 w-4" />
+        <img src="/logo.svg" alt="Logo" className="h-5 w-5 rounded" />
+        <span className="font-semibold text-foreground hidden sm:inline">InsightCore</span>
+        <Home className="h-3.5 w-3.5" />
       </Link>
 
-      {breadcrumbs.map((breadcrumb, index) => (
+      {breadcrumbs.map((breadcrumb) => (
         <div key={breadcrumb.href} className="flex items-center">
-          <ChevronRight className="h-4 w-4 mx-2 text-muted-foreground/50" />
+          <ChevronRight className="h-3.5 w-3.5 mx-0.5 text-muted-foreground/50" />
           {breadcrumb.isLast ? (
-            <span className="text-foreground font-medium">
+            <span className="px-1 text-foreground font-medium">
               {breadcrumb.label}
             </span>
           ) : (
             <Link
               href={breadcrumb.href}
-              className="hover:text-foreground transition-colors"
+              className="px-1 hover:text-foreground transition-colors"
             >
               {breadcrumb.label}
             </Link>
