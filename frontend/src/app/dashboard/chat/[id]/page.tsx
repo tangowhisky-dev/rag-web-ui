@@ -15,7 +15,7 @@ function generateId(): string {
 import { useEffect, useRef, useState, useMemo } from "react";
 import { flushSync } from "react-dom";
 import { useRouter } from "next/navigation";
-import { User, Copy, Trash2, Settings, Download } from "lucide-react";
+import { Copy, Trash2, Settings, Download } from "lucide-react";
 import ChatLayout from "@/components/layout/chat-layout";
 import { useChatContext, ChatProvider } from "@/contexts/chat-context";
 import ChatSettings from "@/components/chat/chat-settings";
@@ -541,29 +541,36 @@ function ChatPageInner({ params }: { params: { id: string } }) {
   };
 
   return (
-    <ChatLayout pageTitle={chatTitle} graphRagActive={useGraphRag}>
-      <div className="flex flex-col h-[calc(100vh-5rem)] relative">
-        {/* Chat action buttons */}
-        <div className="flex items-center justify-end gap-1 px-4 py-2 border-b shrink-0">
+    <ChatLayout graphRagActive={useGraphRag}>
+      <div className="flex flex-col h-full relative">
+        {/* Minimal top strip: title + action icons */}
+        <div className="flex items-center gap-2 px-4 pt-3 pb-2 shrink-0">
+          <span className="flex-1 text-sm font-medium text-muted-foreground truncate pl-8 lg:pl-0">
+            {chatTitle ?? ""}
+          </span>
+          {useGraphRag && (
+            <span className="inline-flex items-center rounded-full border border-violet-400/50 bg-violet-500/10 px-2 py-0.5 text-xs font-medium text-violet-400">
+              ⬡ GraphRAG
+            </span>
+          )}
           <button
             data-testid="export-chat"
             onClick={handleExport}
-            className="flex items-center gap-1.5 px-2 py-1 rounded text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+            className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
             aria-label="Export chat as Markdown"
           >
             <Download className="h-4 w-4" />
-            Export
           </button>
           <button
             data-testid="open-settings"
             onClick={() => setIsSettingsOpen((v) => !v)}
-            className="flex items-center gap-1.5 px-2 py-1 rounded text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+            className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
             aria-label="Chat settings"
           >
             <Settings className="h-4 w-4" />
-            Settings
           </button>
         </div>
+
         {isSettingsOpen && (
           <ChatSettings
             chat={{
@@ -580,128 +587,115 @@ function ChatPageInner({ params }: { params: { id: string } }) {
             onUpdate={handleSettingsUpdate}
           />
         )}
-        <div className="flex-1 overflow-y-auto p-4 space-y-4 pb-[80px]">
-          {processedMessages.map((message) =>
-            message.role === "assistant" ? (
-              <div
-                key={message.id}
-                className="flex justify-start items-start space-x-2"
-              >
-                <div className="w-8 h-8 flex items-center justify-center">
-                  <img
-                    src="/logo.png"
-                    className="h-8 w-8 rounded-full"
-                    alt="logo"
-                  />
-                </div>
-                <div className="max-w-[80%] rounded-lg px-4 py-2 text-accent-foreground">
-                  {isLoading && !message.content && !message.rewrittenQuery ? (
-                    <div className="flex items-center space-x-1 py-2">
-                      <div className="w-2 h-2 rounded-full bg-primary animate-bounce" />
-                      <div className="w-2 h-2 rounded-full bg-primary animate-bounce [animation-delay:0.2s]" />
-                      <div className="w-2 h-2 rounded-full bg-primary animate-bounce [animation-delay:0.4s]" />
-                    </div>
-                  ) : (
-                    <Answer
-                      key={message.id}
-                      messageId={message.id}
-                      chatId={params.id}
-                      markdown={message.content}
-                      citations={message.citations}
-                      rewrittenQuery={
-                        message.id === lastAssistantId
-                          ? message.rewrittenQuery
-                          : undefined
-                      }
-                      retrievedContext={
-                        message.id === lastAssistantId
-                          ? message.retrievedContext
-                          : undefined
-                      }
-                      confidence={message.confidence}
-                      confidenceScore={message.confidenceScore}
-                      confidenceBreakdown={message.confidenceBreakdown}
-                      suggestion={message.suggestion}
-                      failedLegs={message.failedLegs}
-                      queryClassification={
-                        message.id === lastAssistantId
-                          ? message.queryClassification
-                          : undefined
-                      }
-                      toolTrace={
-                        message.id === lastAssistantId
-                          ? message.toolTrace
-                          : undefined
-                      }
-                      synthesisMode={message.synthesisMode}
-                      isStreaming={isLoading && message.id === lastAssistantId}
-                      onDelete={(id) =>
-                        setMessages((prev) => prev.filter((m) => m.id !== id))
-                      }
+
+        {/* Scroll area */}
+        <div className="flex-1 overflow-y-auto min-h-0">
+          {processedMessages.length === 0 && !isLoading ? (
+            /* Welcome / empty state */
+            <div className="flex flex-col items-center justify-center h-full gap-4 px-4 text-center">
+              <img src="/logo.png" alt="logo" className="w-16 h-16 rounded-2xl" />
+              <h2 className="text-2xl font-semibold">How can I help you today?</h2>
+              <p className="text-sm text-muted-foreground">Ask anything about your knowledge base</p>
+            </div>
+          ) : (
+            <div className="max-w-3xl mx-auto px-4 py-6 space-y-6 pb-8">
+              {processedMessages.map((message) =>
+                message.role === "assistant" ? (
+                  <div key={message.id} className="flex items-start gap-3">
+                    {/* Avatar */}
+                    <img
+                      src="/logo.png"
+                      className="h-7 w-7 rounded-full shrink-0 mt-0.5"
+                      alt="assistant"
                     />
-                  )}
-                </div>
-              </div>
-            ) : (
-              <div
-                key={message.id}
-                className="flex justify-end items-start space-x-2 group"
-              >
-                <div className="flex flex-col items-end gap-1">
-                  <div className="max-w-[80%] rounded-lg px-4 py-2 bg-primary text-primary-foreground">
-                    {message.content}
+                    {/* Content */}
+                    <div className="flex-1 min-w-0 text-sm">
+                      {isLoading && !message.content && !message.rewrittenQuery ? (
+                        <div className="flex items-center gap-1 py-2">
+                          <div className="w-2 h-2 rounded-full bg-primary animate-bounce" />
+                          <div className="w-2 h-2 rounded-full bg-primary animate-bounce [animation-delay:0.2s]" />
+                          <div className="w-2 h-2 rounded-full bg-primary animate-bounce [animation-delay:0.4s]" />
+                        </div>
+                      ) : (
+                        <Answer
+                          key={message.id}
+                          messageId={message.id}
+                          chatId={params.id}
+                          markdown={message.content}
+                          citations={message.citations}
+                          rewrittenQuery={message.id === lastAssistantId ? message.rewrittenQuery : undefined}
+                          retrievedContext={message.id === lastAssistantId ? message.retrievedContext : undefined}
+                          confidence={message.confidence}
+                          confidenceScore={message.confidenceScore}
+                          confidenceBreakdown={message.confidenceBreakdown}
+                          suggestion={message.suggestion}
+                          failedLegs={message.failedLegs}
+                          queryClassification={message.id === lastAssistantId ? message.queryClassification : undefined}
+                          toolTrace={message.id === lastAssistantId ? message.toolTrace : undefined}
+                          synthesisMode={message.synthesisMode}
+                          isStreaming={isLoading && message.id === lastAssistantId}
+                          onDelete={(id) => setMessages((prev) => prev.filter((m) => m.id !== id))}
+                        />
+                      )}
+                    </div>
                   </div>
-                  {/* action buttons — visible on hover */}
-                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <button
-                      onClick={() => {
-                        navigator.clipboard.writeText(message.content);
-                      }}
-                      title="Copy"
-                      className="flex items-center gap-1 px-2 py-0.5 rounded text-xs text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 dark:hover:text-zinc-200 dark:hover:bg-zinc-800 transition-colors"
-                    >
-                      <Copy className="h-3 w-3" />
-                      <span>Copy</span>
-                    </button>
-                    <button
-                      onClick={async () => {
-                        const confirmed = window.confirm("Delete this message? This cannot be undone.");
-                        if (!confirmed) return;
-                        try {
-                          await api.delete(`/api/chat/${params.id}/messages/${message.id}`);
-                          setMessages((prev) => prev.filter((m) => m.id !== message.id));
-                        } catch (e) {
-                          console.error("Failed to delete message:", e);
-                        }
-                      }}
-                      title="Delete"
-                      className="flex items-center gap-1 px-2 py-0.5 rounded text-xs text-zinc-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
-                    >
-                      <Trash2 className="h-3 w-3" />
-                      <span>Delete</span>
-                    </button>
+                ) : (
+                  <div key={message.id} className="flex justify-end items-start gap-2 group">
+                    <div className="flex flex-col items-end gap-1 max-w-[70%]">
+                      <div className="bg-primary text-primary-foreground rounded-2xl rounded-tr-sm px-4 py-2.5 text-sm">
+                        {message.content}
+                      </div>
+                      {/* Hover actions */}
+                      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <button
+                          onClick={() => navigator.clipboard.writeText(message.content)}
+                          title="Copy"
+                          className="flex items-center gap-1 px-2 py-0.5 rounded text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                        >
+                          <Copy className="h-3 w-3" />
+                          Copy
+                        </button>
+                        <button
+                          onClick={async () => {
+                            if (!window.confirm("Delete this message? This cannot be undone.")) return;
+                            try {
+                              await api.delete(`/api/chat/${params.id}/messages/${message.id}`);
+                              setMessages((prev) => prev.filter((m) => m.id !== message.id));
+                            } catch (e) {
+                              console.error("Failed to delete message:", e);
+                            }
+                          }}
+                          title="Delete"
+                          className="flex items-center gap-1 px-2 py-0.5 rounded text-xs text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
+                        >
+                          <Trash2 className="h-3 w-3" />
+                          Delete
+                        </button>
+                      </div>
+                    </div>
                   </div>
-                </div>
-                <div className="w-8 h-8 rounded-full bg-primary flex items-center justify-center">
-                  <User className="h-5 w-5 text-primary-foreground" />
-                </div>
-              </div>
-            )
+                )
+              )}
+              <div ref={messagesEndRef} />
+            </div>
           )}
-          <div ref={messagesEndRef} />
         </div>
-        <div className="border-t p-4 flex items-center space-x-4 bg-background absolute bottom-0 left-0 right-0">
-          <InputBar
-            value={input}
-            onChange={setInput}
-            onSubmit={handleSubmit}
-            disabled={isLoading}
-            placeholder="Type your message..."
-            file={attachedFile}
-            onFileChange={setAttachedFile}
-            fileError={fileError}
-            onFileError={setFileError}
-          />
+
+        {/* Floating input bar */}
+        <div className="sticky bottom-0 bg-background/80 backdrop-blur-sm pb-4 pt-2 px-4 shrink-0">
+          <div className="max-w-3xl mx-auto">
+            <InputBar
+              value={input}
+              onChange={setInput}
+              onSubmit={handleSubmit}
+              disabled={isLoading}
+              placeholder="Type your message..."
+              file={attachedFile}
+              onFileChange={setAttachedFile}
+              fileError={fileError}
+              onFileError={setFileError}
+            />
+          </div>
         </div>
       </div>
     </ChatLayout>

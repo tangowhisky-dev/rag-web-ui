@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Send, Loader2, ChevronDown } from "lucide-react";
+import { Loader2, Paperclip, ArrowUp } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
   Select,
@@ -173,141 +173,137 @@ export function InputBar({
   };
 
   return (
-    <div className="flex flex-col gap-2" data-testid="chat-input-container">
-      {/* Hidden span for textarea measurement */}
+    <div
+      {...getRootProps()}
+      className={cn(
+        "flex flex-col rounded-2xl border border-border bg-background shadow-md",
+        isDragActive && "ring-2 ring-primary ring-offset-1"
+      )}
+      data-testid="chat-input-container"
+    >
+      {/* Hidden span for textarea height measurement */}
       <span
         ref={hiddenSpanRef}
         className="absolute invisible whitespace-pre-wrap break-words"
-        style={{
-          width: "100%",
-          lineHeight: `${LINE_HEIGHT_PX}px`,
-        }}
+        style={{ width: "100%", lineHeight: `${LINE_HEIGHT_PX}px` }}
       />
 
-      {/* File chip row */}
+      {/* File chip (inside card, above textarea) */}
       {activeFile && (
-        <div className="px-1">
+        <div className="px-3 pt-3">
           <FileChip file={activeFile} onRemove={handleFileRemove} />
         </div>
       )}
 
-      <div
-        {...getRootProps()}
-        className={cn(
-          "flex items-end gap-2",
-          isDragActive && "ring-2 ring-primary ring-offset-1 rounded-md"
-        )}
-      >
-        {/* KB Selector */}
-        {knowledgeBases.length > 0 && (
-          <Select open={kbOpen} onOpenChange={setKbOpen}>
-            <SelectTrigger
-              className="h-8 w-[140px] rounded-md text-xs shrink-0"
-              data-testid="chat-input-kb-selector"
-            >
-              <SelectValue
-                placeholder="Select KBs"
-              />
-            </SelectTrigger>
-            <SelectContent>
-              {knowledgeBases.map((kb) => (
-                <SelectItem
-                  key={kb.id}
-                  value={String(kb.id)}
-                  onSelect={(e) => {
-                    e.preventDefault();
-                    handleKbToggle(kb.id, !selectedKbIds.includes(kb.id));
-                  }}
-                >
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="checkbox"
-                      checked={selectedKbIds.includes(kb.id)}
-                      onChange={() => {}}
-                      className="h-3 w-3"
-                    />
-                    <span className="truncate max-w-[160px]">{kb.name}</span>
-                  </div>
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        )}
-
-        {/* File Attachment Button */}
-        <FileAttachButton
-          onFileAccepted={handleFileAccepted}
-          onError={handleFileError}
+      {/* Textarea */}
+      <div className="px-3 pt-3 pb-1">
+        <textarea
+          ref={textareaRef}
+          value={value}
+          onChange={handleInputChange}
+          onKeyDown={handleKeyDown}
+          placeholder={placeholder}
           disabled={disabled}
-          isDragActive={isDragActive}
+          rows={LINES_MIN}
+          className={cn(
+            "w-full resize-none border-0 bg-transparent text-sm",
+            "focus:outline-none focus:ring-0 disabled:cursor-not-allowed disabled:opacity-50",
+            "placeholder:text-muted-foreground"
+          )}
+          style={{
+            height: `${LINES_MIN * LINE_HEIGHT_PX}px`,
+            lineHeight: `${LINE_HEIGHT_PX}px`,
+          }}
+          data-testid="chat-input-textarea"
         />
+      </div>
 
-        {/* Textarea + Send Button Container */}
-        <div className="flex-1 flex items-end gap-2 rounded-md border border-input bg-background focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2">
-          <textarea
-            ref={textareaRef}
-            value={value}
-            onChange={handleInputChange}
-            onKeyDown={handleKeyDown}
-            placeholder={placeholder}
-            disabled={disabled}
-            rows={LINES_MIN}
+      {/* Bottom row: attach + KB chips + send */}
+      <div className="flex items-center justify-between px-2 pb-2 gap-2">
+        <div className="flex items-center gap-1">
+          {/* File attach button */}
+          <label
             className={cn(
-              "flex-1 min-w-0 resize-none rounded-l-md border-0 bg-transparent px-3 py-2 text-sm",
-              "focus:outline-none focus:ring-0 disabled:cursor-not-allowed disabled:opacity-50",
-              "placeholder:text-muted-foreground"
+              "p-1.5 rounded-lg cursor-pointer text-muted-foreground hover:text-foreground hover:bg-muted transition-colors",
+              disabled && "pointer-events-none opacity-50"
             )}
-            style={{
-              height: `${LINES_MIN * LINE_HEIGHT_PX}px`,
-              lineHeight: `${LINE_HEIGHT_PX}px`,
-            }}
-            data-testid="chat-input-textarea"
-          />
-
-          {/* Send Button */}
-          <button
-            type="button"
-            onClick={onSubmit}
-            disabled={disabled || !value.trim()}
-            className={cn(
-              "h-10 rounded-r-md px-3 flex items-center justify-center transition-all",
-              "bg-primary text-primary-foreground hover:bg-primary/90",
-              "disabled:pointer-events-none disabled:opacity-50"
-            )}
-            data-testid="chat-input-send-button"
+            aria-label="Attach file"
           >
-            {disabled ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Send className="h-4 w-4" />
-            )}
-          </button>
+            <Paperclip className="h-4 w-4" />
+            <input
+              type="file"
+              className="hidden"
+              disabled={disabled}
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) handleFileAccepted(file);
+                e.target.value = "";
+              }}
+            />
+          </label>
+
+          {/* KB selector pills */}
+          {knowledgeBases.length > 0 && (
+            <Select open={kbOpen} onOpenChange={setKbOpen}>
+              <SelectTrigger
+                className="h-7 w-auto gap-1 rounded-full border px-2.5 text-xs shrink-0"
+                data-testid="chat-input-kb-selector"
+              >
+                <SelectValue placeholder="KBs" />
+              </SelectTrigger>
+              <SelectContent>
+                {knowledgeBases.map((kb) => (
+                  <SelectItem
+                    key={kb.id}
+                    value={String(kb.id)}
+                    onSelect={(e) => {
+                      e.preventDefault();
+                      handleKbToggle(kb.id, !selectedKbIds.includes(kb.id));
+                    }}
+                  >
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={selectedKbIds.includes(kb.id)}
+                        onChange={() => {}}
+                        className="h-3 w-3"
+                      />
+                      <span className="truncate max-w-[160px]">{kb.name}</span>
+                    </div>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
         </div>
+
+        {/* Send button — circular arrow-up */}
+        <button
+          type="button"
+          onClick={onSubmit}
+          disabled={disabled || !value.trim()}
+          className={cn(
+            "h-8 w-8 rounded-full flex items-center justify-center transition-all shrink-0",
+            disabled || !value.trim()
+              ? "bg-muted text-muted-foreground"
+              : "bg-primary text-primary-foreground hover:bg-primary/90",
+            "disabled:pointer-events-none"
+          )}
+          data-testid="chat-input-send-button"
+        >
+          {disabled ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <ArrowUp className="h-4 w-4" />
+          )}
+        </button>
       </div>
 
       {/* File error */}
       {activeError && (
-        <p className="text-xs text-destructive px-1" data-testid="file-error">
+        <p className="text-xs text-destructive px-3 pb-2" data-testid="file-error">
           {activeError}
         </p>
-      )}
-
-      {/* Selected KBs indicator */}
-      {knowledgeBases.length > 0 && selectedKbIds.length > 0 && (
-        <div className="flex flex-wrap gap-1 px-1">
-          {selectedKbIds.map((id) => {
-            const kb = knowledgeBases.find((k) => k.id === id);
-            if (!kb) return null;
-            return (
-              <span
-                key={id}
-                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs bg-secondary text-secondary-foreground"
-              >
-                {kb.name}
-              </span>
-            );
-          })}
-        </div>
       )}
     </div>
   );

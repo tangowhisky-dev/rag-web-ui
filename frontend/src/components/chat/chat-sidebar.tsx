@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
-import { Plus, Pencil, Trash2, X, MessageSquare, Pin, Search, LogOut } from "lucide-react";
+import { Plus, Pencil, Trash2, X, MessageSquare, Pin, Search, LogOut, Book } from "lucide-react";
 import { useChatContext } from "@/contexts/chat-context";
 
 interface ChatSidebarProps {
@@ -13,12 +13,6 @@ interface ChatSidebarProps {
 
 export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
   const router = useRouter();
-
-  const handleLogout = () => {
-    localStorage.removeItem("token");
-    document.cookie = 'token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT';
-    router.push("/login");
-  };
   const pathname = usePathname();
   const { chatList, activeChat, renameChat, deleteChat, patchChat } = useChatContext();
 
@@ -26,6 +20,12 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
   const [editingValue, setEditingValue] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+
+  const handleLogout = () => {
+    localStorage.removeItem("token");
+    document.cookie = "token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT";
+    router.push("/login");
+  };
 
   useEffect(() => {
     if (editingId !== null) {
@@ -64,14 +64,12 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
     await patchChat(id, { pinned: !pinned }).catch(() => {});
   };
 
-  // Filter and sort: pinned first, then by id desc
   const filtered = chatList.filter((c) => {
     if (!searchQuery.trim()) return true;
     return c.title.toLowerCase().includes(searchQuery.toLowerCase());
   });
   const pinned = filtered.filter((c) => c.pinned);
   const unpinned = filtered.filter((c) => !c.pinned);
-  const sorted = [...pinned, ...unpinned];
 
   const renderChatItem = (chat: (typeof chatList)[0]) => {
     const isActive =
@@ -81,10 +79,10 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
         key={chat.id}
         data-testid={`chat-item-${chat.id}`}
         className={[
-          "group flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm transition-colors",
+          "group flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm transition-colors cursor-pointer",
           isActive
-            ? "bg-primary/10 text-primary"
-            : "hover:bg-muted text-foreground",
+            ? "bg-accent text-accent-foreground"
+            : "hover:bg-accent/60 text-foreground",
         ].join(" ")}
       >
         {editingId === chat.id ? (
@@ -102,7 +100,7 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
             onClick={onClose}
             className="flex items-center gap-2 flex-1 min-w-0"
           >
-            <MessageSquare className="h-3.5 w-3.5 shrink-0 opacity-60" />
+            <MessageSquare className="h-3.5 w-3.5 shrink-0 opacity-50" />
             <span className="truncate">{chat.title}</span>
           </Link>
         )}
@@ -113,25 +111,23 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
               onClick={() => handleTogglePin(chat.id, chat.pinned)}
               className={[
                 "p-1 rounded transition-colors",
-                chat.pinned
-                  ? "text-primary opacity-100"
-                  : "hover:bg-muted-foreground/20",
+                chat.pinned ? "text-primary" : "hover:bg-muted-foreground/20",
               ].join(" ")}
-              aria-label={chat.pinned ? "Unpin chat" : "Pin chat"}
+              aria-label={chat.pinned ? "Unpin" : "Pin"}
             >
               <Pin className="h-3 w-3" />
             </button>
             <button
               onClick={() => startEdit(chat.id, chat.title)}
               className="p-1 rounded hover:bg-muted-foreground/20 transition-colors"
-              aria-label="Rename chat"
+              aria-label="Rename"
             >
               <Pencil className="h-3 w-3" />
             </button>
             <button
               onClick={() => handleDelete(chat.id)}
               className="p-1 rounded hover:bg-destructive/20 hover:text-destructive transition-colors"
-              aria-label="Delete chat"
+              aria-label="Delete"
             >
               <Trash2 className="h-3 w-3" />
             </button>
@@ -153,17 +149,23 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
 
       <aside
         className={[
-          "fixed top-0 left-0 z-30 h-full w-64 sm:w-72 bg-background border-r flex flex-col",
+          "fixed inset-y-0 left-0 z-30 w-64 bg-card border-r flex flex-col",
           "transition-transform duration-200 ease-in-out",
           "lg:static lg:translate-x-0 lg:z-auto",
           isOpen ? "translate-x-0" : "-translate-x-full",
         ].join(" ")}
       >
-        {/* Header */}
-        <div className="flex items-center justify-between px-4 py-3 border-b shrink-0">
-          <span className="font-semibold text-sm tracking-wide text-foreground">
-            Chats
-          </span>
+        {/* Logo + app name */}
+        <div className="flex items-center justify-between px-4 py-4 shrink-0">
+          <Link
+            href="/dashboard"
+            onClick={onClose}
+            className="flex items-center gap-2.5 font-semibold text-sm hover:text-primary transition-colors"
+          >
+            <img src="/logo.svg" alt="Logo" className="h-7 w-7 rounded-lg" />
+            <span>InsightCore</span>
+          </Link>
+          {/* Close on mobile */}
           <button
             onClick={onClose}
             className="lg:hidden p-1 rounded hover:bg-muted transition-colors"
@@ -173,13 +175,13 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
           </button>
         </div>
 
-        {/* New chat */}
-        <div className="px-3 py-2 shrink-0">
+        {/* New Chat */}
+        <div className="px-3 pb-2 shrink-0">
           <Link
             href="/dashboard/chat/new"
             onClick={onClose}
             data-testid="new-chat-button"
-            className="flex items-center gap-2 w-full rounded-lg px-3 py-2 text-sm font-medium hover:bg-muted transition-colors"
+            className="flex items-center gap-2 w-full rounded-lg px-3 py-2 text-sm font-medium hover:bg-accent transition-colors"
           >
             <Plus className="h-4 w-4 shrink-0" />
             New Chat
@@ -187,8 +189,8 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
         </div>
 
         {/* Search */}
-        <div className="px-3 pb-2 shrink-0">
-          <div className="flex items-center gap-1.5 rounded-lg border bg-muted/40 px-2 py-1.5">
+        <div className="px-3 pb-3 shrink-0">
+          <div className="flex items-center gap-1.5 rounded-lg border bg-muted/40 px-2.5 py-1.5">
             <Search className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
             <input
               data-testid="chat-search"
@@ -204,9 +206,9 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
         {/* Chat list */}
         <nav
           data-testid="chat-list"
-          className="flex-1 overflow-y-auto px-2 pb-4 space-y-0.5"
+          className="flex-1 overflow-y-auto px-2 space-y-0.5"
         >
-          {sorted.length === 0 && (
+          {filtered.length === 0 && (
             <p className="text-xs text-muted-foreground text-center mt-6 px-4">
               {searchQuery ? "No matching chats." : "No conversations yet."}
             </p>
@@ -218,19 +220,27 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
           )}
           {pinned.map(renderChatItem)}
           {pinned.length > 0 && unpinned.length > 0 && (
-            <p className="text-xs text-muted-foreground px-2 pt-2 pb-0.5 uppercase tracking-wide">
+            <p className="text-xs text-muted-foreground px-2 pt-3 pb-0.5 uppercase tracking-wide">
               Recent
             </p>
           )}
           {unpinned.map(renderChatItem)}
         </nav>
-        {/* Sign out */}
-        <div className="border-t p-3 shrink-0">
+
+        {/* Bottom: KB link + Sign out */}
+        <div className="border-t px-3 py-3 shrink-0 space-y-0.5">
+          <Link
+            href="/dashboard/knowledge"
+            className="flex items-center gap-2 w-full rounded-lg px-3 py-2 text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+          >
+            <Book className="h-4 w-4 shrink-0" />
+            Knowledge Base
+          </Link>
           <button
             onClick={handleLogout}
-            className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-destructive hover:bg-destructive/10 transition-colors"
+            className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
           >
-            <LogOut className="h-4 w-4" />
+            <LogOut className="h-4 w-4 shrink-0" />
             Sign out
           </button>
         </div>
