@@ -8,7 +8,7 @@ RUN apk add --no-cache libc6-compat git
 # Setup pnpm environment
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
-RUN npm install -g pnpm@8
+RUN npm install -g pnpm@10
 
 WORKDIR /app
 
@@ -16,12 +16,12 @@ COPY package.json pnpm-lock.yaml ./
 
 # Cache mount for pnpm content-addressable store
 RUN --mount=type=cache,target=/pnpm/store \
-    pnpm install --no-frozen-lockfile
+    pnpm install --frozen-lockfile
 
 # Builder
 FROM base AS builder
 
-RUN npm install -g pnpm@8
+RUN npm install -g pnpm@10
 
 WORKDIR /app
 
