@@ -165,9 +165,7 @@ async def create_message(
         if chat_file.status == "error":
             raise HTTPException(status_code=422, detail=chat_file.error_message or "File processing failed.")
         if chat_file.markdown_content:
-            file_context_parts.append(f"## Attached File: {chat_file.file_name}
-
-{chat_file.markdown_content}")
+            file_context_parts.append(f"## Attached File: {chat_file.file_name}\n\n{chat_file.markdown_content}")
 
     # Prior-turn files in this chat (multi-turn context)
     prior_files = (
@@ -183,16 +181,10 @@ async def create_message(
     )
     for pf in prior_files:
         if pf.markdown_content:
-            file_context_parts.append(f"## Previously Uploaded File: {pf.file_name}
-
-{pf.markdown_content}")
+            file_context_parts.append(f"## Previously Uploaded File: {pf.file_name}\n\n{pf.markdown_content}")
 
     if file_context_parts:
-        query_text = "
-
-".join(file_context_parts) + "
-
-" + query_text
+        query_text = "\n\n".join(file_context_parts) + "\n\n" + query_text
 
     knowledge_base_ids = [kb.id for kb in chat.knowledge_bases]
 
