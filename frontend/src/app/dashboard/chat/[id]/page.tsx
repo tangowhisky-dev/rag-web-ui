@@ -15,7 +15,7 @@ function generateId(): string {
 import { useEffect, useRef, useState, useMemo } from "react";
 import { flushSync } from "react-dom";
 import { useRouter } from "next/navigation";
-import { Copy, Trash2, Settings, Download } from "lucide-react";
+import { Copy, Trash2 } from "lucide-react";
 import ChatLayout from "@/components/layout/chat-layout";
 import { useChatContext, ChatProvider } from "@/contexts/chat-context";
 import ChatSettings from "@/components/chat/chat-settings";
@@ -543,25 +543,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
   return (
     <ChatLayout pageTitle={chatTitle ?? undefined} graphRagActive={useGraphRag}>
       <div className="flex flex-col h-full relative">
-        {/* Action icons row (export + settings) */}
-        <div className="flex items-center justify-end gap-1 px-4 pt-2 pb-1 shrink-0">
-          <button
-            data-testid="export-chat"
-            onClick={handleExport}
-            className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-            aria-label="Export chat as Markdown"
-          >
-            <Download className="h-4 w-4" />
-          </button>
-          <button
-            data-testid="open-settings"
-            onClick={() => setIsSettingsOpen((v) => !v)}
-            className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-            aria-label="Chat settings"
-          >
-            <Settings className="h-4 w-4" />
-          </button>
-        </div>
+
 
         {isSettingsOpen && (
           <ChatSettings

@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
-import { Plus, Pencil, Trash2, X, MessageSquare, Pin, Search, Settings } from "lucide-react";
+import { Plus, Pencil, Trash2, X, MessageSquare, Pin, Search, Settings, Download } from "lucide-react";
 import { useChatContext } from "@/contexts/chat-context";
 
 interface ChatSidebarProps {
@@ -65,6 +65,26 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
   const pinned = filtered.filter((c) => c.pinned);
   const unpinned = filtered.filter((c) => !c.pinned);
 
+  const handleExport = async (id: number) => {
+    try {
+      const res = await fetch(`/api/chat/${id}/export`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem("token") ?? ""}` },
+      });
+      if (!res.ok) throw new Error("Export failed");
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `chat-${id}.md`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error("Export failed", e);
+    }
+  };
+
   const renderChatItem = (chat: (typeof chatList)[0]) => {
     const isActive =
       activeChat === chat.id || pathname === `/dashboard/chat/${chat.id}`;
@@ -110,6 +130,13 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
               aria-label={chat.pinned ? "Unpin" : "Pin"}
             >
               <Pin className="h-3 w-3" />
+            </button>
+            <button
+              onClick={(e) => { e.preventDefault(); handleExport(chat.id); }}
+              className="p-1 rounded hover:bg-muted-foreground/20 transition-colors"
+              aria-label="Download chat"
+            >
+              <Download className="h-3 w-3" />
             </button>
             <button
               onClick={() => startEdit(chat.id, chat.title)}
