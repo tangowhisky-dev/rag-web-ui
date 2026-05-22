@@ -426,7 +426,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
         const formData = new FormData();
         formData.append("file", attachedFile);
         formData.append("message", trimmedInput);
-        formData.append("messages", JSON.stringify(requestMessages));
+        formData.append("messages", JSON.stringify({ messages: requestMessages }));
         response = await fetch(`/api/chat/${params.id}/messages/with-file`, {
           method: "POST",
           headers: {
