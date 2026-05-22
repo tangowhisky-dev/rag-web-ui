@@ -142,9 +142,8 @@ async def upload_chat_file(
             detail=f"File exceeds 10 MB limit ({len(file_bytes) / 1024 / 1024:.1f} MB).",
         )
 
-    # Persist to uploads/ephemeral/{chat_id}/ so markitdown can read it
-    stored_path = save_ephemeral_file(chat_id, filename, file_bytes)
-
+    # Insert the DB row first so we have a unique id to use as the on-disk filename prefix.
+    # This prevents collisions when the same filename is uploaded multiple times to the same chat.
     chat_file = ChatFile(
         chat_id=chat_id,
         file_name=filename,
@@ -155,6 +154,10 @@ async def upload_chat_file(
     db.add(chat_file)
     db.commit()
     db.refresh(chat_file)
+
+    # Stored as {file_id}_{original_filename} — unique even if the same name is re-uploaded
+    stored_name = f"{chat_file.id}_{filename}"
+    stored_path = save_ephemeral_file(chat_id, stored_name, file_bytes)
 
     background_tasks.add_task(_process_file, None, chat_file.id, stored_path, filename)
 
