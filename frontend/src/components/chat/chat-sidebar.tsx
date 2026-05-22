@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
-import { Plus, Pencil, Trash2, X, MessageSquare, Pin, Search, Book } from "lucide-react";
+import { Plus, Pencil, Trash2, X, MessageSquare, Pin, Search, Settings } from "lucide-react";
 import { useChatContext } from "@/contexts/chat-context";
 
 interface ChatSidebarProps {
@@ -143,26 +143,19 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
 
       <aside
         className={[
+          // Mobile: fixed overlay sliding from left
+          // Desktop: static in-flow, full height of parent flex row
           "fixed inset-y-0 left-0 z-30 w-64 bg-card border-r flex flex-col",
           "transition-transform duration-200 ease-in-out",
-          "lg:static lg:translate-x-0 lg:z-auto",
+          "lg:relative lg:inset-auto lg:translate-x-0 lg:z-auto lg:h-full",
           isOpen ? "translate-x-0" : "-translate-x-full",
         ].join(" ")}
       >
-        {/* Logo + app name */}
-        <div className="flex items-center justify-between px-4 py-4 shrink-0">
-          <Link
-            href="/dashboard"
-            onClick={onClose}
-            className="flex items-center gap-2.5 font-semibold text-sm hover:text-primary transition-colors"
-          >
-            <img src="/logo.svg" alt="Logo" className="h-7 w-7 rounded-lg" />
-            <span>InsightCore</span>
-          </Link>
-          {/* Close on mobile */}
+        {/* Mobile close button */}
+        <div className="flex items-center justify-end px-3 pt-3 lg:hidden shrink-0">
           <button
             onClick={onClose}
-            className="lg:hidden p-1 rounded hover:bg-muted transition-colors"
+            className="p-1 rounded hover:bg-muted transition-colors"
             aria-label="Close sidebar"
           >
             <X className="h-4 w-4" />
@@ -221,14 +214,14 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
           {unpinned.map(renderChatItem)}
         </nav>
 
-        {/* Bottom: KB link */}
+        {/* Bottom: Settings link */}
         <div className="border-t px-3 py-3 shrink-0">
           <Link
-            href="/dashboard/knowledge"
+            href="/dashboard/settings"
             className="flex items-center gap-2 w-full rounded-lg px-3 py-2 text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
           >
-            <Book className="h-4 w-4 shrink-0" />
-            Knowledge Base
+            <Settings className="h-4 w-4 shrink-0" />
+            Settings
           </Link>
         </div>
       </aside>
