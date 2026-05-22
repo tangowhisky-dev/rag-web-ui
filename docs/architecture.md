@@ -111,6 +111,43 @@ export_service.py — generate_synthesis_report() [synthesis mode]
     └── Structured Markdown: header + answer + ## Sources from tool_trace
 ```
 
+### 3. Chat File Upload Pipeline
+
+Files attached to chat messages are processed ephemerally — not indexed in any knowledge base.
+
+```
+User attaches file to message
+    │
+    ▼
+POST /api/chat/{chat_id}/files
+    ├── Save original to uploads/ephemeral/{chat_id}/{filename} (deduplicated with _1, _2 suffixes)
+    ├── Insert ChatFile row (status=processing, stored_path=<disk path>)
+    └── Background task: MarkItDown → Markdown
+            ├── Update ChatFile.markdown_content + token_count (status=ready)
+            └── Original file kept on disk until chat delete
+
+User sends message with file_id
+    │
+    ▼
+POST /api/chat/{chat_id}/messages (or /messages/with-file for streaming)
+    ├── Load ChatFile.markdown_content from DB
+    ├── Inject into generate_response() as file_markdown (bypasses query rewrite + KB retrieval)
+    └── QA system prompt receives: "## Uploaded File Context\n<markdown>"
+            └── Prior-turn files in same chat also injected for multi-turn continuity
+
+Chat delete  →  delete_ephemeral_chat_files(chat_id)  →  rm -rf uploads/ephemeral/{chat_id}/
+
+Download
+    └── GET /api/chat/{chat_id}/files/{file_id}/download  →  FileResponse(stored_path)
+```
+
+**Key design constraints:**
+- File content bypasses the query rewrite step (rewriter would corrupt the query using prior "no file" history)
+- Synthesis mode is disabled when a file is present (synthesis prompt has no file injection path)
+- File content is capped at 25% of `OPENAI_MODEL_CONTEXT_SIZE` tokens
+- `chat_files.file_name` stores the finalized on-disk filename (post-deduplication), not the raw upload name
+```
+
 #### GraphRAG architecture note
 
 **Strict separation of concerns:**
@@ -151,6 +188,7 @@ app/
 │       ├── api.py             # Router registration
 │       ├── auth.py            # JWT login / register
 │       ├── chat.py            # Chat endpoints (create, stream, history)
+│       ├── chat_files.py      # Ephemeral chat file upload, status poll, download, delete
 │       └── knowledge_base.py  # KB + document CRUD, upload, processing
 ├── core/
 │   ├── config.py              # All settings (pydantic-settings, reads .env)
@@ -189,12 +227,36 @@ Next.js 14 app with TypeScript, Tailwind CSS, shadcn/ui, and the Vercel AI SDK f
 
 ```
 src/
-├── app/          # Next.js app router pages
-├── components/   # React components (chat, KB management, retrieval test UI)
-├── lib/          # API clients, utilities
-├── styles/       # Global CSS
-└── middleware.ts # Route protection (redirect unauthenticated to /login)
+├── app/
+│   ├── dashboard/
+│   │   ├── chat/
+│   │   │   ├── [id]/page.tsx      # Chat view: messages, streaming, file chip, AgentTimeline
+│   │   │   ├── new/page.tsx       # New chat: select KB + retrieval options
+│   │   │   └── page.tsx           # Redirect to most recent chat or /new
+│   │   ├── knowledge/             # KB management CRUD
+│   │   └── test-retrieval/        # Retrieval quality tester
+│   ├── api/
+│   │   └── chat/[id]/
+│   │       ├── messages/route.ts          # Streaming proxy (Node.js http.request)
+│   │       ├── messages/with-file/route.ts # File+message streaming proxy
+│   │       └── files/[fileId]/download/route.ts  # File download proxy
+│   └── layout.tsx                 # ThemeProvider (dark/light/system)
+├── components/
+│   ├── chat/
+│   │   ├── chat-sidebar.tsx       # Collapsible sidebar; localStorage persistence
+│   │   ├── chat-input.tsx         # Textarea + file attachment button
+│   │   ├── file-attachment.tsx    # FileUploadChip (pre-send) + MessageFileChip (post-send download)
+│   │   ├── answer.tsx             # Markdown renderer with citation parsing
+│   │   └── agent-timeline.tsx     # Streaming AgentTimeline (tool trace + confidence)
+│   ├── layout/
+│   │   ├── chat-layout.tsx        # Full-width breadcrumb bar + sidebar + main
+│   │   └── dashboard-layout.tsx   # KB management layout
+│   └── ui/
+│       └── theme-toggle.tsx       # Dark / light / system toggle
+└── middleware.ts                  # Route protection (redirect unauthenticated to /login)
 ```
+
+**Chat UI layout:** A full-width breadcrumb bar sits at the top of the viewport (blurred glass effect). Below it, the collapsible sidebar and main chat area fill the remaining height. Sidebar state persists in `localStorage` under `chat-sidebar-collapsed`. The `ThemeProvider` (next-themes) is mounted at root with `attribute="class"` supporting dark/light/system modes; the CSS palette uses pure neutral greys (zero chroma) for dark mode.
 
 ### Docker Stack
 

@@ -66,6 +66,7 @@ Copy `.env.example` to `.env` and set these values:
 | `OPENAI_VISION_API_BASE` | no | Base URL for the vision model when it lives on a different server. Falls back to `OPENAI_API_BASE`. | `http://host.docker.internal:11434/v1` |
 | `DENSE_EMBEDDINGS_MODEL` | yes | Embedding model name | `text-embedding-3-small` |
 | `DENSE_EMBEDDING_DIM` | yes | Output dimension of the embedding model | `1536` for OpenAI, `1024` for qwen3-0.6b |
+| `OPENAI_MODEL_CONTEXT_SIZE` | no | Total context window of `OPENAI_MODEL` in tokens. Used to limit ephemeral file content to 25% of the window. | `131072` |
 
 **Using a local model server (e.g. LM Studio):**
 ```env
@@ -170,6 +171,23 @@ MATCH (c:Chunk)-[:FROM_CHUNK]-(e:__Entity__ {name: "Apple"}) RETURN c, e
 | `TOOL_CALLING_ENABLED` | Enable the pre-answer agentic tool-calling loop. LLM may call `search_documents`, `extract_entities`, `summarize_chunks`. | `true` |
 | `MAX_TOOL_ITERATIONS` | Maximum tool-call iterations per chat turn. | `5` |
 | `SYNTHESIS_MODE_ENABLED` | For MULTI_PART queries with synthesis keywords (summarize, compare, themes…), use the synthesis prompt and `synthesize_documents` for parallel multi-query retrieval. | `true` |
+
+### Chat File Upload
+
+When a user attaches a file to a chat message, the file is processed ephemerally — it is **not** added to any knowledge base. Instead:
+
+1. The file is saved to `uploads/ephemeral/{chat_id}/` (same Docker volume as KB uploads).
+2. MarkItDown extracts the full text to Markdown.
+3. The Markdown is stored in MySQL (`chat_files` table) alongside a `stored_path` to the original file on disk.
+4. On the next message send, up to 25% of `OPENAI_MODEL_CONTEXT_SIZE` tokens of the file Markdown is injected directly into the QA system prompt as `## Uploaded File Context`.
+5. Prior-turn files in the same chat are also re-injected for multi-turn context continuity.
+6. The original file is kept on disk until the chat is deleted (calls `delete_ephemeral_chat_files`).
+
+| Variable | Description | Default |
+|---|---|---|
+| `OPENAI_MODEL_CONTEXT_SIZE` | Total context window tokens — controls how much file content to inject (capped at 25%). | `131072` |
+
+> Files attached to chat messages are **not** indexed in Qdrant or MySQL FTS. They exist only in the chat session and are served for download via the attachment chip in the UI.
 
 ### Vector DB (Qdrant)
 
@@ -307,9 +325,12 @@ docker compose -f docker-compose.dev.yml up -d --build backend
 - **Retrieval confidence scoring** — every answer shows a 4-level confidence indicator (High/Medium/Low/None) based on score distribution, leg overlap, and entity signals; actionable suggestions when confidence is low
 - **Agentic tool calling** — LLM can call `search_documents`, `extract_entities`, and `summarize_chunks` in a pre-answer loop (up to `MAX_TOOL_ITERATIONS`); tool trace visible per message
 - **Multi-document synthesis** — for synthesis queries (summarize / compare / themes), the LLM uses `synthesize_documents` for parallel multi-query fan-out and produces a structured Markdown report with citations
+- **Chat file upload** — attach any supported document to a chat message; content is injected into the LLM context (up to 25% of the model context window) without indexing; multi-turn re-injection keeps file context available across follow-up questions; attachment chip under user messages shows filename on hover and triggers download on click
 - Multi-turn chat with source citations
 - Streaming responses with think-block collapsing for reasoning models
 - Query classification badge, tool trace timeline, and synthesis mode indicator in the chat UI
+- Collapsible chat sidebar with localStorage persistence
+- Dark / light / system theme toggle in both dashboard and chat layouts
 - Retrieval quality testing UI
 - Route protection: unauthenticated users are redirected to `/login`
 - JWT invalidated on container restart (ephemeral secret key in dev)
