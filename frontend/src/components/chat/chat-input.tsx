@@ -222,16 +222,21 @@ export function InputBar({
               disabled && "pointer-events-none opacity-50"
             )}
             aria-label="Attach file"
+            data-testid="chat-input-file-button"
           >
             <Paperclip className="h-4 w-4" />
             <input
               type="file"
               className="hidden"
               disabled={disabled}
+              accept=".pdf,.docx,.doc,.pptx,.ppt,.xlsx,.xls,.txt,.md,.html,.htm,.csv,.json,.xml,.eml,.epub,.jpg,.jpeg,.png,.gif,.zip"
+              data-testid="file-input"
               onChange={(e) => {
                 const file = e.target.files?.[0];
-
-                e.target.value = "";
+                if (file) {
+                  handleFileAccepted(file);
+                }
+                e.target.value = "";  // reset so same file can be re-selected
               }}
             />
           </label>
