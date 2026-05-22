@@ -482,13 +482,16 @@ async def generate_response(
                     len(window_messages), older_count, bool(existing_summary))
 
         # ── Step 1: Rewrite query using sliding window ─────────────────────
-        # When file content is injected into query, use display_query (the real user
-        # question text) for rewrite — the markdown should never reach the rewriter.
-        rewrite_input = display_query if (file_markdown and display_query) else query
-        logger.info("[STEP 1] condense | window_turns=%d | using_display_query=%s",
-                    len(recent_lc_history), bool(file_markdown and display_query))
-        standalone_question = await _rewrite_query(rewrite_input, recent_lc_history)
-        logger.info("[STEP 1] standalone_question=%r", standalone_question)
+        # When file content is present, skip the rewrite entirely — the chat history
+        # may contain previous "no document" assistant replies that would corrupt
+        # the rewriter output. Use display_query (the real user question) directly.
+        if file_markdown:
+            standalone_question = display_query or query
+            logger.info("[STEP 1] skipped (file present) | standalone=%r", standalone_question)
+        else:
+            logger.info("[STEP 1] condense | window_turns=%d", len(recent_lc_history))
+            standalone_question = await _rewrite_query(query, recent_lc_history)
+            logger.info("[STEP 1] standalone_question=%r", standalone_question)
 
         # Emit rewritten query immediately — UI shows it without waiting for LLM
         yield f'1:{json.dumps({"rewritten_query": standalone_question})}\n'
@@ -704,6 +707,15 @@ async def generate_response(
             elif isinstance(lc_msg, AIMessage):
                 openai_messages.append({"role": "assistant", "content": lc_msg.content})
         openai_messages.append({"role": "user", "content": standalone_question})
+
+        # Log the full request payload for debugging (truncate large file content)
+        _log_msgs = []
+        for m in openai_messages:
+            content = m.get("content") or ""
+            _log_msgs.append({"role": m["role"], "content": content[:300] + "…[truncated]" if len(content) > 300 else content})
+        logger.info("[STEP 4] openai_request | model=%s | messages=%s",
+                    model_name or settings.OPENAI_MODEL,
+                    _log_msgs)
 
         stream = await openai_client.chat.completions.create(
             model=model_name or settings.OPENAI_MODEL,
