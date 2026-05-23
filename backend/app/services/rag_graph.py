@@ -207,6 +207,252 @@ async def context_router_node(state: RAGGraphState) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Node: extract_file_sections_node
+# ---------------------------------------------------------------------------
+
+async def extract_file_sections_node(state: RAGGraphState) -> dict:
+    """
+    Extracts the most relevant sections from attached file markdown
+    instead of dumping the entire document into context.
+
+    Logs: [EXTRACT] chars_in=... sections=... chars_out=... latency_ms=...
+    Updates: file_markdown (trimmed), agent_steps
+    """
+    t0 = time.monotonic()
+    file_markdown: Optional[str] = state.get("file_markdown")
+
+    if not file_markdown:
+        latency_ms = round((time.monotonic() - t0) * 1000, 2)
+        step = {"node": "extract_file_sections", "latency_ms": latency_ms, "status": "skipped"}
+        return {"agent_steps": (state.get("agent_steps") or []) + [step]}
+
+    query = state.get("rewritten_query") or state["query"]
+    model_name = state.get("model_name")
+
+    # Split into sections by markdown headings or double-newlines
+    import re
+    raw_sections = re.split(r"\n(?=#{1,3} )", file_markdown)
+    if len(raw_sections) <= 1:
+        # fallback: split by paragraph blocks
+        raw_sections = [s.strip() for s in file_markdown.split("\n\n") if s.strip()]
+
+    chars_in = len(file_markdown)
+
+    # If the file is small enough, keep it all
+    MAX_CHARS = 12_000
+    if chars_in <= MAX_CHARS:
+        latency_ms = round((time.monotonic() - t0) * 1000, 2)
+        logger.info(
+            "[EXTRACT] chars_in=%d sections=%d chars_out=%d latency_ms=%.1f (passthrough)",
+            chars_in, len(raw_sections), chars_in, latency_ms,
+        )
+        step = {"node": "extract_file_sections", "latency_ms": latency_ms,
+                "status": "passthrough", "sections": len(raw_sections)}
+        return {"agent_steps": (state.get("agent_steps") or []) + [step]}
+
+    # Use LLM to pick the top sections most relevant to the query
+    llm = _get_llm(model_name, 0.0)
+
+    # Build a numbered list of section previews (first 200 chars each)
+    previews = "\n".join(
+        f"[{i}] {s[:200].strip()}" for i, s in enumerate(raw_sections)
+    )
+    system_prompt = (
+        "You are a document section selector. "
+        "Given a query and a numbered list of document sections, "
+        "return a JSON object: {\"indices\": [<list of section indices>]} "
+        "selecting the 3-6 most relevant sections. "
+        "Return ONLY the JSON object."
+    )
+    user_msg = f"Query: {query}\n\nSections:\n{previews}"
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_msg},
+    ]
+
+    selected_sections = raw_sections  # fallback
+    try:
+        response = await llm.ainvoke(
+            messages,
+            response_format={"type": "json_object"},
+        )
+        parsed = json.loads(response.content)
+        indices: List[int] = [int(i) for i in (parsed.get("indices") or [])]
+        if indices:
+            selected_sections = [raw_sections[i] for i in indices if 0 <= i < len(raw_sections)]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[EXTRACT] section selection failed: %s — keeping all sections", exc)
+
+    trimmed = "\n\n".join(selected_sections)
+    latency_ms = round((time.monotonic() - t0) * 1000, 2)
+    logger.info(
+        "[EXTRACT] chars_in=%d sections_total=%d sections_kept=%d chars_out=%d latency_ms=%.1f",
+        chars_in, len(raw_sections), len(selected_sections), len(trimmed), latency_ms,
+    )
+
+    step = {"node": "extract_file_sections", "latency_ms": latency_ms, "status": "done",
+            "sections_total": len(raw_sections), "sections_kept": len(selected_sections)}
+    return {
+        "file_markdown": trimmed,
+        "agent_steps": (state.get("agent_steps") or []) + [step],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Node: kb_retrieval_node
+# ---------------------------------------------------------------------------
+
+async def kb_retrieval_node(state: RAGGraphState) -> dict:
+    """
+    Retrieves documents from the knowledge base using the existing
+    multi-strategy retrieval utilities.
+
+    Logs: [RETRIEVE] kb_ids=... docs_found=... latency_ms=...
+    Updates: retrieved_docs, agent_steps
+    """
+    t0 = time.monotonic()
+    sources: List[str] = state.get("sources") or ["kb"]
+
+    if "kb" not in sources:
+        latency_ms = round((time.monotonic() - t0) * 1000, 2)
+        step = {"node": "kb_retrieval", "latency_ms": latency_ms, "status": "skipped"}
+        return {
+            "retrieved_docs": state.get("retrieved_docs") or [],
+            "agent_steps": (state.get("agent_steps") or []) + [step],
+        }
+
+    query = state.get("rewritten_query") or state["query"]
+    kb_ids: List[int] = state.get("knowledge_base_ids") or []
+    db = state.get("_db")  # injected by run_stream
+
+    use_dense: bool = state.get("use_dense", True)
+    use_sparse: bool = state.get("use_sparse", True)
+    use_exact: bool = state.get("use_exact", True)
+    use_graph_rag: bool = state.get("use_graph_rag", False)
+
+    docs: list = []
+    try:
+        from app.services.retrieval import retrieve_documents  # noqa: PLC0415
+        docs = await retrieve_documents(
+            query=query,
+            knowledge_base_ids=kb_ids,
+            db=db,
+            use_dense=use_dense,
+            use_sparse=use_sparse,
+            use_exact=use_exact,
+            use_graph_rag=use_graph_rag,
+        )
+    except ImportError:
+        # retrieval module may not exist yet in test environments
+        logger.warning("[RETRIEVE] retrieval module not available — returning empty docs")
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[RETRIEVE] error: %s", exc)
+
+    latency_ms = round((time.monotonic() - t0) * 1000, 2)
+    logger.info(
+        "[RETRIEVE] kb_ids=%s docs_found=%d latency_ms=%.1f",
+        kb_ids, len(docs), latency_ms,
+    )
+
+    step = {"node": "kb_retrieval", "latency_ms": latency_ms,
+            "status": "done", "docs_found": len(docs)}
+    prior = state.get("retrieved_docs") or []
+    return {
+        "retrieved_docs": prior + docs,
+        "agent_steps": (state.get("agent_steps") or []) + [step],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Node: grade_documents_node
+# ---------------------------------------------------------------------------
+
+_GRADE_SYSTEM_PROMPT = """\
+You are a relevance grader. Given a query and a document excerpt, decide whether
+the document is relevant to the query.
+
+Respond with a JSON object:
+{"relevant": true}  or  {"relevant": false}
+
+Be strict: only mark relevant if the document directly helps answer the query.
+"""
+
+
+async def grade_documents_node(state: RAGGraphState) -> dict:
+    """
+    Grades each retrieved document for relevance, keeping only relevant ones.
+    Triggers a rewrite-retry signal when too few docs pass.
+
+    Logs: [GRADE] relevant=N irrelevant=M retry=bool latency_ms=...
+    Updates: graded_docs, agent_steps
+    """
+    t0 = time.monotonic()
+    docs: list = state.get("retrieved_docs") or []
+    query = state.get("rewritten_query") or state["query"]
+    model_name = state.get("model_name")
+
+    if not docs:
+        latency_ms = round((time.monotonic() - t0) * 1000, 2)
+        step = {"node": "grade_documents", "latency_ms": latency_ms,
+                "status": "skipped", "relevant": 0, "irrelevant": 0, "retry": False}
+        return {
+            "graded_docs": [],
+            "agent_steps": (state.get("agent_steps") or []) + [step],
+        }
+
+    llm = _get_llm(model_name, 0.0)
+
+    graded: list = []
+    irrelevant_count = 0
+
+    for doc in docs:
+        # Extract text from various doc shapes (dict with "content", LangChain Document, or str)
+        if isinstance(doc, dict):
+            content = doc.get("content") or doc.get("page_content") or str(doc)
+        elif hasattr(doc, "page_content"):
+            content = doc.page_content
+        else:
+            content = str(doc)
+
+        excerpt = content[:500]  # grade on first 500 chars for cost efficiency
+        messages = [
+            {"role": "system", "content": _GRADE_SYSTEM_PROMPT},
+            {"role": "user", "content": f"Query: {query}\n\nDocument:\n{excerpt}"},
+        ]
+        try:
+            response = await llm.ainvoke(
+                messages,
+                response_format={"type": "json_object"},
+            )
+            parsed = json.loads(response.content)
+            is_relevant: bool = bool(parsed.get("relevant", True))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[GRADE] parse error for doc: %s — marking relevant by default", exc)
+            is_relevant = True
+
+        if is_relevant:
+            graded.append(doc)
+        else:
+            irrelevant_count += 1
+
+    # Retry signal: fewer than 2 relevant docs and at least one irrelevant doc was filtered
+    retry = len(graded) < 2 and irrelevant_count > 0
+
+    latency_ms = round((time.monotonic() - t0) * 1000, 2)
+    logger.info(
+        "[GRADE] relevant=%d irrelevant=%d retry=%s latency_ms=%.1f",
+        len(graded), irrelevant_count, retry, latency_ms,
+    )
+
+    step = {"node": "grade_documents", "latency_ms": latency_ms, "status": "done",
+            "relevant": len(graded), "irrelevant": irrelevant_count, "retry": retry}
+    return {
+        "graded_docs": graded,
+        "agent_steps": (state.get("agent_steps") or []) + [step],
+    }
+
+
+# ---------------------------------------------------------------------------
 # run_stream() — async generator interface contract
 #
 # Interface is stable from T01 onward.  Full graph wiring arrives in T04.
