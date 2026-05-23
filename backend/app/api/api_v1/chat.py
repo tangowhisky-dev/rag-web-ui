@@ -583,7 +583,8 @@ def get_message_siblings(
         siblings = (
             db.query(Message)
             .filter(
-                Message.parent_message_id == shared_parent_id,
+                (Message.id == shared_parent_id) |
+                (Message.parent_message_id == shared_parent_id),
                 Message.chat_id == target.chat_id,
             )
             .order_by(Message.branch_index)
