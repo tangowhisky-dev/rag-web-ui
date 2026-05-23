@@ -254,6 +254,25 @@ class TestContextRouterNode:
 # run_stream interface contract
 # ---------------------------------------------------------------------------
 
+def _make_mock_llm(content: str):
+    """Return a mock LLM whose ainvoke always returns content."""
+    mock_llm = AsyncMock()
+    mock_llm.ainvoke = AsyncMock(return_value=_make_llm_response(content))
+    return mock_llm
+
+
+def _router_json(sources=None, rationale="general", file_ids=None):
+    return json.dumps({
+        "sources": sources or ["kb"],
+        "rationale": rationale,
+        "file_ids_needed": file_ids or [],
+    })
+
+
+def _grade_json(relevant=True):
+    return json.dumps({"relevant": relevant})
+
+
 class TestRunStreamInterface:
     @pytest.mark.asyncio
     async def test_importable_and_async_generator(self):
@@ -263,18 +282,32 @@ class TestRunStreamInterface:
 
     @pytest.mark.asyncio
     async def test_yields_expected_event_keys(self):
-        """run_stream stub should yield dicts with 'event' key."""
+        """run_stream should yield dicts with 'event' key (full graph mocked)."""
+        # Each node calls _get_llm once; return different payloads in call order:
+        # rewrite, router, (extract skips LLM for small/no file), grade (no docs → skips), answer
+        call_payloads = [
+            "rewritten query",           # rewrite_query_node
+            _router_json(),              # context_router_node
+            "The answer is here.",       # generate_answer_node
+        ]
+        call_iter = iter(call_payloads)
+
+        def side_effect(*args, **kwargs):
+            payload = next(call_iter, "fallback")
+            return _make_mock_llm(payload)
+
         events = []
-        async for evt in run_stream(
-            query="test",
-            file_markdown=None,
-            db=None,
-            chat_id=1,
-            knowledge_base_ids=[],
-            recent_lc_history=[],
-            existing_summary=None,
-        ):
-            events.append(evt)
+        with patch("app.services.rag_graph._get_llm", side_effect=side_effect):
+            async for evt in run_stream(
+                query="test",
+                file_markdown=None,
+                db=None,
+                chat_id=1,
+                knowledge_base_ids=[],
+                recent_lc_history=[],
+                existing_summary=None,
+            ):
+                events.append(evt)
 
         assert len(events) > 0
         for evt in events:
@@ -282,39 +315,59 @@ class TestRunStreamInterface:
 
     @pytest.mark.asyncio
     async def test_yields_done_event(self):
-        """run_stream stub should always yield a 'done' event last."""
+        """run_stream should always yield a 'done' event last."""
+        call_payloads = iter([
+            "rewritten query",
+            _router_json(),
+            "The answer.",
+        ])
+
+        def side_effect(*args, **kwargs):
+            return _make_mock_llm(next(call_payloads, "fallback"))
+
         events = []
-        async for evt in run_stream(
-            query="test",
-            file_markdown=None,
-            db=None,
-            chat_id=1,
-            knowledge_base_ids=[],
-            recent_lc_history=[],
-            existing_summary=None,
-        ):
-            events.append(evt)
+        with patch("app.services.rag_graph._get_llm", side_effect=side_effect):
+            async for evt in run_stream(
+                query="test",
+                file_markdown=None,
+                db=None,
+                chat_id=1,
+                knowledge_base_ids=[],
+                recent_lc_history=[],
+                existing_summary=None,
+            ):
+                events.append(evt)
 
         assert events[-1]["event"] == EVENT_DONE
 
     @pytest.mark.asyncio
     async def test_done_event_has_full_response(self):
         """done event should have full_response and usage fields."""
-        async for evt in run_stream(
-            query="test",
-            file_markdown=None,
-            db=None,
-            chat_id=1,
-            knowledge_base_ids=[],
-            recent_lc_history=[],
-            existing_summary=None,
-        ):
-            if evt["event"] == EVENT_DONE:
-                assert "full_response" in evt
-                assert "usage" in evt
-                assert "promptTokens" in evt["usage"]
-                assert "completionTokens" in evt["usage"]
-                break
+        call_payloads = iter([
+            "rewritten query",
+            _router_json(),
+            "The answer.",
+        ])
+
+        def side_effect(*args, **kwargs):
+            return _make_mock_llm(next(call_payloads, "fallback"))
+
+        with patch("app.services.rag_graph._get_llm", side_effect=side_effect):
+            async for evt in run_stream(
+                query="test",
+                file_markdown=None,
+                db=None,
+                chat_id=1,
+                knowledge_base_ids=[],
+                recent_lc_history=[],
+                existing_summary=None,
+            ):
+                if evt["event"] == EVENT_DONE:
+                    assert "full_response" in evt
+                    assert "usage" in evt
+                    assert "promptTokens" in evt["usage"]
+                    assert "completionTokens" in evt["usage"]
+                    break
 
     def test_event_constants_defined(self):
         """All SSE event type constants should be non-empty strings."""
