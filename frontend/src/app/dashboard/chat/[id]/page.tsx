@@ -26,6 +26,7 @@ import { useToast } from "@/components/ui/use-toast";
 import { Answer } from "@/components/chat/answer";
 import { InputBar } from "@/components/chat/chat-input";
 import { MessageFileChip, type UploadedFile } from "@/components/chat/file-attachment";
+import { BranchPicker } from "@/components/chat/branch-picker";
 
 interface Message {
   id: string;
@@ -563,6 +564,28 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     }
   };
 
+  /** Called by BranchPicker when the user saves an edit and a new branch message is created. */
+  const handleBranch = (originalId: string, newMessageId: string, newContent: string) => {
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === originalId
+          ? { ...m, id: newMessageId, content: newContent }
+          : m
+      )
+    );
+  };
+
+  /** Called by BranchPicker when the user navigates to a sibling branch. */
+  const handleNavigate = (targetMessageId: string, targetContent: string, currentMessageId: string) => {
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === currentMessageId
+          ? { ...m, id: targetMessageId, content: targetContent }
+          : m
+      )
+    );
+  };
+
   const processedMessages = useMemo(() => {
     return messages.map((message) => {
       if (message.role !== "assistant" || !message.content) return message;
@@ -698,6 +721,18 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                       </div>{/* end flex-row bubble+chip */}
                       {/* Hover actions */}
                       <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <BranchPicker
+                          messageId={message.id}
+                          chatId={params.id}
+                          content={message.content}
+                          onBranch={(newMsgId, newContent) =>
+                            handleBranch(message.id, newMsgId, newContent)
+                          }
+                          onNavigate={(siblingId, siblingContent) =>
+                            handleNavigate(siblingId, siblingContent, message.id)
+                          }
+                          disabled={isLoading}
+                        />
                         <button
                           onClick={() => navigator.clipboard.writeText(message.content)}
                           title="Copy"
