@@ -28,6 +28,7 @@ from qdrant_client.models import (
 from fastembed import SparseTextEmbedding
 from app.core.config import settings
 from app.core.storage import get_abs_path, save_file, move_file, delete_file
+from app.services.markdown_cleaner import clean_markdown
 from app.models.knowledge import ProcessingTask, Document, DocumentChunk
 from app.services.chunk_record import ChunkRecord
 
@@ -511,6 +512,21 @@ async def preview_document(file_path: str, chunk_size: int = None, chunk_overlap
         # Convert to markdown using markitdown (handles all supported formats)
         markdown_text = _convert_to_markdown(abs_path, os.path.basename(file_path))
 
+        # ── Cleanup pass ─────────────────────────────────────────────────────
+        _fname = os.path.basename(file_path)
+        _chars_before = len(markdown_text)
+        try:
+            markdown_text = clean_markdown(markdown_text)
+            logging.getLogger(__name__).info(
+                "[CLEANUP] chars_before=%d chars_after=%d file=%s",
+                _chars_before, len(markdown_text), _fname,
+            )
+        except Exception as _ce:
+            logging.getLogger(__name__).warning(
+                "[CLEANUP] fallback to raw markdown. reason=%s file=%s",
+                str(_ce)[:200], _fname,
+            )
+
         # Wrap in a LangchainDocument so we can reuse RecursiveCharacterTextSplitter
         doc = LangchainDocument(
             page_content=markdown_text,
@@ -606,6 +622,20 @@ async def process_document_background(
         markdown_text = await loop.run_in_executor(
             None, lambda: _convert_to_markdown(local_temp_path, file_name, enable_ocr=enable_ocr)
         )
+
+        # ── Cleanup pass ─────────────────────────────────────────────────────
+        _chars_before = len(markdown_text)
+        try:
+            markdown_text = clean_markdown(markdown_text)
+            logger.info(
+                "[CLEANUP] chars_before=%d chars_after=%d file=%s",
+                _chars_before, len(markdown_text), file_name,
+            )
+        except Exception as _ce:
+            logger.warning(
+                "[CLEANUP] fallback to raw markdown. reason=%s file=%s",
+                str(_ce)[:200], file_name,
+            )
 
         if not markdown_text or not markdown_text.strip():
             raise ValueError(
