@@ -390,6 +390,7 @@ async def classify_query(query: str) -> "QueryClassification":
         )
 
 
+
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 async def generate_response(
@@ -406,13 +407,30 @@ async def generate_response(
     model_name:    Optional[str] = None,
     display_query: Optional[str] = None,
     file_id: Optional[int] = None,
-    file_markdown: Optional[str] = None,  # pre-loaded file content to inject into QA context
+    file_markdown: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
+    """
+    Stream a chat response for the given query.
+
+    Delegates the full RAG pipeline (query rewrite → routing → retrieval →
+    grading → generation) to rag_graph.run_stream(), which emits typed
+    events that are forwarded as Vercel AI SDK SSE frames:
+
+      0:  token             (streaming answer text)
+      1:  rewritten_query   (standalone question after rewrite node)
+      2:  context           (retrieved docs + confidence metadata)
+      3:  error             (exception message)
+      4:  agent_step        (LangGraph node start / finish event)
+      d:  done              (finish reason + token usage)
+
+    file_markdown is forwarded to run_stream; the graph routes the query
+    internally — no special-casing in this function.
+    """
     logger.info("=" * 70)
     logger.info("[CHAT] chat_id=%s | kb_ids=%s | query=%r", chat_id, knowledge_base_ids, query)
 
     try:
-        # Persist user message — use display_query if provided (hides augmented file content)
+        # ── Persist user message ───────────────────────────────────────────
         user_message = Message(content=display_query or query, role="user", chat_id=chat_id)
         db.add(user_message)
         db.commit()
@@ -425,7 +443,7 @@ async def generate_response(
                 chat_file.message_id = user_message.id
                 db.commit()
 
-        # Persist bot placeholder
+        # ── Persist bot placeholder ────────────────────────────────────────
         bot_message = Message(content="", role="assistant", chat_id=chat_id)
         db.add(bot_message)
         db.commit()
@@ -458,16 +476,9 @@ async def generate_response(
         existing_summary: str | None = chat.history_summary if chat else None
 
         # ── Build sliding window from prior messages ───────────────────────
-        # prior_messages = all messages in payload except the current one
         prior_messages = messages["messages"][:-1]
-        logger.info("[CHAT] total_payload_msgs=%d | prior=%d",
-                    len(messages["messages"]), len(prior_messages))
-
-        # Take only the last N messages (sliding window)
         window_messages = prior_messages[-_SLIDING_WINDOW_MESSAGES:]
-        older_count = max(0, len(prior_messages) - _SLIDING_WINDOW_MESSAGES)
 
-        # Convert window to LangChain message objects for query rewrite
         recent_lc_history = []
         for m in window_messages:
             if m["role"] == "user":
@@ -478,305 +489,73 @@ async def generate_response(
                     content = content.split("__LLM_RESPONSE__")[-1]
                 recent_lc_history.append(AIMessage(content=content))
 
-        logger.info("[CHAT] sliding_window=%d msgs | older=%d msgs | has_summary=%s",
-                    len(window_messages), older_count, bool(existing_summary))
+        logger.info("[CHAT] sliding_window=%d msgs | has_summary=%s",
+                    len(window_messages), bool(existing_summary))
 
-        # ── Step 1: Rewrite query using sliding window ─────────────────────
-        # When file content is present, skip the rewrite entirely — the chat history
-        # may contain previous "no document" assistant replies that would corrupt
-        # the rewriter output. Use display_query (the real user question) directly.
-        if file_markdown:
-            standalone_question = display_query or query
-            logger.info("[STEP 1] skipped (file present) | standalone=%r", standalone_question)
-        else:
-            logger.info("[STEP 1] condense | window_turns=%d", len(recent_lc_history))
-            standalone_question = await _rewrite_query(query, recent_lc_history)
-            logger.info("[STEP 1] standalone_question=%r", standalone_question)
+        # ── Delegate to LangGraph run_stream ──────────────────────────────
+        from app.services.rag_graph import run_stream
 
-        # Emit rewritten query immediately — UI shows it without waiting for LLM
-        yield f'1:{json.dumps({"rewritten_query": standalone_question})}\n'
+        full_response = ""
+        rewritten_q = display_query or query
 
-        # ── Step 1.5: Classify query for adaptive retrieval ────────────────
-        classification = await classify_query(standalone_question)
-        logger.info("[CHAT] classification=%s | confidence=%.2f | latency=%dms",
-                    classification.type.value, classification.confidence, classification.latency_ms)
-
-        # ── Step 2: Hybrid retrieval ───────────────────────────────────────
-        # Skip KB retrieval when file content is provided — the file IS the context.
-        if file_markdown:
-            logger.info("[STEP 2] skipped — file_markdown present, using file as context")
-            docs = []
-            retrieval_info = {"legs": {}, "failed_legs": []}
-            failed_legs = []
-        else:
-            logger.info("[STEP 2] hybrid_search | query=%r | query_type=%s",
-                        standalone_question, classification.type.value)
-            retrieval_result = await hybrid_search_with_legs(
-                query=standalone_question,
-                kb_ids=knowledge_base_ids,
-                db=db,
-                use_dense=use_dense,
-                use_sparse=use_sparse,
-                use_exact=use_exact,
-                use_graph_rag=use_graph_rag,
-                query_type=classification.type,
-            )
-            docs = retrieval_result["docs"]
-            retrieval_info = retrieval_result["retrieval_info"]
-            failed_legs = retrieval_info["failed_legs"]
-            logger.info("[STEP 2] returned %d docs | failed_legs=%s", len(docs), failed_legs)
-            for i, doc in enumerate(docs):
-                snippet = doc.page_content[:120].replace("\n", " ")
-                logger.info("  chunk[%d] meta=%s | text=%r", i, doc.metadata, snippet)
-
-        # ── Confidence scoring ─────────────────────────────────────────────
-        confidence_result = score_retrieval(docs, retrieval_info)
-        confidence = confidence_result.level
-        suggestion = confidence_result.suggestion
-
-        # Emit retrieved context + confidence — UI renders this before LLM starts
-        serializable_context = [
-            {"page_content": doc.page_content, "metadata": doc.metadata}
-            for doc in docs
-        ]
-
-        # Shared OpenAI client for tool calling + final answer
-        openai_client = AsyncOpenAI(
-            api_key=settings.OPENAI_API_KEY,
-            base_url=settings.OPENAI_API_BASE,
-        )
-
-        # ── Step 2.5: Agentic tool calling (pre-answer) ───────────────────
-        # When TOOL_CALLING_ENABLED and NOT in synthesis mode (synthesis queries
-        # run their own guided tool loop inside Step 4), give the LLM a chance
-        # to invoke tools before the final RAG answer.
-        #
-        # Pre-compute synthesis_active here so we can skip Step 2.5 for synthesis
-        # queries (which use a structured tool loop via the synthesis prompt instead).
-        # File-based queries: never use synthesis mode — the file IS the context.
-        # Synthesis mode triggers its own tool loop that has no access to file markdown.
-        synthesis_active = (
-            not file_markdown
-            and settings.SYNTHESIS_MODE_ENABLED
-            and settings.TOOL_CALLING_ENABLED
-            and _is_synthesis_query(standalone_question, classification.type.value)
-        )
-
-        tool_trace: list = []
-        _iteration = 0  # guard: stays 0 if MAX_TOOL_ITERATIONS=0 or loop never runs
-        if settings.TOOL_CALLING_ENABLED and not synthesis_active:
-            import app.services.builtin_tools  # registers built-in tools on first import  # noqa: F401
-            from app.services.tool_registry import _registry, execute_tool as _execute_tool
-            import json as _json
-
-            tool_messages = [
-                {"role": "system", "content": (
-                    "You are a tool-calling assistant. "
-                    "Given the user question, decide which tools to call to gather information. "
-                    "When you have enough information, stop calling tools and respond with DONE."
-                )},
-                {"role": "user", "content": standalone_question},
-            ]
-            tool_schemas = _registry.list_tools()
-
-            for _iteration in range(settings.MAX_TOOL_ITERATIONS):
-                tool_resp = await openai_client.chat.completions.create(
-                    model=settings.OPENAI_MODEL,
-                    messages=tool_messages,
-                    tools=tool_schemas,
-                    tool_choice="auto",
-                    temperature=0,
-                    max_tokens=512,
-                )
-                tool_choice_msg = tool_resp.choices[0].message
-                finish_reason = tool_resp.choices[0].finish_reason
-
-                if finish_reason != "tool_calls" or not tool_choice_msg.tool_calls:
-                    # LLM decided no more tools needed
-                    break
-
-                # Execute each tool call
-                tool_messages.append(tool_choice_msg)
-                for tc in tool_choice_msg.tool_calls:
-                    fn_name = tc.function.name
-                    try:
-                        fn_args = _json.loads(tc.function.arguments or "{}")
-                    except Exception:
-                        fn_args = {}
-
-                    result = _execute_tool(fn_name, fn_args)
-                    tool_trace.append(result.to_dict())
-
-                    tool_messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": _json.dumps(result.output if result.success else {"error": result.error}),
-                    })
-
-                    logger.info(
-                        "[TOOL] iter=%d tool=%s success=%s latency_ms=%.1f",
-                        _iteration + 1, fn_name, result.success, result.latency_ms,
-                    )
-
-            if tool_trace:
-                logger.info("[TOOL] tool_calling_complete | iterations=%d | tools_called=%d",
-                            _iteration + 1, len(tool_trace))
-
-        yield f'2:{json.dumps({"context": serializable_context, "confidence": confidence, "score": confidence_result.score, "suggestion": suggestion, "failed_legs": failed_legs, "breakdown": confidence_result.breakdown, "query_classification": {"type": classification.type.value, "confidence": classification.confidence, "latency_ms": classification.latency_ms, "fallback": classification.fallback}, "tool_trace": tool_trace, "synthesis_mode": synthesis_active})}\n'
-
-        # ── Step 3: Emit base64 context chunk (legacy, for DB persistence) ─
-        base64_context = base64.b64encode(
-            json.dumps({
-                "context": serializable_context,
-                "rewritten_query": standalone_question,
-            }).encode()
-        ).decode()
-        separator = "__LLM_RESPONSE__"
-        yield f'0:"{base64_context}{separator}"\n'
-        full_response = base64_context + separator
-
-        # ── Step 4: QA answer with context + sliding window + summary ──────
-        formatted_context = "\n\n".join(
-            f"[{i + 1}] {doc.page_content}" for i, doc in enumerate(docs)
-        )
-
-        # Build the system prompt — inject summary when it exists
-        summary_section = ""
-        if existing_summary:
-            summary_section = (
-                "\n\n## Earlier Conversation Summary\n"
-                "The following is a summary of the earlier part of this conversation "
-                "(before the recent exchanges shown in the chat history below). "
-                "Use it for context but prioritise the retrieved documents and recent exchanges:\n"
-                f"{existing_summary}"
-            )
-
-        # ── Synthesis mode: swap QA prompt for synthesis orchestration prompt ──
-        if synthesis_active:
-            qa_system_prompt = _SYNTHESIS_SYSTEM_PROMPT + summary_section
-            logger.info(
-                "[SYNTHESIS] mode=active | query=%.80s | query_type=%s",
-                standalone_question, classification.type.value,
-            )
-        else:
-            qa_system_prompt = (
-                "You are a professional AI-based Knowledge Assistant that answers questions using the provided context documents.\n\n"
-                "## Formatting\n"
-                "- Use **bold** for key terms, concepts, and important phrases.\n"
-                "- Use *italics* for definitions, technical terms, or emphasis.\n"
-                "- Use numbered lists (1. 2. 3.) for sequential steps or ordered items.\n"
-                "- Use bullet points (- or *) for non-ordered lists, features, or comparisons.\n"
-                "- Use headings (##, ###) for longer multi-section answers.\n"
-                "- Keep paragraphs short and well-separated for readability.\n\n"
-                "## Citations\n"
-                "You will be given context documents numbered sequentially starting from 1.\n"
-                "You MUST cite sources using EXACTLY this format: [citation:x] — for example: 'The sky is blue [citation:1].'\n"
-                "Do NOT use any other citation format such as [1], (1), Context [1], or footnotes.\n"
-                "WRONG: 'The answer is 42 [1].'  RIGHT: 'The answer is 42 [citation:1].'\n"
-                "If a sentence draws from multiple contexts, list all applicable citations: [citation:1] [citation:2].\n\n"
-                "## General\n"
-                "- Your answer must be correct, accurate, and written in a professional, unbiased tone.\n"
-                # "- Limit your response to 2048 tokens.\n"
-                "- Do not include information unrelated to the question, and do not repeat yourself.\n"
-                "- If the provided context does not contain sufficient information, say so briefly and professionally.\n"
-                "- Write in the same language as the question (except for code, citations, and proper nouns).\n"
-                "- Do not blindly repeat the contexts verbatim; synthesize and explain.\n\n"
-                f"Context:\n{formatted_context}"
-                + (
-                    f"\n\n## Uploaded File Context\n"
-                    f"The user has uploaded a file whose full contents are provided below. "
-                    f"Use this as the primary source for answering the question.\n\n"
-                    f"{file_markdown}"
-                    if file_markdown else ""
-                )
-                + f"{summary_section}"
-            )
-
-        logger.info("[STEP 4] QA | model=%s | standalone=%r | context_chunks=%d | window_msgs=%d | has_summary=%s",
-                    settings.OPENAI_MODEL, standalone_question, len(docs),
-                    len(recent_lc_history), bool(existing_summary))
-
-        # Build OpenAI messages directly — do NOT use ChatPromptTemplate here.
-        # Template formatting parses curly-braces in user content (e.g. LaTeX
-        # citations like {author1, author2}) as variable placeholders, raising
-        # KeyError when the context contains arbitrary document text.
-        openai_messages = [{"role": "system", "content": qa_system_prompt}]
-        for lc_msg in recent_lc_history:
-            if isinstance(lc_msg, HumanMessage):
-                openai_messages.append({"role": "user", "content": lc_msg.content})
-            elif isinstance(lc_msg, AIMessage):
-                openai_messages.append({"role": "assistant", "content": lc_msg.content})
-        openai_messages.append({"role": "user", "content": standalone_question})
-
-        # Log the full request payload for debugging (truncate large file content)
-        _log_msgs = []
-        for m in openai_messages:
-            content = m.get("content") or ""
-            _log_msgs.append({"role": m["role"], "content": content[:300] + "…[truncated]" if len(content) > 300 else content})
-        logger.info("[STEP 4] openai_request | model=%s | messages=%s",
-                    model_name or settings.OPENAI_MODEL,
-                    _log_msgs)
-
-        stream = await openai_client.chat.completions.create(
-            model=model_name or settings.OPENAI_MODEL,
-            messages=openai_messages,
+        async for event in run_stream(
+            query=query,
+            file_markdown=file_markdown,
+            db=db,
+            chat_id=chat_id,
+            knowledge_base_ids=knowledge_base_ids,
+            recent_lc_history=recent_lc_history,
+            existing_summary=existing_summary,
+            use_dense=use_dense,
+            use_sparse=use_sparse,
+            use_exact=use_exact,
+            use_graph_rag=use_graph_rag,
             temperature=temperature,
-            stream=True,
-        )
+            model_name=model_name,
+            display_query=display_query,
+        ):
+            event_type = event.get("event")
 
-        # reasoning_content is emitted by models like carnice/QwQ/DeepSeek-R1
-        # via the OpenAI-style `delta.reasoning_content` field instead of
-        # wrapping in <think> tags inline. We collect it and emit a synthetic
-        # <think>...</think> block so the frontend ThinkBlock renders correctly.
-        reasoning_buf = ""
-        reasoning_closed = False  # track whether we've sent </think> yet
+            if event_type == "agent_step":
+                # Forward graph-node events for AgentTimeline rendering
+                yield f'4:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
 
-        async for chunk in stream:
-            delta = chunk.choices[0].delta
+            elif event_type == "rewritten_query":
+                rewritten_q = event.get("query", query)
+                yield f'1:{json.dumps({"rewritten_query": rewritten_q})}\n'
 
-            # ── reasoning tokens ──────────────────────────────────────────
-            reasoning_token = getattr(delta, "reasoning_content", None) or ""
-            if reasoning_token:
-                if not reasoning_buf:
-                    # Open the think block on the first reasoning token
-                    open_tag = "<think>"
-                    full_response += open_tag
-                    yield f'0:{json.dumps(open_tag)}\n'
-                reasoning_buf += reasoning_token
-                full_response += reasoning_token
-                yield f'0:{json.dumps(reasoning_token)}\n'
-                continue
+            elif event_type == "context":
+                # Emit context + base64 prefix for legacy DB persistence
+                docs = event.get("docs", [])
+                base64_context = base64.b64encode(
+                    json.dumps({
+                        "context": docs,
+                        "rewritten_query": rewritten_q,
+                    }).encode()
+                ).decode()
+                separator = "__LLM_RESPONSE__"
+                full_response = base64_context + separator
 
-            # ── answer tokens ─────────────────────────────────────────────
-            chunk_text = delta.content or ""
-            if not chunk_text:
-                continue
+                context_payload = {k: v for k, v in event.items() if k != "event"}
+                yield f'2:{json.dumps(context_payload)}\n'
+                yield f'0:"{base64_context}{separator}"\n'
 
-            # Close the think block exactly once, on the first answer token
-            if reasoning_buf and not reasoning_closed:
-                close_tag = "</think>"
-                full_response += close_tag
-                yield f'0:{json.dumps(close_tag)}\n'
-                reasoning_closed = True
+            elif event_type == "token":
+                content = event.get("content", "")
+                full_response += content
+                yield f'0:{json.dumps(content)}\n'
 
-            full_response += chunk_text
-            yield f'0:{json.dumps(chunk_text)}\n'
+            elif event_type == "done":
+                usage = event.get("usage", {"promptTokens": 0, "completionTokens": 0})
+                yield f'd:{json.dumps({"finishReason": "stop", "usage": usage})}\n'
 
-        # Edge case: model produced reasoning but no answer tokens at all
-        if reasoning_buf and not reasoning_closed:
-            close_tag = "</think>"
-            full_response += close_tag
-            yield f'0:{json.dumps(close_tag)}\n'
+        logger.info("[CHAT] stream complete | response_length=%d chars", len(full_response))
 
-        logger.info("[STEP 4] streaming complete | response_length=%d chars", len(full_response))
+        # ── Persist final answer ───────────────────────────────────────────
         bot_message.content = full_response
-        bot_message.confidence_level = confidence_result.level
-        bot_message.confidence_score = confidence_result.score
-        bot_message.confidence_breakdown = json.dumps(confidence_result.breakdown)
         db.commit()
 
         # ── Post-turn: schedule summary update (fire-and-forget) ──────────
-        # Runs after the stream is fully consumed by the client.
         def _log_task_error(task: asyncio.Task) -> None:
             exc = task.exception()
             if exc:

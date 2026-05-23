@@ -8,7 +8,6 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - ./backend:/app
       - ./uploads:/app/uploads
       - ./assets:/app/assets
     networks:
@@ -72,7 +71,7 @@ services:
       start_period: 10s
 
   qdrant:
-    image: qdrant/qdrant:latest
+    image: qdrant/qdrant:v1.18
     environment:
       - TZ=UTC
     ports:
@@ -106,7 +105,7 @@ services:
       start_period: 30s
 
   adminer:
-    image: adminer:latest
+    image: adminer:5
     ports:
       - "8080:8080"
     networks:
