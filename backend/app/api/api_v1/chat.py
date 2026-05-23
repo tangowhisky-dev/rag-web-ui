@@ -15,6 +15,7 @@ from app.schemas.chat import (
     ChatResponse,
     ChatUpdate,
     MessageCreate,
+    MessageEditRequest,
     MessageResponse
 )
 from app.core.security import get_current_user
@@ -484,3 +485,109 @@ def delete_chat(
     # Clean up ephemeral uploaded files for this chat
     delete_ephemeral_chat_files(chat_id)
     return {"status": "success"}
+
+@router.patch("/messages/{message_id}", response_model=MessageResponse)
+def edit_message(
+    *,
+    db: Session = Depends(get_db),
+    message_id: int,
+    body: MessageEditRequest,
+    current_user: User = Depends(get_current_user),
+) -> Any:
+    """Edit a sent user message by creating a new branch.
+
+    The original message is kept intact. A new Message row is created with
+    the same ``parent_message_id`` as the original (or the original message's
+    own id when it has no parent) and an incremented ``branch_index``.  This
+    preserves the full conversation history while giving the UI a clean new
+    branch to stream the assistant response into.
+    """
+    original = (
+        db.query(Message)
+        .join(Chat, Chat.id == Message.chat_id)
+        .filter(Message.id == message_id, Chat.user_id == current_user.id)
+        .first()
+    )
+    if not original:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    # Determine the shared parent for this branch group
+    shared_parent_id = original.parent_message_id if original.parent_message_id is not None else original.id
+
+    # Find the highest branch_index among existing siblings
+    max_branch = (
+        db.query(Message.branch_index)
+        .filter(
+            Message.parent_message_id == shared_parent_id,
+            Message.chat_id == original.chat_id,
+        )
+        .order_by(Message.branch_index.desc())
+        .first()
+    )
+    next_index = (max_branch[0] + 1) if max_branch else 1
+
+    new_message = Message(
+        content=body.content,
+        role=original.role,
+        chat_id=original.chat_id,
+        parent_message_id=shared_parent_id,
+        branch_index=next_index,
+    )
+    db.add(new_message)
+    db.commit()
+    db.refresh(new_message)
+    logger.info(
+        "message.branch_created chat_id=%s original_id=%s new_id=%s branch_index=%s",
+        original.chat_id, original.id, new_message.id, next_index,
+    )
+    return new_message
+
+
+@router.get("/messages/{message_id}/siblings", response_model=List[MessageResponse])
+def get_message_siblings(
+    *,
+    db: Session = Depends(get_db),
+    message_id: int,
+    current_user: User = Depends(get_current_user),
+) -> Any:
+    """Return all branch siblings of a message (messages sharing the same parent).
+
+    The response includes the original message (branch_index=0) and all
+    edited variants, ordered by branch_index ascending.
+    """
+    target = (
+        db.query(Message)
+        .join(Chat, Chat.id == Message.chat_id)
+        .filter(Message.id == message_id, Chat.user_id == current_user.id)
+        .first()
+    )
+    if not target:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    # The root of the branch group
+    shared_parent_id = target.parent_message_id if target.parent_message_id is not None else target.id
+
+    # If target IS the root (no parent), include itself + all children
+    if target.parent_message_id is None:
+        siblings = (
+            db.query(Message)
+            .filter(
+                (Message.id == shared_parent_id) |
+                (Message.parent_message_id == shared_parent_id),
+                Message.chat_id == target.chat_id,
+            )
+            .order_by(Message.branch_index)
+            .all()
+        )
+    else:
+        siblings = (
+            db.query(Message)
+            .filter(
+                Message.parent_message_id == shared_parent_id,
+                Message.chat_id == target.chat_id,
+            )
+            .order_by(Message.branch_index)
+            .all()
+        )
+
+    return siblings

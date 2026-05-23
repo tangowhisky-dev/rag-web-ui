@@ -33,9 +33,15 @@ class MessageBase(BaseModel):
 class MessageCreate(MessageBase):
     chat_id: int
 
+class MessageEditRequest(BaseModel):
+    content: str
+
+
 class MessageResponse(MessageBase):
     id: int
     chat_id: int
+    parent_message_id: Optional[int] = None
+    branch_index: int = 0
     created_at: datetime
     updated_at: datetime
     confidence_level: Optional[str] = None
