@@ -453,6 +453,183 @@ async def grade_documents_node(state: RAGGraphState) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Node: merge_context_node
+# ---------------------------------------------------------------------------
+
+async def merge_context_node(state: RAGGraphState) -> dict:
+    """
+    Merges graded KB docs and file sections into a single ranked context string.
+
+    Logs: [MERGE] kb_docs=N file_chars=M merged_chars=K latency_ms=...
+    Updates: merged_context, agent_steps
+    """
+    t0 = time.monotonic()
+    graded_docs: list = state.get("graded_docs") or []
+    file_markdown: Optional[str] = state.get("file_markdown")
+
+    parts: List[str] = []
+
+    # 1. KB documents (numbered for traceability)
+    if graded_docs:
+        kb_parts = []
+        for i, doc in enumerate(graded_docs, 1):
+            if isinstance(doc, dict):
+                content = doc.get("content") or doc.get("page_content") or str(doc)
+                source = doc.get("source", "")
+            elif hasattr(doc, "page_content"):
+                content = doc.page_content
+                source = getattr(doc, "metadata", {}).get("source", "")
+            else:
+                content = str(doc)
+                source = ""
+            header = f"[KB-{i}]" + (f" ({source})" if source else "")
+            kb_parts.append(f"{header}\n{content.strip()}")
+        parts.append("\n\n".join(kb_parts))
+
+    # 2. File sections (placed after KB docs so KB has higher retrieval priority)
+    if file_markdown and file_markdown.strip():
+        parts.append(f"[FILE CONTENT]\n{file_markdown.strip()}")
+
+    merged = "\n\n---\n\n".join(parts) if parts else ""
+
+    latency_ms = round((time.monotonic() - t0) * 1000, 2)
+    logger.info(
+        "[MERGE] kb_docs=%d file_chars=%d merged_chars=%d latency_ms=%.1f",
+        len(graded_docs),
+        len(file_markdown) if file_markdown else 0,
+        len(merged),
+        latency_ms,
+    )
+
+    step = {"node": "merge_context", "latency_ms": latency_ms, "status": "done",
+            "kb_docs": len(graded_docs), "merged_chars": len(merged)}
+    return {
+        "merged_context": merged,
+        "agent_steps": (state.get("agent_steps") or []) + [step],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Node: generate_answer_node
+# ---------------------------------------------------------------------------
+
+_ANSWER_SYSTEM_PROMPT = """\
+You are a helpful assistant. Answer the user's question using ONLY the provided
+context. If the context is insufficient, say so clearly.
+Keep your answer concise, accurate, and well-structured.
+"""
+
+
+async def generate_answer_node(state: RAGGraphState) -> dict:
+    """
+    Generates the final answer from merged context using the LLM.
+
+    Logs: [ANSWER] prompt_tokens=... completion_tokens=... latency_ms=...
+    Updates: answer, agent_steps
+    """
+    t0 = time.monotonic()
+    query = state.get("rewritten_query") or state["query"]
+    merged_context: str = state.get("merged_context") or ""
+    model_name = state.get("model_name")
+    temperature = state.get("temperature", 0.0)
+    history = state.get("recent_lc_history") or []
+    existing_summary = state.get("existing_summary")
+
+    llm = _get_llm(model_name, temperature)
+
+    messages: list = [{"role": "system", "content": _ANSWER_SYSTEM_PROMPT}]
+
+    if existing_summary:
+        messages.append({
+            "role": "system",
+            "content": f"[Earlier conversation summary]\n{existing_summary}",
+        })
+
+    for msg in history[-6:]:  # last 3 turns
+        messages.append(msg)
+
+    if merged_context:
+        messages.append({
+            "role": "user",
+            "content": f"Context:\n{merged_context}\n\nQuestion: {query}",
+        })
+    else:
+        messages.append({"role": "user", "content": query})
+
+    response = await llm.ainvoke(messages)
+    answer: str = response.content.strip()
+
+    # Extract token usage if available
+    usage = {}
+    if hasattr(response, "usage_metadata") and response.usage_metadata:
+        usage = {
+            "promptTokens": response.usage_metadata.get("input_tokens", 0),
+            "completionTokens": response.usage_metadata.get("output_tokens", 0),
+        }
+    elif hasattr(response, "response_metadata"):
+        meta = response.response_metadata or {}
+        token_usage = meta.get("token_usage") or meta.get("usage", {})
+        usage = {
+            "promptTokens": token_usage.get("prompt_tokens", 0),
+            "completionTokens": token_usage.get("completion_tokens", 0),
+        }
+
+    latency_ms = round((time.monotonic() - t0) * 1000, 2)
+    logger.info(
+        "[ANSWER] prompt_tokens=%d completion_tokens=%d latency_ms=%.1f",
+        usage.get("promptTokens", 0),
+        usage.get("completionTokens", 0),
+        latency_ms,
+    )
+
+    step = {"node": "generate_answer", "latency_ms": latency_ms, "status": "done",
+            "usage": usage}
+    return {
+        "answer": answer,
+        "agent_steps": (state.get("agent_steps") or []) + [step],
+        "_usage": usage,  # carry forward for run_stream EVENT_DONE
+    }
+
+
+# ---------------------------------------------------------------------------
+# StateGraph assembly
+# ---------------------------------------------------------------------------
+
+def _build_rag_graph():
+    """Builds and compiles the LangGraph StateGraph for RAG."""
+    from langgraph.graph import StateGraph, END  # noqa: PLC0415
+
+    builder = StateGraph(RAGGraphState)
+
+    # Register nodes
+    builder.add_node("rewrite_query",         rewrite_query_node)
+    builder.add_node("context_router",        context_router_node)
+    builder.add_node("kb_retrieval",          kb_retrieval_node)
+    builder.add_node("extract_file_sections", extract_file_sections_node)
+    builder.add_node("grade_documents",       grade_documents_node)
+    builder.add_node("merge_context",         merge_context_node)
+    builder.add_node("generate_answer",       generate_answer_node)
+
+    # Entry point
+    builder.set_entry_point("rewrite_query")
+
+    # Linear edges
+    builder.add_edge("rewrite_query",         "context_router")
+    builder.add_edge("context_router",        "extract_file_sections")
+    builder.add_edge("extract_file_sections", "kb_retrieval")
+    builder.add_edge("kb_retrieval",          "grade_documents")
+    builder.add_edge("grade_documents",       "merge_context")
+    builder.add_edge("merge_context",         "generate_answer")
+    builder.add_edge("generate_answer",       END)
+
+    return builder.compile()
+
+
+# Module-level compiled graph (lazy so import is fast in tests)
+_rag_graph = _build_rag_graph()
+
+
+# ---------------------------------------------------------------------------
 # run_stream() — async generator interface contract
 #
 # Interface is stable from T01 onward.  Full graph wiring arrives in T04.
@@ -488,48 +665,107 @@ async def run_stream(
       {"event": "done",          "full_response": str,
                                  "usage": {"promptTokens": int, "completionTokens": int}}
 
-    Full multi-node graph (rewrite → route → retrieve → grade →
-    merge → generate) is wired in T02-T04.  This stub allows chat_service
-    to compile and be tested against the interface contract.
+    Full multi-node graph: rewrite → route → extract_file_sections →
+    kb_retrieval → grade → merge → generate.
     """
-    start = time.monotonic()
-
-    # Stub: emit one placeholder agent_step so the frontend has something to
-    # render while T02-T04 implement the real nodes.
-    yield {
-        "event": EVENT_AGENT_STEP,
-        "node": "placeholder",
-        "latency_ms": round((time.monotonic() - start) * 1000, 2),
-        "status": "pending",
-        "message": "LangGraph graph not yet wired (T02-T04).",
+    initial_state: RAGGraphState = {
+        "query": query,
+        "rewritten_query": "",
+        "route": "both",
+        "sources": [],
+        "file_ids_needed": [],
+        "router_rationale": "",
+        "file_markdown": file_markdown,
+        "retrieved_docs": [],
+        "graded_docs": [],
+        "merged_context": "",
+        "answer": "",
+        "agent_steps": [],
+        "knowledge_base_ids": knowledge_base_ids,
+        "recent_lc_history": recent_lc_history,
+        "existing_summary": existing_summary,
+        "use_dense": use_dense,
+        "use_sparse": use_sparse,
+        "use_exact": use_exact,
+        "use_graph_rag": use_graph_rag,
+        "temperature": temperature,
+        "model_name": model_name,
+        "display_query": display_query,
+        "_db": db,  # type: ignore[typeddict-unknown-key]
     }
 
-    # Stub: emit a pass-through rewritten_query
-    yield {
-        "event": EVENT_REWRITTEN,
-        "query": display_query or query,
-    }
+    final_state: Optional[RAGGraphState] = None
+    emitted_nodes: set = set()
 
-    # Stub: emit empty context
+    async for chunk in _rag_graph.astream(initial_state):
+        # chunk is {node_name: partial_state_dict}
+        for node_name, partial in chunk.items():
+            if node_name == "__end__":
+                continue
+
+            # Emit agent_step events for any new nodes
+            new_steps: list = partial.get("agent_steps") or []
+            for step in new_steps:
+                step_node = step.get("node", node_name)
+                if step_node not in emitted_nodes:
+                    emitted_nodes.add(step_node)
+                    yield {
+                        "event": EVENT_AGENT_STEP,
+                        **{k: v for k, v in step.items()},
+                    }
+
+            # Emit rewritten_query as soon as rewrite node completes
+            if node_name == "rewrite_query" and partial.get("rewritten_query"):
+                yield {
+                    "event": EVENT_REWRITTEN,
+                    "query": display_query or partial["rewritten_query"],
+                }
+
+            # Merge into tracked final state
+            if final_state is None:
+                final_state = dict(initial_state)  # type: ignore[assignment]
+            final_state.update(partial)  # type: ignore[arg-type]
+
+    if final_state is None:
+        final_state = initial_state  # type: ignore[assignment]
+
+    # Build graded docs list for the context event
+    graded_docs: list = final_state.get("graded_docs") or []
+    merged_context: str = final_state.get("merged_context") or ""
+    confidence = "high" if len(graded_docs) >= 3 else ("medium" if graded_docs else "low")
+    score = min(1.0, len(graded_docs) / 5.0)
+
     yield {
         "event": EVENT_CONTEXT,
-        "docs": [],
-        "confidence": "low",
-        "score": 0.0,
-        "suggestion": "Graph not yet wired.",
+        "docs": graded_docs,
+        "confidence": confidence,
+        "score": round(score, 2),
+        "suggestion": "" if graded_docs else "No relevant documents found.",
         "failed_legs": [],
-        "breakdown": {},
-        "query_classification": {"type": "SIMPLE", "confidence": 0.0, "latency_ms": 0, "fallback": True},
-        "tool_trace": [],
-        "synthesis_mode": False,
+        "breakdown": {
+            "kb_docs": len(graded_docs),
+            "file_chars": len(final_state.get("file_markdown") or ""),
+            "merged_chars": len(merged_context),
+            "sources": final_state.get("sources") or [],
+        },
+        "query_classification": {
+            "type": "GRAPH",
+            "confidence": score,
+            "latency_ms": 0,
+            "fallback": False,
+        },
+        "tool_trace": [s.get("node") for s in (final_state.get("agent_steps") or [])],
+        "synthesis_mode": len((final_state.get("sources") or [])) > 1,
     }
 
-    # Stub: emit a placeholder answer token
-    stub_msg = "[Graph not yet wired — T02-T04 pending]"
-    yield {"event": EVENT_TOKEN, "content": stub_msg}
+    # Stream the answer as a single token (answer was generated non-streaming for simplicity)
+    answer: str = final_state.get("answer") or ""
+    if answer:
+        yield {"event": EVENT_TOKEN, "content": answer}
 
+    usage: dict = final_state.get("_usage") or {"promptTokens": 0, "completionTokens": 0}
     yield {
         "event": EVENT_DONE,
-        "full_response": stub_msg,
-        "usage": {"promptTokens": 0, "completionTokens": 0},
+        "full_response": answer,
+        "usage": usage,
     }
