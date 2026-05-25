@@ -76,9 +76,34 @@ class ChatUpdate(BaseModel):
     use_graph_rag: Optional[bool] = None
     knowledge_base_ids: Optional[List[int]] = None
 
+class FolderCreate(BaseModel):
+    name: str
+
+class FolderUpdate(BaseModel):
+    name: Optional[str] = None
+
+class FolderResponse(BaseModel):
+    id: int
+    name: str
+    user_id: int
+    created_at: datetime
+
+    @field_serializer("created_at")
+    def serialise_created_at(self, v): return _as_utc_iso(v)
+
+    class Config:
+        from_attributes = True
+
+class SearchResult(BaseModel):
+    chat_id: int
+    chat_title: str
+    snippet: str
+    message_id: int
+
 class ChatResponse(ChatBase):
     id: int
     user_id: int
+    folder_id: Optional[int] = None
     use_graph_rag: bool = False
     use_dense:     bool = True
     use_sparse:    bool = True
