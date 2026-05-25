@@ -2,178 +2,121 @@
 
 ## Overview
 
-Retrieval uses a **3-leg hybrid pipeline** fused with Reciprocal Rank Fusion (RRF):
+Retrieval uses a **3-leg hybrid pipeline** fused with weighted Reciprocal Rank Fusion (RRF):
 
 - **Leg 1 — Dense**: Qdrant cosine-similarity search on OpenAI-compatible embeddings
 - **Leg 2 — Sparse**: Qdrant learned-sparse search (SPLADE via FastEmbed, CPU-local)
 - **Leg 3 — Exact**: MySQL InnoDB FULLTEXT search (BM25/TF-IDF, server-side)
 
-All three legs run independently; their ranked lists are merged by weighted RRF. Each leg covers the failure modes of the others: dense handles paraphrases/synonyms, sparse captures term-frequency signal for technical vocabulary, exact matches product codes and precise keywords that embeddings may blur.
-
-Individual legs can be disabled via `.env` without re-indexing — ingestion always writes to all three stores.
+All three legs run independently; their ranked lists are merged by weighted RRF. Individual legs can be disabled via `.env` without re-indexing.
 
 ---
 
 ## Pipeline
 
+### Fast / Thinking mode (`fast_pipeline.py`)
+
 ```
-User query
+rewrite_query (standalone question via QUERY_MODEL)
     │
     ▼
-[chat_service.py] Condense with chat history → standalone question
-    │
-    ▼
-[retrieval.py] hybrid_search_with_legs()
+hybrid_search_with_legs()
     ├── _dense_search()          → Qdrant cosine similarity (dense vectors)
     ├── _qdrant_sparse_search()  → Qdrant SPLADE sparse vectors
     └── _exact_search()          → MySQL InnoDB FULLTEXT (NATURAL LANGUAGE MODE)
     │          ↓
-    └── _rrf_merge_candidates()  → weighted RRF score → top-K LangchainDocuments
+    └── _rrf_merge_candidates()  → weighted RRF → top-K documents
     │
-    ▼ (optional: GRAPHRAG_ENABLED=true and use_graph_rag=True)
-[graph_service.py] enrich_docs_with_graph()
-    └── Look up Chunk by (document_id, chunk_index) in Neo4j
-        → traverse entity relationships
-        → append [Graph context] triples to each doc's text
+    ▼ (optional: GRAPHRAG_ENABLED + use_graph_rag)
+graph_service.py — expand_docs_via_graph() + enrich_docs_with_graph()
     │
-    ▼ (optional: RERANKER_ENABLED=true)
-[reranker.py] cross-encoder reranking — threshold filter, no top-N cap
+    ▼ (optional: RERANKER_ENABLED)
+reranker.py — cross-encoder reranking (score_threshold configurable)
     │
     ▼
-[chat_service.py] Build prompt → stream LLM response
+LLM streaming answer
 ```
 
-### GraphRAG enrichment — not a retrieval leg
+### Agentic mode (`rag_graph.py`)
 
-Graph enrichment runs **after** RRF merge, not as a scored leg alongside dense/sparse/exact. Neo4j is queried by `(document_id, chunk_index)` — the same identifiers stored in every Qdrant point payload, established as a cross-reference link at ingest time.
+Parallel sub-query retrieval with reinforced deduplication:
 
-This matches the Qdrant+Neo4j reference architecture:
-- **Qdrant** finds the relevant chunks via vector search
-- **Neo4j** enriches those chunks with entity/relationship context
-- The enriched text is reranked by the cross-encoder before being sent to the LLM
-
-Neo4j never runs its own vector index — that would duplicate Qdrant's work.
+```
+decompose_query → [sub_query_1, ..., sub_query_N]
+    │
+    ▼
+asyncio.gather(hybrid_search_with_legs(sq) for sq in sub_queries)
+    │
+    ▼
+_dedup_and_reinforce()
+    └── Chunks found by N sub-queries get score × N (reinforced scoring)
+    └── Deduplicated by content hash, sorted by reinforced score
+    │
+    ▼
+[Retry 1 if uncovered: widened_retrieval]
+    └── Same legs, reranker threshold relaxed to -5.0, merges with prior docs
+    │
+    ▼
+[Retry 2 if still uncovered: keyword_search_loop]
+    └── LLM extracts broad + narrow keywords → MySQL FULLTEXT only → merges
+```
 
 ---
 
-## Files
+## Hybrid Search Entry Point
 
-| File | Role |
-|------|------|
-| `backend/app/services/retrieval.py` | Complete hybrid search implementation |
-| `backend/app/services/chat_service.py` | Calls `hybrid_search()`, builds prompt, streams response |
-| `backend/app/core/config.py` | All tunable retrieval parameters |
-| `.env` / `.env.example` | Runtime configuration |
-
----
-
-## Implementation Detail
-
-### Entry point — `hybrid_search()`
-
-`backend/app/services/retrieval.py`
+`backend/app/services/retrieval.py` — `hybrid_search_with_legs()`
 
 ```python
-async def hybrid_search(query, kb_ids, db) -> List[LangchainDocument]:
-    top_k = settings.RETRIEVAL_TOP_K
-    pool = top_k * 4   # each leg over-fetches so RRF has room to rerank
-
-    dense         = _dense_search(query, kb_ids, pool)          if enabled["dense"]          else {}
-    qdrant_sparse = _qdrant_sparse_search(query, kb_ids, pool)  if enabled["qdrant_sparse"]  else {}
-    exact         = _exact_search(query, kb_ids, db, pool)      if enabled["exact"]          else {}
-
-    return _rrf_merge(dense, qdrant_sparse, exact, top_k)
+async def hybrid_search_with_legs(
+    query: str,
+    kb_ids: List[int],
+    db: Session,
+    use_dense: bool = True,
+    use_sparse: bool = True,
+    use_exact: bool = True,
+    use_graph_rag: bool = False,
+    query_type: Optional[QueryType] = None,
+) -> dict:
+    # Returns {"docs": [...], "retrieval_info": {"legs": {...}, "failed_legs": [...]}}
 ```
 
-`pool = top_k * 4` ensures a document ranked #20 by one leg but #1 by another is not discarded before the merge.
-
----
+Each leg runs independently — a failure in one never blocks the others.
 
 ### Dense leg — `_dense_search()`
 
-Embeds the query with the configured OpenAI-compatible embedding model, then queries each knowledge base's Qdrant collection using cosine distance on the `dense` named vector.
+Embeds the query via the configured OpenAI-compatible embeddings endpoint, then queries Qdrant by cosine distance on the `dense` named vector.
 
 ```python
 response = _get_openai_client().embeddings.create(input=query, model=settings.DENSE_EMBEDDINGS_MODEL)
-query_vector = response.data[0].embedding
-
 hits = _get_qdrant_client().query_points(
     collection_name=f"kb_{kb_id}",
-    query=query_vector,
-    using="dense",
-    limit=candidates,
-    with_payload=True,
+    query=response.data[0].embedding,
+    using="dense", limit=candidates, with_payload=True,
 ).points
 ```
-
-Qdrant returns scored points; they are ranked in arrival order (Qdrant returns results sorted by score descending).
-
----
 
 ### Sparse leg — `_qdrant_sparse_search()`
 
-Embeds the query with the FastEmbed SPLADE model to produce a sparse (indices + values) vector, then queries Qdrant's `sparse` named vector index.
-
-```python
-sparse_emb = next(iter(_get_sparse_embedder().embed([query])))
-query_sparse = SparseVector(
-    indices=sparse_emb.indices.tolist(),
-    values=sparse_emb.values.tolist(),
-)
-
-hits = _get_qdrant_client().query_points(
-    collection_name=f"kb_{kb_id}",
-    query=query_sparse,
-    using="sparse",
-    limit=candidates,
-    with_payload=True,
-).points
-```
-
-SPLADE produces term-weighted sparse vectors in BERT vocabulary space. These capture TF-IDF-like signal with learned expansion, beating raw BM25 on recall while remaining interpretable.
-
----
+Embeds query via SPLADE (FastEmbed, CPU-local) to produce a sparse `(indices, values)` vector, then queries Qdrant's `sparse` named vector index.
 
 ### Exact leg — `_exact_search()`
 
-MySQL InnoDB FULLTEXT search in `NATURAL LANGUAGE MODE`, which applies server-side BM25/TF-IDF ranking. No client-side index to build or maintain.
+MySQL InnoDB FULLTEXT in `NATURAL LANGUAGE MODE` (BM25/TF-IDF, server-side, no client index):
 
-```python
-sql = text("""
-    SELECT chunk_text, chunk_metadata,
-           MATCH(chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE) AS fts_score
-    FROM   document_chunks
-    WHERE  kb_id IN :kb_ids
-      AND  MATCH(chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE) > 0
-    ORDER  BY fts_score DESC
-    LIMIT  :candidates
-""").bindparams(bindparam("kb_ids", expanding=True))
+```sql
+SELECT chunk_text, chunk_metadata,
+       MATCH(chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE) AS fts_score
+FROM   document_chunks
+WHERE  kb_id IN :kb_ids
+  AND  MATCH(chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE) > 0
+ORDER  BY fts_score DESC
+LIMIT  :candidates
 ```
 
-Only rows with `fts_score > 0` are returned — MySQL omits documents with no query-term overlap, matching BM25 semantics without an in-memory `score == 0` guard.
+Only rows with `fts_score > 0` are returned (no keyword overlap = excluded).
 
----
-
-### RRF merge — `_rrf_merge()`
-
-```python
-def _rrf_merge(dense, qdrant_sparse, exact, top_k):
-    merged = {**dense}
-    for h, c in qdrant_sparse.items():
-        if h in merged:
-            merged[h].qdrant_sparse_rank = c.qdrant_sparse_rank
-        else:
-            merged[h] = c
-    for h, c in exact.items():
-        if h in merged:
-            merged[h].exact_rank = c.exact_rank
-        else:
-            merged[h] = c
-    ranked = sorted(merged.values(), key=lambda c: c.rrf_score, reverse=True)
-    return [c.doc for c in ranked[:top_k]]
-```
-
-#### RRF score formula
+### RRF merge — `_rrf_merge_candidates()`
 
 ```
 score(doc) = HYBRID_DENSE_WEIGHT         / (60 + dense_rank)
@@ -181,96 +124,85 @@ score(doc) = HYBRID_DENSE_WEIGHT         / (60 + dense_rank)
            + HYBRID_EXACT_WEIGHT         / (60 + exact_rank)
 ```
 
-A leg absent for a document (rank == -1) contributes 0. The constant 60 is from the original RRF paper (Cormack et al., 2009) — it prevents the top-ranked document from dominating disproportionately.
+A leg absent for a document (rank == -1) contributes 0. Constant 60 from Cormack et al. (2009). Each leg over-fetches by `top_k × 4` so documents ranked outside the per-leg top-K are still visible to the merge.
 
-#### The eight cases (three binary legs)
+### Adaptive presets
 
-| Dense | Sparse | Exact | Outcome |
-|-------|--------|-------|---------|
-| hit   | hit    | hit   | All three legs contribute — strongest signal |
-| hit   | hit    | miss  | Dense + sparse; keyword may not match exactly |
-| hit   | miss   | hit   | Dense + exact; SPLADE missed the query terms |
-| miss  | hit    | hit   | Sparse + exact; dense embedding didn't fire |
-| hit   | miss   | miss  | Dense only; paraphrase / synonym match |
-| miss  | hit    | miss  | Sparse only; unusual term weighting |
-| miss  | miss   | hit   | Exact only; keyword match, no semantic overlap |
-| miss  | miss   | miss  | Excluded — no signal from any leg |
+When `query_type` is provided, `get_retrieval_config(query_type)` overrides leg weights and `top_k`:
+
+| Query type | Dense | Sparse | Exact | top_k | Notes |
+|---|---|---|---|---|---|
+| FACTUAL | 0.5 | 0.3 | 0.2 | default | Balanced across all legs |
+| ENTITY_CENTRIC | 0.6 | 0.2 | 0.2 | default | Dense-heavy; entity proximity matters |
+| MULTI_PART | 0.5 | 0.5 | 0.0 | default | Dense + sparse; no exact |
+| AMBIGUOUS | 0.5 | 0.3 | 0.2 | 15 | Conservative wider net |
+
+### Reinforced scoring (Agentic only)
+
+When multiple sub-queries retrieve the same chunk, scores are accumulated:
+
+```python
+# In _dedup_and_reinforce()
+if content_hash in seen:
+    prev["_reinforced_score"] += current_score
+    prev["_retrieval_count"] += 1
+```
+
+A chunk central to 3 sub-queries ranks higher than one relevant to just 1, without any additional LLM calls.
 
 ---
 
-### Scoring dataclass — `_Candidate`
+## GraphRAG Enrichment
 
-```python
-@dataclass
-class _Candidate:
-    doc: LangchainDocument
-    content_hash: str
-    dense_rank: int = -1           # -1 = absent from this leg
-    qdrant_sparse_rank: int = -1
-    exact_rank: int = -1
+GraphRAG runs **after** RRF merge, not as a scored leg.
 
-    @property
-    def rrf_score(self) -> float:
-        score = 0.0
-        if self.dense_rank >= 0:
-            score += settings.HYBRID_DENSE_WEIGHT / (_RRF_K + self.dense_rank)
-        if self.qdrant_sparse_rank >= 0:
-            score += settings.HYBRID_QDRANT_SPARSE_WEIGHT / (_RRF_K + self.qdrant_sparse_rank)
-        if self.exact_rank >= 0:
-            score += settings.HYBRID_EXACT_WEIGHT / (_RRF_K + self.exact_rank)
-        return score
+- **Expansion** (`expand_docs_via_graph`): traverses entity edges from seed chunks to find chunks NOT in the top-K by similarity. These are tagged with `_legs: ["graph"]` in their metadata.
+- **Enrichment** (`enrich_docs_with_graph`): appends entity/relationship triples as `[Graph context]` text to every candidate (seed + expanded).
+
+```
+Qdrant — source of truth for TEXT and VECTORS
+Neo4j  — source of truth for GRAPH TOPOLOGY
 ```
 
-`-1` sentinel separates "not ranked" from "ranked last". A rank of 0 is the best possible position.
+Vectors are never stored in Neo4j. Cross-reference uses `qdrant_point_id` (the exact UUID Qdrant assigns).
 
-### Deduplication — `_content_hash()`
+---
 
-Multiple knowledge bases may contain the same chunk (e.g. a shared onboarding document). SHA-256 of the chunk text is the merge key — duplicates are collapsed to one candidate before scoring.
+## Cross-Encoder Reranking
+
+`backend/app/services/reranker.py` — `rerank(query, docs, score_threshold)`
+
+```python
+def rerank(query, docs, score_threshold=None):
+    # score_threshold defaults to RERANKER_SCORE_THRESHOLD (default -2.0)
+    # Agentic widened_retrieval passes score_threshold=-5.0 for looser filtering
+    ...
+```
+
+Reranker is a HuggingFace cross-encoder running on CPU. It re-scores all candidates against the query and filters by threshold; no cap on number of results. Disabled by setting `RERANKER_ENABLED=false`.
 
 ---
 
 ## Configuration
 
-All parameters live in `backend/app/core/config.py` and are set via `.env`.
-
 | Parameter | Default | Description |
-|-----------|---------|-------------|
-| `RETRIEVAL_TOP_K` | `10` | Number of chunks returned to the LLM |
-| `HYBRID_DENSE_WEIGHT` | `0.5` | RRF weight for the dense (embedding) leg |
-| `HYBRID_QDRANT_SPARSE_WEIGHT` | `0.3` | RRF weight for the SPLADE sparse leg |
-| `HYBRID_EXACT_WEIGHT` | `0.2` | RRF weight for the MySQL FTS leg |
-| `RETRIEVAL_DENSE_ENABLED` | `true` | Enable/disable the dense leg |
-| `RETRIEVAL_QDRANT_SPARSE_ENABLED` | `true` | Enable/disable the sparse leg |
-| `RETRIEVAL_EXACT_ENABLED` | `true` | Enable/disable the exact leg |
-| `DENSE_EMBEDDING_DIM` | `1024` | Output dimension of the embedding model |
-| `SPLADE_MODEL` | `prithivida/Splade_PP_en_v1` | FastEmbed model name for SPLADE |
+|---|---|---|
+| `RETRIEVAL_TOP_K` | `10` | Chunks returned to LLM |
+| `HYBRID_DENSE_WEIGHT` | `0.5` | RRF weight for dense leg |
+| `HYBRID_QDRANT_SPARSE_WEIGHT` | `0.3` | RRF weight for SPLADE leg |
+| `HYBRID_EXACT_WEIGHT` | `0.2` | RRF weight for MySQL FTS leg |
+| `RETRIEVAL_DENSE_ENABLED` | `true` | Enable/disable dense leg |
+| `RETRIEVAL_QDRANT_SPARSE_ENABLED` | `true` | Enable/disable sparse leg |
+| `RETRIEVAL_EXACT_ENABLED` | `true` | Enable/disable exact leg |
+| `RERANKER_ENABLED` | `true` | Enable cross-encoder reranker |
+| `RERANKER_SCORE_THRESHOLD` | `-2.0` | Minimum logit to pass reranker |
 
-Weights are relative — they don't need to sum to 1. Raise `HYBRID_EXACT_WEIGHT` for corpora with precise terminology (legal, medical, part numbers). Raise `HYBRID_DENSE_WEIGHT` for conversational or paraphrase-heavy content.
-
-Disabling a leg affects retrieval only. Ingestion always indexes all three stores, so re-enabling a leg later requires no re-indexing.
+Disabling a leg affects retrieval only. Ingestion always writes to all three stores.
 
 ---
 
 ## Where retrieval is called
 
-`backend/app/services/chat_service.py`, inside `generate_response()`:
+**Fast/Thinking:** `fast_pipeline.fast_stream()` calls `hybrid_search_with_legs()` once with the rewritten query.
 
-```python
-# Retrieve relevant chunks via 3-leg hybrid search
-docs = await hybrid_search(
-    query=standalone_question,
-    kb_ids=knowledge_base_ids,
-    db=db,
-)
-```
-
-The query passed is the **condensed standalone question** — chat history context has been folded in by the preceding summarisation/sliding-window step. This ensures the retrieval query is self-contained and does not depend on pronouns or conversational references that keyword search would fail to resolve.
-
----
-
-## Performance notes
-
-- Dense and sparse legs query Qdrant (a compiled Rust service) — both are fast even for large collections.
-- The exact leg runs a native MySQL FULLTEXT query; InnoDB FTS indexes are persistent and maintained incrementally on insert.
-- The candidate pool (`top_k * 4`) adds some overhead but is necessary for RRF correctness — without headroom, a document ranked #1 by one leg but outside the top-K of another would be invisible to the merge.
-- SPLADE model (~500 MB) is loaded once per process and kept in memory as a module-level singleton.
+**Agentic:** `rag_graph.parallel_retrieval_node()` calls `hybrid_search_with_legs()` once per sub-query via `asyncio.gather`, then deduplicates with reinforced scoring. `widened_retrieval_node()` re-runs for uncovered sub-queries with a relaxed reranker threshold. `keyword_search_loop_node()` calls `_exact_search()` directly (no vector legs) for the final fallback.

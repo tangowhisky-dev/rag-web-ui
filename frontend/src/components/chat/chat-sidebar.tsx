@@ -17,13 +17,14 @@ interface ChatSidebarProps {
   onClose: () => void;
 }
 
-// Draggable chat item wrapper
+// Draggable chat item wrapper — drag handle is the icon+title area only,
+// so action buttons (pin, rename, delete, export) receive clicks normally.
 function DraggableChatItem({
   chat,
   children,
 }: {
   chat: { id: number };
-  children: React.ReactNode;
+  children: (dragHandleProps: React.HTMLAttributes<HTMLElement>) => React.ReactNode;
 }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: String(chat.id),
@@ -31,11 +32,12 @@ function DraggableChatItem({
   const style = {
     transform: CSS.Translate.toString(transform),
     opacity: isDragging ? 0.5 : 1,
-    cursor: isDragging ? "grabbing" : "grab",
   };
+  // Pass drag listeners down so only the handle area activates drag
+  const dragHandleProps = { ...listeners, ...attributes, style: { cursor: isDragging ? "grabbing" : "grab" } };
   return (
-    <div ref={setNodeRef} style={style} {...listeners} {...attributes}>
-      {children}
+    <div ref={setNodeRef} style={style}>
+      {children(dragHandleProps)}
     </div>
   );
 }
@@ -228,6 +230,7 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
       activeChat === chat.id || pathname === `/dashboard/chat/${chat.id}`;
     return (
       <DraggableChatItem key={chat.id} chat={chat}>
+        {(dragHandleProps) => (
         <div
           data-testid={`chat-item-${chat.id}`}
           className={[
@@ -251,6 +254,7 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
               href={`/dashboard/chat/${chat.id}`}
               onClick={onClose}
               className="flex items-center gap-2 flex-1 min-w-0"
+              {...dragHandleProps}
             >
               <MessageSquare className="h-3.5 w-3.5 shrink-0 opacity-50" />
               <span className="truncate">{chat.title}</span>
@@ -293,6 +297,7 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
             </div>
           )}
         </div>
+        )}
       </DraggableChatItem>
     );
   };

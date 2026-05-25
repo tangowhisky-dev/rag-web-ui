@@ -221,6 +221,7 @@ async def create_message(
     temperature: float = float(messages.get("temperature", 0.0))
     model_name: Optional[str] = messages.get("model_name") or None
     file_id: Optional[int] = messages.get("file_id") or None
+    answering_mode: str = messages.get("answering_mode", "agentic")
 
     # ── File context injection ─────────────────────────────────────────────────
     # Build augmented query from: attached file (current turn) + any files from
@@ -286,6 +287,7 @@ async def create_message(
             display_query=display_query,
             file_id=file_id,
             file_markdown=current_file_markdown,
+            answering_mode=answering_mode,
         ):
             yield chunk
 

@@ -24,7 +24,7 @@ import { api, ApiError } from "@/lib/api";
 import { APP_LOGO_SRC } from "@/lib/app-config";
 import { useToast } from "@/components/ui/use-toast";
 import { Answer } from "@/components/chat/answer";
-import { InputBar } from "@/components/chat/chat-input";
+import { InputBar, type AnsweringMode } from "@/components/chat/chat-input";
 import { MessageFileChip, type UploadedFile } from "@/components/chat/file-attachment";
 import { BranchPicker } from "@/components/chat/branch-picker";
 
@@ -32,6 +32,8 @@ interface AgentStep {
   node: string;
   latency_ms: number;
   status: string;
+  // optional per-node detail fields emitted by the backend
+  [key: string]: unknown;
 }
 
 interface Message {
@@ -93,6 +95,7 @@ interface Citation {
 function ChatPageInner({ params }: { params: { id: string } }) {
   const router = useRouter();
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
   const { toast } = useToast();
   const { setActiveChat } = useChatContext();
   const [isInitialLoad, setIsInitialLoad] = useState(true);
@@ -109,6 +112,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
   const [isLoading, setIsLoading] = useState(false);
   const [uploadedFile, setUploadedFile] = useState<UploadedFile | null>(null);
   const [fileError, setFileError] = useState<string>("");
+  const [answeringMode, setAnsweringMode] = useState<AnsweringMode>("fast");
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Poll file status until ready or error
@@ -469,6 +473,20 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       return;
     }
 
+    // r: answer_rewrite — citation-normalised full answer replaces streamed tokens
+    if (trimmedLine.startsWith("r:")) {
+      try {
+        const payload = JSON.parse(trimmedLine.slice(2)) as { content: string };
+        appendAssistantChunk(assistantId, (message) => ({
+          ...message,
+          content: payload.content,
+        }));
+      } catch (e) {
+        console.error("Failed to parse answer_rewrite event:", e);
+      }
+      return;
+    }
+
     if (trimmedLine.startsWith("3:")) {
       const errorMessage = trimmedLine.slice(2);
       throw new Error(errorMessage || "Streaming request failed");
@@ -486,6 +504,9 @@ function ChatPageInner({ params }: { params: { id: string } }) {
         ? window.localStorage.getItem("token") || ""
         : "";
 
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
     const response = await fetch(`/api/chat/${params.id}/messages`, {
       method: "POST",
       headers: {
@@ -494,8 +515,10 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       },
       body: JSON.stringify({
         messages: requestMessages,
+        answering_mode: answeringMode,
         ...(fileId ? { file_id: fileId } : {}),
       }),
+      signal: controller.signal,
     });
 
     if (!response.ok || !response.body) {
@@ -575,18 +598,34 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     try {
       await streamFromMessages(requestMessages, assistantId, sentFile?.id);
     } catch (error) {
-      console.error("Failed to stream chat:", error);
-      setMessages((prev) => prev.filter((message) => message.id !== assistantId));
-
-      toast({
-        title: "Error",
-        description:
-          error instanceof Error ? error.message : "Failed to send message",
-        variant: "destructive",
-      });
+      // AbortError is intentional (user clicked stop) — drop the placeholder, no toast
+      if (error instanceof Error && error.name === "AbortError") {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantId
+              ? { ...m, content: m.content || "*(generation stopped)*" }
+              : m
+          )
+        );
+      } else {
+        console.error("Failed to stream chat:", error);
+        setMessages((prev) => prev.filter((message) => message.id !== assistantId));
+        toast({
+          title: "Error",
+          description:
+            error instanceof Error ? error.message : "Failed to send message",
+          variant: "destructive",
+        });
+      }
     } finally {
+      abortControllerRef.current = null;
       setIsLoading(false);
     }
+  };
+
+  /** Abort the in-flight stream request. */
+  const handleStop = () => {
+    abortControllerRef.current?.abort();
   };
 
   /** Called by BranchPicker when the user saves an edit and a new branch message is created. */
@@ -843,6 +882,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
               value={input}
               onChange={setInput}
               onSubmit={handleSubmit}
+              onStop={handleStop}
               disabled={isLoading}
               placeholder="Type your message..."
               uploadedFile={uploadedFile}
@@ -850,6 +890,8 @@ function ChatPageInner({ params }: { params: { id: string } }) {
               onFileRemove={handleFileRemove}
               fileError={fileError}
               onFileError={setFileError}
+              answeringMode={answeringMode}
+              onAnsweringModeChange={setAnsweringMode}
             />
           </div>
         </div>

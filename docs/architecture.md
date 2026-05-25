@@ -2,20 +2,54 @@
 
 ## Overview
 
-A self-hosted knowledge base Q&A system using 3-leg hybrid retrieval (dense vector + SPLADE sparse + MySQL full-text) with any OpenAI-compatible LLM.
+A self-hosted knowledge base Q&A system with three answering modes, 3-leg hybrid retrieval, optional GraphRAG, and an agentic LangGraph pipeline for complex queries.
 
 ```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                           RAG WEB UI ARCHITECTURE                            │
-└──────────────────────────────────────────────────────────────────────────────┘
-
-┏━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┓
-┃  FRONTEND   ┃   BACKEND    ┃  VECTOR DB  ┃   GRAPH DB   ┃  DATABASE    ┃
-┃ (Next.js)   ┃ (FastAPI)    ┃ (Qdrant)    ┃  (Neo4j)     ┃ (MySQL 8)    ┃
-┗━━━━━━━━━━━━━┻━━━━━━━━━━━━━━┻━━━━━━━━━━━━━┻━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━┛
-
-USER REQUEST → [Frontend:3000] → [Backend API:8000] → [Retrieval Engine] → [LLM] → RESPONSE
+USER REQUEST → [Frontend:3000] → [Backend API:8000] → [Pipeline] → [LLM] → STREAMING RESPONSE
 ```
+
+---
+
+## Answering Modes
+
+### Fast ⚡ and Thinking 🧠 (`fast_pipeline.py`)
+
+Linear pipeline, low latency:
+
+```
+rewrite_query
+  → hybrid_search_with_legs (dense + sparse + exact + graph in parallel)
+  → stream LLM answer
+```
+
+Fast uses `OPENAI_MODEL`; Thinking uses `REASONING_MODEL` (falls back to `OPENAI_MODEL`). Thinking mode is identical in structure — only the model changes.
+
+**Steps visible in UI:** Rewriting query → Retrieving context → (optional) Additional context from Neo4j → Generating answer.
+
+### Agentic 🤖 (`rag_graph.py`)
+
+Full LangGraph `StateGraph` with 10 nodes and a coverage-driven retry loop:
+
+```
+rewrite_query
+  → context_router          (smart source routing: kb / file_current / file_prior / both)
+  → decompose_query         (LLM splits into 2–5 atomic sub-queries)
+  → parallel_retrieval      (hybrid search per sub-query via asyncio.gather; reinforced dedup)
+  → extract_file_sections   (LLM selects 3–6 relevant file sections; passthrough if ≤ 12 KB)
+  → draft_answer            (LLM draft keyed by sub-query, for grading only)
+  → grade_coverage          (LLM grades each sub-query: covered / partially_covered / not_covered)
+  → [conditional_router]
+      ├─ all covered         → generate_answer (final)
+      ├─ uncovered, attempt 0 → widened_retrieval (relaxed reranker threshold −5.0)
+      │                            → draft_answer → grade_coverage
+      ├─ uncovered, attempt 1 → keyword_search_loop (MySQL FULLTEXT: broad → narrow)
+      │                            → draft_answer → grade_coverage
+      └─ attempt ≥ 2          → generate_answer (partial / unable)
+```
+
+**Reinforced scoring:** a chunk retrieved by N sub-queries has its RRF score multiplied by N, making broadly relevant chunks rank higher.
+
+**All nodes emit `active` and `done` events** — the UI shows live step labels ("Decomposing query…" → "Sub-queries: [list]") with collapsible detail panels.
 
 ---
 
@@ -24,334 +58,205 @@ USER REQUEST → [Frontend:3000] → [Backend API:8000] → [Retrieval Engine] �
 ### 1. Document Ingestion Pipeline
 
 ```
-Upload (PDF / DOCX / DOC / PPTX / PPT / XLSX / XLS /
-        TXT / MD / HTML / MHTML / CSV / JSON / XML /
-        MSG / EML / EPUB / JPG / PNG / GIF / BMP / TIFF / ZIP)
+Upload (PDF / DOCX / PPTX / XLSX / TXT / MD / HTML / CSV / JSON /
+        XML / MSG / EML / EPUB / images (OCR) / ZIP)
     │
     ▼
 document_processor.py
-    ├── Convert to Markdown (MarkItDown — single unified parser for all formats; OCR via vision model when VISION_MODEL is set)
-    ├── Chunk (RecursiveCharacterTextSplitter)
-    ├── Embed chunks — async OpenAI-compatible API → dense vectors
-    ├── Embed chunks — FastEmbed SPLADE → sparse vectors
-    ├── Upsert to Qdrant (dense + sparse named vectors per collection kb_<id>; qdrant_point_id stored in payload)
-    ├── Store chunk text in MySQL document_chunks (for FTS + metadata)
-    └── graph_service.py — GraphRAG extraction (when GRAPHRAG_ENABLED=true)
-            ├── [ReLiK mode]  POST /api/relik → NER+RE → write Entity nodes + relationships to Neo4j
-            │                  └── MATCH Chunk node by qdrant_point_id → CREATE (chunk)-[:FROM_CHUNK]->(entity)
-            └── [LLM mode]    LLMEntityRelationExtractor (use_structured_output=True, JSON Schema-constrained)
-                               → neo4j-graphrag Pipeline → write Entity nodes + relationships to Neo4j
-                               └── MATCH Chunk node by qdrant_point_id → CREATE (chunk)-[:FROM_CHUNK]->(entity)
+    ├── MarkItDown → Markdown (OCR via VISION_MODEL when set)
+    ├── RecursiveCharacterTextSplitter → chunks
+    ├── Dense embedding → Qdrant (per-KB collection kb_<id>)
+    ├── SPLADE sparse embedding → Qdrant (named sparse vector)
+    ├── chunk_text + metadata → MySQL document_chunks (for FTS)
+    └── graph_service.py [GRAPHRAG_ENABLED=true]
+            └── LLMEntityRelationExtractor → Neo4j Entity nodes + relationships
+                → (chunk)-[:FROM_CHUNK]->(entity) keyed by qdrant_point_id
 ```
 
-### 2. Query / Chat Pipeline
+### 2. Fast / Thinking Pipeline (`fast_pipeline.py`)
 
 ```
 User message
     │
     ▼
-chat_service.py
-    ├── Identity shortcut  (hardcoded response for "who are you?" etc.)
-    ├── Sliding-window context (3 most-recent turn-pairs verbatim)
-    ├── Rolling summary    (older turns folded into a summary via LLM)
-    ├── Standalone question (context folded in → self-contained query; uses QUERY_MODEL if set)
-    │
-    ▼
-classifier.py — classify_query()  [QUERY_CLASSIFIER_ENABLED]
-    └── LLM-based 4-way classification: FACTUAL / ENTITY_CENTRIC / MULTI_PART / AMBIGUOUS
-        → emitted in stream frame 1: alongside rewritten query
-    │
-    ▼
-retrieval.py — hybrid_search_with_legs()
-    ├── get_retrieval_config(query_type) → per-type leg weights + top-k (RETRIEVAL_CONFIG_PRESETS)
-    ├── Leg 1: _dense_search()          → Qdrant cosine similarity (dense)
-    ├── Leg 2: _qdrant_sparse_search()  → Qdrant SPLADE sparse vectors
-    ├── Leg 3: _exact_search()          → MySQL FULLTEXT NATURAL LANGUAGE MODE
-    │                   │
-    │                   ▼
-    │              _rrf_merge_candidates()
-    │                   └── Weighted Reciprocal Rank Fusion using per-preset weights
-    │                   │
-    │                   ▼ (optional, GRAPHRAG_ENABLED + use_graph_rag)
-    │         graph_service.py — expand_docs_via_graph() + enrich_docs_with_graph()
-    │                   │
-    │                   ▼ (optional, RERANKER_ENABLED)
-    │         reranker.py — cross-encoder reranking
-    │                   │
-    │                   ▼ (ENTITY_AWARE_ENABLED + ENTITY_CENTRIC query)
-    │         entity_extractor.py — extract_expand_boost()
-    │             ├── extract_entities_from_query() — LLM (GRAPHRAG_LLM) extracts entities
-    │             ├── expand_query_entities()       — Neo4j 1-hop CONTAINS match + expansion
-    │             └── apply_entity_boost()          — additive score boost (ENTITY_BOOST_FACTOR)
-    │
-    ▼
-confidence.py — score_retrieval()
-    └── 4-level confidence: HIGH/MEDIUM/LOW/NONE + suggestion
-    │
-    ▼  [stream frame 2: emitted to UI — context, confidence, query_classification, tool_trace, synthesis_mode]
-    │
-    ▼ (TOOL_CALLING_ENABLED + non-synthesis query — Step 2.5)
-tool_registry.py / builtin_tools.py
-    ├── search_documents(query, kb_ids, top_k)
-    ├── extract_entities(text)
-    └── summarize_chunks(chunks, instruction)
-    └── Loop up to MAX_TOOL_ITERATIONS — tool results fed back into conversation
-    │
-    ▼ (SYNTHESIS_MODE_ENABLED + MULTI_PART/AMBIGUOUS + synthesis keywords — Step 4 with synthesis prompt)
-builtin_tools.py — synthesize_documents(topic, sub_queries, kb_ids, top_k_per_query)
-    └── asyncio.gather N sub-queries in parallel → MD5 content-hash dedup → score-sorted
-    │
-    ▼
-chat_service.py
-    ├── QA prompt (standard) OR synthesis orchestration prompt (synthesis mode)
-    ├── Stream response via AsyncOpenAI
-    └── Strip <think> blocks (reasoning model support)
-    │
-export_service.py — generate_synthesis_report() [synthesis mode]
-    └── Structured Markdown: header + answer + ## Sources from tool_trace
+chat_service.generate_response()
+    ├── answeringMode = "fast" or "thinking"
+    └── fast_stream()
+            ├── _rewrite_query()        — standalone question via QUERY_MODEL
+            ├── hybrid_search_with_legs() — all 3 legs in parallel
+            ├── [graph_enrichment step if Neo4j returned data]
+            └── ChatOpenAI.astream()    — token streaming
 ```
 
-### 3. Chat File Upload Pipeline
+Events emitted: `agent_step` (active + done per node), `rewritten_query`, `context`, `token`, `done`.
 
-Files attached to chat messages are processed ephemerally — not indexed in any knowledge base.
+### 3. Agentic Pipeline (`rag_graph.py`)
 
 ```
-User attaches file to message
+User message
     │
     ▼
-POST /api/chat/{chat_id}/files
-    ├── Save original to uploads/ephemeral/{chat_id}/{filename} (deduplicated with _1, _2 suffixes)
-    ├── Insert ChatFile row (status=processing, stored_path=<disk path>)
-    └── Background task: MarkItDown → Markdown
-            ├── Update ChatFile.markdown_content + token_count (status=ready)
-            └── Original file kept on disk until chat delete
-
-User sends message with file_id
-    │
-    ▼
-POST /api/chat/{chat_id}/messages (or /messages/with-file for streaming)
-    ├── Load ChatFile.markdown_content from DB
-    ├── Inject into generate_response() as file_markdown (bypasses query rewrite + KB retrieval)
-    └── QA system prompt receives: "## Uploaded File Context\n<markdown>"
-            └── Prior-turn files in same chat also injected for multi-turn continuity
-
-Chat delete  →  delete_ephemeral_chat_files(chat_id)  →  rm -rf uploads/ephemeral/{chat_id}/
-
-Download
-    └── GET /api/chat/{chat_id}/files/{file_id}/download  →  FileResponse(stored_path)
+chat_service.generate_response()
+    ├── answeringMode = "agentic"
+    └── run_stream()
+            └── _rag_graph.astream_events()
+                    ├── on_chain_start  → emit agent_step {status: "active"}
+                    ├── on_chain_end    → emit agent_step {status: "done", ...node data}
+                    └── on_chat_model_stream → emit token events (generate_answer only)
 ```
 
-**Key design constraints:**
-- File content bypasses the query rewrite step (rewriter would corrupt the query using prior "no file" history)
-- Synthesis mode is disabled when a file is present (synthesis prompt has no file injection path)
-- File content is capped at 25% of `OPENAI_MODEL_CONTEXT_SIZE` tokens
-- `chat_files.file_name` stores the finalized on-disk filename (post-deduplication), not the raw upload name
-```
+#### Node-by-node detail
 
-#### GraphRAG architecture note
-
-**Strict separation of concerns:**
-
-```
-Qdrant  — source of truth for all chunk TEXT and VECTORS
-Neo4j   — source of truth for GRAPH TOPOLOGY (entities, relationships, chunk linkage)
-```
-
-Vectors are never stored in Neo4j. Neo4j Chunk nodes are keyed by `qdrant_point_id` (the exact UUID Qdrant uses as a point ID), enabling bidirectional lookup in a single index hit. This means graph-expanded chunks can be fetched from Qdrant by UUID — no re-embedding, no re-scoring, just a direct key lookup.
-
-**Retrieval expansion vs enrichment** — two distinct operations:
-
-- **Expansion** (`expand_docs_via_graph`) — finds chunks NOT in the vector search results by traversing entity connections. A query surface 5 chunks; expansion may add 3 more that are entity-connected but not in the top-K by similarity.
-- **Enrichment** (`enrich_docs_with_graph`) — appends entity/relationship triples as `[Graph context]` text to every candidate chunk (seed + expanded), giving the reranker and LLM explicit graph signal.
-
-**Entity-aware retrieval** (`entity_extractor.py`, M001):
-
-- For ENTITY_CENTRIC queries, `extract_entities_from_query()` calls the `GRAPHRAG_LLM` model with a JSON-schema prompt to extract named entities.
-- `expand_query_entities()` fuzzy-matches extracted entities against Neo4j `__Entity__` nodes (CONTAINS match), then fetches 1-hop neighbors.
-- `apply_entity_boost()` adds `ENTITY_BOOST_FACTOR` to the RRF score of chunks whose text mentions any matched entity.
-
-**Extraction backends** (controlled by `.env`):
-
-| Mode | Trigger | Notes |
+| Node | What it does | State written |
 |---|---|---|
-| LLM | `GRAPHRAG_LLM=<model>` | `LLMEntityRelationExtractor` + `use_structured_output=True`; JSON Schema-constrained |
-| Disabled | both unset | Extraction silently skipped; retrieval graph leg also inactive |
+| `rewrite_query` | Condense with history → retrieval-friendly query | `rewritten_query` |
+| `context_router` | LLM decides: kb / file_current / file_prior / both | `sources`, `file_ids_needed` |
+| `decompose_query` | LLM splits into 2–5 atomic sub-queries | `sub_queries` |
+| `parallel_retrieval` | `hybrid_search_with_legs` per sub-query via `asyncio.gather`; dedup with reinforced scoring | `retrieved_docs` |
+| `extract_file_sections` | LLM selects 3–6 relevant sections from attached file; passthrough if ≤ 12 KB | `file_markdown` (trimmed) |
+| `draft_answer` | LLM writes per-sub-query draft using current context | `draft_answer` |
+| `grade_coverage` | LLM grades each sub-query as covered / partially_covered / not_covered | `coverage_result`, `uncovered_sub_queries` |
+| `widened_retrieval` | Retry for uncovered sub-queries; reranker threshold relaxed to −5.0 | `retrieved_docs` (accumulated), `retrieval_attempt=1` |
+| `keyword_search_loop` | MySQL FULLTEXT: broad keywords first, narrow if no results; max 3 sub-queries × 2 iterations | `retrieved_docs`, `keyword_iterations`, `retrieval_attempt=2` |
+| `generate_answer` | Final streaming answer with citation normalisation; transparent partial-answer note if uncovered sub-queries remain after all retries | `answer` |
 
-**Explore the graph:** Neo4j Browser — http://localhost:7474/browser/ (login: `neo4j` / `ragwebui_neo4j`)
+#### Conditional routing
 
+```python
+def _route_after_grade(state) -> str:
+    if not uncovered:           return "generate_answer"
+    if attempt == 0:            return "widened_retrieval"
+    if attempt == 1:            return "keyword_search_loop"
+    return "generate_answer"    # attempt >= 2: partial/unable
+```
+
+### 4. Chat File Upload Pipeline
 
 ```
-app/
-├── main.py                    # FastAPI entry point, startup hooks
-├── api/
-│   └── api_v1/
-│       ├── api.py             # Router registration
-│       ├── auth.py            # JWT login / register
-│       ├── chat.py            # Chat endpoints (create, stream, history)
-│       ├── chat_files.py      # Ephemeral chat file upload, status poll, download, delete
-│       └── knowledge_base.py  # KB + document CRUD, upload, processing
+POST /api/chat/{chat_id}/files
+    ├── 10 MB size guard
+    ├── Save to uploads/ephemeral/{chat_id}/
+    ├── Background: MarkItDown → Markdown → token estimate
+    │       ├── token_count > 25% of OPENAI_MODEL_CONTEXT_SIZE → status=error
+    │       └── else → status=ready, markdown_content stored in MySQL
+    └── Client polls /files/{file_id} for status
+
+User sends message with file
+    ├── Fast/Thinking: file_markdown passed to fast_stream() — full content, no truncation
+    └── Agentic: file_markdown passed to run_stream() → extract_file_sections selects relevant sections
+
+Chat delete → rm -rf uploads/ephemeral/{chat_id}/
+```
+
+---
+
+## Backend Code Structure
+
+```
+backend/app/
+├── api/api_v1/
+│   ├── auth.py             # JWT login / register
+│   ├── chat.py             # Chat endpoints; extracts answering_mode from request body
+│   ├── chat_files.py       # Ephemeral file upload, status poll, download, delete
+│   ├── folders.py          # Chat folder management
+│   └── knowledge_base.py   # KB + document CRUD, upload, processing
 ├── core/
-│   ├── config.py              # All settings (pydantic-settings, reads .env)
-│   ├── security.py            # Password hashing, JWT creation/verification
-│   └── storage.py             # Local filesystem helpers (save, move, delete)
-├── db/
-│   └── session.py             # SQLAlchemy engine + SessionLocal
-├── models/
-│   ├── user.py                # User ORM model
-│   ├── knowledge.py           # KnowledgeBase, Document, DocumentChunk, ProcessingTask
-│   └── chat.py                # Chat, Message ORM models
-├── schemas/
-│   ├── user.py                # Pydantic request/response schemas
-│   ├── knowledge.py
-│   ├── chat.py
-│   └── token.py
+│   ├── config.py           # All settings (pydantic-settings); OPENAI_MODEL,
+│   │                         QUERY_MODEL, REASONING_MODEL, VISION_MODEL,
+│   │                         OPENAI_MODEL_CONTEXT_SIZE, RERANKER_*, GRAPHRAG_*
+│   ├── security.py         # Password hashing, JWT
+│   └── storage.py          # Local filesystem helpers
+├── models/                 # SQLAlchemy ORM: User, KnowledgeBase, Document,
+│                             DocumentChunk, ProcessingTask, Chat, Message, ChatFile
 ├── services/
-│   ├── document_processor.py  # Ingestion: parse → chunk → embed → index
-│   ├── retrieval.py           # 3-leg hybrid search + weighted RRF merge + adaptive config
-│   ├── reranker.py            # Cross-encoder reranking (RERANKER_ENABLED)
-│   ├── entity_extractor.py    # LLM entity extraction, Neo4j expansion, score boost (M001)
-│   ├── tool_registry.py       # Tool registry + execute_tool() (M001)
-│   ├── builtin_tools.py       # search_documents, extract_entities, summarize_chunks, synthesize_documents (M001)
-│   ├── chat_service.py        # Conversation context, prompt, LLM streaming, synthesis mode
-│   ├── export_service.py      # Export to PDF/Word/Image + generate_synthesis_report
-│   ├── confidence.py          # 4-level retrieval confidence scoring
-│   └── chunk_record.py        # MySQL chunk upsert helpers
-└── startup/                   # Startup utilities (Alembic auto-migrate etc.)
-
-alembic/                       # Database migration scripts
+│   ├── fast_pipeline.py    # Fast/Thinking: rewrite → hybrid search → stream
+│   ├── rag_graph.py        # Agentic: 10-node LangGraph StateGraph
+│   ├── chat_service.py     # Routes to fast_stream or run_stream by answering_mode
+│   ├── retrieval.py        # 3-leg hybrid search + weighted RRF + adaptive presets
+│   ├── reranker.py         # Cross-encoder reranking (score_threshold configurable)
+│   ├── document_processor.py # Ingest: parse → chunk → embed → index
+│   ├── graph_service.py    # Neo4j ingestion + graph expansion/enrichment
+│   ├── entity_extractor.py # LLM entity extraction from queries + Neo4j score boost
+│   ├── confidence.py       # 4-level retrieval confidence scoring
+│   ├── export_service.py   # PDF/Word/Image export
+│   ├── auto_tune.py        # Retrieval config auto-tuning
+│   └── markdown_cleaner.py # Post-processing for LLM markdown output
+└── startup/                # Alembic auto-migrate on startup
 ```
 
-### Frontend Structure (`frontend/`)
-
-Next.js 14 app with TypeScript, Tailwind CSS, shadcn/ui, and the Vercel AI SDK for streaming.
+## Frontend Code Structure
 
 ```
-src/
+frontend/src/
 ├── app/
 │   ├── dashboard/
-│   │   ├── chat/
-│   │   │   ├── [id]/page.tsx      # Chat view: messages, streaming, file chip, AgentTimeline
-│   │   │   ├── new/page.tsx       # New chat: select KB + retrieval options
-│   │   │   └── page.tsx           # Redirect to most recent chat or /new
-│   │   ├── knowledge/             # KB management CRUD
-│   │   └── test-retrieval/        # Retrieval quality tester
-│   ├── api/
-│   │   └── chat/[id]/
-│   │       ├── messages/route.ts          # Streaming proxy (Node.js http.request)
-│   │       ├── messages/with-file/route.ts # File+message streaming proxy
-│   │       └── files/[fileId]/download/route.ts  # File download proxy
-│   └── layout.tsx                 # ThemeProvider (dark/light/system)
-├── components/
-│   ├── chat/
-│   │   ├── chat-sidebar.tsx       # Collapsible sidebar; localStorage persistence
-│   │   ├── chat-input.tsx         # Textarea + file attachment button
-│   │   ├── file-attachment.tsx    # FileUploadChip (pre-send) + MessageFileChip (post-send download)
-│   │   ├── answer.tsx             # Markdown renderer with citation parsing
-│   │   └── agent-timeline.tsx     # Streaming AgentTimeline (tool trace + confidence)
-│   ├── layout/
-│   │   ├── chat-layout.tsx        # Full-width breadcrumb bar + sidebar + main
-│   │   └── dashboard-layout.tsx   # KB management layout
-│   └── ui/
-│       └── theme-toggle.tsx       # Dark / light / system toggle
-└── middleware.ts                  # Route protection (redirect unauthenticated to /login)
+│   │   ├── chat/[id]/page.tsx    # Chat view: messages, streaming, AgentTimeline,
+│   │   │                           mode selector, stop button, abort controller
+│   │   ├── chat/new/page.tsx     # New chat: select KB + retrieval options
+│   │   └── knowledge/            # KB management CRUD
+│   └── api/chat/[id]/
+│       ├── messages/route.ts           # Streaming proxy
+│       ├── messages/with-file/route.ts # File+message streaming proxy
+│       └── files/[fileId]/download/route.ts
+├── components/chat/
+│   ├── agent-timeline.tsx  # Real-time pipeline step display (active/done collapsibles)
+│   │                         Nodes: rewrite_query, context_router, decompose_query,
+│   │                                parallel_retrieval, extract_file_sections,
+│   │                                draft_answer, grade_coverage, widened_retrieval,
+│   │                                keyword_search_loop, graph_enrichment, generate_answer
+│   ├── answer.tsx          # Markdown renderer with [N](N) citation link parsing
+│   ├── chat-input.tsx      # Textarea + mode selector (Fast/Thinking/Agentic pills)
+│   │                         + Stop button (replaces Send during generation)
+│   ├── chat-sidebar.tsx    # Collapsible sidebar; drag-to-folder; action buttons
+│   ├── file-attachment.tsx # Pre-send dropzone chip + post-send download chip
+│   ├── branch-picker.tsx   # Chat branching (multiple answer variants)
+│   └── mermaid-diagram.tsx # Mermaid diagram rendering in answers
+└── middleware.ts            # Route protection (redirect to /login)
 ```
 
-**Chat UI layout:** A full-width breadcrumb bar sits at the top of the viewport (blurred glass effect). Below it, the collapsible sidebar and main chat area fill the remaining height. Sidebar state persists in `localStorage` under `chat-sidebar-collapsed`. The `ThemeProvider` (next-themes) is mounted at root with `attribute="class"` supporting dark/light/system modes; the CSS palette uses pure neutral greys (zero chroma) for dark mode.
+---
 
-### Docker Stack
+## Docker Stack
 
 | Service | Image | Purpose |
-|---------|-------|---------|
-| `backend` | custom (Python FastAPI) | API server; uvicorn with hot-reload in dev |
-| `frontend` | custom (Next.js) | Web UI; Next.js dev server or production build |
-| `qdrant` | `qdrant/qdrant` | Vector database (dense + sparse collections) |
-| `db` | `mysql:8` | Relational data + FULLTEXT chunk index |
-| `neo4j` | `neo4j:2026.04` | Graph DB — entity/relationship storage for GraphRAG + entity-aware retrieval; browser at http://localhost:7474/browser/ |
+|---|---|---|
+| `backend` | custom (Python FastAPI) | API server + pipeline |
+| `frontend` | custom (Next.js) | Web UI |
+| `qdrant` | `qdrant/qdrant` | Vector database |
+| `db` | `mysql:8` | Relational data + FULLTEXT index |
+| `neo4j` | `neo4j:2026.04` | Entity/relationship graph (GraphRAG) |
 | `adminer` | `adminer` | MySQL web GUI (dev compose only) |
 
 ---
 
 ## Key Architectural Decisions
 
-### 1. 3-Leg Hybrid Retrieval
-No single modality dominates all query types. Dense vectors handle paraphrases; SPLADE handles technical terms; MySQL FTS handles exact keywords and product codes. Weighted RRF fuses all three without requiring scores to be on the same scale.
+### 1. Three Answering Modes with a Single Streaming Contract
+All three modes (`fast_stream`, `run_stream`) emit the same SSE event shapes: `agent_step`, `rewritten_query`, `context`, `token`, `answer_rewrite`, `done`. The frontend handles them identically regardless of mode.
 
-### 2. CPU-First Sparse Embeddings
-SPLADE runs locally via FastEmbed (ONNX, CPU-optimised), avoiding any GPU dependency for retrieval while maintaining learned sparse expansion beyond raw BM25.
+### 2. Draft-Grade-Retry Loop (Agentic)
+Rather than grading individual documents (which misses synthesis failures), the agentic pipeline generates a per-sub-query draft answer and grades it for coverage. This catches cases where 8 individually relevant chunks together still don't answer the compound question. Retry escalates from widened vector search to keyword search to partial-answer transparency — always showing the user what was found and what wasn't.
 
-### 3. MarkItDown for Unified Document Parsing
-All document types are converted to Markdown by [MarkItDown](https://github.com/microsoft/markitdown) before chunking. A single parser handles 20+ formats (PDF, Office, spreadsheets, email, images via OCR, archives) and produces consistent Markdown output that the splitter can break on structural boundaries. Format-specific LangChain loaders (`PyPDFLoader`, `Docx2txtLoader`) are no longer used.
+### 3. Reinforced Scoring (Agentic)
+A chunk retrieved for N sub-queries has its RRF score accumulated across those N results. Chunks central to many aspects of the question naturally rank higher than chunks relevant to only one edge.
 
-When `VISION_MODEL` is set, the `markitdown-ocr` plugin is activated and embedded images in documents (scanned PDF pages, photos in DOCX/PPTX/XLSX) are sent to the vision model for OCR. Think-block traces emitted by reasoning vision models are stripped before the text is chunked. When `VISION_MODEL` is unset the behaviour is identical to before — no OCR, no external calls.
+### 4. File Token Budget Before Pipeline
+Both file size (10 MB) and token count (25% of `OPENAI_MODEL_CONTEXT_SIZE`) are enforced at upload/processing time — not at generation time. By the time a file reaches either pipeline, it has already been approved. No silent truncation at the LLM boundary.
 
-### 4. Ingestion Always Indexes All Three Stores
-Per-leg retrieval can be toggled via `.env` without re-ingestion. This makes A/B testing retrieval configurations cheap — flip a flag, test, flip back.
+### 5. Smart Routing Preserved in Agentic Mode
+`context_router` (LLM-based, JSON-schema constrained) decides whether to search the KB, use the attached file, or both — before decomposition and retrieval. `extract_file_sections` then selects the relevant portions of the file for the sub-queries. These nodes are inherited from v1 and unchanged.
 
-### 5. Sliding Window + Rolling Summary for Context
-Rather than truncating history or stuffing the full chat into the prompt, older turns are summarised by the LLM and folded into a rolling summary. The 3 most-recent turn-pairs are kept verbatim. Both the query-rewriting step and the summarisation step use `QUERY_MODEL` when set, falling back to `OPENAI_MODEL`.
+### 6. Active State Visibility via `on_chain_start`
+LangGraph's `astream_events` fires `on_chain_start` before a node runs. The `run_stream` generator intercepts this and emits an `agent_step` with `status: "active"` immediately, so the UI shows "Decomposing query…" before the LLM call completes — not after.
 
-### 6. OpenAI-Compatible API for LLM and Embeddings
-Four distinct model roles are supported, all pointing at OpenAI-compatible endpoints:
+### 7. 3-Leg Hybrid Retrieval with Adaptive Presets
+Dense vectors handle paraphrases; SPLADE captures TF-IDF signal; MySQL FTS handles exact keywords. Weighted RRF fuses all three. Per-query-type presets (`RETRIEVAL_CONFIG_PRESETS`) allow different leg weights for FACTUAL vs ENTITY_CENTRIC vs MULTI_PART queries.
 
-| Variable | Role | Falls back to |
-|---|---|---|
-| `OPENAI_MODEL` | Response generation (RAG answers) | — (required) |
-| `QUERY_MODEL` | Query rewriting + rolling summarisation | `OPENAI_MODEL` |
-| `VISION_MODEL` | markitdown-ocr OCR during ingestion | unset = OCR disabled |
-| `DENSE_EMBEDDINGS_MODEL` | Dense embeddings | — (required) |
+### 8. GraphRAG: Qdrant + Neo4j Strict Separation
+Vectors live exclusively in Qdrant. Neo4j Chunk nodes are keyed by `qdrant_point_id`. Graph expansion finds chunks not in the top-K by traversing entity edges; enrichment appends entity triples to existing chunks. Neither operation requires re-embedding.
 
-`OPENAI_VISION_API_BASE` lets the vision model live on a different server (e.g. a separate Ollama instance for a multimodal model). When unset it falls back to `OPENAI_API_BASE`.
+### 9. OpenAI-Compatible API Throughout
+Four model roles — `OPENAI_MODEL`, `QUERY_MODEL`, `REASONING_MODEL`, `VISION_MODEL` — all point at OpenAI-compatible endpoints and can be on different servers via `OPENAI_API_BASE` / `OPENAI_VISION_API_BASE`. Switching models requires only `.env` changes, no code changes.
 
----
-
-## Memory & Session Management
-
-- Alembic migrations for MySQL schema evolution (auto-applied on backend startup)
-- JWT tokens with configurable expiration (default 7 days)
-- Ephemeral `SECRET_KEY` in dev — tokens are invalidated on container restart
-
-### 7. LLM Query Classifier for Adaptive Retrieval
-Rather than using the same retrieval config for every query, an LLM classifier (using `QUERY_MODEL` or `OPENAI_MODEL`) assigns each query to one of four types. Each type maps to a tunable retrieval preset (leg weights + top-k) stored in `RETRIEVAL_CONFIG_PRESETS`. This allows ENTITY_CENTRIC queries to rely more on dense search, MULTI_PART queries to blend dense + sparse, and AMBIGUOUS queries to retrieve broader candidate sets — without any retraining.
-
-### 8. Entity-Aware Retrieval via Neo4j
-For ENTITY_CENTRIC queries, named entities are extracted from the query using the `GRAPHRAG_LLM` model, matched against existing Neo4j entities with fuzzy CONTAINS matching and 1-hop expansion, and used to boost chunk scores. This integrates the graph's entity knowledge into the retrieval scoring without a separate retrieval leg.
-
-### 9. Agentic Tool Calling Substrate
-A global tool registry (`tool_registry.py`) lets any code register callable tools as structured JSON schemas. `execute_tool()` always returns a `ToolResult` — it never raises — so one tool failure never breaks the loop. The pre-answer tool-calling loop in `chat_service.py` is gated by `TOOL_CALLING_ENABLED` and skipped entirely for synthesis queries (which use a structured synthesis prompt instead, avoiding double tool execution).
-
-### 10. Synthesis Mode for Multi-Document Queries
-Synthesis queries (MULTI_PART/AMBIGUOUS + synthesis keywords) bypass the standard QA prompt and enter synthesis mode. The LLM is given a structured synthesis prompt that directs it to call `synthesize_documents` (parallel sub-query fan-out with MD5 deduplication), then produce a structured Markdown report. The `synthesize_documents` tool runs sub-queries in a separate thread (`ThreadPoolExecutor`) with `asyncio.run()` to avoid the "event loop already running" error that would occur with `loop.run_until_complete()` inside a running FastAPI context.
-
----
-
-## Technology Stack Summary
-
-| Layer | Technology |
-|---|---|
-| Document Parsing | MarkItDown (Microsoft) — 20+ formats to Markdown; OCR via markitdown-ocr |
-| Frontend | Next.js 14, TypeScript, Tailwind CSS, shadcn/ui, Vercel AI SDK |
-| Backend | Python FastAPI, LangChain, SQLAlchemy, Alembic |
-| Vector DB | Qdrant (dense + sparse named vectors) |
-| Graph DB | Neo4j (entity/relationship graph; neo4j-graphrag pipeline; entity-aware retrieval) |
-| Sparse Embeddings | SPLADE via FastEmbed (CPU, ONNX, local) |
-| Cross-Encoder Reranking | HuggingFace cross-encoder (RERANKER_MODEL) — CPU inference |
-| File Storage | Local filesystem (Docker volume mount) |
-| Database | MySQL 8 (ORM data + FULLTEXT index) |
-| Auth | JWT (python-jose, bcrypt) |
-
----
-
-## Quick Start
-
-```bash
-git clone https://github.com/tangowhisky-dev/rag-web-ui.git
-cd rag-web-ui
-cp .env.example .env
-# Edit .env — set OPENAI_API_KEY, OPENAI_API_BASE, OPENAI_MODEL, DENSE_EMBEDDINGS_MODEL, DENSE_EMBEDDING_DIM
-# Optional: QUERY_MODEL (query rewriting), VISION_MODEL (OCR), OPENAI_VISION_API_BASE
-docker compose up -d --build
-```
-
-Open **http://localhost:3000**, register an account, and start uploading documents.
-
-See [README.md](../README.md) for full configuration reference and development setup.
+### 10. AbortController for Stop
+The frontend holds an `AbortController` in a ref. The Stop button calls `abortControllerRef.current.abort()`. The `fetch` stream catches `AbortError` and preserves the partial message with `*(generation stopped)*` appended. Real errors show a toast and remove the placeholder.

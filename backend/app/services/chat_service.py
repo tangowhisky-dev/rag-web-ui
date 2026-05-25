@@ -408,6 +408,7 @@ async def generate_response(
     display_query: Optional[str] = None,
     file_id: Optional[int] = None,
     file_markdown: Optional[str] = None,
+    answering_mode: str = "agentic",
 ) -> AsyncGenerator[str, None]:
     """
     Stream a chat response for the given query.
@@ -489,31 +490,54 @@ async def generate_response(
                     content = content.split("__LLM_RESPONSE__")[-1]
                 recent_lc_history.append(AIMessage(content=content))
 
-        logger.info("[CHAT] sliding_window=%d msgs | has_summary=%s",
-                    len(window_messages), bool(existing_summary))
-
-        # ── Delegate to LangGraph run_stream ──────────────────────────────
-        from app.services.rag_graph import run_stream
+        logger.info("[CHAT] sliding_window=%d msgs | has_summary=%s | mode=%s",
+                    len(window_messages), bool(existing_summary), answering_mode)
 
         full_response = ""
         rewritten_q = display_query or query
 
-        async for event in run_stream(
-            query=query,
-            file_markdown=file_markdown,
-            db=db,
-            chat_id=chat_id,
-            knowledge_base_ids=knowledge_base_ids,
-            recent_lc_history=recent_lc_history,
-            existing_summary=existing_summary,
-            use_dense=use_dense,
-            use_sparse=use_sparse,
-            use_exact=use_exact,
-            use_graph_rag=use_graph_rag,
-            temperature=temperature,
-            model_name=model_name,
-            display_query=display_query,
-        ):
+        # ── Route to answering pipeline based on mode ──────────────────────
+        if answering_mode in ("fast", "thinking"):
+            from app.services.fast_pipeline import fast_stream
+            stream_iter = fast_stream(
+                query=query,
+                knowledge_base_ids=knowledge_base_ids,
+                db=db,
+                recent_lc_history=recent_lc_history,
+                existing_summary=existing_summary,
+                use_dense=use_dense,
+                use_sparse=use_sparse,
+                use_exact=use_exact,
+                use_graph_rag=use_graph_rag,
+                temperature=temperature,
+                model_name=model_name or (
+                    settings.effective_reasoning_model if answering_mode == "thinking"
+                    else settings.OPENAI_MODEL
+                ),
+                display_query=display_query,
+                file_markdown=file_markdown,
+            )
+        else:
+            # Agentic: full LangGraph pipeline
+            from app.services.rag_graph import run_stream
+            stream_iter = run_stream(
+                query=query,
+                file_markdown=file_markdown,
+                db=db,
+                chat_id=chat_id,
+                knowledge_base_ids=knowledge_base_ids,
+                recent_lc_history=recent_lc_history,
+                existing_summary=existing_summary,
+                use_dense=use_dense,
+                use_sparse=use_sparse,
+                use_exact=use_exact,
+                use_graph_rag=use_graph_rag,
+                temperature=temperature,
+                model_name=model_name,
+                display_query=display_query,
+            )
+
+        async for event in stream_iter:
             event_type = event.get("event")
 
             if event_type == "agent_step":
@@ -526,7 +550,13 @@ async def generate_response(
 
             elif event_type == "context":
                 # Emit context + base64 prefix for legacy DB persistence
-                docs = event.get("docs", [])
+                raw_docs = event.get("docs", [])
+                # Serialize LangChain Document objects to plain dicts
+                docs = [
+                    {"page_content": d.page_content, "metadata": d.metadata}
+                    if hasattr(d, "page_content") else d
+                    for d in raw_docs
+                ]
                 base64_context = base64.b64encode(
                     json.dumps({
                         "context": docs,
@@ -536,7 +566,13 @@ async def generate_response(
                 separator = "__LLM_RESPONSE__"
                 full_response = base64_context + separator
 
-                context_payload = {k: v for k, v in event.items() if k != "event"}
+                context_payload = {
+                    k: (
+                        [{"page_content": d.page_content, "metadata": d.metadata} if hasattr(d, "page_content") else d for d in v]
+                        if k == "docs" else v
+                    )
+                    for k, v in event.items() if k != "event"
+                }
                 yield f'2:{json.dumps(context_payload)}\n'
                 yield f'0:"{base64_context}{separator}"\n'
 
@@ -544,6 +580,12 @@ async def generate_response(
                 content = event.get("content", "")
                 full_response += content
                 yield f'0:{json.dumps(content)}\n'
+
+            elif event_type == "answer_rewrite":
+                # Citation normalisation: replace accumulated streamed text with
+                # the citation-linked version. Frontend handles this via event type 'r'.
+                full_response = event.get("content", full_response)
+                yield f'r:{json.dumps({"content": full_response})}\n'
 
             elif event_type == "done":
                 usage = event.get("usage", {"promptTokens": 0, "completionTokens": 0})

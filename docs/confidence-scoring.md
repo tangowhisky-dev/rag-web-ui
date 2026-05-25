@@ -151,6 +151,26 @@ banner is shown, since there are no results to qualify.
 
 ---
 
+## Confidence in Agentic mode
+
+In Agentic mode the confidence score reported in the `context` event is derived from **sub-query coverage** rather than from the 4-signal formula above:
+
+```
+confidence_score = covered_sub_queries / total_sub_queries
+```
+
+| Score | Label |
+|---|---|
+| ≥ 0.8 | `"high"` |
+| ≥ 0.4 | `"medium"` |
+| < 0.4 | `"low"` |
+
+This reflects whether the draft-grade loop succeeded in answering each part of the question, not just whether documents were retrieved. The `breakdown` field also includes `sub_queries` (list) and `retrieval_attempts` (1–3) for debugging.
+
+The `grade_coverage` node emits per-sub-query coverage lines (✓/~/✗) in its `agent_step` event — these are shown in the collapsible timeline detail, not in the confidence bar.
+
+---
+
 ## Tuning
 
 The weights are in `confidence.py` as plain arithmetic — change them there.

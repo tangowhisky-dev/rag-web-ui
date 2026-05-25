@@ -19,29 +19,63 @@ branch_labels = None
 depends_on = None
 
 
+def _table_exists(conn, table_name):
+    result = conn.execute(
+        sa.text("SELECT COUNT(*) FROM information_schema.tables "
+                "WHERE table_schema = DATABASE() AND table_name = :t"),
+        {"t": table_name},
+    )
+    return result.scalar() > 0
+
+
+def _column_exists(conn, table_name, column_name):
+    result = conn.execute(
+        sa.text("SELECT COUNT(*) FROM information_schema.columns "
+                "WHERE table_schema = DATABASE() AND table_name = :t AND column_name = :c"),
+        {"t": table_name, "c": column_name},
+    )
+    return result.scalar() > 0
+
+
+def _index_exists(conn, table_name, index_name):
+    result = conn.execute(
+        sa.text("SELECT COUNT(*) FROM information_schema.statistics "
+                "WHERE table_schema = DATABASE() AND table_name = :t AND index_name = :i"),
+        {"t": table_name, "i": index_name},
+    )
+    return result.scalar() > 0
+
+
 def upgrade():
-    # 1. Create folders table
-    op.create_table(
-        'folders',
-        sa.Column('id', sa.Integer(), primary_key=True, autoincrement=True, nullable=False),
-        sa.Column('name', sa.String(255), nullable=False),
-        sa.Column('user_id', sa.Integer(), sa.ForeignKey('users.id', ondelete='CASCADE'), nullable=False),
-        sa.Column('created_at', sa.DateTime(), nullable=True),
-        sa.Column('updated_at', sa.DateTime(), nullable=True),
-    )
-    op.create_index('ix_folders_user_id', 'folders', ['user_id'])
+    conn = op.get_bind()
 
-    # 2. Add folder_id FK column to chats
-    op.add_column(
-        'chats',
-        sa.Column('folder_id', sa.Integer(), sa.ForeignKey('folders.id', ondelete='SET NULL'), nullable=True),
-    )
-    op.create_index('ix_chats_folder_id', 'chats', ['folder_id'])
+    # 1. Create folders table (idempotent)
+    if not _table_exists(conn, 'folders'):
+        op.create_table(
+            'folders',
+            sa.Column('id', sa.Integer(), primary_key=True, autoincrement=True, nullable=False),
+            sa.Column('name', sa.String(255), nullable=False),
+            sa.Column('user_id', sa.Integer(), sa.ForeignKey('users.id', ondelete='CASCADE'), nullable=False),
+            sa.Column('created_at', sa.DateTime(), nullable=True),
+            sa.Column('updated_at', sa.DateTime(), nullable=True),
+        )
+    if not _index_exists(conn, 'folders', 'ix_folders_user_id'):
+        op.create_index('ix_folders_user_id', 'folders', ['user_id'])
 
-    # 3. Add FULLTEXT index on messages.content (ALGORITHM=INPLACE, LOCK=NONE)
-    op.execute(
-        'ALTER TABLE messages ADD FULLTEXT INDEX idx_messages_content (content) ALGORITHM=INPLACE, LOCK=NONE'
-    )
+    # 2. Add folder_id FK column to chats (idempotent)
+    if not _column_exists(conn, 'chats', 'folder_id'):
+        op.add_column(
+            'chats',
+            sa.Column('folder_id', sa.Integer(), sa.ForeignKey('folders.id', ondelete='SET NULL'), nullable=True),
+        )
+    if not _index_exists(conn, 'chats', 'ix_chats_folder_id'):
+        op.create_index('ix_chats_folder_id', 'chats', ['folder_id'])
+
+    # 3. Add FULLTEXT index on messages.content (idempotent)
+    if not _index_exists(conn, 'messages', 'idx_messages_content'):
+        op.execute(
+            'ALTER TABLE messages ADD FULLTEXT INDEX idx_messages_content (content)'
+        )
 
 
 def downgrade():

@@ -31,11 +31,11 @@ export default function DashboardPage() {
 
   return (
     <DashboardLayout>
-      <div className="p-8 max-w-7xl mx-auto">
+      <div className="p-6 max-w-7xl mx-auto">
         {/* Hero */}
-        <div className="mb-12 rounded-2xl bg-muted border p-8">
+        <div className="mb-12 rounded-2xl bg-muted border p-6">
           <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
-            <div className="space-y-3">
+            <div className="space-y-1">
               <h1 className="text-4xl font-bold tracking-tight text-foreground">
                 Enterprise Knowledge Assistant
               </h1>
@@ -96,19 +96,19 @@ export default function DashboardPage() {
         </div>
 
         {/* How It Works */}
-        <h2 className="text-2xl font-semibold mb-6">How It Works</h2>
-        <div className="grid gap-6 md:grid-cols-3 mb-12">
+        <h2 className="text-2xl font-semibold mb-2">How It Works</h2>
+        <div className="grid gap-4 md:grid-cols-3 mb-12">
           <a
             href="/dashboard/knowledge/new"
-            className="relative flex flex-col items-center justify-center rounded-2xl border bg-card text-card-foreground p-8 hover:shadow-md hover:border-foreground/30 transition-all"
+            className="relative flex flex-col items-center justify-center rounded-2xl border bg-card text-card-foreground p-5 hover:shadow-md hover:border-foreground/30 transition-all"
           >
             <span className="absolute top-2 left-2 flex h-7 w-7 items-center justify-center rounded-full bg-muted text-xs font-bold">
               1
             </span>
-            <div className="rounded-full bg-muted p-4 mb-4">
-              <Brain className="h-8 w-8 text-foreground" />
+            <div className="rounded-full bg-muted p-3 mb-3">
+              <Brain className="h-6 w-6 text-foreground" />
             </div>
-            <h3 className="text-lg font-medium mb-2">Create Knowledge Base</h3>
+            <h3 className="text-base font-medium mb-1">Create Knowledge Base</h3>
             <p className="text-sm text-muted-foreground text-center">
               Build a new AI-powered knowledge repository
             </p>
@@ -116,31 +116,31 @@ export default function DashboardPage() {
 
           <a
             href="/dashboard/knowledge"
-            className="relative flex flex-col items-center justify-center rounded-2xl border bg-card text-card-foreground p-8 hover:shadow-md hover:border-foreground/30 transition-all"
+            className="relative flex flex-col items-center justify-center rounded-2xl border bg-card text-card-foreground p-5 hover:shadow-md hover:border-foreground/30 transition-all"
           >
             <span className="absolute top-2 left-2 flex h-7 w-7 items-center justify-center rounded-full bg-muted text-xs font-bold">
               2
             </span>
-            <div className="rounded-full bg-muted p-4 mb-4">
-              <Upload className="h-8 w-8 text-foreground" />
+            <div className="rounded-full bg-muted p-3 mb-3">
+              <Upload className="h-6 w-6 text-foreground" />
             </div>
-            <h3 className="text-lg font-medium mb-2">Upload Documents</h3>
+            <h3 className="text-base font-medium mb-1">Upload Documents</h3>
             <p className="text-sm text-muted-foreground text-center">
-              Add PDF, DOCX, MD or TXT files to your knowledge bases
+              Add PDFs, documents or images to your knowledge bases
             </p>
           </a>
 
           <a
             href="/dashboard/chat/new"
-            className="relative flex flex-col items-center justify-center rounded-2xl border bg-card text-card-foreground p-8 hover:shadow-md hover:border-foreground/30 transition-all"
+            className="relative flex flex-col items-center justify-center rounded-2xl border bg-card text-card-foreground p-5 hover:shadow-md hover:border-foreground/30 transition-all"
           >
             <span className="absolute top-2 left-2 flex h-7 w-7 items-center justify-center rounded-full bg-muted text-xs font-bold">
               3
             </span>
-            <div className="rounded-full bg-muted p-4 mb-4">
-              <Sparkles className="h-8 w-8 text-foreground" />
+            <div className="rounded-full bg-muted p-3 mb-3">
+              <Sparkles className="h-6 w-6 text-foreground" />
             </div>
-            <h3 className="text-lg font-medium mb-2">Start Chatting</h3>
+            <h3 className="text-base font-medium mb-1">Start Chatting</h3>
             <p className="text-sm text-muted-foreground text-center">
               Get instant answers from your knowledge with AI
             </p>

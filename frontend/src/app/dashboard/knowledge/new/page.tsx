@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import DashboardLayout from "@/components/layout/dashboard-layout";
+import KnowledgeLayout from "@/components/layout/knowledge-layout";
 import { api, ApiError } from "@/lib/api";
 import { useToast } from "@/components/ui/use-toast";
 
@@ -54,8 +54,9 @@ export default function NewKnowledgeBasePage() {
   };
 
   return (
-    <DashboardLayout>
-      <div className="max-w-2xl mx-auto space-y-8">
+    <KnowledgeLayout>
+      <div className="h-full overflow-y-auto">
+        <div className="max-w-2xl mx-auto space-y-8 p-6 pt-16">
         <div>
           <h2 className="text-3xl font-bold tracking-tight">
             Create Knowledge Base
@@ -117,7 +118,8 @@ export default function NewKnowledgeBasePage() {
             </button>
           </div>
         </form>
+        </div>
       </div>
-    </DashboardLayout>
+    </KnowledgeLayout>
   );
 }

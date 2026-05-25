@@ -524,7 +524,7 @@ export const Answer: FC<{
   failedLegs?: string[];
   queryClassification?: QueryClassification;
   toolTrace?: ToolTraceEntry[];
-  agentSteps?: Array<{ node: string; latency_ms: number; status: string }>;
+  agentSteps?: Array<{ node: string; latency_ms: number; status: string; [key: string]: unknown }>;
   synthesisMode?: boolean;
   isStreaming?: boolean;
   onDelete?: (id: string) => void;
@@ -537,10 +537,12 @@ export const Answer: FC<{
   const debouncedCitations = useDebouncedValue(citations, 300);
 
   // Keep refs so CitationLink can read the latest data without changing its
-  // identity (avoiding react-markdown remounting all <a> elements every render)
-  const citationsRef = useRef(debouncedCitations);
+  // identity (avoiding react-markdown remounting all <a> elements every render).
+  // citationsRef tracks `citations` directly (not debounced) so CitationLink
+  // always has the latest data immediately after the 2: context event.
+  const citationsRef = useRef(citations);
   const citationInfoMapRef = useRef(citationInfoMap);
-  citationsRef.current = debouncedCitations;
+  citationsRef.current = citations;
   citationInfoMapRef.current = citationInfoMap;
 
   const parsedContent = useMemo(() => {
@@ -637,14 +639,12 @@ export const Answer: FC<{
       return (
         <Popover>
           <PopoverTrigger asChild>
-            <a
-              {...props}
-              href="#"
-              role="button"
+            <button
+              type="button"
               className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/50 rounded hover:bg-blue-100 dark:hover:bg-blue-900/60 transition-colors relative"
             >
               <span className="absolute -top-3 -right-1">[{props.href}]</span>
-            </a>
+            </button>
           </PopoverTrigger>
           <PopoverContent
             side="top"
@@ -767,10 +767,8 @@ export const Answer: FC<{
   // Memoize the components object so react-markdown never sees a new reference
   const markdownComponents = useMemo(() => ({ a: CitationLink, code: CodeBlock }), [CitationLink]);
 
-  // Key changes only when citation info is first fetched; this forces a single
-  // controlled remount of <Markdown> (so popover content updates after the
-  // async fetch), instead of continuous uncontrolled remounts during streaming.
-  const citationInfoKey = Object.keys(citationInfoMap).sort().join(",");
+  // citationInfoMap is read via citationInfoMapRef inside CitationLink (ref-based,
+  // always current). No key-based remount needed — it would destroy open Popovers.
 
   // ── Action handlers ────────────────────────────────────────────────────────
   const [copied, setCopied] = useState(false);
@@ -837,6 +835,7 @@ export const Answer: FC<{
         failedLegs={failedLegs}
         agentSteps={agentSteps}
         isStreaming={isStreaming}
+        answerStarted={isStreaming && !!markdown}
       />
       {confidence === "none" && suggestion && (
         <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 mb-2">
@@ -859,7 +858,7 @@ export const Answer: FC<{
       )}
       {parsedContent.answerText && (
         <Markdown
-          key={citationInfoKey}
+          key={citations.length > 0 ? "with-citations" : "no-citations"}
           remarkPlugins={[remarkGfm, remarkMath]}
           rehypePlugins={[rehypeHighlight, [rehypeKatex, { throwOnError: false }]]}
           components={markdownComponents}

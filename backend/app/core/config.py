@@ -62,6 +62,11 @@ class Settings(BaseSettings):
     # to OPENAI_API_BASE (same server as chat/embeddings).
     OPENAI_VISION_API_BASE: Optional[str] = os.getenv("OPENAI_VISION_API_BASE") or None
 
+    # Reasoning / thinking model — used in "Thinking" answering mode.
+    # Should be a CoT/reasoning-enabled model (e.g. qwq-32b, deepseek-r1).
+    # Falls back to OPENAI_MODEL when unset.
+    REASONING_MODEL: Optional[str] = os.getenv("REASONING_MODEL") or None
+
     DENSE_EMBEDDINGS_MODEL: str = os.getenv("DENSE_EMBEDDINGS_MODEL", "local-embedding-model")
     # Dimension of the dense embedding model output. Must match DENSE_EMBEDDINGS_MODEL.
     # qwen3-embedding-0.6b = 1024, text-embedding-3-small = 1536, text-embedding-ada-002 = 1536
@@ -71,6 +76,11 @@ class Settings(BaseSettings):
     def effective_query_model(self) -> str:
         """Model to use for query rewriting and summarisation. Falls back to OPENAI_MODEL."""
         return self.QUERY_MODEL or self.OPENAI_MODEL
+
+    @property
+    def effective_reasoning_model(self) -> str:
+        """Model to use for the Thinking answering mode. Falls back to OPENAI_MODEL."""
+        return self.REASONING_MODEL or self.OPENAI_MODEL
 
     @property
     def effective_vision_api_base(self) -> str:

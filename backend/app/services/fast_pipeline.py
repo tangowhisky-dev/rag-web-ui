@@ -1,0 +1,303 @@
+"""
+Fast and Thinking answering pipelines.
+
+query_rewrite → hybrid_search (dense+sparse+exact+neo4j) → stream answer
+
+Both yield the same event dict shapes as rag_graph.run_stream so that
+chat_service.generate_response can forward them unchanged.
+
+Step data schema emitted per node:
+  rewrite_query    : { rewritten_query: str }
+  kb_retrieval     : { docs_found: int, chunks: [{preview, source, score}] }
+  graph_enrichment : { graph_docs: int, enriched_docs: int,
+                       context_lines: [str] }   (only if graph data found)
+  generate_answer  : { usage: {promptTokens, completionTokens} }
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+import time
+from typing import Any, AsyncGenerator, List, Optional
+
+logger = logging.getLogger(__name__)
+
+_ANSWER_SYSTEM_PROMPT = """\
+You are a helpful assistant. Answer the user's question using ONLY the provided context.
+If the context is insufficient, say so clearly.
+Keep your answer concise, accurate, and well-structured.
+
+The context contains numbered source chunks labeled [KB-1], [KB-2], etc.
+When you use information from a chunk, cite it as a markdown link with ONLY the number as both text and href:
+  Example: process scheduling [1](1) involves saving the CPU state [2](2).
+The number must match the [KB-N] label of the chunk you are citing.
+Do NOT invent citations. Only cite chunks you actually used.
+"""
+
+_PREVIEW_CHARS = 120  # characters shown per chunk in the timeline
+
+
+def _preview(text: str, n: int = _PREVIEW_CHARS) -> str:
+    text = text.strip().replace("\n", " ")
+    return text[:n] + "…" if len(text) > n else text
+
+
+def _get_llm(model_name: str, temperature: float = 0.0):
+    from langchain_openai import ChatOpenAI
+    from app.core.config import settings
+    return ChatOpenAI(
+        model=model_name,
+        temperature=temperature,
+        openai_api_base=settings.OPENAI_API_BASE,
+        openai_api_key=settings.OPENAI_API_KEY,
+        streaming=True,
+    )
+
+
+def _serialise_doc(doc: Any) -> dict:
+    if hasattr(doc, "page_content"):
+        return {"page_content": doc.page_content, "metadata": dict(doc.metadata)}
+    if isinstance(doc, dict):
+        return doc
+    return {"page_content": str(doc), "metadata": {}}
+
+
+async def fast_stream(
+    query: str,
+    knowledge_base_ids: List[int],
+    db: Any,
+    recent_lc_history: list,
+    existing_summary: Optional[str],
+    use_dense: bool = True,
+    use_sparse: bool = True,
+    use_exact: bool = True,
+    use_graph_rag: bool = False,
+    temperature: float = 0.0,
+    model_name: Optional[str] = None,
+    display_query: Optional[str] = None,
+    file_markdown: Optional[str] = None,
+) -> AsyncGenerator[dict, None]:
+    """
+    Lean RAG pipeline: rewrite → hybrid_search → stream answer.
+    Yields event dicts in the same shapes as rag_graph.run_stream.
+    """
+    from app.core.config import settings
+    from app.services.retrieval import hybrid_search_with_legs
+    from app.services.chat_service import _rewrite_query
+
+    effective_model = model_name or settings.OPENAI_MODEL
+
+    # ── 1. Query rewrite ──────────────────────────────────────────────────────
+    # Emit "active" first so the UI shows "Rewriting query…"
+    yield {"event": "agent_step", "node": "rewrite_query", "status": "active", "latency_ms": None}
+
+    t0 = time.monotonic()
+    try:
+        rewritten = await _rewrite_query(query, recent_lc_history)
+    except Exception as exc:
+        logger.warning("[FAST] rewrite failed (non-fatal): %s", exc)
+        rewritten = query
+
+    rewrite_ms = round((time.monotonic() - t0) * 1000, 1)
+    logger.info("[FAST] rewrite latency_ms=%.1f | rewritten=%r", rewrite_ms, rewritten[:80])
+
+    yield {
+        "event": "agent_step",
+        "node": "rewrite_query",
+        "status": "done",
+        "latency_ms": rewrite_ms,
+        "rewritten_query": rewritten,
+    }
+    yield {
+        "event": "rewritten_query",
+        "query": display_query or rewritten,
+    }
+
+    # ── 2. Hybrid retrieval ───────────────────────────────────────────────────
+    yield {"event": "agent_step", "node": "kb_retrieval", "status": "active", "latency_ms": None}
+
+    t1 = time.monotonic()
+    retrieval_result: dict = {}
+    raw_docs: list = []
+    try:
+        retrieval_result = await hybrid_search_with_legs(
+            query=rewritten,
+            kb_ids=knowledge_base_ids,
+            db=db,
+            use_dense=use_dense,
+            use_sparse=use_sparse,
+            use_exact=use_exact,
+            use_graph_rag=use_graph_rag,
+        )
+        raw_docs = retrieval_result.get("docs", [])
+    except Exception as exc:
+        logger.error("[FAST] retrieval failed: %s", exc)
+
+    retrieval_ms = round((time.monotonic() - t1) * 1000, 1)
+    retrieval_info = retrieval_result.get("retrieval_info", {})
+    failed_legs = retrieval_info.get("failed_legs", [])
+    logger.info("[FAST] retrieval latency_ms=%.1f | docs=%d | failed_legs=%s",
+                retrieval_ms, len(raw_docs), failed_legs)
+
+    # Separate graph-expanded docs (added by Neo4j expansion) from regular docs
+    graph_expanded: list = []
+    kb_docs: list = []
+    for doc in raw_docs:
+        meta = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
+        legs = meta.get("_legs", [])
+        if isinstance(legs, list) and "graph" in legs:
+            graph_expanded.append(doc)
+        else:
+            kb_docs.append(doc)
+
+    # Build chunk previews for kb_retrieval step (ordered as reranker returned them)
+    chunk_previews = []
+    for doc in kb_docs:
+        d = _serialise_doc(doc)
+        meta = d["metadata"]
+        chunk_previews.append({
+            "preview": _preview(d["page_content"]),
+            "source": meta.get("source") or meta.get("file_name") or "",
+            "score": round(float(meta.get("_rrf_score", meta.get("score", 0))), 4),
+        })
+
+    yield {
+        "event": "agent_step",
+        "node": "kb_retrieval",
+        "status": "done",
+        "latency_ms": retrieval_ms,
+        "docs_found": len(raw_docs),
+        "chunks": chunk_previews,
+    }
+
+    # ── 2b. Graph enrichment step (only if graph data was retrieved) ──────────
+    graph_info = retrieval_info.get("legs", {}).get("graph", {})
+    enriched_count = graph_info.get("count", 0)
+    expanded_count = graph_info.get("expanded", 0)
+    has_graph = enriched_count > 0 or expanded_count > 0 or bool(graph_expanded)
+
+    if has_graph or graph_expanded:
+        # Build context lines — first 3 lines of each graph-expanded chunk
+        context_lines: list[str] = []
+        for doc in graph_expanded[:6]:
+            d = _serialise_doc(doc)
+            lines = d["page_content"].strip().splitlines()
+            first_lines = " ".join(l.strip() for l in lines[:3] if l.strip())
+            source = d["metadata"].get("source") or d["metadata"].get("file_name") or ""
+            context_lines.append(f"{_preview(first_lines, 150)}" + (f" [{source}]" if source else ""))
+
+        yield {
+            "event": "agent_step",
+            "node": "graph_enrichment",
+            "status": "done",
+            "latency_ms": 0,
+            "graph_docs": expanded_count,
+            "enriched_docs": enriched_count,
+            "context_lines": context_lines,
+        }
+
+    # Serialise all docs for the context event
+    serialised_docs = [_serialise_doc(d) for d in raw_docs]
+    confidence = "high" if len(raw_docs) >= 3 else ("medium" if raw_docs else "low")
+    score = round(min(1.0, len(raw_docs) / 5.0), 2)
+
+    yield {
+        "event": "context",
+        "docs": serialised_docs,
+        "confidence": confidence,
+        "score": score,
+        "suggestion": "" if raw_docs else "No relevant documents found.",
+        "failed_legs": failed_legs,
+        "breakdown": {
+            "kb_docs": len(kb_docs),
+            "graph_docs": len(graph_expanded),
+            "file_chars": len(file_markdown or ""),
+            "merged_chars": sum(len(d.get("page_content", "")) for d in serialised_docs),
+            "sources": ["kb"] if raw_docs else [],
+        },
+        "query_classification": {
+            "type": "FACTUAL",
+            "confidence": score,
+            "latency_ms": 0,
+            "fallback": False,
+        },
+        "tool_trace": ["rewrite_query", "kb_retrieval", "generate_answer"],
+        "synthesis_mode": False,
+    }
+
+    # ── 3. Build context string ────────────────────────────────────────────────
+    context_parts: list[str] = []
+    for i, doc in enumerate(serialised_docs, 1):
+        content = doc.get("page_content", "").strip()
+        source = doc.get("metadata", {}).get("source", "")
+        header = f"[KB-{i}]" + (f" ({source})" if source else "")
+        context_parts.append(f"{header}\n{content}")
+    if file_markdown:
+        context_parts.append(f"[File Content]\n{file_markdown}")
+    merged = "\n\n---\n\n".join(context_parts)
+
+    # ── 4. Build messages ──────────────────────────────────────────────────────
+    from langchain_core.messages import HumanMessage, AIMessage
+
+    messages: list = [{"role": "system", "content": _ANSWER_SYSTEM_PROMPT}]
+    if existing_summary:
+        messages.append({
+            "role": "system",
+            "content": f"[Earlier conversation summary]\n{existing_summary}",
+        })
+    for msg in recent_lc_history[-6:]:
+        if isinstance(msg, HumanMessage):
+            messages.append({"role": "user", "content": msg.content})
+        elif isinstance(msg, AIMessage):
+            messages.append({"role": "assistant", "content": msg.content})
+
+    messages.append({
+        "role": "user",
+        "content": f"Context:\n{merged}\n\nQuestion: {rewritten}" if merged else rewritten,
+    })
+
+    # ── 5. Stream answer ──────────────────────────────────────────────────────
+    yield {"event": "agent_step", "node": "generate_answer", "status": "active", "latency_ms": None}
+
+    t2 = time.monotonic()
+    llm = _get_llm(effective_model, temperature)
+    streamed_parts: list[str] = []
+    usage: dict = {"promptTokens": 0, "completionTokens": 0}
+
+    try:
+        async for chunk in llm.astream(messages):
+            token: str = chunk.content or ""
+            if token:
+                streamed_parts.append(token)
+                yield {"event": "token", "content": token}
+            if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
+                usage = {
+                    "promptTokens": chunk.usage_metadata.get("input_tokens", 0),
+                    "completionTokens": chunk.usage_metadata.get("output_tokens", 0),
+                }
+    except Exception as exc:
+        logger.error("[FAST] generation failed: %s", exc)
+        err_msg = "I encountered an error generating the response. Please try again."
+        yield {"event": "token", "content": err_msg}
+        streamed_parts.append(err_msg)
+
+    answer_ms = round((time.monotonic() - t2) * 1000, 1)
+    logger.info("[FAST] generation latency_ms=%.1f | tokens=%d | model=%s",
+                answer_ms, len(streamed_parts), effective_model)
+
+    yield {
+        "event": "agent_step",
+        "node": "generate_answer",
+        "status": "done",
+        "latency_ms": answer_ms,
+        "usage": usage,
+    }
+
+    # Normalise citation syntax: [2] → [2](2)
+    raw_answer = "".join(streamed_parts)
+    normalised = re.sub(r'\[(\d+)\](?!\()', lambda m: f'[{m.group(1)}]({m.group(1)})', raw_answer)
+    if normalised != raw_answer:
+        yield {"event": "answer_rewrite", "content": normalised}
+
+    yield {"event": "done", "full_response": normalised or raw_answer, "usage": usage}

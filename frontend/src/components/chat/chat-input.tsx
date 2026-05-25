@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Loader2, Paperclip, ArrowUp } from "lucide-react";
+import { Paperclip, ArrowUp, Zap, Brain, Bot, Square } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
   Select,
@@ -12,6 +12,14 @@ import {
 } from "@/components/ui/select";
 import { api } from "@/lib/api";
 import { FileAttachButton, FileChip, useFileDropzone, type UploadedFile } from "./file-attachment";
+
+export type AnsweringMode = "fast" | "thinking" | "agentic";
+
+const MODE_META: Record<AnsweringMode, { label: string; description: string; icon: React.ElementType }> = {
+  fast:     { label: "Fast",     description: "Quick search + rerank + direct answer", icon: Zap },
+  thinking: { label: "Thinking", description: "Same as Fast but with a reasoning model", icon: Brain },
+  agentic:  { label: "Agentic",  description: "Full multi-step LangGraph pipeline",     icon: Bot },
+};
 
 interface KnowledgeBase {
   id: number;
@@ -35,6 +43,12 @@ interface InputBarProps {
   fileError?: string;
   /** Setter for fileError */
   onFileError?: (msg: string) => void;
+  /** Called when user clicks stop during generation */
+  onStop?: () => void;
+  /** Current answering mode */
+  answeringMode?: AnsweringMode;
+  /** Called when user changes mode */
+  onAnsweringModeChange?: (mode: AnsweringMode) => void;
 }
 
 const LINES_MIN = 1;
@@ -89,10 +103,19 @@ export function InputBar({
   onFileRemove: onFileRemoveProp,
   fileError = "",
   onFileError,
+  onStop,
+  answeringMode: answeringModeProp,
+  onAnsweringModeChange,
 }: InputBarProps) {
   const [kbOpen, setKbOpen] = useState(false);
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]);
   const [selectedKbIds, setSelectedKbIds] = useState<number[]>([]);
+  const [internalMode, setInternalMode] = useState<AnsweringMode>("fast");
+  const activeMode: AnsweringMode = answeringModeProp ?? internalMode;
+  const setMode = (m: AnsweringMode) => {
+    setInternalMode(m);
+    onAnsweringModeChange?.(m);
+  };
   const { textareaRef, hiddenSpanRef } = useAutoResize(value);
 
   const [internalError, setInternalError] = useState("");
@@ -212,7 +235,7 @@ export function InputBar({
         />
       </div>
 
-      {/* Bottom row: attach + KB chips + send */}
+      {/* Bottom row: attach + KB chips | mode pills (center) | send */}
       <div className="flex items-center justify-between px-2 pb-2 gap-2">
         <div className="flex items-center gap-1">
           {/* File attach button */}
@@ -276,26 +299,59 @@ export function InputBar({
           )}
         </div>
 
-        {/* Send button — circular arrow-up */}
-        <button
-          type="button"
-          onClick={onSubmit}
-          disabled={disabled || !value.trim() || uploadedFile?.status === "processing"}
-          className={cn(
-            "h-8 w-8 rounded-full flex items-center justify-center transition-all shrink-0",
-            disabled || !value.trim()
-              ? "bg-muted text-muted-foreground"
-              : "bg-primary text-primary-foreground hover:bg-primary/90",
-            "disabled:pointer-events-none"
-          )}
-          data-testid="chat-input-send-button"
-        >
-          {disabled ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
+        {/* Mode selector pills — centered */}
+        <div className="flex items-center gap-0.5">
+          {(Object.entries(MODE_META) as [AnsweringMode, typeof MODE_META[AnsweringMode]][]).map(([mode, meta]) => {
+            const Icon = meta.icon;
+            const active = activeMode === mode;
+            return (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => setMode(mode)}
+                title={meta.description}
+                className={cn(
+                  "flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium transition-all",
+                  active
+                    ? "bg-primary text-primary-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground hover:bg-muted"
+                )}
+              >
+                <Icon className="h-3 w-3" />
+                {meta.label}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Send / Stop button */}
+        {disabled ? (
+          <button
+            type="button"
+            onClick={onStop}
+            className="h-8 w-8 rounded-full flex items-center justify-center transition-all shrink-0 bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            aria-label="Stop generation"
+            data-testid="chat-input-stop-button"
+          >
+            <Square className="h-3.5 w-3.5 fill-current" />
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={onSubmit}
+            disabled={!value.trim() || uploadedFile?.status === "processing"}
+            className={cn(
+              "h-8 w-8 rounded-full flex items-center justify-center transition-all shrink-0",
+              !value.trim()
+                ? "bg-muted text-muted-foreground"
+                : "bg-primary text-primary-foreground hover:bg-primary/90",
+              "disabled:pointer-events-none"
+            )}
+            data-testid="chat-input-send-button"
+          >
             <ArrowUp className="h-4 w-4" />
-          )}
-        </button>
+          </button>
+        )}
       </div>
 
       {/* File error */}

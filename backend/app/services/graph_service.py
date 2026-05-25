@@ -127,7 +127,43 @@ def _get_llm_pipeline():
         OnError,
     )
     from neo4j_graphrag.experimental.components.kg_writer import Neo4jWriter
+    from neo4j_graphrag.experimental.components.types import Neo4jNode, Neo4jGraph
     from neo4j_graphrag.experimental.pipeline.pipeline import Pipeline
+
+    class _SafeNeo4jWriter(Neo4jWriter):
+        """Strips empty/non-finite embedding_properties before writing to Neo4j.
+
+        The LLM occasionally returns malformed entity nodes that end up with
+        embedding_properties={"embedding": []} — an empty list that Neo4j's
+        db.create.setNodeVectorProperty() rejects with
+        'Vector must only contain finite values. Provided: List{}'.
+
+        We don't store vectors in Neo4j (Qdrant is the vector store), so the
+        safest fix is to clear all embedding_properties before each write.
+        """
+
+        @staticmethod
+        def _clean_nodes(nodes: list[Neo4jNode]) -> list[Neo4jNode]:
+            cleaned = []
+            for node in nodes:
+                if node.embedding_properties:
+                    # Keep only entries that are non-empty lists of finite floats
+                    valid = {
+                        k: v for k, v in node.embedding_properties.items()
+                        if v and all(isinstance(x, (int, float)) and not (x != x or x == float("inf") or x == float("-inf")) for x in v)
+                    }
+                    if valid != node.embedding_properties:
+                        node = Neo4jNode(
+                            id=node.id,
+                            label=node.label,
+                            properties=node.properties,
+                            embedding_properties=valid,
+                        )
+                cleaned.append(node)
+            return cleaned
+
+        def _upsert_nodes(self, nodes, lexical_graph_config):  # type: ignore[override]
+            super()._upsert_nodes(self._clean_nodes(nodes), lexical_graph_config)
 
     llm = OpenAILLM(
         model_name=settings.GRAPHRAG_LLM,
@@ -147,7 +183,7 @@ def _get_llm_pipeline():
         max_concurrency=1,   # 1 = fully sequential; local models OOM at >1
     )
 
-    writer = Neo4jWriter(
+    writer = _SafeNeo4jWriter(
         driver=_get_driver(),
         neo4j_database="neo4j",
         batch_size=500,

@@ -1,20 +1,35 @@
 """
-LangGraph-based multi-agent RAG orchestration.
+LangGraph-based multi-agent RAG orchestration — Agentic Pipeline v2.
 
-T01: Schema definition and interface contract for run_stream.
-T02: rewrite_query + context_router nodes.
-T03: extract_file_sections, kb_retrieval, grade_documents nodes.
-T04: merge_context, generate_answer nodes + StateGraph assembly + full run_stream().
+Pipeline flow:
+  rewrite_query
+    → context_router          (smart source routing: kb / file / both)
+    → decompose_query         (split into 2-5 atomic sub-queries)
+    → parallel_retrieval      (hybrid search per sub-query, reinforced dedup)
+    → extract_file_sections   (select relevant file sections per sub-query)
+    → draft_answer            (draft answer for grading — not final output)
+    → grade_coverage          (LLM grades which sub-queries are covered)
+    → [conditional_router]
+        ├─ all covered          → generate_answer (final)
+        ├─ uncovered, attempt=0 → widened_retrieval  → draft_answer → grade_coverage
+        ├─ uncovered, attempt=1 → keyword_search_loop → draft_answer → grade_coverage
+        └─ attempt >= 2         → generate_answer (partial / unable)
 """
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import logging
+import re
 import time
-from typing import Any, AsyncGenerator, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
+from pydantic import BaseModel
 from typing_extensions import TypedDict
+
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -24,21 +39,38 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 class RAGGraphState(TypedDict):
-    """Shared state passed between graph nodes."""
-
+    # ── Query lifecycle ────────────────────────────────────────────────────
     query: str
     rewritten_query: str
-    route: str                    # "file" | "kb" | "both"
-    sources: List[str]            # ["kb", "file_current", "file_prior"]
-    file_ids_needed: List[int]    # file IDs the router decided to use
-    router_rationale: str         # LLM rationale for routing decision
+    sub_queries: List[str]             # from decompose_query
+
+    # ── Routing (preserved from v1) ───────────────────────────────────────
+    sources: List[str]                 # ["kb", "file_current", "file_prior"]
+    file_ids_needed: List[int]
+    router_rationale: str
+
+    # ── File ──────────────────────────────────────────────────────────────
     file_markdown: Optional[str]
-    retrieved_docs: list          # raw docs from KB retrieval
-    graded_docs: list             # docs that passed relevance grading
-    merged_context: str           # final formatted context string
+
+    # ── Retrieval ─────────────────────────────────────────────────────────
+    retrieved_docs: list               # accumulates across all retry attempts
+    retrieval_attempt: int             # 0=first, 1=widened, 2=keyword
+    keyword_iterations: list           # [{sub_query, iteration, keywords, results_found}]
+
+    # ── Grading / coverage ────────────────────────────────────────────────
+    draft_answer: str
+    coverage_result: dict              # sub_query → "covered"|"partially_covered"|"not_covered"
+    uncovered_sub_queries: List[str]
+
+    # ── Final answer ──────────────────────────────────────────────────────
+    merged_context: str
     answer: str
-    agent_steps: list             # each: {"node": str, "latency_ms": float, "status": str}
-    # run-time context injected by run_stream before graph execution
+    _usage: dict
+
+    # ── Observability ─────────────────────────────────────────────────────
+    agent_steps: list
+
+    # ── Run-time context injected by run_stream ───────────────────────────
     knowledge_base_ids: List[int]
     recent_lc_history: list
     existing_summary: Optional[str]
@@ -49,34 +81,145 @@ class RAGGraphState(TypedDict):
     temperature: float
     model_name: Optional[str]
     display_query: Optional[str]
+    _db: Any
 
 
 # ---------------------------------------------------------------------------
-# SSE event type constants (used by chat_service to map run_stream events)
+# SSE event type constants
 # ---------------------------------------------------------------------------
 
-EVENT_AGENT_STEP    = "agent_step"      # graph node started/finished
-EVENT_REWRITTEN     = "rewritten_query" # query after rewrite node
-EVENT_CONTEXT       = "context"         # retrieved + graded docs + confidence
-EVENT_TOKEN         = "token"           # streaming answer token
-EVENT_DONE          = "done"            # final event, carries full_response + usage
+EVENT_AGENT_STEP = "agent_step"
+EVENT_REWRITTEN  = "rewritten_query"
+EVENT_CONTEXT    = "context"
+EVENT_TOKEN      = "token"
+EVENT_DONE       = "done"
 
 
 # ---------------------------------------------------------------------------
-# Node helpers
+# Pydantic schemas for structured LLM calls
+# ---------------------------------------------------------------------------
+
+class _RouterOutput(BaseModel):
+    sources: List[str]
+    rationale: str
+    file_ids_needed: List[int] = []
+
+class _SectionOutput(BaseModel):
+    indices: List[int]
+
+class _SubQueriesOutput(BaseModel):
+    sub_queries: List[str]
+
+class _CoverageItem(BaseModel):
+    sub_query: str
+    status: str  # "covered" | "partially_covered" | "not_covered"
+
+class _CoverageOutput(BaseModel):
+    coverage: List[_CoverageItem]
+
+class _KeywordsOutput(BaseModel):
+    broad_keywords: List[str]
+    narrow_keywords: List[str]
+
+
+# ---------------------------------------------------------------------------
+# Helpers
 # ---------------------------------------------------------------------------
 
 def _get_llm(model_name: Optional[str] = None, temperature: float = 0.0):
-    """Return a ChatOpenAI instance (lazy import so tests can mock easily)."""
-    from langchain_openai import ChatOpenAI  # noqa: PLC0415
+    from langchain_openai import ChatOpenAI
     return ChatOpenAI(
-        model=model_name or "gpt-4o-mini",
+        model=model_name or settings.OPENAI_MODEL,
         temperature=temperature,
+        openai_api_base=settings.OPENAI_API_BASE,
+        openai_api_key=settings.OPENAI_API_KEY,
+        streaming=True,
     )
 
 
+async def _invoke_structured(llm, messages: list, schema: type) -> str:
+    """
+    Invoke LLM with json_schema constrained output.
+    Falls back to unconstrained invocation if the server rejects the format.
+    strict=False intentional: local models often refuse strict mode.
+    """
+    json_schema_format = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": schema.__name__,
+            "strict": False,
+            "schema": schema.model_json_schema(),
+        },
+    }
+    try:
+        resp = await llm.ainvoke(messages, response_format=json_schema_format)
+    except Exception as exc:
+        err = str(exc)
+        if "response_format" in err or "json_schema" in err or "400" in err:
+            resp = await llm.ainvoke(messages)
+        else:
+            raise
+    return resp.content
+
+
+def _content_hash(text: str) -> str:
+    return hashlib.md5(text.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _serialise_doc(doc: Any) -> dict:
+    if isinstance(doc, dict):
+        return doc
+    if hasattr(doc, "page_content"):
+        return {"page_content": doc.page_content, "metadata": dict(doc.metadata)}
+    return {"page_content": str(doc), "metadata": {}}
+
+
+def _dedup_and_reinforce(doc_lists: List[List[dict]]) -> List[dict]:
+    """
+    Merge multiple lists of serialised docs.
+    A chunk found in N sub-query results has its score multiplied (reinforced).
+    Returns sorted by reinforced score descending.
+    """
+    seen: Dict[str, dict] = {}
+    for docs in doc_lists:
+        for doc in docs:
+            text = doc.get("page_content", "")
+            h = _content_hash(text)
+            meta = doc.get("metadata", {})
+            score = float(meta.get("_rrf_score", meta.get("score", 0.001)))
+            if h in seen:
+                prev_meta = seen[h].get("metadata", {})
+                prev_score = float(prev_meta.get("_reinforced_score", score))
+                new_meta = dict(prev_meta)
+                new_meta["_reinforced_score"] = prev_score + score
+                new_meta["_retrieval_count"] = prev_meta.get("_retrieval_count", 1) + 1
+                seen[h] = {"page_content": text, "metadata": new_meta}
+            else:
+                new_meta = dict(meta)
+                new_meta["_reinforced_score"] = score
+                new_meta["_retrieval_count"] = 1
+                seen[h] = {"page_content": text, "metadata": new_meta}
+
+    result = list(seen.values())
+    result.sort(key=lambda d: d.get("metadata", {}).get("_reinforced_score", 0), reverse=True)
+    return result
+
+
+def _build_context_string(docs: List[dict], file_markdown: Optional[str] = None) -> str:
+    parts: List[str] = []
+    for i, doc in enumerate(docs, 1):
+        content = doc.get("page_content", "").strip()
+        meta = doc.get("metadata", {})
+        source = meta.get("source") or meta.get("file_name", "")
+        header = f"[KB-{i}]" + (f" ({source})" if source else "")
+        parts.append(f"{header}\n{content}")
+    if file_markdown and file_markdown.strip():
+        parts.append(f"[FILE CONTENT]\n{file_markdown.strip()}")
+    return "\n\n---\n\n".join(parts)
+
+
 # ---------------------------------------------------------------------------
-# Node: rewrite_query_node
+# Node: rewrite_query_node  (preserved from v1)
 # ---------------------------------------------------------------------------
 
 async def rewrite_query_node(state: RAGGraphState) -> dict:
@@ -100,18 +243,25 @@ async def rewrite_query_node(state: RAGGraphState) -> dict:
         "Return ONLY the rewritten query — no explanations, no quotes."
     )
     history = state.get("recent_lc_history") or []
-    messages = [{"role": "system", "content": system_prompt}]
-    for msg in history[-4:]:  # last 2 turns for context
+    messages: list = [{"role": "system", "content": system_prompt}]
+    for msg in history[-4:]:
         messages.append(msg)
     messages.append({"role": "user", "content": query})
 
-    response = await llm.ainvoke(messages)
-    rewritten = response.content.strip() or query
+    try:
+        response = await llm.ainvoke(messages)
+        rewritten = response.content.strip() or query
+    except Exception as exc:
+        logger.warning("[REWRITE] failed: %s — using original", exc)
+        rewritten = query
 
     latency_ms = round((time.monotonic() - t0) * 1000, 2)
-    logger.info("[REWRITE] original=%r rewritten=%r latency_ms=%.1f", query, rewritten, latency_ms)
+    logger.info("[REWRITE] original=%r rewritten=%r latency_ms=%.1f", query[:60], rewritten[:60], latency_ms)
 
-    step = {"node": "rewrite_query", "latency_ms": latency_ms, "status": "done"}
+    step = {
+        "node": "rewrite_query", "latency_ms": latency_ms, "status": "done",
+        "rewritten_query": rewritten,
+    }
     return {
         "rewritten_query": rewritten,
         "agent_steps": (state.get("agent_steps") or []) + [step],
@@ -119,7 +269,7 @@ async def rewrite_query_node(state: RAGGraphState) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Node: context_router_node
+# Node: context_router_node  (preserved from v1)
 # ---------------------------------------------------------------------------
 
 _ROUTER_SYSTEM_PROMPT = """\
@@ -133,9 +283,9 @@ Available sources:
 
 Respond with a JSON object:
 {
-  "sources": ["kb"],                 // list of sources needed, non-empty
-  "rationale": "...",                // one-sentence reason
-  "file_ids_needed": []              // integer file IDs if file_current or file_prior are chosen, else []
+  "sources": ["kb"],
+  "rationale": "...",
+  "file_ids_needed": []
 }
 
 Rules:
@@ -159,7 +309,7 @@ async def context_router_node(state: RAGGraphState) -> dict:
     model_name = state.get("model_name")
     temperature = state.get("temperature", 0.0)
 
-    llm = _get_llm(model_name, temperature)
+    json_llm = _get_llm(model_name, 0.0)
 
     user_msg = f"Query: {query}"
     if state.get("file_markdown"):
@@ -172,19 +322,13 @@ async def context_router_node(state: RAGGraphState) -> dict:
         {"role": "user", "content": user_msg},
     ]
 
-    # Request JSON output
-    from langchain_openai import ChatOpenAI  # noqa: PLC0415 (already imported above but kept explicit)
-    json_llm = _get_llm(model_name, 0.0)
     try:
-        response = await json_llm.ainvoke(
-            messages,
-            response_format={"type": "json_object"},
-        )
-        parsed = json.loads(response.content)
+        raw = await _invoke_structured(json_llm, messages, _RouterOutput)
+        parsed = json.loads(raw)
         sources: List[str] = parsed.get("sources") or ["kb"]
         rationale: str = parsed.get("rationale", "")
         file_ids_needed: List[int] = [int(x) for x in (parsed.get("file_ids_needed") or [])]
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("[ROUTER] JSON parse error: %s — falling back to kb-only", exc)
         sources = ["kb"]
         rationale = "fallback due to parse error"
@@ -196,8 +340,10 @@ async def context_router_node(state: RAGGraphState) -> dict:
         sources, rationale, file_ids_needed, latency_ms,
     )
 
-    step = {"node": "context_router", "latency_ms": latency_ms, "status": "done",
-            "sources": sources, "rationale": rationale}
+    step = {
+        "node": "context_router", "latency_ms": latency_ms, "status": "done",
+        "sources": sources, "rationale": rationale,
+    }
     return {
         "sources": sources,
         "file_ids_needed": file_ids_needed,
@@ -207,38 +353,170 @@ async def context_router_node(state: RAGGraphState) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Node: extract_file_sections_node
+# Node: decompose_query_node  ← NEW
+# ---------------------------------------------------------------------------
+
+_DECOMPOSE_SYSTEM = """\
+You are a query decomposer. Break a complex question into 2–5 atomic sub-questions
+that together fully cover the original question.
+
+Rules:
+- Simple, single-fact questions → produce exactly 1 sub-question (the question itself, unchanged).
+- Each sub-question must be self-contained and independently answerable.
+- Avoid overlap between sub-questions.
+- Maximum 5 sub-questions.
+
+Respond with JSON only: {"sub_queries": ["...", "..."]}
+"""
+
+
+async def decompose_query_node(state: RAGGraphState) -> dict:
+    t0 = time.monotonic()
+    query = state.get("rewritten_query") or state["query"]
+    model_name = state.get("model_name")
+    llm = _get_llm(model_name or settings.QUERY_MODEL, 0.0)
+
+    messages = [
+        {"role": "system", "content": _DECOMPOSE_SYSTEM},
+        {"role": "user", "content": f"Question: {query}"},
+    ]
+    sub_queries = [query]
+    try:
+        raw = await _invoke_structured(llm, messages, _SubQueriesOutput)
+        m = re.search(r'\{.*\}', raw, re.DOTALL)
+        if m:
+            parsed = json.loads(m.group(0))
+            sqs = [q.strip() for q in (parsed.get("sub_queries") or []) if q.strip()]
+            if sqs:
+                sub_queries = sqs[:5]
+    except Exception as exc:
+        logger.warning("[DECOMPOSE] parse failed: %s — using single sub-query", exc)
+
+    latency_ms = round((time.monotonic() - t0) * 1000, 1)
+    logger.info("[DECOMPOSE] latency_ms=%.1f sub_queries=%d: %s",
+                latency_ms, len(sub_queries), sub_queries)
+
+    step = {
+        "node": "decompose_query", "status": "done", "latency_ms": latency_ms,
+        "sub_queries": sub_queries,
+    }
+    return {
+        "sub_queries": sub_queries,
+        "agent_steps": (state.get("agent_steps") or []) + [step],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Node: parallel_retrieval_node  ← replaces kb_retrieval_node
+# ---------------------------------------------------------------------------
+
+async def parallel_retrieval_node(state: RAGGraphState) -> dict:
+    t0 = time.monotonic()
+    sources: List[str] = state.get("sources") or ["kb"]
+
+    if "kb" not in sources:
+        latency_ms = round((time.monotonic() - t0) * 1000, 1)
+        step = {
+            "node": "parallel_retrieval", "status": "skipped", "latency_ms": latency_ms,
+            "docs_found": 0, "sub_queries_searched": 0,
+        }
+        return {
+            "retrieved_docs": state.get("retrieved_docs") or [],
+            "retrieval_attempt": 0,
+            "agent_steps": (state.get("agent_steps") or []) + [step],
+        }
+
+    sub_queries: List[str] = state.get("sub_queries") or [state.get("rewritten_query") or state["query"]]
+    kb_ids: List[int] = state.get("knowledge_base_ids") or []
+    db = state.get("_db")
+    use_dense = state.get("use_dense", True)
+    use_sparse = state.get("use_sparse", True)
+    use_exact = state.get("use_exact", True)
+    use_graph_rag = state.get("use_graph_rag", False)
+
+    from app.services.retrieval import hybrid_search_with_legs
+
+    async def _retrieve_one(sq: str) -> List[dict]:
+        try:
+            result = await hybrid_search_with_legs(
+                query=sq, kb_ids=kb_ids, db=db,
+                use_dense=use_dense, use_sparse=use_sparse,
+                use_exact=use_exact, use_graph_rag=use_graph_rag,
+            )
+            return [_serialise_doc(d) for d in result.get("docs", [])]
+        except Exception as exc:
+            logger.error("[PARALLEL_RETRIEVE] sub_query=%r error: %s", sq[:60], exc)
+            return []
+
+    results = await asyncio.gather(*[_retrieve_one(sq) for sq in sub_queries])
+    merged = _dedup_and_reinforce(list(results))
+
+    latency_ms = round((time.monotonic() - t0) * 1000, 1)
+    logger.info("[PARALLEL_RETRIEVE] sub_queries=%d docs_merged=%d latency_ms=%.1f",
+                len(sub_queries), len(merged), latency_ms)
+
+    chunk_previews = []
+    for doc in merged[:10]:
+        meta = doc.get("metadata", {})
+        text = doc.get("page_content", "")
+        preview = text[:120].strip() + ("…" if len(text) > 120 else "")
+        chunk_previews.append({
+            "preview": preview,
+            "source": meta.get("source") or meta.get("file_name", ""),
+            "score": round(float(meta.get("_reinforced_score", 0)), 4),
+            "retrieval_count": int(meta.get("_retrieval_count", 1)),
+        })
+
+    step = {
+        "node": "parallel_retrieval", "status": "done", "latency_ms": latency_ms,
+        "docs_found": len(merged), "sub_queries_searched": len(sub_queries),
+        "chunks": chunk_previews,
+    }
+    return {
+        "retrieved_docs": merged,
+        "retrieval_attempt": 0,
+        "agent_steps": (state.get("agent_steps") or []) + [step],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Node: extract_file_sections_node  (preserved from v1, adapted for sub_queries)
 # ---------------------------------------------------------------------------
 
 async def extract_file_sections_node(state: RAGGraphState) -> dict:
     """
-    Extracts the most relevant sections from attached file markdown
-    instead of dumping the entire document into context.
+    Extracts the most relevant sections from the attached file markdown.
+    Uses the combined sub-queries for section selection (preserved v1 logic).
 
     Logs: [EXTRACT] chars_in=... sections=... chars_out=... latency_ms=...
     Updates: file_markdown (trimmed), agent_steps
     """
     t0 = time.monotonic()
+    sources: List[str] = state.get("sources") or []
     file_markdown: Optional[str] = state.get("file_markdown")
 
-    if not file_markdown:
+    if not any(s.startswith("file") for s in sources) or not file_markdown:
         latency_ms = round((time.monotonic() - t0) * 1000, 2)
-        step = {"node": "extract_file_sections", "latency_ms": latency_ms, "status": "skipped"}
+        step = {
+            "node": "extract_file_sections", "latency_ms": latency_ms,
+            "status": "skipped", "sections": 0,
+        }
         return {"agent_steps": (state.get("agent_steps") or []) + [step]}
 
-    query = state.get("rewritten_query") or state["query"]
+    # Combine sub-queries for richer section selection
+    sub_queries: List[str] = state.get("sub_queries") or [state.get("rewritten_query") or state["query"]]
+    query = " ".join(sub_queries[:3])
     model_name = state.get("model_name")
+    llm = _get_llm(model_name, 0.0)
 
     # Split into sections by markdown headings or double-newlines
-    import re
     raw_sections = re.split(r"\n(?=#{1,3} )", file_markdown)
     if len(raw_sections) <= 1:
-        # fallback: split by paragraph blocks
         raw_sections = [s.strip() for s in file_markdown.split("\n\n") if s.strip()]
 
     chars_in = len(file_markdown)
 
-    # If the file is small enough, keep it all
+    # If the file is small enough, keep it all (passthrough)
     MAX_CHARS = 12_000
     if chars_in <= MAX_CHARS:
         latency_ms = round((time.monotonic() - t0) * 1000, 2)
@@ -246,41 +524,36 @@ async def extract_file_sections_node(state: RAGGraphState) -> dict:
             "[EXTRACT] chars_in=%d sections=%d chars_out=%d latency_ms=%.1f (passthrough)",
             chars_in, len(raw_sections), chars_in, latency_ms,
         )
-        step = {"node": "extract_file_sections", "latency_ms": latency_ms,
-                "status": "passthrough", "sections": len(raw_sections)}
+        step = {
+            "node": "extract_file_sections", "latency_ms": latency_ms,
+            "status": "passthrough", "sections": len(raw_sections),
+        }
         return {"agent_steps": (state.get("agent_steps") or []) + [step]}
 
-    # Use LLM to pick the top sections most relevant to the query
-    llm = _get_llm(model_name, 0.0)
-
-    # Build a numbered list of section previews (first 200 chars each)
+    # Use LLM to pick the top sections most relevant to the combined query
     previews = "\n".join(
         f"[{i}] {s[:200].strip()}" for i, s in enumerate(raw_sections)
     )
-    system_prompt = (
-        "You are a document section selector. "
-        "Given a query and a numbered list of document sections, "
-        "return a JSON object: {\"indices\": [<list of section indices>]} "
-        "selecting the 3-6 most relevant sections. "
-        "Return ONLY the JSON object."
-    )
-    user_msg = f"Query: {query}\n\nSections:\n{previews}"
     messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_msg},
+        {"role": "system", "content": (
+            "You are a document section selector. "
+            "Given a query and a numbered list of document sections, "
+            "return a JSON object: {\"indices\": [<list of 3-6 most relevant section indices>]}. "
+            "Return ONLY the JSON object."
+        )},
+        {"role": "user", "content": f"Query: {query}\n\nSections:\n{previews}"},
     ]
 
-    selected_sections = raw_sections  # fallback
+    selected_sections = raw_sections  # fallback: keep all
     try:
-        response = await llm.ainvoke(
-            messages,
-            response_format={"type": "json_object"},
-        )
-        parsed = json.loads(response.content)
-        indices: List[int] = [int(i) for i in (parsed.get("indices") or [])]
-        if indices:
-            selected_sections = [raw_sections[i] for i in indices if 0 <= i < len(raw_sections)]
-    except Exception as exc:  # noqa: BLE001
+        raw = await _invoke_structured(llm, messages, _SectionOutput)
+        m = re.search(r'\{.*?\}', raw, re.DOTALL)
+        if m:
+            parsed = json.loads(m.group(0))
+            indices: List[int] = [int(i) for i in (parsed.get("indices") or [])]
+            if indices:
+                selected_sections = [raw_sections[i] for i in indices if 0 <= i < len(raw_sections)]
+    except Exception as exc:
         logger.warning("[EXTRACT] section selection failed: %s — keeping all sections", exc)
 
     trimmed = "\n\n".join(selected_sections)
@@ -290,8 +563,10 @@ async def extract_file_sections_node(state: RAGGraphState) -> dict:
         chars_in, len(raw_sections), len(selected_sections), len(trimmed), latency_ms,
     )
 
-    step = {"node": "extract_file_sections", "latency_ms": latency_ms, "status": "done",
-            "sections_total": len(raw_sections), "sections_kept": len(selected_sections)}
+    step = {
+        "node": "extract_file_sections", "latency_ms": latency_ms, "status": "done",
+        "sections_total": len(raw_sections), "sections_kept": len(selected_sections),
+    }
     return {
         "file_markdown": trimmed,
         "agent_steps": (state.get("agent_steps") or []) + [step],
@@ -299,340 +574,531 @@ async def extract_file_sections_node(state: RAGGraphState) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Node: kb_retrieval_node
+# Node: draft_answer_node  ← NEW
 # ---------------------------------------------------------------------------
 
-async def kb_retrieval_node(state: RAGGraphState) -> dict:
-    """
-    Retrieves documents from the knowledge base using the existing
-    multi-strategy retrieval utilities.
+_DRAFT_SYSTEM = """\
+You are a research assistant. Using ONLY the provided context chunks, write a structured
+draft answer with one section per sub-question.
 
-    Logs: [RETRIEVE] kb_ids=... docs_found=... latency_ms=...
-    Updates: retrieved_docs, agent_steps
-    """
-    t0 = time.monotonic()
-    sources: List[str] = state.get("sources") or ["kb"]
+Label each section: ### Sub-question N: <text>
 
-    if "kb" not in sources:
-        latency_ms = round((time.monotonic() - t0) * 1000, 2)
-        step = {"node": "kb_retrieval", "latency_ms": latency_ms, "status": "skipped"}
-        return {
-            "retrieved_docs": state.get("retrieved_docs") or [],
-            "agent_steps": (state.get("agent_steps") or []) + [step],
-        }
+If the context contains no information for a sub-question, write:
+### Sub-question N: <text>
+[NO INFORMATION FOUND]
 
-    query = state.get("rewritten_query") or state["query"]
-    kb_ids: List[int] = state.get("knowledge_base_ids") or []
-    db = state.get("_db")  # injected by run_stream
-
-    use_dense: bool = state.get("use_dense", True)
-    use_sparse: bool = state.get("use_sparse", True)
-    use_exact: bool = state.get("use_exact", True)
-    use_graph_rag: bool = state.get("use_graph_rag", False)
-
-    docs: list = []
-    try:
-        from app.services.retrieval import retrieve_documents  # noqa: PLC0415
-        docs = await retrieve_documents(
-            query=query,
-            knowledge_base_ids=kb_ids,
-            db=db,
-            use_dense=use_dense,
-            use_sparse=use_sparse,
-            use_exact=use_exact,
-            use_graph_rag=use_graph_rag,
-        )
-    except ImportError:
-        # retrieval module may not exist yet in test environments
-        logger.warning("[RETRIEVE] retrieval module not available — returning empty docs")
-    except Exception as exc:  # noqa: BLE001
-        logger.error("[RETRIEVE] error: %s", exc)
-
-    latency_ms = round((time.monotonic() - t0) * 1000, 2)
-    logger.info(
-        "[RETRIEVE] kb_ids=%s docs_found=%d latency_ms=%.1f",
-        kb_ids, len(docs), latency_ms,
-    )
-
-    step = {"node": "kb_retrieval", "latency_ms": latency_ms,
-            "status": "done", "docs_found": len(docs)}
-    prior = state.get("retrieved_docs") or []
-    return {
-        "retrieved_docs": prior + docs,
-        "agent_steps": (state.get("agent_steps") or []) + [step],
-    }
-
-
-# ---------------------------------------------------------------------------
-# Node: grade_documents_node
-# ---------------------------------------------------------------------------
-
-_GRADE_SYSTEM_PROMPT = """\
-You are a relevance grader. Given a query and a document excerpt, decide whether
-the document is relevant to the query.
-
-Respond with a JSON object:
-{"relevant": true}  or  {"relevant": false}
-
-Be strict: only mark relevant if the document directly helps answer the query.
+Use inline citations [N](N) when you reference context chunk [KB-N].
+Keep each section concise (2-4 sentences). This draft is for internal quality grading only.
 """
 
 
-async def grade_documents_node(state: RAGGraphState) -> dict:
-    """
-    Grades each retrieved document for relevance, keeping only relevant ones.
-    Triggers a rewrite-retry signal when too few docs pass.
-
-    Logs: [GRADE] relevant=N irrelevant=M retry=bool latency_ms=...
-    Updates: graded_docs, agent_steps
-    """
+async def draft_answer_node(state: RAGGraphState) -> dict:
     t0 = time.monotonic()
+    sub_queries: List[str] = state.get("sub_queries") or [state.get("rewritten_query") or state["query"]]
     docs: list = state.get("retrieved_docs") or []
-    query = state.get("rewritten_query") or state["query"]
+    file_markdown: Optional[str] = state.get("file_markdown")
     model_name = state.get("model_name")
+    llm = _get_llm(model_name, 0.0)
 
-    if not docs:
-        latency_ms = round((time.monotonic() - t0) * 1000, 2)
-        step = {"node": "grade_documents", "latency_ms": latency_ms,
-                "status": "skipped", "relevant": 0, "irrelevant": 0, "retry": False}
+    context = _build_context_string(docs[:20], file_markdown)
+    sub_q_block = "\n".join(f"{i+1}. {sq}" for i, sq in enumerate(sub_queries))
+
+    messages = [
+        {"role": "system", "content": _DRAFT_SYSTEM},
+        {"role": "user", "content": (
+            f"Sub-questions to answer:\n{sub_q_block}\n\n"
+            f"Context:\n{context or '[No context available]'}"
+        )},
+    ]
+
+    draft = ""
+    try:
+        response = await llm.ainvoke(messages)
+        draft = response.content if hasattr(response, "content") else str(response)
+    except Exception as exc:
+        logger.error("[DRAFT] generation failed: %s", exc)
+        draft = "[DRAFT FAILED]"
+
+    latency_ms = round((time.monotonic() - t0) * 1000, 1)
+    logger.info("[DRAFT] latency_ms=%.1f chars=%d", latency_ms, len(draft))
+
+    step = {
+        "node": "draft_answer", "status": "done", "latency_ms": latency_ms,
+        "draft_chars": len(draft),
+    }
+    return {
+        "draft_answer": draft,
+        "agent_steps": (state.get("agent_steps") or []) + [step],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Node: grade_coverage_node  ← replaces grade_documents_node
+# ---------------------------------------------------------------------------
+
+_GRADE_COVERAGE_SYSTEM = """\
+You are a coverage grader. Given a draft answer and the original sub-questions,
+determine whether each sub-question is answered.
+
+For each sub-question, assign one of:
+  "covered"           — clearly and fully answered with supporting detail
+  "partially_covered" — addressed but lacking depth or specifics
+  "not_covered"       — no useful answer found or explicitly stated as not found
+
+Respond with JSON only:
+{"coverage": [{"sub_query": "...", "status": "covered|partially_covered|not_covered"}, ...]}
+"""
+
+
+async def grade_coverage_node(state: RAGGraphState) -> dict:
+    t0 = time.monotonic()
+    sub_queries: List[str] = state.get("sub_queries") or [state.get("rewritten_query") or state["query"]]
+    draft: str = state.get("draft_answer") or ""
+    model_name = state.get("model_name")
+    llm = _get_llm(model_name or settings.QUERY_MODEL, 0.0)
+    attempt = state.get("retrieval_attempt", 0)
+
+    if not draft or draft == "[DRAFT FAILED]":
+        coverage_result = {sq: "not_covered" for sq in sub_queries}
+        uncovered = list(sub_queries)
+        latency_ms = round((time.monotonic() - t0) * 1000, 1)
+        step = {
+            "node": "grade_coverage", "status": "done", "latency_ms": latency_ms,
+            "coverage": coverage_result, "coverage_lines": [f"✗ {sq}" for sq in uncovered],
+            "uncovered_count": len(uncovered), "attempt": attempt,
+        }
         return {
-            "graded_docs": [],
+            "coverage_result": coverage_result,
+            "uncovered_sub_queries": uncovered,
             "agent_steps": (state.get("agent_steps") or []) + [step],
         }
 
-    llm = _get_llm(model_name, 0.0)
+    sub_q_block = "\n".join(f"{i+1}. {sq}" for i, sq in enumerate(sub_queries))
+    messages = [
+        {"role": "system", "content": _GRADE_COVERAGE_SYSTEM},
+        {"role": "user", "content": (
+            f"Sub-questions:\n{sub_q_block}\n\n"
+            f"Draft answer:\n{draft[:3000]}"
+        )},
+    ]
 
-    graded: list = []
-    irrelevant_count = 0
+    coverage_result: dict = {}
+    uncovered: List[str] = []
+    try:
+        raw = await _invoke_structured(llm, messages, _CoverageOutput)
+        m = re.search(r'\{.*\}', raw, re.DOTALL)
+        if m:
+            parsed = json.loads(m.group(0))
+            for item in (parsed.get("coverage") or []):
+                sq = item.get("sub_query", "")
+                status = item.get("status", "not_covered")
+                coverage_result[sq] = status
+                if status == "not_covered":
+                    uncovered.append(sq)
+    except Exception as exc:
+        logger.warning("[GRADE_COVERAGE] parse failed: %s — marking all covered", exc)
+        coverage_result = {sq: "covered" for sq in sub_queries}
+        uncovered = []
 
-    for doc in docs:
-        # Extract text from various doc shapes (dict with "content", LangChain Document, or str)
-        if isinstance(doc, dict):
-            content = doc.get("content") or doc.get("page_content") or str(doc)
-        elif hasattr(doc, "page_content"):
-            content = doc.page_content
-        else:
-            content = str(doc)
+    # Fill any sub-query the LLM didn't return
+    for sq in sub_queries:
+        if sq not in coverage_result:
+            coverage_result[sq] = "not_covered"
+            if sq not in uncovered:
+                uncovered.append(sq)
 
-        excerpt = content[:500]  # grade on first 500 chars for cost efficiency
-        messages = [
-            {"role": "system", "content": _GRADE_SYSTEM_PROMPT},
-            {"role": "user", "content": f"Query: {query}\n\nDocument:\n{excerpt}"},
-        ]
-        try:
-            response = await llm.ainvoke(
-                messages,
-                response_format={"type": "json_object"},
-            )
-            parsed = json.loads(response.content)
-            is_relevant: bool = bool(parsed.get("relevant", True))
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[GRADE] parse error for doc: %s — marking relevant by default", exc)
-            is_relevant = True
+    coverage_lines = []
+    for sq, status in coverage_result.items():
+        icon = "✓" if status == "covered" else ("~" if status == "partially_covered" else "✗")
+        coverage_lines.append(f"{icon} {sq}")
 
-        if is_relevant:
-            graded.append(doc)
-        else:
-            irrelevant_count += 1
-
-    # Retry signal: fewer than 2 relevant docs and at least one irrelevant doc was filtered
-    retry = len(graded) < 2 and irrelevant_count > 0
-
-    latency_ms = round((time.monotonic() - t0) * 1000, 2)
+    latency_ms = round((time.monotonic() - t0) * 1000, 1)
     logger.info(
-        "[GRADE] relevant=%d irrelevant=%d retry=%s latency_ms=%.1f",
-        len(graded), irrelevant_count, retry, latency_ms,
+        "[GRADE_COVERAGE] attempt=%d covered=%d not_covered=%d latency_ms=%.1f",
+        attempt,
+        sum(1 for s in coverage_result.values() if s == "covered"),
+        len(uncovered), latency_ms,
     )
 
-    step = {"node": "grade_documents", "latency_ms": latency_ms, "status": "done",
-            "relevant": len(graded), "irrelevant": irrelevant_count, "retry": retry}
+    step = {
+        "node": "grade_coverage", "status": "done", "latency_ms": latency_ms,
+        "coverage": coverage_result, "coverage_lines": coverage_lines,
+        "uncovered_count": len(uncovered), "attempt": attempt,
+    }
     return {
-        "graded_docs": graded,
+        "coverage_result": coverage_result,
+        "uncovered_sub_queries": uncovered,
         "agent_steps": (state.get("agent_steps") or []) + [step],
     }
 
 
 # ---------------------------------------------------------------------------
-# Node: merge_context_node
+# Conditional router: post grade_coverage
 # ---------------------------------------------------------------------------
 
-async def merge_context_node(state: RAGGraphState) -> dict:
-    """
-    Merges graded KB docs and file sections into a single ranked context string.
+def _route_after_grade(state: RAGGraphState) -> str:
+    uncovered: List[str] = state.get("uncovered_sub_queries") or []
+    attempt: int = state.get("retrieval_attempt", 0)
 
-    Logs: [MERGE] kb_docs=N file_chars=M merged_chars=K latency_ms=...
-    Updates: merged_context, agent_steps
-    """
+    if not uncovered:
+        return "generate_answer"
+    if attempt == 0:
+        return "widened_retrieval"
+    if attempt == 1:
+        return "keyword_search_loop"
+    return "generate_answer"
+
+
+# ---------------------------------------------------------------------------
+# Node: widened_retrieval_node  ← NEW (Retry 1)
+# ---------------------------------------------------------------------------
+
+async def widened_retrieval_node(state: RAGGraphState) -> dict:
     t0 = time.monotonic()
-    graded_docs: list = state.get("graded_docs") or []
-    file_markdown: Optional[str] = state.get("file_markdown")
+    uncovered: List[str] = state.get("uncovered_sub_queries") or []
+    kb_ids: List[int] = state.get("knowledge_base_ids") or []
+    db = state.get("_db")
+    use_graph_rag = state.get("use_graph_rag", False)
 
-    parts: List[str] = []
+    if not uncovered or not kb_ids:
+        latency_ms = round((time.monotonic() - t0) * 1000, 1)
+        step = {"node": "widened_retrieval", "status": "skipped", "latency_ms": latency_ms}
+        return {
+            "retrieval_attempt": 1,
+            "agent_steps": (state.get("agent_steps") or []) + [step],
+        }
 
-    # 1. KB documents (numbered for traceability)
-    if graded_docs:
-        kb_parts = []
-        for i, doc in enumerate(graded_docs, 1):
-            if isinstance(doc, dict):
-                content = doc.get("content") or doc.get("page_content") or str(doc)
-                source = doc.get("source", "")
-            elif hasattr(doc, "page_content"):
-                content = doc.page_content
-                source = getattr(doc, "metadata", {}).get("source", "")
-            else:
-                content = str(doc)
-                source = ""
-            header = f"[KB-{i}]" + (f" ({source})" if source else "")
-            kb_parts.append(f"{header}\n{content.strip()}")
-        parts.append("\n\n".join(kb_parts))
+    logger.info("[WIDENED] re-retrieving for %d uncovered sub-queries (attempt 1)", len(uncovered))
 
-    # 2. File sections (placed after KB docs so KB has higher retrieval priority)
-    if file_markdown and file_markdown.strip():
-        parts.append(f"[FILE CONTENT]\n{file_markdown.strip()}")
+    from app.services.retrieval import hybrid_search_with_legs
 
-    merged = "\n\n---\n\n".join(parts) if parts else ""
+    async def _widened_one(sq: str) -> List[dict]:
+        try:
+            # All legs, no query_type preset (uses global top_k but pool is 4× so wider)
+            result = await hybrid_search_with_legs(
+                query=sq, kb_ids=kb_ids, db=db,
+                use_dense=True, use_sparse=True, use_exact=True,
+                use_graph_rag=use_graph_rag,
+            )
+            docs = [_serialise_doc(d) for d in result.get("docs", [])]
+            # Apply reranker with very relaxed threshold (-5.0 vs default -2.0)
+            # so weaker-matching chunks pass through
+            if settings.RERANKER_ENABLED and docs:
+                try:
+                    from app.services.reranker import rerank as _rerank
+                    lc_docs = [
+                        type("_D", (), {
+                            "page_content": d["page_content"],
+                            "metadata": d.get("metadata", {}),
+                        })()
+                        for d in docs
+                    ]
+                    reranked = _rerank(query=sq, docs=lc_docs, score_threshold=-5.0)
+                    docs = [_serialise_doc(d) for d in reranked]
+                except Exception:
+                    pass  # keep RRF order
+            return docs
+        except Exception as exc:
+            logger.error("[WIDENED] error for %r: %s", sq[:60], exc)
+            return []
 
-    latency_ms = round((time.monotonic() - t0) * 1000, 2)
-    logger.info(
-        "[MERGE] kb_docs=%d file_chars=%d merged_chars=%d latency_ms=%.1f",
-        len(graded_docs),
-        len(file_markdown) if file_markdown else 0,
-        len(merged),
-        latency_ms,
-    )
+    results = await asyncio.gather(*[_widened_one(sq) for sq in uncovered])
+    new_docs = _dedup_and_reinforce(list(results))
+    prior_docs: list = state.get("retrieved_docs") or []
+    all_merged = _dedup_and_reinforce([prior_docs, new_docs])
 
-    step = {"node": "merge_context", "latency_ms": latency_ms, "status": "done",
-            "kb_docs": len(graded_docs), "merged_chars": len(merged)}
+    latency_ms = round((time.monotonic() - t0) * 1000, 1)
+    logger.info("[WIDENED] new_docs=%d merged_total=%d latency_ms=%.1f",
+                len(new_docs), len(all_merged), latency_ms)
+
+    step = {
+        "node": "widened_retrieval", "status": "done", "latency_ms": latency_ms,
+        "uncovered_sub_queries": uncovered,
+        "new_docs_found": len(new_docs),
+        "total_docs": len(all_merged),
+        "threshold_relaxed_to": -5.0,
+    }
     return {
-        "merged_context": merged,
+        "retrieved_docs": all_merged,
+        "retrieval_attempt": 1,
         "agent_steps": (state.get("agent_steps") or []) + [step],
     }
 
 
 # ---------------------------------------------------------------------------
-# Node: generate_answer_node
+# Node: keyword_search_loop_node  ← NEW (Retry 2)
 # ---------------------------------------------------------------------------
 
-_ANSWER_SYSTEM_PROMPT = """\
-You are a helpful assistant. Answer the user's question using ONLY the provided
-context. If the context is insufficient, say so clearly.
-Keep your answer concise, accurate, and well-structured.
+_KEYWORD_EXTRACT_SYSTEM = """\
+Extract search keywords from a question for a MySQL full-text keyword search.
+
+Return two sets:
+- broad_keywords:  3-4 general terms likely to appear in relevant documents
+- narrow_keywords: 1-2 specific compound phrases that precisely identify the topic
+
+Respond with JSON only:
+{"broad_keywords": ["term1", "term2"], "narrow_keywords": ["compound phrase"]}
+"""
+
+
+async def keyword_search_loop_node(state: RAGGraphState) -> dict:
+    t0 = time.monotonic()
+    uncovered: List[str] = state.get("uncovered_sub_queries") or []
+    kb_ids: List[int] = state.get("knowledge_base_ids") or []
+    db = state.get("_db")
+    model_name = state.get("model_name")
+
+    if not uncovered or not kb_ids or not db:
+        latency_ms = round((time.monotonic() - t0) * 1000, 1)
+        step = {"node": "keyword_search_loop", "status": "skipped", "latency_ms": latency_ms}
+        return {
+            "retrieval_attempt": 2,
+            "agent_steps": (state.get("agent_steps") or []) + [step],
+        }
+
+    from app.services.retrieval import _exact_search  # type: ignore[attr-defined]
+    llm = _get_llm(model_name or settings.QUERY_MODEL, 0.0)
+
+    all_new_docs: List[dict] = []
+    keyword_iterations: list = list(state.get("keyword_iterations") or [])
+
+    # Cap: 3 uncovered sub-queries max, 2 iterations each = 6 keyword searches ceiling
+    for sq in uncovered[:3]:
+        messages = [
+            {"role": "system", "content": _KEYWORD_EXTRACT_SYSTEM},
+            {"role": "user", "content": f"Question: {sq}"},
+        ]
+        broad_kw: List[str] = []
+        narrow_kw: List[str] = []
+        try:
+            raw = await _invoke_structured(llm, messages, _KeywordsOutput)
+            m = re.search(r'\{.*\}', raw, re.DOTALL)
+            if m:
+                parsed = json.loads(m.group(0))
+                broad_kw = [str(k) for k in (parsed.get("broad_keywords") or [])]
+                narrow_kw = [str(k) for k in (parsed.get("narrow_keywords") or [])]
+        except Exception as exc:
+            logger.warning("[KEYWORD] keyword extraction failed for %r: %s", sq[:60], exc)
+            broad_kw = sq.split()[:4]
+
+        # Iteration 1: broad keyword search
+        broad_query = " ".join(broad_kw)
+        broad_candidates: dict = {}
+        if broad_query.strip():
+            try:
+                broad_candidates = _exact_search(broad_query, kb_ids, db, 20)
+            except Exception as exc:
+                logger.warning("[KEYWORD] broad search failed: %s", exc)
+
+        broad_docs = [_serialise_doc(c.doc) for c in broad_candidates.values()]
+        keyword_iterations.append({
+            "sub_query": sq, "iteration": "broad",
+            "keywords": broad_kw, "results_found": len(broad_docs),
+        })
+
+        if not broad_docs and narrow_kw:
+            # Iteration 2: narrow keyword search
+            narrow_query = " ".join(narrow_kw)
+            narrow_candidates: dict = {}
+            try:
+                narrow_candidates = _exact_search(narrow_query, kb_ids, db, 15)
+            except Exception as exc:
+                logger.warning("[KEYWORD] narrow search failed: %s", exc)
+
+            narrow_docs = [_serialise_doc(c.doc) for c in narrow_candidates.values()]
+            keyword_iterations.append({
+                "sub_query": sq, "iteration": "narrow",
+                "keywords": narrow_kw, "results_found": len(narrow_docs),
+            })
+            all_new_docs.extend(narrow_docs)
+        else:
+            all_new_docs.extend(broad_docs)
+
+    prior_docs: list = state.get("retrieved_docs") or []
+    all_merged = _dedup_and_reinforce([prior_docs, all_new_docs]) if all_new_docs else prior_docs
+
+    latency_ms = round((time.monotonic() - t0) * 1000, 1)
+    logger.info("[KEYWORD] iterations=%d new_docs=%d total=%d latency_ms=%.1f",
+                len(keyword_iterations), len(all_new_docs), len(all_merged), latency_ms)
+
+    step = {
+        "node": "keyword_search_loop", "status": "done", "latency_ms": latency_ms,
+        "keyword_iterations": keyword_iterations,
+        "new_docs_found": len(all_new_docs),
+        "total_docs": len(all_merged),
+    }
+    return {
+        "retrieved_docs": all_merged,
+        "keyword_iterations": keyword_iterations,
+        "retrieval_attempt": 2,
+        "agent_steps": (state.get("agent_steps") or []) + [step],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Node: generate_answer_node  (final, enhanced)
+# ---------------------------------------------------------------------------
+
+_FINAL_ANSWER_SYSTEM = """\
+You are a helpful assistant. Answer the user's question using ONLY the provided context.
+Structure your answer clearly. When you use information from a context chunk, cite it
+as a markdown link: [N](N) where N is the chunk number from [KB-N].
+Only cite chunks you actually used.
+
+If some parts of the question could not be answered from available context, clearly state:
+"I could not find sufficient information about: [specific topic]"
+
+If no relevant context was found at all, clearly state that.
 """
 
 
 async def generate_answer_node(state: RAGGraphState) -> dict:
-    """
-    Generates the final answer from merged context using the LLM.
-
-    Logs: [ANSWER] prompt_tokens=... completion_tokens=... latency_ms=...
-    Updates: answer, agent_steps
-    """
     t0 = time.monotonic()
-    query = state.get("rewritten_query") or state["query"]
-    merged_context: str = state.get("merged_context") or ""
+    docs: list = state.get("retrieved_docs") or []
+    file_markdown: Optional[str] = state.get("file_markdown")
+    sub_queries: List[str] = state.get("sub_queries") or [state.get("rewritten_query") or state["query"]]
+    uncovered: List[str] = state.get("uncovered_sub_queries") or []
+    coverage_result: dict = state.get("coverage_result") or {}
     model_name = state.get("model_name")
-    temperature = state.get("temperature", 0.0)
-    history = state.get("recent_lc_history") or []
-    existing_summary = state.get("existing_summary")
+    temperature: float = state.get("temperature", 0.0)
+    existing_summary: Optional[str] = state.get("existing_summary")
+    recent_history = state.get("recent_lc_history") or []
+    query = state.get("rewritten_query") or state["query"]
+    attempt = state.get("retrieval_attempt", 0)
 
     llm = _get_llm(model_name, temperature)
+    context = _build_context_string(docs[:20], file_markdown)
 
-    messages: list = [{"role": "system", "content": _ANSWER_SYSTEM_PROMPT}]
+    # Build coverage note for partial / unable answers
+    coverage_note = ""
+    if uncovered and attempt >= 2:
+        coverage_note = (
+            "\n\nNote: Despite exhaustive search (widened retrieval + keyword search), "
+            "the following sub-questions could not be answered from available documents:\n"
+            + "\n".join(f"  - {sq}" for sq in uncovered)
+        )
 
+    messages: list = [{"role": "system", "content": _FINAL_ANSWER_SYSTEM + coverage_note}]
     if existing_summary:
-        messages.append({
-            "role": "system",
-            "content": f"[Earlier conversation summary]\n{existing_summary}",
-        })
+        messages.append({"role": "system", "content": f"[Earlier conversation summary]\n{existing_summary}"})
 
-    for msg in history[-6:]:  # last 3 turns
-        messages.append(msg)
+    from langchain_core.messages import HumanMessage, AIMessage
+    for msg in recent_history[-6:]:
+        if isinstance(msg, HumanMessage):
+            messages.append({"role": "user", "content": msg.content})
+        elif isinstance(msg, AIMessage):
+            messages.append({"role": "assistant", "content": msg.content})
 
-    if merged_context:
-        messages.append({
-            "role": "user",
-            "content": f"Context:\n{merged_context}\n\nQuestion: {query}",
-        })
-    else:
-        messages.append({"role": "user", "content": query})
+    messages.append({
+        "role": "user",
+        "content": (
+            f"Question: {query}\n\nContext:\n{context}"
+            if context else
+            f"Question: {query}\n\n[No relevant documents found in the knowledge base]"
+        ),
+    })
 
-    response = await llm.ainvoke(messages)
-    answer: str = response.content.strip()
+    # NOTE: streaming tokens are captured by run_stream via on_chat_model_stream events
+    # generate_answer_node stores the completed answer via ainvoke as a fallback
+    streamed_parts: list = []
+    usage: dict = {"promptTokens": 0, "completionTokens": 0}
+    try:
+        async for chunk in llm.astream(messages):
+            token = chunk.content or ""
+            if token:
+                streamed_parts.append(token)
+        if hasattr(llm, "_last_usage"):
+            usage = llm._last_usage  # type: ignore[attr-defined]
+    except Exception as exc:
+        logger.error("[GENERATE] failed: %s", exc)
+        streamed_parts = ["I encountered an error generating the response. Please try again."]
 
-    # Extract token usage if available
-    usage = {}
-    if hasattr(response, "usage_metadata") and response.usage_metadata:
-        usage = {
-            "promptTokens": response.usage_metadata.get("input_tokens", 0),
-            "completionTokens": response.usage_metadata.get("output_tokens", 0),
-        }
-    elif hasattr(response, "response_metadata"):
-        meta = response.response_metadata or {}
-        token_usage = meta.get("token_usage") or meta.get("usage", {})
-        usage = {
-            "promptTokens": token_usage.get("prompt_tokens", 0),
-            "completionTokens": token_usage.get("completion_tokens", 0),
-        }
-
-    latency_ms = round((time.monotonic() - t0) * 1000, 2)
-    logger.info(
-        "[ANSWER] prompt_tokens=%d completion_tokens=%d latency_ms=%.1f",
-        usage.get("promptTokens", 0),
-        usage.get("completionTokens", 0),
-        latency_ms,
+    answer = re.sub(
+        r'\[(\d+)\](?!\()',
+        lambda m: f'[{m.group(1)}]({m.group(1)})',
+        "".join(streamed_parts),
     )
 
-    step = {"node": "generate_answer", "latency_ms": latency_ms, "status": "done",
-            "usage": usage}
+    latency_ms = round((time.monotonic() - t0) * 1000, 1)
+    logger.info("[GENERATE] latency_ms=%.1f chars=%d model=%s partial=%s",
+                latency_ms, len(answer), model_name, bool(uncovered and attempt >= 2))
+
+    step = {
+        "node": "generate_answer", "status": "done", "latency_ms": latency_ms,
+        "usage": usage,
+        "partial": bool(uncovered and attempt >= 2),
+    }
     return {
         "answer": answer,
+        "_usage": usage,
         "agent_steps": (state.get("agent_steps") or []) + [step],
-        "_usage": usage,  # carry forward for run_stream EVENT_DONE
     }
 
 
 # ---------------------------------------------------------------------------
-# StateGraph assembly
+# Graph assembly
 # ---------------------------------------------------------------------------
 
+_KNOWN_NODES = {
+    "rewrite_query", "context_router", "decompose_query",
+    "parallel_retrieval", "extract_file_sections",
+    "draft_answer", "grade_coverage",
+    "widened_retrieval", "keyword_search_loop", "generate_answer",
+}
+
+
 def _build_rag_graph():
-    """Builds and compiles the LangGraph StateGraph for RAG."""
-    from langgraph.graph import StateGraph, END  # noqa: PLC0415
+    from langgraph.graph import StateGraph, END
 
     builder = StateGraph(RAGGraphState)
 
-    # Register nodes
     builder.add_node("rewrite_query",         rewrite_query_node)
     builder.add_node("context_router",        context_router_node)
-    builder.add_node("kb_retrieval",          kb_retrieval_node)
+    builder.add_node("decompose_query",       decompose_query_node)
+    builder.add_node("parallel_retrieval",    parallel_retrieval_node)
     builder.add_node("extract_file_sections", extract_file_sections_node)
-    builder.add_node("grade_documents",       grade_documents_node)
-    builder.add_node("merge_context",         merge_context_node)
+    builder.add_node("draft_answer",          draft_answer_node)
+    builder.add_node("grade_coverage",        grade_coverage_node)
+    builder.add_node("widened_retrieval",     widened_retrieval_node)
+    builder.add_node("keyword_search_loop",   keyword_search_loop_node)
     builder.add_node("generate_answer",       generate_answer_node)
 
-    # Entry point
+    # Entry
     builder.set_entry_point("rewrite_query")
 
-    # Linear edges
+    # Linear spine
     builder.add_edge("rewrite_query",         "context_router")
-    builder.add_edge("context_router",        "extract_file_sections")
-    builder.add_edge("extract_file_sections", "kb_retrieval")
-    builder.add_edge("kb_retrieval",          "grade_documents")
-    builder.add_edge("grade_documents",       "merge_context")
-    builder.add_edge("merge_context",         "generate_answer")
-    builder.add_edge("generate_answer",       END)
+    builder.add_edge("context_router",        "decompose_query")
+    builder.add_edge("decompose_query",       "parallel_retrieval")
+    builder.add_edge("parallel_retrieval",    "extract_file_sections")
+    builder.add_edge("extract_file_sections", "draft_answer")
+    builder.add_edge("draft_answer",          "grade_coverage")
+
+    # Conditional routing from grade_coverage
+    builder.add_conditional_edges(
+        "grade_coverage",
+        _route_after_grade,
+        {
+            "generate_answer":     "generate_answer",
+            "widened_retrieval":   "widened_retrieval",
+            "keyword_search_loop": "keyword_search_loop",
+        },
+    )
+
+    # Retry loops: each escalation feeds back into draft → grade
+    builder.add_edge("widened_retrieval",   "draft_answer")
+    builder.add_edge("keyword_search_loop", "draft_answer")
+
+    builder.add_edge("generate_answer", END)
 
     return builder.compile()
 
 
-# Module-level compiled graph (lazy so import is fast in tests)
 _rag_graph = _build_rag_graph()
 
 
 # ---------------------------------------------------------------------------
-# run_stream() — async generator interface contract
-#
-# Interface is stable from T01 onward.  Full graph wiring arrives in T04.
+# run_stream() — public async generator interface
 # ---------------------------------------------------------------------------
 
 async def run_stream(
@@ -652,34 +1118,34 @@ async def run_stream(
     display_query: Optional[str] = None,
 ) -> AsyncGenerator[dict, None]:
     """
-    Async generator that runs the full RAG graph and streams events.
+    Async generator that runs the full agentic RAG graph and streams events.
 
     Yield shapes (keyed by "event"):
-      {"event": "agent_step",    "node": str, "latency_ms": float, "status": str}
-      {"event": "rewritten_query","query": str}
-      {"event": "context",       "docs": list, "confidence": str, "score": float,
-                                 "suggestion": str, "failed_legs": list,
-                                 "breakdown": dict, "query_classification": dict,
-                                 "tool_trace": list, "synthesis_mode": bool}
-      {"event": "token",         "content": str}
-      {"event": "done",          "full_response": str,
-                                 "usage": {"promptTokens": int, "completionTokens": int}}
-
-    Full multi-node graph: rewrite → route → extract_file_sections →
-    kb_retrieval → grade → merge → generate.
+      {"event": "agent_step",      "node": str, "status": "active"|"done",
+                                   "latency_ms": float|None, ...node-specific fields}
+      {"event": "rewritten_query", "query": str}
+      {"event": "context",         "docs": list, "confidence": str, "score": float, ...}
+      {"event": "token",           "content": str}
+      {"event": "answer_rewrite",  "content": str}   (if citations normalised post-stream)
+      {"event": "done",            "full_response": str, "usage": dict}
     """
     initial_state: RAGGraphState = {
         "query": query,
         "rewritten_query": "",
-        "route": "both",
+        "sub_queries": [],
         "sources": [],
         "file_ids_needed": [],
         "router_rationale": "",
         "file_markdown": file_markdown,
         "retrieved_docs": [],
-        "graded_docs": [],
+        "retrieval_attempt": 0,
+        "keyword_iterations": [],
+        "draft_answer": "",
+        "coverage_result": {},
+        "uncovered_sub_queries": [],
         "merged_context": "",
         "answer": "",
+        "_usage": {},
         "agent_steps": [],
         "knowledge_base_ids": knowledge_base_ids,
         "recent_lc_history": recent_lc_history,
@@ -694,63 +1160,107 @@ async def run_stream(
         "_db": db,  # type: ignore[typeddict-unknown-key]
     }
 
-    final_state: Optional[RAGGraphState] = None
-    emitted_nodes: set = set()
+    final_state: dict = dict(initial_state)
+    emitted_active_nodes: set = set()
+    emitted_done_nodes: set = set()
+    answer_streaming_started = False
+    streamed_answer_parts: list = []
 
-    async for chunk in _rag_graph.astream(initial_state):
-        # chunk is {node_name: partial_state_dict}
-        for node_name, partial in chunk.items():
-            if node_name == "__end__":
-                continue
+    async for event in _rag_graph.astream_events(initial_state, version="v2"):
+        ev_name = event.get("event", "")
+        ev_data = event.get("data", {})
+        metadata = event.get("metadata", {})
+        langgraph_node = metadata.get("langgraph_node", "")
 
-            # Emit agent_step events for any new nodes
-            new_steps: list = partial.get("agent_steps") or []
-            for step in new_steps:
-                step_node = step.get("node", node_name)
-                if step_node not in emitted_nodes:
-                    emitted_nodes.add(step_node)
+        # ── Emit "active" the moment a known node starts ──────────────────
+        if ev_name == "on_chain_start" and langgraph_node in _KNOWN_NODES:
+            if langgraph_node not in emitted_active_nodes:
+                emitted_active_nodes.add(langgraph_node)
+                yield {
+                    "event": EVENT_AGENT_STEP,
+                    "node": langgraph_node,
+                    "status": "active",
+                    "latency_ms": None,
+                }
+            continue
+
+        # ── Real-time token streaming from generate_answer ────────────────
+        if ev_name == "on_chat_model_stream" and langgraph_node == "generate_answer":
+            chunk = ev_data.get("chunk")
+            token = ""
+            if chunk is not None:
+                if hasattr(chunk, "content"):
+                    token = chunk.content or ""
+                elif isinstance(chunk, dict):
+                    token = chunk.get("content", "")
+            if token:
+                answer_streaming_started = True
+                streamed_answer_parts.append(token)
+                yield {"event": EVENT_TOKEN, "content": token}
+            continue
+
+        # ── Node completion: emit "done" step events ──────────────────────
+        if ev_name == "on_chain_end":
+            output = ev_data.get("output")
+            if isinstance(output, dict):
+                final_state.update(output)
+
+                new_steps: list = output.get("agent_steps") or []
+                for step in new_steps:
+                    step_node = step.get("node", "")
+                    if step_node and step_node not in emitted_done_nodes:
+                        emitted_done_nodes.add(step_node)
+                        yield {"event": EVENT_AGENT_STEP, **{k: v for k, v in step.items()}}
+
+                # Emit rewritten_query event once
+                if output.get("rewritten_query") and "rewrite_done" not in emitted_done_nodes:
+                    emitted_done_nodes.add("rewrite_done")
                     yield {
-                        "event": EVENT_AGENT_STEP,
-                        **{k: v for k, v in step.items()},
+                        "event": EVENT_REWRITTEN,
+                        "query": display_query or output["rewritten_query"],
                     }
 
-            # Emit rewritten_query as soon as rewrite node completes
-            if node_name == "rewrite_query" and partial.get("rewritten_query"):
-                yield {
-                    "event": EVENT_REWRITTEN,
-                    "query": display_query or partial["rewritten_query"],
-                }
+    # ── Post-graph: citation normalisation ───────────────────────────────
+    if answer_streaming_started and streamed_answer_parts:
+        raw_answer = "".join(streamed_answer_parts)
+        normalised = re.sub(
+            r'\[(\d+)\](?!\()',
+            lambda m: f'[{m.group(1)}]({m.group(1)})',
+            raw_answer,
+        )
+        if normalised != raw_answer:
+            yield {"event": "answer_rewrite", "content": normalised}
+        final_state["answer"] = normalised
 
-            # Merge into tracked final state
-            if final_state is None:
-                final_state = dict(initial_state)  # type: ignore[assignment]
-            final_state.update(partial)  # type: ignore[arg-type]
-
-    if final_state is None:
-        final_state = initial_state  # type: ignore[assignment]
-
-    # Build graded docs list for the context event
-    graded_docs: list = final_state.get("graded_docs") or []
-    merged_context: str = final_state.get("merged_context") or ""
-    confidence = "high" if len(graded_docs) >= 3 else ("medium" if graded_docs else "low")
-    score = min(1.0, len(graded_docs) / 5.0)
+    # ── Context event (summary of all retrieval) ─────────────────────────
+    docs = final_state.get("retrieved_docs") or []
+    answer = final_state.get("answer") or ""
+    coverage_result = final_state.get("coverage_result") or {}
+    covered_count = sum(1 for s in coverage_result.values() if s == "covered")
+    total_count = len(coverage_result) or 1
+    confidence_score = covered_count / total_count
 
     yield {
         "event": EVENT_CONTEXT,
-        "docs": graded_docs,
-        "confidence": confidence,
-        "score": round(score, 2),
-        "suggestion": "" if graded_docs else "No relevant documents found.",
+        "docs": docs,
+        "confidence": (
+            "high" if confidence_score >= 0.8
+            else ("medium" if confidence_score >= 0.4 else "low")
+        ),
+        "score": round(confidence_score, 2),
+        "suggestion": "" if docs else "No relevant documents found.",
         "failed_legs": [],
         "breakdown": {
-            "kb_docs": len(graded_docs),
+            "kb_docs": len(docs),
             "file_chars": len(final_state.get("file_markdown") or ""),
-            "merged_chars": len(merged_context),
+            "merged_chars": len(answer),
             "sources": final_state.get("sources") or [],
+            "sub_queries": final_state.get("sub_queries") or [],
+            "retrieval_attempts": final_state.get("retrieval_attempt", 0) + 1,
         },
         "query_classification": {
-            "type": "GRAPH",
-            "confidence": score,
+            "type": "AGENTIC",
+            "confidence": confidence_score,
             "latency_ms": 0,
             "fallback": False,
         },
@@ -758,14 +1268,9 @@ async def run_stream(
         "synthesis_mode": len((final_state.get("sources") or [])) > 1,
     }
 
-    # Stream the answer as a single token (answer was generated non-streaming for simplicity)
-    answer: str = final_state.get("answer") or ""
-    if answer:
+    # Fallback: if streaming didn't fire, emit answer as single token
+    if not answer_streaming_started and answer:
         yield {"event": EVENT_TOKEN, "content": answer}
 
-    usage: dict = final_state.get("_usage") or {"promptTokens": 0, "completionTokens": 0}
-    yield {
-        "event": EVENT_DONE,
-        "full_response": answer,
-        "usage": usage,
-    }
+    usage = final_state.get("_usage") or {"promptTokens": 0, "completionTokens": 0}
+    yield {"event": EVENT_DONE, "full_response": answer, "usage": usage}

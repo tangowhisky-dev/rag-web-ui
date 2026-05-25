@@ -116,7 +116,7 @@ export default function NewChatPage() {
 
   return (
     <ChatLayout>
-      <div className="max-w-2xl mx-auto space-y-4">
+      <div className="max-w-2xl mx-auto space-y-4 pt-16">
         <div>
           <h2 className="text-3xl font-bold tracking-tight">Start New Chat</h2>
         </div>
