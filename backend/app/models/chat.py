@@ -4,6 +4,19 @@ from sqlalchemy.orm import relationship
 from app.models.base import Base, TimestampMixin
 from datetime import datetime
 
+
+class Folder(Base, TimestampMixin):
+    """Chat folder — a named group owned by a single user."""
+    __tablename__ = "folders"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(255), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    # Relationships
+    chats = relationship("Chat", back_populates="folder")
+
+
 # Association table for many-to-many relationship between Chat and KnowledgeBase
 chat_knowledge_bases = Table(
     "chat_knowledge_bases",
@@ -24,11 +37,13 @@ class Chat(Base, TimestampMixin):
     use_sparse    = Column(Boolean, nullable=False, default=True,  server_default="1")
     use_exact     = Column(Boolean, nullable=False, default=True,  server_default="1")
     pinned        = Column(Boolean, nullable=False, default=False, server_default="0")
+    folder_id     = Column(Integer, ForeignKey("folders.id", ondelete="SET NULL"), nullable=True, index=True)
 
     # Relationships
     messages = relationship("Message", back_populates="chat", cascade="all, delete-orphan")
     chat_files = relationship("ChatFile", back_populates="chat", cascade="all, delete-orphan")
     user = relationship("User", back_populates="chats")
+    folder = relationship("Folder", back_populates="chats")
     knowledge_bases = relationship(
         "KnowledgeBase",
         secondary=chat_knowledge_bases,
