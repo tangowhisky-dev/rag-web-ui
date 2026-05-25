@@ -5,21 +5,57 @@ import { useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
 import {
   Plus, Pencil, Trash2, X, MessageSquare, Pin, Search,
-  Settings, Download, PanelLeftClose, PanelLeftOpen,
+  Settings, Download, PanelLeftClose, PanelLeftOpen, FolderPlus,
 } from "lucide-react";
+import { DndContext, DragEndEvent, useDraggable } from "@dnd-kit/core";
+import { CSS } from "@dnd-kit/utilities";
 import { useChatContext } from "@/contexts/chat-context";
+import FolderItem from "@/components/chat/folder-item";
 
 interface ChatSidebarProps {
   isOpen: boolean;
   onClose: () => void;
 }
 
+// Draggable chat item wrapper
+function DraggableChatItem({
+  chat,
+  children,
+}: {
+  chat: { id: number };
+  children: React.ReactNode;
+}) {
+  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
+    id: String(chat.id),
+  });
+  const style = {
+    transform: CSS.Translate.toString(transform),
+    opacity: isDragging ? 0.5 : 1,
+    cursor: isDragging ? "grabbing" : "grab",
+  };
+  return (
+    <div ref={setNodeRef} style={style} {...listeners} {...attributes}>
+      {children}
+    </div>
+  );
+}
+
 export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
   const router = useRouter();
   const pathname = usePathname();
-  const { chatList, activeChat, renameChat, deleteChat, patchChat } = useChatContext();
+  const {
+    chatList,
+    activeChat,
+    renameChat,
+    deleteChat,
+    patchChat,
+    folderList,
+    createFolder,
+    renameFolder,
+    deleteFolder,
+    assignChatToFolder,
+  } = useChatContext();
 
-  // Always start uncollapsed on SSR; sync from localStorage after mount to avoid hydration mismatch
   const [collapsed, setCollapsed] = useState(false);
   useEffect(() => {
     setCollapsed(localStorage.getItem("chat-sidebar-collapsed") === "true");
@@ -94,83 +130,110 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
     }
   };
 
+  const handleNewFolder = async () => {
+    const name = window.prompt("Folder name:");
+    if (!name?.trim()) return;
+    await createFolder(name.trim()).catch(() => {});
+  };
+
+  // DnD: drag a chat (id=String(chatId)) onto a folder (droppable id=`folder-{folderId}`)
+  const onDragEnd = async (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over) return;
+    const chatId = Number(active.id);
+    const overStr = String(over.id);
+    if (!overStr.startsWith("folder-")) return;
+    const folderId = Number(overStr.replace("folder-", ""));
+    if (!chatId || !folderId) return;
+    console.debug("[DnD] chat_id=%d → folder_id=%d", chatId, folderId);
+    await assignChatToFolder(chatId, folderId).catch(() => {});
+  };
+
+  // Filtered lists
   const filtered = chatList.filter((c) => {
     if (!searchQuery.trim()) return true;
     return c.title.toLowerCase().includes(searchQuery.toLowerCase());
   });
-  const pinned = filtered.filter((c) => c.pinned);
-  const unpinned = filtered.filter((c) => !c.pinned);
+
+  // Chats without a folder (or not matching a known folder)
+  const knownFolderIds = new Set(folderList.map((f) => f.id));
+  const freeChats = filtered.filter(
+    (c) => !c.folder_id || !knownFolderIds.has(c.folder_id)
+  );
+  const pinned = freeChats.filter((c) => c.pinned);
+  const unpinned = freeChats.filter((c) => !c.pinned);
 
   const renderChatItem = (chat: (typeof chatList)[0]) => {
     const isActive =
       activeChat === chat.id || pathname === `/dashboard/chat/${chat.id}`;
     return (
-      <div
-        key={chat.id}
-        data-testid={`chat-item-${chat.id}`}
-        className={[
-          "group flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm transition-colors cursor-pointer",
-          isActive
-            ? "bg-accent text-accent-foreground"
-            : "hover:bg-accent/60 text-foreground",
-        ].join(" ")}
-      >
-        {editingId === chat.id ? (
-          <input
-            ref={inputRef}
-            value={editingValue}
-            onChange={(e) => setEditingValue(e.target.value)}
-            onBlur={() => commitEdit(chat.id)}
-            onKeyDown={(e) => handleEditKeyDown(e, chat.id)}
-            className="flex-1 min-w-0 bg-transparent border-b border-primary outline-none text-sm px-0.5"
-          />
-        ) : (
-          <Link
-            href={`/dashboard/chat/${chat.id}`}
-            onClick={onClose}
-            className="flex items-center gap-2 flex-1 min-w-0"
-          >
-            <MessageSquare className="h-3.5 w-3.5 shrink-0 opacity-50" />
-            <span className="truncate">{chat.title}</span>
-          </Link>
-        )}
+      <DraggableChatItem key={chat.id} chat={chat}>
+        <div
+          data-testid={`chat-item-${chat.id}`}
+          className={[
+            "group flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm transition-colors",
+            isActive
+              ? "bg-accent text-accent-foreground"
+              : "hover:bg-accent/60 text-foreground",
+          ].join(" ")}
+        >
+          {editingId === chat.id ? (
+            <input
+              ref={inputRef}
+              value={editingValue}
+              onChange={(e) => setEditingValue(e.target.value)}
+              onBlur={() => commitEdit(chat.id)}
+              onKeyDown={(e) => handleEditKeyDown(e, chat.id)}
+              className="flex-1 min-w-0 bg-transparent border-b border-primary outline-none text-sm px-0.5"
+            />
+          ) : (
+            <Link
+              href={`/dashboard/chat/${chat.id}`}
+              onClick={onClose}
+              className="flex items-center gap-2 flex-1 min-w-0"
+            >
+              <MessageSquare className="h-3.5 w-3.5 shrink-0 opacity-50" />
+              <span className="truncate">{chat.title}</span>
+            </Link>
+          )}
 
-        {editingId !== chat.id && (
-          <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
-            <button
-              onClick={() => handleTogglePin(chat.id, chat.pinned)}
-              className={[
-                "p-1 rounded transition-colors",
-                chat.pinned ? "text-primary" : "hover:bg-muted-foreground/20",
-              ].join(" ")}
-              aria-label={chat.pinned ? "Unpin" : "Pin"}
-            >
-              <Pin className="h-3 w-3" />
-            </button>
-            <button
-              onClick={(e) => { e.preventDefault(); handleExport(chat.id); }}
-              className="p-1 rounded hover:bg-muted-foreground/20 transition-colors"
-              aria-label="Download chat"
-            >
-              <Download className="h-3 w-3" />
-            </button>
-            <button
-              onClick={() => startEdit(chat.id, chat.title)}
-              className="p-1 rounded hover:bg-muted-foreground/20 transition-colors"
-              aria-label="Rename"
-            >
-              <Pencil className="h-3 w-3" />
-            </button>
-            <button
-              onClick={() => handleDelete(chat.id)}
-              className="p-1 rounded hover:bg-destructive/20 hover:text-destructive transition-colors"
-              aria-label="Delete"
-            >
-              <Trash2 className="h-3 w-3" />
-            </button>
-          </div>
-        )}
-      </div>
+          {editingId !== chat.id && (
+            <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+              <button
+                onClick={() => handleTogglePin(chat.id, chat.pinned)}
+                className={[
+                  "p-1 rounded transition-colors",
+                  chat.pinned ? "text-primary" : "hover:bg-muted-foreground/20",
+                ].join(" ")}
+                aria-label={chat.pinned ? "Unpin" : "Pin"}
+              >
+                <Pin className="h-3 w-3" />
+              </button>
+              <button
+                onClick={(e) => { e.preventDefault(); handleExport(chat.id); }}
+                className="p-1 rounded hover:bg-muted-foreground/20 transition-colors"
+                aria-label="Download chat"
+              >
+                <Download className="h-3 w-3" />
+              </button>
+              <button
+                onClick={() => startEdit(chat.id, chat.title)}
+                className="p-1 rounded hover:bg-muted-foreground/20 transition-colors"
+                aria-label="Rename"
+              >
+                <Pencil className="h-3 w-3" />
+              </button>
+              <button
+                onClick={() => handleDelete(chat.id)}
+                className="p-1 rounded hover:bg-destructive/20 hover:text-destructive transition-colors"
+                aria-label="Delete"
+              >
+                <Trash2 className="h-3 w-3" />
+              </button>
+            </div>
+          )}
+        </div>
+      </DraggableChatItem>
     );
   };
 
@@ -189,16 +252,13 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
           "fixed inset-y-0 left-0 z-30 bg-card border-r flex flex-col",
           "transition-all duration-200 ease-in-out",
           "lg:relative lg:inset-auto lg:translate-x-0 lg:z-auto lg:h-full",
-          // Width: collapsed = icon rail, expanded = full
           collapsed ? "w-12" : "w-64",
-          // Mobile show/hide
           isOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0",
         ].join(" ")}
       >
         {/* ── Collapsed view ─────────────────────────────────────────── */}
         {collapsed && (
           <div className="flex flex-col items-center gap-2 py-3 flex-1">
-            {/* Expand button */}
             <button
               onClick={toggleCollapse}
               className="p-2 rounded-lg hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
@@ -207,7 +267,6 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
               <PanelLeftOpen className="h-4 w-4" />
             </button>
             <div className="flex-1" />
-            {/* Settings */}
             <Link
               href="/dashboard/settings"
               className="p-2 rounded-lg hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
@@ -220,10 +279,9 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
 
         {/* ── Expanded view ──────────────────────────────────────────── */}
         {!collapsed && (
-          <>
-            {/* Collapse + New Chat row */}
+          <DndContext onDragEnd={onDragEnd}>
+            {/* Header row */}
             <div className="flex items-center gap-1 px-3 pt-3 pb-2 shrink-0">
-              {/* New Chat */}
               <Link
                 href="/dashboard/chat/new"
                 onClick={onClose}
@@ -233,7 +291,14 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
                 <Plus className="h-4 w-4 shrink-0" />
                 New Chat
               </Link>
-              {/* Desktop: collapse button */}
+              <button
+                onClick={handleNewFolder}
+                className="p-1.5 rounded-lg hover:bg-muted transition-colors text-muted-foreground hover:text-foreground shrink-0"
+                aria-label="New Folder"
+                title="New Folder"
+              >
+                <FolderPlus className="h-4 w-4" />
+              </button>
               <button
                 onClick={toggleCollapse}
                 className="hidden lg:flex p-1.5 rounded-lg hover:bg-muted transition-colors text-muted-foreground hover:text-foreground shrink-0"
@@ -241,7 +306,6 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
               >
                 <PanelLeftClose className="h-4 w-4" />
               </button>
-              {/* Mobile: close button */}
               <button
                 onClick={onClose}
                 className="lg:hidden p-1.5 rounded-lg hover:bg-muted transition-colors text-muted-foreground hover:text-foreground shrink-0"
@@ -271,11 +335,37 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
               data-testid="chat-list"
               className="flex-1 overflow-y-auto px-2 space-y-0.5"
             >
-              {filtered.length === 0 && (
+              {/* Folders section */}
+              {folderList.length > 0 && (
+                <>
+                  <p className="text-xs text-muted-foreground px-2 pt-1 pb-0.5 uppercase tracking-wide">
+                    Folders
+                  </p>
+                  {folderList.map((folder) => (
+                    <FolderItem
+                      key={folder.id}
+                      id={folder.id}
+                      name={folder.name}
+                      chats={filtered.filter((c) => c.folder_id === folder.id)}
+                      onRename={renameFolder}
+                      onDelete={deleteFolder}
+                      onCloseNav={onClose}
+                    />
+                  ))}
+                  {(pinned.length > 0 || unpinned.length > 0) && (
+                    <p className="text-xs text-muted-foreground px-2 pt-3 pb-0.5 uppercase tracking-wide">
+                      Chats
+                    </p>
+                  )}
+                </>
+              )}
+
+              {filtered.length === 0 && folderList.length === 0 && (
                 <p className="text-xs text-muted-foreground text-center mt-6 px-4">
                   {searchQuery ? "No matching chats." : "No conversations yet."}
                 </p>
               )}
+
               {pinned.length > 0 && (
                 <p className="text-xs text-muted-foreground px-2 pt-1 pb-0.5 uppercase tracking-wide">
                   Pinned
@@ -300,7 +390,7 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
                 Settings
               </Link>
             </div>
-          </>
+          </DndContext>
         )}
       </aside>
     </>
