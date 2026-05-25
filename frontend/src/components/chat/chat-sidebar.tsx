@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
 import {
@@ -65,6 +65,66 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
   const [editingValue, setEditingValue] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // ── Message search state ───────────────────────────────────────────
+  interface SearchResult {
+    chat_id: number;
+    chat_title: string;
+    snippet: string;
+  }
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState(false);
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const runSearch = useCallback(async (q: string) => {
+    setSearchLoading(true);
+    setSearchError(false);
+    console.debug("[SEARCH] query=%s", q);
+    try {
+      const res = await fetch(`/api/chat/search?q=${encodeURIComponent(q)}`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem("token") ?? ""}` },
+      });
+      if (!res.ok) throw new Error("search failed");
+      const data: SearchResult[] = await res.json();
+      console.debug("[SEARCH] result_count=%d", data.length);
+      setSearchResults(data);
+    } catch {
+      setSearchError(true);
+      setSearchResults([]);
+    } finally {
+      setSearchLoading(false);
+    }
+  }, []);
+
+  // useDebounce pattern (300 ms): call backend when query >= 4 chars, clear results otherwise
+  useEffect(() => {
+    if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+    if (searchQuery.length >= 4) {
+      searchTimerRef.current = setTimeout(() => runSearch(searchQuery), 300);
+    } else {
+      setSearchResults([]);
+      setSearchError(false);
+    }
+    return () => {
+      if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+    };
+  }, [searchQuery, runSearch]);
+
+  // Highlight matching phrase inside snippet
+  const highlightSnippet = (snippet: string, query: string) => {
+    const idx = snippet.toLowerCase().indexOf(query.toLowerCase());
+    if (idx === -1) return <span>{snippet}</span>;
+    return (
+      <>
+        {snippet.slice(0, idx)}
+        <mark className="bg-yellow-200 dark:bg-yellow-800 rounded px-0.5">
+          {snippet.slice(idx, idx + query.length)}
+        </mark>
+        {snippet.slice(idx + query.length)}
+      </>
+    );
+  };
 
   useEffect(() => {
     if (editingId !== null) {
@@ -335,6 +395,42 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
               data-testid="chat-list"
               className="flex-1 overflow-y-auto px-2 space-y-0.5"
             >
+              {/* ── Message search results ─────────────────────────── */}
+              {searchQuery.length >= 4 && (
+                <div data-testid="search-results" className="mb-2">
+                  <p className="text-xs text-muted-foreground px-2 pt-1 pb-1 uppercase tracking-wide">
+                    Message search
+                  </p>
+                  {searchLoading && (
+                    <p className="text-xs text-muted-foreground px-2 py-1 animate-pulse">
+                      Searching messages…
+                    </p>
+                  )}
+                  {searchError && !searchLoading && (
+                    <p className="text-xs text-destructive px-2 py-1">
+                      Search unavailable
+                    </p>
+                  )}
+                  {!searchLoading && !searchError && searchResults.length === 0 && (
+                    <p className="text-xs text-muted-foreground px-2 py-1">
+                      No message matches found.
+                    </p>
+                  )}
+                  {!searchLoading && !searchError && searchResults.map((r) => (
+                    <button
+                      key={r.chat_id}
+                      onClick={() => { router.push(`/dashboard/chat/${r.chat_id}`); onClose(); }}
+                      className="w-full text-left rounded-lg px-2 py-1.5 hover:bg-accent/60 transition-colors"
+                    >
+                      <p className="text-sm font-semibold truncate">{r.chat_title}</p>
+                      <p className="text-xs text-muted-foreground line-clamp-2 mt-0.5">
+                        {highlightSnippet(r.snippet, searchQuery)}
+                      </p>
+                    </button>
+                  ))}
+                  <div className="border-b my-2 mx-2 opacity-30" />
+                </div>
+              )}
               {/* Folders section */}
               {folderList.length > 0 && (
                 <>
