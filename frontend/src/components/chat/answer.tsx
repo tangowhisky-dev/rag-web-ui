@@ -524,10 +524,11 @@ export const Answer: FC<{
   failedLegs?: string[];
   queryClassification?: QueryClassification;
   toolTrace?: ToolTraceEntry[];
+  agentSteps?: Array<{ node: string; latency_ms: number; status: string }>;
   synthesisMode?: boolean;
   isStreaming?: boolean;
   onDelete?: (id: string) => void;
-}> = ({ messageId, chatId, markdown, citations = [], rewrittenQuery, retrievedContext, confidence, confidenceScore, confidenceBreakdown, suggestion, failedLegs, queryClassification, toolTrace, synthesisMode, isStreaming = false, onDelete }) => {
+}> = ({ messageId, chatId, markdown, citations = [], rewrittenQuery, retrievedContext, confidence, confidenceScore, confidenceBreakdown, suggestion, failedLegs, queryClassification, toolTrace, agentSteps, synthesisMode, isStreaming = false, onDelete }) => {
   const [citationInfoMap, setCitationInfoMap] = useState<
     Record<string, CitationInfo>
   >({});
@@ -827,13 +828,14 @@ export const Answer: FC<{
 
   return (
     <div className="prose prose-sm max-w-full">
-      {/* AgentTimeline consolidates: rewrittenQuery, queryClassification, toolTrace, failedLegs, retrievedContext */}
+      {/* AgentTimeline consolidates: rewrittenQuery, queryClassification, toolTrace, failedLegs, retrievedContext, agentSteps */}
       <AgentTimeline
         rewrittenQuery={rewrittenQuery}
         retrievedContext={retrievedContext}
         queryClassification={queryClassification}
         toolTrace={toolTrace}
         failedLegs={failedLegs}
+        agentSteps={agentSteps}
         isStreaming={isStreaming}
       />
       {confidence === "none" && suggestion && (

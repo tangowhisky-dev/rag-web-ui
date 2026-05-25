@@ -34,14 +34,33 @@ interface ToolTraceEntry {
   latency_ms: number;
 }
 
+interface AgentStepEvent {
+  node: string;
+  latency_ms: number;
+  status: string;
+}
+
 interface AgentTimelineProps {
   rewrittenQuery?: string;
   retrievedContext?: ContextDoc[];
   queryClassification?: QueryClassification;
   toolTrace?: ToolTraceEntry[];
   failedLegs?: string[];
+  agentSteps?: AgentStepEvent[];
   isStreaming?: boolean;
 }
+
+// ── Node name → display metadata ────────────────────────────────────────────
+
+const NODE_META: Record<string, { label: string; icon: TimelineStep["icon"] }> = {
+  rewrite_query:         { label: "Rewrite Query",    icon: "search"  },
+  context_router:        { label: "Route Context",    icon: "share"   },
+  kb_retrieval:          { label: "Retrieve",         icon: "book"    },
+  extract_file_sections: { label: "Extract Sections", icon: "wrench"  },
+  grade_documents:       { label: "Grade Docs",       icon: "check"   },
+  merge_context:         { label: "Merge Context",    icon: "book"    },
+  generate_answer:       { label: "Generate Answer",  icon: "wrench"  },
+};
 
 // ── Step status icons ────────────────────────────────────────────────────────
 
@@ -191,13 +210,28 @@ export const AgentTimeline: FC<AgentTimelineProps> = ({
   queryClassification,
   toolTrace,
   failedLegs,
+  agentSteps,
   isStreaming = false,
 }) => {
-  // Build timeline steps from props
-  const steps: TimelineStep[] = useMemo(() => {
+  // Live steps from SSE type-4 events — rendered during and after streaming
+  const liveSteps: TimelineStep[] = useMemo(() => {
+    if (!agentSteps?.length) return [];
+    return agentSteps.map((s) => {
+      const meta = NODE_META[s.node] ?? { label: s.node, icon: "wrench" as const };
+      return {
+        id: s.node,
+        label: meta.label,
+        icon: meta.icon,
+        status: (s.status === "done" ? "done" : s.status === "error" ? "error" : "active") as TimelineStep["status"],
+        latencyMs: s.latency_ms,
+      };
+    });
+  }, [agentSteps]);
+
+  // Derived steps from post-stream metadata (2: context event)
+  const derivedSteps: TimelineStep[] = useMemo(() => {
     const result: TimelineStep[] = [];
 
-    // 1. Query Rewrite step
     if (rewrittenQuery) {
       result.push({
         id: "query_rewrite",
@@ -208,7 +242,6 @@ export const AgentTimeline: FC<AgentTimelineProps> = ({
       });
     }
 
-    // 2. Classification step
     if (queryClassification) {
       result.push({
         id: "classification",
@@ -223,7 +256,6 @@ export const AgentTimeline: FC<AgentTimelineProps> = ({
       });
     }
 
-    // 3. Retrieve step
     if (retrievedContext && retrievedContext.length > 0) {
       const docCount = retrievedContext.filter(
         (d) => d.metadata?.source !== "graph"
@@ -241,7 +273,6 @@ export const AgentTimeline: FC<AgentTimelineProps> = ({
       });
     }
 
-    // 4. Tool Calls step
     if (toolTrace && toolTrace.length > 0) {
       const totalLatency = toolTrace.reduce((s, t) => s + t.latency_ms, 0);
       const tools = [...new Set(toolTrace.map((t) => t.tool_name))];
@@ -257,7 +288,6 @@ export const AgentTimeline: FC<AgentTimelineProps> = ({
       });
     }
 
-    // 5. Failed Legs step
     if (failedLegs && failedLegs.length > 0) {
       result.push({
         id: "failed_legs",
@@ -271,11 +301,13 @@ export const AgentTimeline: FC<AgentTimelineProps> = ({
     return result;
   }, [rewrittenQuery, retrievedContext, queryClassification, toolTrace, failedLegs]);
 
+  // Prefer live steps when available; fall back to derived (post-stream)
+  const steps = liveSteps.length > 0 ? liveSteps : derivedSteps;
+
   // Track expanded state per step
   const [expandedSteps, setExpandedSteps] = useState<Set<string>>(() => new Set());
 
   // Auto-collapse when streaming ends
-  const prevStreaming = isStreaming;
   useEffect(() => {
     if (!isStreaming) {
       setExpandedSteps(new Set());

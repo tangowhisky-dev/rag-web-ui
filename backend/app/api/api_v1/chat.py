@@ -83,6 +83,72 @@ def get_chats(
     )
     return chats
 
+
+
+@router.get("/search", response_model=List[SearchResult])
+def search_chats(
+    q: str = Query(..., min_length=1),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Any:
+    """Full-text search across messages in the current user's chats."""
+    import time as _time
+    from sqlalchemy import text as sa_text
+    from sqlalchemy.exc import OperationalError
+
+    t0 = _time.monotonic()
+    mode = "fulltext"
+    rows = []
+
+    # Get all chat ids belonging to this user
+    chat_ids = [
+        r.id for r in db.query(Chat.id).filter(Chat.user_id == current_user.id).all()
+    ]
+    if not chat_ids:
+        logger.info("[SEARCH] query=%r result_count=0 latency_ms=0 mode=%s", q, mode)
+        return []
+
+    from sqlalchemy import bindparam as _bp
+    try:
+        if len(q) < 4:
+            raise OperationalError("query too short for FULLTEXT", None, None)
+        sql = sa_text(
+            "SELECT m.id AS message_id, m.chat_id, m.content, c.title AS chat_title "
+            "FROM messages m JOIN chats c ON c.id = m.chat_id "
+            "WHERE m.chat_id IN :chat_ids "
+            "AND MATCH(m.content) AGAINST(:q IN BOOLEAN MODE) "
+            "LIMIT 20"
+        ).bindparams(_bp("chat_ids", expanding=True))
+        result = db.execute(sql, {"chat_ids": chat_ids, "q": q})
+        rows = result.fetchall()
+    except OperationalError:
+        mode = "like"
+        sql = sa_text(
+            "SELECT m.id AS message_id, m.chat_id, m.content, c.title AS chat_title "
+            "FROM messages m JOIN chats c ON c.id = m.chat_id "
+            "WHERE m.chat_id IN :chat_ids "
+            "AND m.content LIKE :pat "
+            "LIMIT 20"
+        ).bindparams(_bp("chat_ids", expanding=True))
+        result = db.execute(sql, {"chat_ids": chat_ids, "pat": f"%{q}%"})
+        rows = result.fetchall()
+
+    latency_ms = round((_time.monotonic() - t0) * 1000)
+    logger.info(
+        "[SEARCH] query=%r result_count=%d latency_ms=%d mode=%s",
+        q, len(rows), latency_ms, mode,
+    )
+    return [
+        SearchResult(
+            chat_id=row.chat_id,
+            chat_title=row.chat_title,
+            snippet=row.content[:120],
+            message_id=row.message_id,
+        )
+        for row in rows
+    ]
+
+
 @router.get("/{chat_id}", response_model=ChatResponse)
 def get_chat(
     *,
@@ -594,66 +660,3 @@ def get_message_siblings(
         )
 
     return siblings
-
-
-@router.get("/search", response_model=List[SearchResult])
-def search_chats(
-    q: str = Query(..., min_length=1),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-) -> Any:
-    """Full-text search across messages in the current user's chats."""
-    import time as _time
-    from sqlalchemy import text as sa_text
-    from sqlalchemy.exc import OperationalError
-
-    t0 = _time.monotonic()
-    mode = "fulltext"
-    rows = []
-
-    # Get all chat ids belonging to this user
-    chat_ids = [
-        r.id for r in db.query(Chat.id).filter(Chat.user_id == current_user.id).all()
-    ]
-    if not chat_ids:
-        logger.info("[SEARCH] query=%r result_count=0 latency_ms=0 mode=%s", q, mode)
-        return []
-
-    try:
-        if len(q) < 4:
-            raise OperationalError("query too short for FULLTEXT", None, None)
-        sql = sa_text(
-            "SELECT m.id AS message_id, m.chat_id, m.content, c.title AS chat_title "
-            "FROM messages m JOIN chats c ON c.id = m.chat_id "
-            "WHERE m.chat_id IN :chat_ids "
-            "AND MATCH(m.content) AGAINST(:q IN BOOLEAN MODE) "
-            "LIMIT 20"
-        )
-        result = db.execute(sql, {"chat_ids": tuple(chat_ids), "q": q})
-        rows = result.fetchall()
-    except OperationalError:
-        mode = "like"
-        sql = sa_text(
-            "SELECT m.id AS message_id, m.chat_id, m.content, c.title AS chat_title "
-            "FROM messages m JOIN chats c ON c.id = m.chat_id "
-            "WHERE m.chat_id IN :chat_ids "
-            "AND m.content LIKE :pat "
-            "LIMIT 20"
-        )
-        result = db.execute(sql, {"chat_ids": tuple(chat_ids), "pat": f"%{q}%"})
-        rows = result.fetchall()
-
-    latency_ms = round((_time.monotonic() - t0) * 1000)
-    logger.info(
-        "[SEARCH] query=%r result_count=%d latency_ms=%d mode=%s",
-        q, len(rows), latency_ms, mode,
-    )
-    return [
-        SearchResult(
-            chat_id=row.chat_id,
-            chat_title=row.chat_title,
-            snippet=row.content[:120],
-            message_id=row.message_id,
-        )
-        for row in rows
-    ]

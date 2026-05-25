@@ -28,6 +28,12 @@ import { InputBar } from "@/components/chat/chat-input";
 import { MessageFileChip, type UploadedFile } from "@/components/chat/file-attachment";
 import { BranchPicker } from "@/components/chat/branch-picker";
 
+interface AgentStep {
+  node: string;
+  latency_ms: number;
+  status: string;
+}
+
 interface Message {
   id: string;
   role: "assistant" | "user" | "system" | "data";
@@ -54,6 +60,7 @@ interface Message {
     latency_ms: number;
   }>;
   synthesisMode?: boolean;
+  agentSteps?: AgentStep[];
   file_name?: string;  // filename of attached chat file, if any
   file_id?: number;    // chat_files.id — needed for download URL
 }
@@ -448,9 +455,81 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       return;
     }
 
+    // 4: agent_step — LangGraph node start/finish events for AgentTimeline
+    if (trimmedLine.startsWith("4:")) {
+      try {
+        const step = JSON.parse(trimmedLine.slice(2)) as AgentStep;
+        appendAssistantChunk(assistantId, (message) => ({
+          ...message,
+          agentSteps: [...(message.agentSteps ?? []), step],
+        }));
+      } catch (e) {
+        console.error("Failed to parse agent_step event:", e);
+      }
+      return;
+    }
+
     if (trimmedLine.startsWith("3:")) {
       const errorMessage = trimmedLine.slice(2);
       throw new Error(errorMessage || "Streaming request failed");
+    }
+  };
+
+  /** Core SSE streaming: POST to /messages and pipe events into the given assistantId slot. */
+  const streamFromMessages = async (
+    requestMessages: Array<{ role: string; content: string }>,
+    assistantId: string,
+    fileId?: number
+  ) => {
+    const token =
+      typeof window !== "undefined"
+        ? window.localStorage.getItem("token") || ""
+        : "";
+
+    const response = await fetch(`/api/chat/${params.id}/messages`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        messages: requestMessages,
+        ...(fileId ? { file_id: fileId } : {}),
+      }),
+    });
+
+    if (!response.ok || !response.body) {
+      throw new Error(`Request failed with status ${response.status}`);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+
+      let hasTokenLines = false;
+      for (const line of lines) {
+        const t = line.trim();
+        if (t.startsWith("1:") || t.startsWith("2:")) {
+          flushSync(() => processStreamLine(line, assistantId));
+        } else if (t) {
+          processStreamLine(line, assistantId);
+          hasTokenLines = true;
+        }
+      }
+      if (hasTokenLines) await flushToBrowser();
+    }
+
+    if (buffer.trim()) {
+      processStreamLine(buffer, assistantId);
+      await flushToBrowser();
     }
   };
 
@@ -461,17 +540,11 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       return;
     }
 
-    const token =
-      typeof window !== "undefined"
-        ? window.localStorage.getItem("token") || ""
-        : "";
-
     const assistantId = generateId();
     const userMessage: Message = {
       id: generateId(),
       role: "user",
       content: trimmedInput,
-      // Optimistically show the attachment chip before the message is persisted
       ...(uploadedFile ? { file_name: uploadedFile.file_name, file_id: uploadedFile.id } : {}),
     };
     const assistantMessage: Message = {
@@ -500,55 +573,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     setMessages((prev) => [...prev, userMessage, assistantMessage]);
 
     try {
-      const response = await fetch(`/api/chat/${params.id}/messages`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          messages: requestMessages,
-          ...(sentFile ? { file_id: sentFile.id } : {}),
-        }),
-      });
-
-      if (!response.ok || !response.body) {
-        throw new Error(`Request failed with status ${response.status}`);
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        // Process step events (1:, 2:) with immediate flushSync so collapsibles
-        // appear before LLM tokens. Batch all token lines (0:) into a single
-        // state update per reader chunk — avoids one rAF per token.
-        let hasTokenLines = false;
-        for (const line of lines) {
-          const t = line.trim();
-          if (t.startsWith("1:") || t.startsWith("2:")) {
-            flushSync(() => processStreamLine(line, assistantId));
-          } else if (t) {
-            processStreamLine(line, assistantId);
-            hasTokenLines = true;
-          }
-        }
-        // One yield per chunk keeps UI responsive without per-token rAF overhead
-        if (hasTokenLines) await flushToBrowser();
-      }
-
-      if (buffer.trim()) {
-        processStreamLine(buffer, assistantId);
-        await flushToBrowser();
-      }
+      await streamFromMessages(requestMessages, assistantId, sentFile?.id);
     } catch (error) {
       console.error("Failed to stream chat:", error);
       setMessages((prev) => prev.filter((message) => message.id !== assistantId));
@@ -565,14 +590,57 @@ function ChatPageInner({ params }: { params: { id: string } }) {
   };
 
   /** Called by BranchPicker when the user saves an edit and a new branch message is created. */
-  const handleBranch = (originalId: string, newMessageId: string, newContent: string) => {
-    setMessages((prev) =>
-      prev.map((m) =>
-        m.id === originalId
-          ? { ...m, id: newMessageId, content: newContent }
-          : m
-      )
-    );
+  const handleBranch = async (originalId: string, newMessageId: string, newContent: string) => {
+    if (isLoading) return;
+
+    // Build request messages up to and including the newly-branched user message
+    // (read from current state before mutating it)
+    const idx = messages.findIndex((m) => m.id === originalId);
+    const requestMessages = messages
+      .slice(0, idx + 1)
+      .filter((m) => m.role === "user" || m.role === "assistant")
+      .map((m) => ({
+        role: m.role,
+        content: m.id === originalId ? newContent : m.content,
+      }));
+
+    const newAssistantId = generateId();
+
+    // Swap user message + remove old assistant reply + insert new assistant placeholder
+    setMessages((prev) => {
+      const updated = prev.map((m) =>
+        m.id === originalId ? { ...m, id: newMessageId, content: newContent } : m
+      );
+      const userIdx = updated.findIndex((m) => m.id === newMessageId);
+      const result = [...updated];
+      // Remove following assistant message if present
+      if (userIdx >= 0 && userIdx + 1 < result.length && result[userIdx + 1].role === "assistant") {
+        result.splice(userIdx + 1, 1);
+      }
+      // Insert new assistant placeholder right after user message
+      result.splice(userIdx + 1, 0, {
+        id: newAssistantId,
+        role: "assistant" as const,
+        content: "",
+        citations: [],
+      });
+      return result;
+    });
+
+    setIsLoading(true);
+    try {
+      await streamFromMessages(requestMessages, newAssistantId);
+    } catch (error) {
+      console.error("Failed to stream after branch:", error);
+      setMessages((prev) => prev.filter((m) => m.id !== newAssistantId));
+      toast({
+        title: "Error",
+        description: error instanceof Error ? error.message : "Failed to regenerate response",
+        variant: "destructive",
+      });
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   /** Called by BranchPicker when the user navigates to a sibling branch. */
@@ -697,6 +765,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                           failedLegs={message.failedLegs}
                           queryClassification={message.id === lastAssistantId ? message.queryClassification : undefined}
                           toolTrace={message.id === lastAssistantId ? message.toolTrace : undefined}
+                          agentSteps={message.id === lastAssistantId ? message.agentSteps : undefined}
                           synthesisMode={message.synthesisMode}
                           isStreaming={isLoading && message.id === lastAssistantId}
                           onDelete={(id) => setMessages((prev) => prev.filter((m) => m.id !== id))}
