@@ -64,6 +64,7 @@ class Message(Base, TimestampMixin):
     confidence_level = Column(String(20), nullable=True)
     confidence_score = Column(Integer, nullable=True)
     confidence_breakdown = Column(LONGTEXT, nullable=True)  # JSON string
+    rewritten_query = Column(LONGTEXT, nullable=True)  # standalone retrieval query after rewrite
 
     # Relationships
     chat = relationship("Chat", back_populates="messages")

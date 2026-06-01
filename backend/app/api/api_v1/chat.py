@@ -154,6 +154,7 @@ def get_chat(
     *,
     db: Session = Depends(get_db),
     chat_id: int,
+    include_messages: bool = Query(True),
     current_user: User = Depends(get_current_user)
 ) -> Any:
     chat = (
@@ -167,6 +168,13 @@ def get_chat(
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
 
+    from app.schemas.chat import ChatResponse
+    chat_data = ChatResponse.model_validate(chat).model_dump()
+
+    if not include_messages:
+        chat_data["messages"] = []
+        return chat_data
+
     # Build a file info lookup: message_id → (file_id, file_name)
     file_map: dict[int, tuple[int, str]] = {}
     chat_files = (
@@ -178,19 +186,77 @@ def get_chat(
         if cf.message_id:
             file_map[cf.message_id] = (cf.id, cf.file_name)
 
-    # Build the response manually so file_name/file_id are reliably serialized.
-    # Relying on transient attributes on SQLAlchemy objects is not safe with FastAPI's
-    # jsonable_encoder when no response_model is declared.
-    from app.schemas.chat import ChatResponse, MessageResponse
-
-    # Serialize via Pydantic, then patch file info into message dicts
-    chat_data = ChatResponse.model_validate(chat).model_dump()
     for msg_dict in chat_data.get("messages", []):
         info = file_map.get(msg_dict["id"])
         msg_dict["file_name"] = info[1] if info else None
         msg_dict["file_id"]   = info[0] if info else None
 
     return chat_data
+
+
+@router.get("/{chat_id}/messages/paginated")
+def get_messages_paginated(
+    *,
+    db: Session = Depends(get_db),
+    chat_id: int,
+    limit: int = Query(20, ge=1, le=100),
+    before_id: Optional[int] = Query(None),
+    current_user: User = Depends(get_current_user),
+) -> Any:
+    """
+    Returns up to `limit` messages ending just before `before_id` (cursor).
+    Messages are returned in ascending ID order (oldest first).
+    `has_more=True` means there are older messages available.
+    """
+    chat = (
+        db.query(Chat)
+        .filter(Chat.id == chat_id, Chat.user_id == current_user.id)
+        .first()
+    )
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    q = db.query(Message).filter(Message.chat_id == chat_id)
+    if before_id is not None:
+        q = q.filter(Message.id < before_id)
+
+    # Fetch newest-first so we get the correct page, then reverse for display
+    messages = q.order_by(Message.id.desc()).limit(limit).all()
+    messages = list(reversed(messages))  # chronological order
+
+    # has_more = there exist messages older than what we just returned
+    has_more = False
+    if messages:
+        oldest_id = messages[0].id
+        has_more = (
+            db.query(Message.id)
+            .filter(Message.chat_id == chat_id, Message.id < oldest_id)
+            .first()
+        ) is not None
+
+    # Build file_map for this page only
+    msg_ids = [m.id for m in messages]
+    file_map: dict[int, tuple[int, str]] = {}
+    if msg_ids:
+        chat_files = (
+            db.query(ChatFile)
+            .filter(ChatFile.chat_id == chat_id, ChatFile.message_id.in_(msg_ids))
+            .all()
+        )
+        for cf in chat_files:
+            if cf.message_id:
+                file_map[cf.message_id] = (cf.id, cf.file_name)
+
+    from app.schemas.chat import MessageResponse
+    result = []
+    for msg in messages:
+        msg_dict = MessageResponse.model_validate(msg).model_dump()
+        info = file_map.get(msg.id)
+        msg_dict["file_name"] = info[1] if info else None
+        msg_dict["file_id"]   = info[0] if info else None
+        result.append(msg_dict)
+
+    return {"messages": result, "has_more": has_more}
 
 @router.post("/{chat_id}/messages")
 async def create_message(
@@ -486,8 +552,14 @@ def export_chat(
         content = msg.content
         if "__LLM_RESPONSE__" in content:
             content = content.split("__LLM_RESPONSE__", 1)[1]
-        label = "**User**" if msg.role == "user" else "**Assistant**"
-        lines.append(f"{label}\n\n{content.strip()}\n")
+        if msg.role == "user":
+            lines.append(f"**User**\n\n{content.strip()}\n")
+        else:
+            # Include rewritten query when it differs from the preceding user message
+            header = "**Assistant**"
+            if msg.rewritten_query:
+                header += f"\n\n> ⛲ *Rewritten query: {msg.rewritten_query.strip()}*"
+            lines.append(f"{header}\n\n{content.strip()}\n")
 
     md = "\n---\n\n".join(lines)
     return Response(

@@ -259,10 +259,12 @@ async def rewrite_query_node(state: RAGGraphState) -> dict:
     llm = _get_llm(model_name, temperature)
 
     system_prompt = (
-        "You are a search query optimizer. "
+        "You are a search query optimizer for a document retrieval system. "
         "Rewrite the user's question into a concise, keyword-rich retrieval query "
         "that maximises recall from a vector database. "
-        "Return ONLY the rewritten query — no explanations, no quotes."
+        "Use conversation history only to resolve pronouns or topic references — "
+        "never to answer or evaluate the question. "
+        "Return ONLY the rewritten query — no explanations, no quotes, no answers."
     )
     history = state.get("recent_lc_history") or []
     messages: list = [{"role": "system", "content": system_prompt}]
@@ -1387,7 +1389,7 @@ async def run_stream(
                     emitted_done_nodes.add("rewrite_done")
                     yield {
                         "event": EVENT_REWRITTEN,
-                        "query": display_query or output["rewritten_query"],
+                        "query": output["rewritten_query"],
                     }
 
     # ── Post-graph: citation normalisation ───────────────────────────────

@@ -119,7 +119,7 @@ async def fast_stream(
     }
     yield {
         "event": "rewritten_query",
-        "query": display_query or rewritten,
+        "query": rewritten,
     }
 
     # ── 2. Hybrid retrieval ───────────────────────────────────────────────────

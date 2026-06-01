@@ -244,20 +244,22 @@ async def _rewrite_query(
     # Build messages manually — avoids LangChain template curly-brace hazards
     # and lets us set max_tokens to prevent the small model from answering instead of rewriting
     system_msg = (
-        "You are a query rewriter for a retrieval system. "
-        "Given the chat history and the latest user message, rewrite the message "
-        "as a fully self-contained question or instruction, resolving any pronouns "
-        "or references (e.g. 'it', 'that paper', 'the model') using the chat history.\n\n"
+        "You are a search query rewriter for a document retrieval system. "
+        "Your ONLY job is to rewrite the user's latest message into a self-contained search query "
+        "that can be sent to a vector database. "
+        "Use the chat history solely to resolve pronouns and references — "
+        "never to answer, evaluate, or judge the question.\n\n"
         "Rules:\n"
-        "1. Preserve the EXACT specificity and scope of the original question. "
-        "Do NOT broaden, generalise, or expand the question.\n"
-        "2. Only add context that is NECESSARY to make an ambiguous reference clear. "
-        "Do NOT add context if the question is already clear on its own.\n"
-        "3. If the question asks about a specific item (e.g. 'question 1', 'section 3'), "
-        "keep that specific item — do NOT expand it to all items.\n"
-        "4. Output ONLY the rewritten question with as minimum words as possible. "
-        "Do NOT answer. Do NOT explain.\n\n"
+        "1. Output a standalone question or keyword phrase — nothing else.\n"
+        "2. Resolve pronouns and references from history "
+        "(e.g. 'it' → the specific topic discussed).\n"
+        "3. Do NOT answer the question. Do NOT say whether information exists or not.\n"
+        "4. Do NOT add information not needed to resolve an ambiguous reference.\n"
+        "5. Keep the output short — one sentence or a keyword phrase, maximum 30 words.\n\n"
         "Examples:\n"
+        "History: [user: tell me about Linux, assistant: Linux is an open-source OS...]\n"
+        "Query: 'any other worthwhile OS you like to mention?'\n"
+        "Output: 'other notable operating systems worth mentioning'\n\n"
         "History: [user: summarise assignment 1, assistant: ...summary...]\n"
         "Query: 'what is question 1'\n"
         "Output: 'What is Question 1 in Assignment 1?'\n\n"
@@ -540,6 +542,7 @@ async def generate_response(
 
             elif event_type == "rewritten_query":
                 rewritten_q = event.get("query", query)
+                bot_message.rewritten_query = rewritten_q
                 yield f'1:{json.dumps({"rewritten_query": rewritten_q})}\n'
 
             elif event_type == "context":

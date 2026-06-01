@@ -12,7 +12,7 @@ function generateId(): string {
   });
 }
 
-import { useEffect, useRef, useState, useMemo } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback } from "react";
 import { flushSync } from "react-dom";
 import { useRouter } from "next/navigation";
 import { Copy, Trash2 } from "lucide-react";
@@ -114,6 +114,14 @@ function ChatPageInner({ params }: { params: { id: string } }) {
   const [answeringMode, setAnsweringMode] = useState<AnsweringMode>("fast");
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // ── Pagination state ────────────────────────────────────────────────────────
+  const [hasMoreMessages, setHasMoreMessages] = useState(false);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const topSentinelRef = useRef<HTMLDivElement>(null);
+  // Stores scrollHeight before prepending older messages so we can restore position
+  const pendingScrollAdjustRef = useRef<number | null>(null);
+
   // Poll file status until ready or error
   const startPolling = (fileId: number) => {
     if (pollRef.current) clearInterval(pollRef.current);
@@ -194,93 +202,93 @@ function ChatPageInner({ params }: { params: { id: string } }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => {
-    if (!isInitialLoad) {
-      scrollToBottom();
+  // Restore scroll position after prepending older messages (must be synchronous pre-paint)
+  useLayoutEffect(() => {
+    if (pendingScrollAdjustRef.current !== null && scrollContainerRef.current) {
+      const delta = scrollContainerRef.current.scrollHeight - pendingScrollAdjustRef.current;
+      scrollContainerRef.current.scrollTop += delta;
+      pendingScrollAdjustRef.current = null;
     }
-  }, [messages, isInitialLoad]);
+  }, [messages]);
+
+  // Scroll to bottom only on initial load (once messages first arrive)
+  useEffect(() => {
+    if (!isInitialLoad && messages.length > 0 && scrollContainerRef.current) {
+      scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isInitialLoad]);
+
+  // ── Message formatter (shared by initial load and paginated load) ───────────
+  const formatMessage = useCallback((msg: ChatMessage): Message => {
+    if (msg.role !== "assistant" || !msg.content)
+      return {
+        id: msg.id.toString(),
+        role: msg.role,
+        content: msg.content,
+        file_name: msg.file_name ?? undefined,
+        file_id: msg.file_id ?? undefined,
+      };
+    try {
+      if (!msg.content.includes("__LLM_RESPONSE__"))
+        return { id: msg.id.toString(), role: msg.role, content: msg.content };
+
+      const [base64Part, responseText] = msg.content.split("__LLM_RESPONSE__");
+      const contextData = base64Part
+        ? (JSON.parse(atob(base64Part.trim())) as {
+            context: Array<{ page_content: string; metadata: Record<string, any> }>;
+          })
+        : null;
+      const citations: Citation[] =
+        contextData?.context.map((c, i) => ({
+          id: i + 1,
+          text: c.page_content,
+          metadata: c.metadata,
+        })) || [];
+      return {
+        id: msg.id.toString(),
+        role: msg.role,
+        content: responseText || "",
+        citations,
+        confidence: msg.confidence_level as Message["confidence"] | undefined,
+        confidenceScore: msg.confidence_score ?? undefined,
+        confidenceBreakdown: msg.confidence_breakdown
+          ? JSON.parse(msg.confidence_breakdown)
+          : undefined,
+        file_name: msg.file_name ?? undefined,
+        file_id: msg.file_id ?? undefined,
+      };
+    } catch {
+      return {
+        id: msg.id.toString(),
+        role: msg.role,
+        content: msg.content,
+        file_name: msg.file_name ?? undefined,
+        file_id: msg.file_id ?? undefined,
+      };
+    }
+  }, []);
 
   const fetchChat = async () => {
     try {
-      const data: Chat = await api.get(`/api/chat/${params.id}`);
-      setChatTitle(data.title);
-      setUseGraphRag(data.use_graph_rag ?? false);
-      setUseDense((data as any).use_dense ?? true);
-      setUseSparse((data as any).use_sparse ?? true);
-      setUseExact((data as any).use_exact ?? false);
-      setTemperature((data as any).temperature ?? 0.7);
-      setModelName((data as any).model_name ?? "gpt-4o");
-      const formattedMessages = data.messages.map((msg) => {
-        if (msg.role !== "assistant" || !msg.content)
-          return {
-            id: msg.id.toString(),
-            role: msg.role,
-            content: msg.content,
-            file_name: msg.file_name ?? undefined,
-            file_id: msg.file_id ?? undefined,
-          };
-
-        try {
-          if (!msg.content.includes("__LLM_RESPONSE__")) {
-            return {
-              id: msg.id.toString(),
-              role: msg.role,
-              content: msg.content,
-            };
-          }
-
-          const [base64Part, responseText] =
-            msg.content.split("__LLM_RESPONSE__");
-
-          const contextData = base64Part
-            ? (JSON.parse(atob(base64Part.trim())) as {
-                context: Array<{
-                  page_content: string;
-                  metadata: Record<string, any>;
-                }>;
-              })
-            : null;
-
-          const citations: Citation[] =
-            contextData?.context.map((citation, index) => ({
-              id: index + 1,
-              text: citation.page_content,
-              metadata: citation.metadata,
-            })) || [];
-
-          return {
-            id: msg.id.toString(),
-            role: msg.role,
-            content: responseText || "",
-            citations,
-            confidence: msg.confidence_level as Message["confidence"] | undefined,
-            confidenceScore: msg.confidence_score ?? undefined,
-            confidenceBreakdown: msg.confidence_breakdown
-              ? JSON.parse(msg.confidence_breakdown)
-              : undefined,
-            file_name: msg.file_name ?? undefined,
-            file_id: msg.file_id ?? undefined,
-          };
-        } catch (e) {
-          console.error("Failed to process message:", e);
-          return {
-            id: msg.id.toString(),
-            role: msg.role,
-            content: msg.content,
-            file_name: msg.file_name ?? undefined,
-            file_id: msg.file_id ?? undefined,
-          };
-        }
-      });
-      setMessages(formattedMessages);
+      // Fetch metadata (no messages) and first page in parallel
+      const [meta, page] = await Promise.all([
+        api.get(`/api/chat/${params.id}?include_messages=false`),
+        api.get(`/api/chat/${params.id}/messages/paginated?limit=20`),
+      ]);
+      setChatTitle(meta.title);
+      setUseGraphRag(meta.use_graph_rag ?? false);
+      setUseDense((meta as any).use_dense ?? true);
+      setUseSparse((meta as any).use_sparse ?? true);
+      setUseExact((meta as any).use_exact ?? false);
+      setTemperature((meta as any).temperature ?? 0.7);
+      setModelName((meta as any).model_name ?? "gpt-4o");
+      setMessages(page.messages.map(formatMessage));
+      setHasMoreMessages(page.has_more);
     } catch (error) {
       console.error("Failed to fetch chat:", error);
       if (error instanceof ApiError) {
-        toast({
-          title: "Error",
-          description: error.message,
-          variant: "destructive",
-        });
+        toast({ title: "Error", description: error.message, variant: "destructive" });
       }
       router.push("/dashboard/chat");
     } finally {
@@ -288,8 +296,43 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     }
   };
 
+  const loadMoreMessages = useCallback(async () => {
+    if (isLoadingMore || !hasMoreMessages || !messages.length) return;
+    setIsLoadingMore(true);
+    // Save scrollHeight before DOM changes so useLayoutEffect can restore position
+    pendingScrollAdjustRef.current = scrollContainerRef.current?.scrollHeight ?? null;
+    try {
+      const oldestId = messages[0].id;
+      const page = await api.get(
+        `/api/chat/${params.id}/messages/paginated?limit=20&before_id=${oldestId}`
+      );
+      const older = page.messages.map(formatMessage);
+      setMessages((prev) => [...older, ...prev]);
+      setHasMoreMessages(page.has_more);
+    } catch (e) {
+      console.error("Failed to load older messages:", e);
+    } finally {
+      setIsLoadingMore(false);
+    }
+  }, [isLoadingMore, hasMoreMessages, messages, params.id, formatMessage]);
+
+  // IntersectionObserver: trigger load-more when top sentinel enters view
+  useEffect(() => {
+    const sentinel = topSentinelRef.current;
+    const container = scrollContainerRef.current;
+    if (!sentinel || !container) return;
+    const observer = new IntersectionObserver(
+      (entries) => { if (entries[0].isIntersecting) loadMoreMessages(); },
+      { root: container, threshold: 0 }
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [loadMoreMessages]);
+
   const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (scrollContainerRef.current) {
+      scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
+    }
   };
 
   const markdownParse = (text: string) => {
@@ -354,7 +397,18 @@ function ChatPageInner({ params }: { params: { id: string } }) {
 
   const flushToBrowser = async () => {
     await new Promise<void>((resolve) => {
-      requestAnimationFrame(() => resolve());
+      requestAnimationFrame(() => {
+        // Auto-scroll during streaming only if user is already near the bottom.
+        // If they've scrolled up to read older messages, don't hijack their position.
+        const container = scrollContainerRef.current;
+        if (container) {
+          const { scrollTop, scrollHeight, clientHeight } = container;
+          if (scrollHeight - scrollTop - clientHeight < 120) {
+            container.scrollTop = scrollHeight;
+          }
+        }
+        resolve();
+      });
     });
   };
 
@@ -605,6 +659,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     setFileError("");
     setIsLoading(true);
     setMessages((prev) => [...prev, userMessage, assistantMessage]);
+    setTimeout(scrollToBottom, 0);
 
     try {
       await streamFromMessages(requestMessages, assistantId, sentFile?.id);
@@ -772,7 +827,14 @@ function ChatPageInner({ params }: { params: { id: string } }) {
         )}
 
         {/* Scroll area */}
-        <div className="flex-1 overflow-y-auto min-h-0 pt-14 pb-28">
+        <div ref={scrollContainerRef} className="flex-1 overflow-y-auto min-h-0 pt-14 pb-28">
+          {/* Top sentinel — IntersectionObserver triggers loadMoreMessages when visible */}
+          <div ref={topSentinelRef} className="h-px" />
+          {isLoadingMore && (
+            <div className="flex justify-center py-3">
+              <div className="h-4 w-4 rounded-full border-2 border-primary border-t-transparent animate-spin" />
+            </div>
+          )}
           {processedMessages.length === 0 && !isLoading && !isInitialLoad ? (
             /* Welcome / empty state */
             <div className="flex flex-col items-center justify-center h-full gap-4 px-4 text-center">
@@ -881,7 +943,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                   </div>
                 )
               )}
-              <div ref={messagesEndRef} />
+
             </div>
           )}
         </div>

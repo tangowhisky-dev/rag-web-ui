@@ -47,6 +47,7 @@ class MessageResponse(MessageBase):
     confidence_level: Optional[str] = None
     confidence_score: Optional[int] = None
     confidence_breakdown: Optional[str] = None  # JSON string, parsed by frontend
+    rewritten_query: Optional[str] = None
     query_classification: Optional[QueryClassification] = None
     file_name: Optional[str] = None  # filename if a chat file was attached to this message
     file_id: Optional[int] = None      # chat_files.id — used to build download URL
