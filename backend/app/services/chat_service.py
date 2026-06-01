@@ -204,22 +204,16 @@ async def _maybe_update_summary(
         ]
 
         total = len(all_msgs)
-        if total <= _SLIDING_WINDOW_MESSAGES:
-            # Nothing outside the window yet — no summary needed
-            logger.info("[SUMMARY] chat_id=%d | total=%d msgs <= window=%d, skip",
-                        chat_id, total, _SLIDING_WINDOW_MESSAGES)
+        if total == 0:
             return
 
-        # Messages older than the sliding window
-        older = all_msgs[: total - _SLIDING_WINDOW_MESSAGES]
+        # Build incrementally: if a summary already exists it covers everything
+        # up to the previous turn, so only fold in the latest turn (last 2 msgs).
+        # On first call (no existing summary) summarise the full history.
+        messages_to_summarise = all_msgs[-2:] if existing_summary else all_msgs
 
-        # Only re-summarise if there are new messages beyond what was
-        # previously summarised. Track this by comparing count.
-        # Simple heuristic: re-summarise whenever we have more "older"
-        # messages than before (i.e. the window has slid forward).
-        # We persist the summary unconditionally each time for simplicity.
         summary = await _summarise_older_messages(
-            messages_to_summarise=older,
+            messages_to_summarise=messages_to_summarise,
             existing_summary=existing_summary,
             chat_id=chat_id,
         )
@@ -261,7 +255,7 @@ async def _rewrite_query(
         "Do NOT add context if the question is already clear on its own.\n"
         "3. If the question asks about a specific item (e.g. 'question 1', 'section 3'), "
         "keep that specific item — do NOT expand it to all items.\n"
-        "4. Output ONLY the rewritten question — one short sentence, maximum 30 words. "
+        "4. Output ONLY the rewritten question with as minimum words as possible. "
         "Do NOT answer. Do NOT explain.\n\n"
         "Examples:\n"
         "History: [user: summarise assignment 1, assistant: ...summary...]\n"
@@ -564,7 +558,12 @@ async def generate_response(
                     }).encode()
                 ).decode()
                 separator = "__LLM_RESPONSE__"
-                full_response = base64_context + separator
+                # Preserve any answer text accumulated before this event
+                # (rag_graph emits context AFTER tokens; fast_pipeline emits it BEFORE).
+                # For fast_pipeline: full_response is still "" here, so answer_so_far is "".
+                # For rag_graph: full_response already holds the (possibly normalised) answer.
+                answer_so_far = full_response
+                full_response = base64_context + separator + answer_so_far
 
                 context_payload = {
                     k: (

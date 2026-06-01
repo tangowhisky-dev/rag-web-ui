@@ -26,9 +26,15 @@ logger = logging.getLogger(__name__)
 _ANSWER_SYSTEM_PROMPT = """\
 You are a helpful assistant. Answer the user's question using ONLY the provided context.
 If the context is insufficient, say so clearly.
-Keep your answer concise, accurate, and well-structured.
 
-The context contains numbered source chunks labeled [KB-1], [KB-2], etc.
+FORMATTING RULES:
+- Use ### headers to divide multi-part answers (e.g., "### 1. Definition", "### 2. How It Works").
+- Use numbered lists for sequential steps or algorithms.
+- Use bullet points with **bold terms** for features, attributes, or comparisons.
+- Use inline code for variable names, identifiers, and technical terms (e.g., `wait()`, `Available[j]`).
+- For simple single-concept questions, plain prose is fine — do not force structure.
+
+CITATION RULES:
 When you use information from a chunk, cite it as a markdown link with ONLY the number as both text and href:
   Example: process scheduling [1](1) involves saving the CPU state [2](2).
 The number must match the [KB-N] label of the chunk you are citing.
@@ -94,6 +100,8 @@ async def fast_stream(
 
     t0 = time.monotonic()
     try:
+        # Only pass last 2 pairs (4 msgs) to rewriter — it only needs pronoun/reference
+        # resolution; more history causes topic drift and query contamination.
         rewritten = await _rewrite_query(query, recent_lc_history)
     except Exception as exc:
         logger.warning("[FAST] rewrite failed (non-fatal): %s", exc)
@@ -197,28 +205,30 @@ async def fast_stream(
             "context_lines": context_lines,
         }
 
-    # Serialise all docs for the context event
+
+    # Use the same reranker-aware confidence scorer as rag_graph.
+    # raw_docs already have _reranker_score in metadata (set by rerank()).
+    from app.services.confidence import score_retrieval
     serialised_docs = [_serialise_doc(d) for d in raw_docs]
-    confidence = "high" if len(raw_docs) >= 3 else ("medium" if raw_docs else "low")
-    score = round(min(1.0, len(raw_docs) / 5.0), 2)
+    conf_result = score_retrieval(raw_docs, retrieval_info)
+    conf_score_01 = round(conf_result.score / 100, 2)  # normalise 0-100 → 0-1 for frontend
 
     yield {
         "event": "context",
         "docs": serialised_docs,
-        "confidence": confidence,
-        "score": score,
-        "suggestion": "" if raw_docs else "No relevant documents found.",
+        "confidence": conf_result.level,
+        "score": conf_score_01,
+        "suggestion": conf_result.suggestion or "",
         "failed_legs": failed_legs,
         "breakdown": {
+            **conf_result.breakdown,
             "kb_docs": len(kb_docs),
             "graph_docs": len(graph_expanded),
             "file_chars": len(file_markdown or ""),
-            "merged_chars": sum(len(d.get("page_content", "")) for d in serialised_docs),
-            "sources": ["kb"] if raw_docs else [],
         },
         "query_classification": {
             "type": "FACTUAL",
-            "confidence": score,
+            "confidence": conf_score_01,
             "latency_ms": 0,
             "fallback": False,
         },
@@ -238,19 +248,17 @@ async def fast_stream(
     merged = "\n\n---\n\n".join(context_parts)
 
     # ── 4. Build messages ──────────────────────────────────────────────────────
-    from langchain_core.messages import HumanMessage, AIMessage
-
+    # Generator context: summary only.
+    # recent_lc_history is intentionally excluded — raw prior answers pollute
+    # the context and cause the LLM to treat its own previous responses as
+    # user statements. The summary (built after every turn) provides all
+    # necessary prior context in a clean, condensed form.
     messages: list = [{"role": "system", "content": _ANSWER_SYSTEM_PROMPT}]
     if existing_summary:
         messages.append({
             "role": "system",
-            "content": f"[Earlier conversation summary]\n{existing_summary}",
+            "content": f"[Conversation summary so far]\n{existing_summary}",
         })
-    for msg in recent_lc_history[-6:]:
-        if isinstance(msg, HumanMessage):
-            messages.append({"role": "user", "content": msg.content})
-        elif isinstance(msg, AIMessage):
-            messages.append({"role": "assistant", "content": msg.content})
 
     messages.append({
         "role": "user",

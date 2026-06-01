@@ -157,7 +157,7 @@ class Settings(BaseSettings):
     # cross-encoder model and re-ordered by relevance score before being passed
     # to the LLM. More accurate than RRF alone for cross-KB disambiguation.
     RERANKER_ENABLED: bool = os.getenv("RERANKER_ENABLED", "true").lower() == "true"
-    RERANKER_MODEL: str = os.getenv("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-12-v2")
+    RERANKER_MODEL: str = os.getenv("RERANKER_MODEL", "Xenova/ms-marco-MiniLM-L-12-v2")
     RERANKER_CACHE_DIR: str = os.getenv("RERANKER_CACHE_DIR", "./assets/reranker")
     # How many chunks to keep after reranking. Must be <= RETRIEVAL_TOP_K.
     # Reducing this keeps only the most relevant chunks, further limiting noise.

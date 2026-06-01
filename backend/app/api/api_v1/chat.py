@@ -477,7 +477,7 @@ def export_chat(
     msgs = (
         db.query(Message)
         .filter(Message.chat_id == chat_id)
-        .order_by(Message.created_at)
+        .order_by(Message.id)
         .all()
     )
 

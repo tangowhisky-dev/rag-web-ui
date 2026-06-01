@@ -45,7 +45,8 @@ class RAGGraphState(TypedDict):
     sub_queries: List[str]             # from decompose_query
 
     # ── Routing (preserved from v1) ───────────────────────────────────────
-    sources: List[str]                 # ["kb", "file_current", "file_prior"]
+    sources: List[str]                 # ["kb", "file_current", "file_prior", "chat_history"]
+    chat_history_docs: list            # from chat_history_retrieval_node
     file_ids_needed: List[int]
     router_rationale: str
 
@@ -206,15 +207,36 @@ def _dedup_and_reinforce(doc_lists: List[List[dict]]) -> List[dict]:
 
 
 def _build_context_string(docs: List[dict], file_markdown: Optional[str] = None) -> str:
+    """
+    Build context string for the LLM.
+
+    Chat history docs (metadata._source_type == 'chat_history') are placed first
+    under a plain [Prior Answer] label with no number — the LLM is instructed
+    not to cite them. KB chunks follow with sequential [KB-N] numbering so
+    citations remain consistent.
+    """
     parts: List[str] = []
-    for i, doc in enumerate(docs, 1):
-        content = doc.get("page_content", "").strip()
-        meta = doc.get("metadata", {})
-        source = meta.get("source") or meta.get("file_name", "")
-        header = f"[KB-{i}]" + (f" ({source})" if source else "")
-        parts.append(f"{header}\n{content}")
+
+    # ── Chat history docs first — no citation number ───────────────────────────
+    for doc in docs:
+        if doc.get("metadata", {}).get("_source_type") == "chat_history":
+            content = doc.get("page_content", "").strip()
+            parts.append(f"[Prior Answer]\n{content}")
+
+    # ── KB chunks with sequential numbers for citations ─────────────────────
+    kb_counter = 0
+    for doc in docs:
+        if doc.get("metadata", {}).get("_source_type") != "chat_history":
+            kb_counter += 1
+            content = doc.get("page_content", "").strip()
+            meta = doc.get("metadata", {})
+            source = meta.get("source") or meta.get("file_name", "")
+            header = f"[KB-{kb_counter}]" + (f" ({source})" if source else "")
+            parts.append(f"{header}\n{content}")
+
     if file_markdown and file_markdown.strip():
         parts.append(f"[FILE CONTENT]\n{file_markdown.strip()}")
+
     return "\n\n---\n\n".join(parts)
 
 
@@ -280,6 +302,7 @@ Available sources:
 - "kb"           — knowledge base (vector store with embedded documents)
 - "file_current" — the file currently open / being discussed in this chat turn
 - "file_prior"   — files previously uploaded in earlier turns of this conversation
+- "chat_history" — previous assistant responses in this conversation
 
 Respond with a JSON object:
 {
@@ -293,6 +316,9 @@ Rules:
 - Include "kb" whenever general knowledge or knowledge-base content is useful.
 - Include "file_current" only when the query asks about the current file/document.
 - Include "file_prior" only when the query references earlier uploaded files by ID or content.
+- Include "chat_history" when the query explicitly references a prior assistant response,
+  asks to expand/elaborate/repeat something said earlier, or uses references like
+  "your previous answer", "as you mentioned", "that example", "those points", "earlier".
 - file_ids_needed must be integer IDs, not strings.
 """
 
@@ -305,17 +331,28 @@ async def context_router_node(state: RAGGraphState) -> dict:
     Updates: sources, file_ids_needed, router_rationale, agent_steps
     """
     t0 = time.monotonic()
-    query = state.get("rewritten_query") or state["query"]
     model_name = state.get("model_name")
     temperature = state.get("temperature", 0.0)
-
     json_llm = _get_llm(model_name, 0.0)
-
-    user_msg = f"Query: {query}"
+    # Router sees BOTH the original and rewritten query.
+    # The rewriter strips conversational references ("your previous answer",
+    # "as you mentioned") because they have no vector-search value — but those
+    # references are exactly what the router needs to decide whether to include
+    # chat_history as a source.
+    original_query = state["query"]
+    rewritten_query = state.get("rewritten_query") or original_query
+    user_msg = f"Original query: {original_query}"
+    if rewritten_query != original_query:
+        user_msg += f"\nRewritten for retrieval: {rewritten_query}"
     if state.get("file_markdown"):
         user_msg += "\n\n[A file is currently attached to this conversation.]"
     if state.get("existing_summary"):
         user_msg += "\n\n[There is a conversation summary from earlier turns.]"
+    history = state.get("recent_lc_history") or []
+    from langchain_core.messages import AIMessage as _AIMsg
+    prior_answers = [m for m in history if isinstance(m, _AIMsg) and m.content.strip()]
+    if prior_answers:
+        user_msg += f"\n\n[There are {len(prior_answers)} prior assistant response(s) in this conversation.]"
 
     messages = [
         {"role": "system", "content": _ROUTER_SYSTEM_PROMPT},
@@ -348,6 +385,113 @@ async def context_router_node(state: RAGGraphState) -> dict:
         "sources": sources,
         "file_ids_needed": file_ids_needed,
         "router_rationale": rationale,
+        "agent_steps": (state.get("agent_steps") or []) + [step],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Node: chat_history_retrieval_node
+# ---------------------------------------------------------------------------
+
+async def chat_history_retrieval_node(state: RAGGraphState) -> dict:
+    """
+    Scores prior assistant answers against the current query using the reranker.
+    Only runs when context_router includes "chat_history" in sources.
+
+    Relevant prior answers are stored in chat_history_docs with
+    metadata._source_type="chat_history" so _build_context_string labels them
+    [Prior Answer] (no citation number) and the generator knows not to cite them.
+
+    Logs: [CHAT_HIST] candidates=... passed_threshold=... latency_ms=...
+    Updates: chat_history_docs, agent_steps
+    """
+    t0 = time.monotonic()
+    sources: List[str] = state.get("sources") or []
+
+    if "chat_history" not in sources:
+        step = {"node": "chat_history_retrieval", "status": "skipped", "latency_ms": 0}
+        return {
+            "chat_history_docs": [],
+            "agent_steps": (state.get("agent_steps") or []) + [step],
+        }
+
+    # Score prior answers against the ORIGINAL query, not the rewritten one.
+    # The rewriter strips conversational references, but the reranker needs the
+    # full semantic intent to correctly judge whether a prior answer is relevant.
+    query = state["query"]
+    history = state.get("recent_lc_history") or []
+
+    from langchain_core.messages import AIMessage
+    from langchain_core.documents import Document as LangchainDocument
+
+    # Extract assistant turns only
+    assistant_turns = [
+        (i, msg) for i, msg in enumerate(history)
+        if isinstance(msg, AIMessage) and msg.content.strip()
+    ]
+
+    if not assistant_turns:
+        latency_ms = round((time.monotonic() - t0) * 1000, 1)
+        step = {"node": "chat_history_retrieval", "status": "no_history", "latency_ms": latency_ms}
+        return {
+            "chat_history_docs": [],
+            "agent_steps": (state.get("agent_steps") or []) + [step],
+        }
+
+    # Build LangchainDocument per prior answer.
+    # Truncate at 1800 chars (~460 tokens) to stay within the reranker's
+    # 512-token window (query ~50 tokens + passage ~460 tokens).
+    # Answers front-load key content so tail truncation is safe.
+    docs = [
+        LangchainDocument(
+            page_content=msg.content.strip()[:1800],
+            metadata={"_source_type": "chat_history", "turn": idx, "source": "chat_history"},
+        )
+        for idx, msg in assistant_turns
+    ]
+
+    # Reranker-disabled fallback: include last 2 answers directly
+    if not settings.RERANKER_ENABLED:
+        result_docs = [_serialise_doc(d) for d in docs[-2:]]
+        for d in result_docs:
+            d["metadata"]["_reranker_score"] = 0.0
+        latency_ms = round((time.monotonic() - t0) * 1000, 1)
+        step = {
+            "node": "chat_history_retrieval", "status": "done_no_reranker",
+            "latency_ms": latency_ms, "candidates": len(docs), "docs_found": len(result_docs),
+        }
+        return {
+            "chat_history_docs": result_docs,
+            "agent_steps": (state.get("agent_steps") or []) + [step],
+        }
+
+    # Score each prior answer against the query.
+    # Threshold 0.0: empirically relevant answers score 9+, irrelevant score -11.
+    # 0.0 cleanly separates them with no ambiguous middle ground.
+    try:
+        from app.services.reranker import rerank
+        ranked = rerank(query=query, docs=docs, score_threshold=0.0)
+    except Exception as exc:
+        logger.warning("[CHAT_HIST] reranker failed: %s — skipping chat history", exc)
+        ranked = []
+
+    result_docs = [_serialise_doc(d) for d in ranked]
+
+    latency_ms = round((time.monotonic() - t0) * 1000, 1)
+    logger.info(
+        "[CHAT_HIST] query=%r | candidates=%d | passed=%d | latency_ms=%.1f",
+        query[:60], len(docs), len(result_docs), latency_ms,
+    )
+
+    step = {
+        "node": "chat_history_retrieval", "status": "done",
+        "latency_ms": latency_ms,
+        "candidates": len(docs),
+        "docs_found": len(result_docs),
+        "scores": [round(d["metadata"].get("_reranker_score", 0), 3) for d in result_docs],
+    }
+    return {
+        "chat_history_docs": result_docs,
         "agent_steps": (state.get("agent_steps") or []) + [step],
     }
 
@@ -466,6 +610,15 @@ async def parallel_retrieval_node(state: RAGGraphState) -> dict:
             "score": round(float(meta.get("_reinforced_score", 0)), 4),
             "retrieval_count": int(meta.get("_retrieval_count", 1)),
         })
+
+    # Prepend chat history docs (already reranker-scored, no RRF scoring).
+    # They go at the front so they're always in the [:20] context slice.
+    # _build_context_string labels them [Prior Answer] (no citation number).
+    chat_history_docs: list = state.get("chat_history_docs") or []
+    if chat_history_docs:
+        merged = chat_history_docs + merged
+        logger.info("[PARALLEL_RETRIEVE] prepended %d chat_history_docs, total=%d",
+                    len(chat_history_docs), len(merged))
 
     step = {
         "node": "parallel_retrieval", "status": "done", "latency_ms": latency_ms,
@@ -587,7 +740,8 @@ If the context contains no information for a sub-question, write:
 ### Sub-question N: <text>
 [NO INFORMATION FOUND]
 
-Use inline citations [N](N) when you reference context chunk [KB-N].
+Use inline citations [N](N) when you reference a knowledge base chunk [KB-N].
+[Prior Answer] sections are previous conversation context — use them freely but do NOT cite them.
 Keep each section concise (2-4 sentences). This draft is for internal quality grading only.
 """
 
@@ -941,9 +1095,21 @@ async def keyword_search_loop_node(state: RAGGraphState) -> dict:
 
 _FINAL_ANSWER_SYSTEM = """\
 You are a helpful assistant. Answer the user's question using ONLY the provided context.
-Structure your answer clearly. When you use information from a context chunk, cite it
-as a markdown link: [N](N) where N is the chunk number from [KB-N].
-Only cite chunks you actually used.
+
+FORMATTING RULES:
+- Use ### headers to divide multi-part answers (e.g., "### 1. Definition", "### 2. How It Works").
+- Use numbered lists for sequential steps or algorithms.
+- Use bullet points with **bold terms** for features, attributes, or comparisons.
+- Use inline code for variable names, identifiers, and technical terms (e.g., `wait()`, `Available[j]`).
+- For simple single-concept questions, plain prose is fine — do not force structure.
+
+CITATION RULES — follow exactly:
+- When you use information from a knowledge base chunk labelled [KB-N], cite it inline
+  as a markdown link using ONLY the number: [N](N)
+- Example: "Process scheduling [1](1) involves saving CPU state [2](2)."
+- Do NOT write [KB-1] or [KB-N] in your answer — write [1](1) or [N](N).
+- Only cite chunks you actually used.
+- [Prior Answer] sections are previous conversation context — use them freely but do NOT cite them.
 
 If some parts of the question could not be answered from available context, clearly state:
 "I could not find sufficient information about: [specific topic]"
@@ -962,7 +1128,6 @@ async def generate_answer_node(state: RAGGraphState) -> dict:
     model_name = state.get("model_name")
     temperature: float = state.get("temperature", 0.0)
     existing_summary: Optional[str] = state.get("existing_summary")
-    recent_history = state.get("recent_lc_history") or []
     query = state.get("rewritten_query") or state["query"]
     attempt = state.get("retrieval_attempt", 0)
 
@@ -978,16 +1143,13 @@ async def generate_answer_node(state: RAGGraphState) -> dict:
             + "\n".join(f"  - {sq}" for sq in uncovered)
         )
 
+    # Generator context: summary only — same policy as fast/thinking pipeline.
+    # Raw prior answers pollute context and cause the LLM to treat its own
+    # previous responses as user statements. The summary provides all necessary
+    # prior context in a clean, condensed form.
     messages: list = [{"role": "system", "content": _FINAL_ANSWER_SYSTEM + coverage_note}]
     if existing_summary:
-        messages.append({"role": "system", "content": f"[Earlier conversation summary]\n{existing_summary}"})
-
-    from langchain_core.messages import HumanMessage, AIMessage
-    for msg in recent_history[-6:]:
-        if isinstance(msg, HumanMessage):
-            messages.append({"role": "user", "content": msg.content})
-        elif isinstance(msg, AIMessage):
-            messages.append({"role": "assistant", "content": msg.content})
+        messages.append({"role": "system", "content": f"[Conversation summary so far]\n{existing_summary}"})
 
     messages.append({
         "role": "user",
@@ -1014,9 +1176,14 @@ async def generate_answer_node(state: RAGGraphState) -> dict:
         streamed_parts = ["I encountered an error generating the response. Please try again."]
 
     answer = re.sub(
-        r'\[(\d+)\](?!\()',
+        r'\[KB-(\d+)\]',
         lambda m: f'[{m.group(1)}]({m.group(1)})',
         "".join(streamed_parts),
+    )
+    answer = re.sub(
+        r'\[(\d+)\](?!\()',
+        lambda m: f'[{m.group(1)}]({m.group(1)})',
+        answer,
     )
 
     latency_ms = round((time.monotonic() - t0) * 1000, 1)
@@ -1040,7 +1207,7 @@ async def generate_answer_node(state: RAGGraphState) -> dict:
 # ---------------------------------------------------------------------------
 
 _KNOWN_NODES = {
-    "rewrite_query", "context_router", "decompose_query",
+    "rewrite_query", "context_router", "chat_history_retrieval", "decompose_query",
     "parallel_retrieval", "extract_file_sections",
     "draft_answer", "grade_coverage",
     "widened_retrieval", "keyword_search_loop", "generate_answer",
@@ -1054,6 +1221,7 @@ def _build_rag_graph():
 
     builder.add_node("rewrite_query",         rewrite_query_node)
     builder.add_node("context_router",        context_router_node)
+    builder.add_node("chat_history_retrieval", chat_history_retrieval_node)
     builder.add_node("decompose_query",       decompose_query_node)
     builder.add_node("parallel_retrieval",    parallel_retrieval_node)
     builder.add_node("extract_file_sections", extract_file_sections_node)
@@ -1067,8 +1235,9 @@ def _build_rag_graph():
     builder.set_entry_point("rewrite_query")
 
     # Linear spine
-    builder.add_edge("rewrite_query",         "context_router")
-    builder.add_edge("context_router",        "decompose_query")
+    builder.add_edge("rewrite_query",          "context_router")
+    builder.add_edge("context_router",         "chat_history_retrieval")
+    builder.add_edge("chat_history_retrieval", "decompose_query")
     builder.add_edge("decompose_query",       "parallel_retrieval")
     builder.add_edge("parallel_retrieval",    "extract_file_sections")
     builder.add_edge("extract_file_sections", "draft_answer")
@@ -1134,6 +1303,7 @@ async def run_stream(
         "rewritten_query": "",
         "sub_queries": [],
         "sources": [],
+        "chat_history_docs": [],
         "file_ids_needed": [],
         "router_rationale": "",
         "file_markdown": file_markdown,
@@ -1223,17 +1393,17 @@ async def run_stream(
     # ── Post-graph: citation normalisation ───────────────────────────────
     if answer_streaming_started and streamed_answer_parts:
         raw_answer = "".join(streamed_answer_parts)
-        normalised = re.sub(
-            r'\[(\d+)\](?!\()',
-            lambda m: f'[{m.group(1)}]({m.group(1)})',
-            raw_answer,
-        )
+        # Normalise [KB-N] citations the LLM emits instead of [N](N)
+        normalised = re.sub(r'\[KB-(\d+)\]', lambda m: f'[{m.group(1)}]({m.group(1)})', raw_answer)
+        normalised = re.sub(r'\[(\d+)\](?!\()', lambda m: f'[{m.group(1)}]({m.group(1)})', normalised)
         if normalised != raw_answer:
             yield {"event": "answer_rewrite", "content": normalised}
         final_state["answer"] = normalised
 
     # ── Context event (summary of all retrieval) ─────────────────────────
-    docs = final_state.get("retrieved_docs") or []
+    # Exclude chat_history_docs — conversational context, not citable KB sources.
+    all_docs = final_state.get("retrieved_docs") or []
+    docs = [d for d in all_docs if d.get("metadata", {}).get("_source_type") != "chat_history"]
     answer = final_state.get("answer") or ""
     coverage_result = final_state.get("coverage_result") or {}
     covered_count = sum(1 for s in coverage_result.values() if s == "covered")
