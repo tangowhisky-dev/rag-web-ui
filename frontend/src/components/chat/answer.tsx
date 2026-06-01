@@ -8,7 +8,7 @@ import React, {
   ClassAttributes,
 } from "react";
 import { AnchorHTMLAttributes } from "react";
-import { ChevronDown, ChevronRight, Brain, Search, BookOpen, Share2, Copy, Trash2, FileText, FileImage, FileType } from "lucide-react";
+import { ChevronDown, ChevronRight, Brain, Search, BookOpen, Share2, Copy, Trash2, FileText, FileImage, FileType, RefreshCw } from "lucide-react";
 import { AgentTimeline } from "./agent-timeline";
 import {
   Popover,
@@ -438,7 +438,7 @@ const ConfidenceCollapsible: FC<{
   const [open, setOpen] = useState(false);
   const cfg = CONFIDENCE_COLORS[level];
   const label = CONFIDENCE_CONFIG[level].label;
-  const pct = score !== undefined ? score : 0;
+  const pct = score !== undefined ? Math.round(score * 100) : 0;
 
   return (
     <div className={`rounded-md border ${cfg.border} ${cfg.bg} text-xs not-prose`}>
@@ -453,7 +453,7 @@ const ConfidenceCollapsible: FC<{
           <ChevronRight className={`h-3 w-3 shrink-0 ${cfg.text}`} />
         )}
         <span className={`font-medium shrink-0 ${cfg.text}`}>
-          Confidence: {label}{score !== undefined ? ` · ${score}/100` : ""}
+          Confidence: {label}{score !== undefined ? ` · ${Math.round(score * 100)}/100` : ""}
         </span>
         {/* inline progress bar */}
         <div className="flex-1 h-1.5 rounded-full bg-zinc-200 dark:bg-zinc-700 overflow-hidden">
@@ -544,6 +544,19 @@ export const Answer: FC<{
   const citationInfoMapRef = useRef(citationInfoMap);
   citationsRef.current = citations;
   citationInfoMapRef.current = citationInfoMap;
+
+  // renderKey forces <Markdown> to remount when citations become ready.
+  // Auto-incremented by useEffect when streaming ends; also exposed as a manual button.
+  const [renderKey, setRenderKey] = useState(0);
+  const wasStreamingRef = useRef(false);
+  useEffect(() => {
+    if (isStreaming) {
+      wasStreamingRef.current = true;
+    } else if (wasStreamingRef.current) {
+      wasStreamingRef.current = false;
+      setRenderKey((k) => k + 1);
+    }
+  }, [isStreaming]);
 
   const parsedContent = useMemo(() => {
     // Non-anchored: handles models that emit text before <think> (preamble)
@@ -858,7 +871,7 @@ export const Answer: FC<{
       )}
       {parsedContent.answerText && (
         <Markdown
-          key={citations.length > 0 ? "with-citations" : "no-citations"}
+          key={`${citations.length > 0 ? "with-citations" : "no-citations"}-${renderKey}`}
           remarkPlugins={[remarkGfm, remarkMath]}
           rehypePlugins={[rehypeHighlight, [rehypeKatex, { throwOnError: false }]]}
           components={markdownComponents}
@@ -880,6 +893,16 @@ export const Answer: FC<{
               <Copy className="h-3.5 w-3.5" />
               <span>{copied ? "Copied" : "Copy"}</span>
             </button>
+            {citations.length > 0 && !isStreaming && (
+              <button
+                onClick={() => setRenderKey((k) => k + 1)}
+                title="Refresh citations"
+                className="flex items-center gap-1 px-2 py-1 rounded text-xs text-zinc-500 hover:text-zinc-800 hover:bg-zinc-100 dark:hover:text-zinc-200 dark:hover:bg-zinc-800 transition-colors"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                <span>Citations</span>
+              </button>
+            )}
             <button
               onClick={() => handleExport("word")}
               title="Export as Word"

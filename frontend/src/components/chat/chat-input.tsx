@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback } from "react";
-import { Paperclip, ArrowUp, Zap, Brain, Bot, Square } from "lucide-react";
+import { useState, useRef, useEffect } from "react";
+import { Paperclip, ArrowUp, Zap, Brain, Bot, Square, ArrowRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
   Select,
@@ -51,45 +51,17 @@ interface InputBarProps {
   onAnsweringModeChange?: (mode: AnsweringMode) => void;
 }
 
-const LINES_MIN = 1;
-const LINES_MAX = 5;
-const LINE_HEIGHT_PX = 24; // matches textarea line-height
+const LINE_HEIGHT_PX = 24;
+const MIN_HEIGHT_PX = 2 * LINE_HEIGHT_PX;  // 2 lines default
+const MAX_HEIGHT_PX = 10 * LINE_HEIGHT_PX; // 10 lines max
 
-function useAutoResize(value: string) {
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const hiddenSpanRef = useRef<HTMLSpanElement>(null);
-
-  const resize = useCallback(() => {
-    const ta = textareaRef.current;
-    const span = hiddenSpanRef.current;
-    if (!ta || !span) return;
-
-    // Keep textarea and span in sync for measurement
-    span.style.fontSize = getComputedStyle(ta).fontSize;
-    span.style.fontFamily = getComputedStyle(ta).fontFamily;
-    span.style.padding = getComputedStyle(ta).padding;
-    span.style.boxSizing = getComputedStyle(ta).boxSizing;
-    span.style.width = getComputedStyle(ta).width;
-    span.textContent = value || "\u00A0"; // non-breaking space preserves height when empty
-
-    const neededLines = Math.ceil(span.scrollHeight / LINE_HEIGHT_PX);
-    const clampedLines = Math.max(LINES_MIN, Math.min(neededLines, LINES_MAX));
-    ta.style.height = `${clampedLines * LINE_HEIGHT_PX}px`;
-
-    if (neededLines > LINES_MAX) {
-      ta.style.overflowY = "auto";
-      ta.style.maxHeight = `${LINES_MAX * LINE_HEIGHT_PX}px`;
-    } else {
-      ta.style.overflowY = "hidden";
-      ta.style.maxHeight = "";
-    }
-  }, [value]);
-
+function useAutoResize(ref: React.RefObject<HTMLTextAreaElement>, value: string) {
   useEffect(() => {
-    resize();
-  }, [resize]);
-
-  return { textareaRef, hiddenSpanRef };
+    const ta = ref.current;
+    if (!ta) return;
+    ta.style.height = "auto";
+    ta.style.height = `${Math.min(Math.max(ta.scrollHeight, MIN_HEIGHT_PX), MAX_HEIGHT_PX)}px`;
+  }, [value, ref]);
 }
 
 export function InputBar({
@@ -116,7 +88,8 @@ export function InputBar({
     setInternalMode(m);
     onAnsweringModeChange?.(m);
   };
-  const { textareaRef, hiddenSpanRef } = useAutoResize(value);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  useAutoResize(textareaRef, value);
 
   const [internalError, setInternalError] = useState("");
   const activeError = onFileError !== undefined ? fileError : internalError;
@@ -198,22 +171,14 @@ export function InputBar({
       )}
       data-testid="chat-input-container"
     >
-      {/* Hidden span for textarea height measurement */}
-      <span
-        ref={hiddenSpanRef}
-        className="absolute invisible whitespace-pre-wrap break-words"
-        style={{ width: "100%", lineHeight: `${LINE_HEIGHT_PX}px` }}
-      />
-
-      {/* File chip (inside card, above textarea) */}
       {uploadedFile && (
         <div className="px-3 pt-3">
           <FileChip uploadedFile={uploadedFile} onRemove={handleFileRemove} />
         </div>
       )}
 
-      {/* Textarea */}
-      <div className="px-3 pt-3 pb-1">
+      {/* Textarea + send button — right-center aligned */}
+      <div className="flex items-center px-3 pt-3 pb-1 gap-2">
         <textarea
           ref={textareaRef}
           value={value}
@@ -221,21 +186,46 @@ export function InputBar({
           onKeyDown={handleKeyDown}
           placeholder={placeholder}
           disabled={disabled}
-          rows={LINES_MIN}
+          rows={1}
           className={cn(
-            "w-full resize-none border-0 bg-transparent text-sm",
+            "flex-1 resize-none border-0 bg-transparent text-sm",
             "focus:outline-none focus:ring-0 disabled:cursor-not-allowed disabled:opacity-50",
-            "placeholder:text-muted-foreground"
+            "placeholder:text-muted-foreground overflow-y-auto"
           )}
-          style={{
-            height: `${LINES_MIN * LINE_HEIGHT_PX}px`,
-            lineHeight: `${LINE_HEIGHT_PX}px`,
-          }}
+          style={{ lineHeight: `${LINE_HEIGHT_PX}px`, height: `${LINE_HEIGHT_PX * 2}px` }}
           data-testid="chat-input-textarea"
         />
+        {/* Send / Stop button — right-center of input */}
+        {disabled ? (
+          <button
+            type="button"
+            onClick={onStop}
+            className="h-8 w-8 rounded-full flex items-center justify-center transition-all shrink-0 bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            aria-label="Stop generation"
+            data-testid="chat-input-stop-button"
+          >
+            <Square className="h-3.5 w-3.5 fill-current" />
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={onSubmit}
+            disabled={!value.trim() || uploadedFile?.status === "processing"}
+            className={cn(
+              "h-8 w-8 rounded-full flex items-center justify-center transition-all shrink-0",
+              !value.trim()
+                ? "bg-muted text-muted-foreground"
+                : "bg-primary text-primary-foreground hover:bg-primary/90",
+              "disabled:pointer-events-none"
+            )}
+            data-testid="chat-input-send-button"
+          >
+            <ArrowRight className="h-4 w-4" />
+          </button>
+        )}
       </div>
 
-      {/* Bottom row: attach + KB chips | mode pills (center) | send */}
+      {/* Bottom row: attach + KB chips | mode pills */}
       <div className="flex items-center justify-between px-2 pb-2 gap-2">
         <div className="flex items-center gap-1">
           {/* File attach button */}
@@ -323,35 +313,6 @@ export function InputBar({
             );
           })}
         </div>
-
-        {/* Send / Stop button */}
-        {disabled ? (
-          <button
-            type="button"
-            onClick={onStop}
-            className="h-8 w-8 rounded-full flex items-center justify-center transition-all shrink-0 bg-destructive text-destructive-foreground hover:bg-destructive/90"
-            aria-label="Stop generation"
-            data-testid="chat-input-stop-button"
-          >
-            <Square className="h-3.5 w-3.5 fill-current" />
-          </button>
-        ) : (
-          <button
-            type="button"
-            onClick={onSubmit}
-            disabled={!value.trim() || uploadedFile?.status === "processing"}
-            className={cn(
-              "h-8 w-8 rounded-full flex items-center justify-center transition-all shrink-0",
-              !value.trim()
-                ? "bg-muted text-muted-foreground"
-                : "bg-primary text-primary-foreground hover:bg-primary/90",
-              "disabled:pointer-events-none"
-            )}
-            data-testid="chat-input-send-button"
-          >
-            <ArrowUp className="h-4 w-4" />
-          </button>
-        )}
       </div>
 
       {/* File error */}

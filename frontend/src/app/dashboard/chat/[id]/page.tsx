@@ -16,8 +16,7 @@ import { useEffect, useRef, useState, useMemo } from "react";
 import { flushSync } from "react-dom";
 import { useRouter } from "next/navigation";
 import { Copy, Trash2 } from "lucide-react";
-import ChatLayout from "@/components/layout/chat-layout";
-import { useChatContext, ChatProvider } from "@/contexts/chat-context";
+import { useChatContext } from "@/contexts/chat-context";
 import ChatSettings from "@/components/chat/chat-settings";
 import type { ChatPatch } from "@/components/chat/chat-settings";
 import { api, ApiError } from "@/lib/api";
@@ -97,7 +96,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const { toast } = useToast();
-  const { setActiveChat } = useChatContext();
+  const { setActiveChat, setGraphRagActive } = useChatContext();
   const [isInitialLoad, setIsInitialLoad] = useState(true);
   const [chatTitle, setChatTitle] = useState<string | undefined>();
   const [useGraphRag, setUseGraphRag] = useState(false);
@@ -180,15 +179,20 @@ function ChatPageInner({ params }: { params: { id: string } }) {
 
   useEffect(() => {
     setActiveChat(Number(params.id));
-    return () => setActiveChat(null);
-  }, [params.id, setActiveChat]);
+    return () => { setActiveChat(null); setGraphRagActive(false); };
+  }, [params.id, setActiveChat, setGraphRagActive]);
+
+  useEffect(() => {
+    setGraphRagActive(useGraphRag);
+  }, [useGraphRag, setGraphRagActive]);
 
   useEffect(() => {
     if (isInitialLoad) {
       fetchChat();
-      setIsInitialLoad(false);
+      // NOTE: do NOT setIsInitialLoad(false) here — fetchChat does it in its finally block
     }
-  }, [isInitialLoad]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (!isInitialLoad) {
@@ -279,6 +283,8 @@ function ChatPageInner({ params }: { params: { id: string } }) {
         });
       }
       router.push("/dashboard/chat");
+    } finally {
+      setIsInitialLoad(false);
     }
   };
 
@@ -292,6 +298,8 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       .replace(/[cC]itation:(\d+)]]/g, "citation:$1]")
       .replace(/\[\[([cC]itation:\d+)]](?!])/g, `[$1]`)
       .replace(/\[[cC]itation:(\d+)]/g, "[citation]($1)")
+      // Agentic pipeline emits [KB-N] labels instead of [N](N).
+      .replace(/\[KB-(\d+)\]/g, "[citation]($1)")
       // Fallback: plain [N] that the model emits instead of [citation:N].
       // Only match standalone bracketed numbers (not part of markdown list
       // syntax "1." or already-converted "[citation](N)").
@@ -386,7 +394,8 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     if (trimmedLine.startsWith("2:")) {
       try {
         const payload = JSON.parse(trimmedLine.slice(2)) as {
-          context: Array<{ page_content: string; metadata: Record<string, any> }>;
+          docs?: Array<{ page_content: string; metadata: Record<string, any> }>;
+          context?: Array<{ page_content: string; metadata: Record<string, any> }>;
           confidence?: string;
           score?: number;
           suggestion?: string | null;
@@ -407,7 +416,9 @@ function ChatPageInner({ params }: { params: { id: string } }) {
           }>;
           synthesis_mode?: boolean;
         };
-        const citations: Citation[] = payload.context.map((doc, index) => ({
+        // Backend fast_pipeline sends "docs"; rag_graph sends "context"
+        const rawDocs = payload.docs ?? payload.context ?? [];
+        const citations: Citation[] = rawDocs.map((doc, index) => ({
           id: index + 1,
           text: doc.page_content,
           metadata: doc.metadata,
@@ -418,7 +429,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
         appendAssistantChunk(assistantId, (message) => ({
           ...message,
           citations,
-          retrievedContext: payload.context,
+          retrievedContext: rawDocs,
           confidence: rawConfidence,
           confidenceScore: payload.score,
           confidenceBreakdown: payload.breakdown,
@@ -739,7 +750,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
   };
 
   return (
-    <ChatLayout pageTitle={chatTitle ?? undefined} graphRagActive={useGraphRag}>
+    <>
       <div className="flex flex-col h-full relative">
 
 
@@ -762,7 +773,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
 
         {/* Scroll area */}
         <div className="flex-1 overflow-y-auto min-h-0 pt-14 pb-28">
-          {processedMessages.length === 0 && !isLoading ? (
+          {processedMessages.length === 0 && !isLoading && !isInitialLoad ? (
             /* Welcome / empty state */
             <div className="flex flex-col items-center justify-center h-full gap-4 px-4 text-center">
               <img src={APP_LOGO_SRC} alt="logo" className="w-16 h-16 rounded-2xl" />
@@ -896,14 +907,10 @@ function ChatPageInner({ params }: { params: { id: string } }) {
           </div>
         </div>
       </div>
-    </ChatLayout>
+    </>
   );
 }
 
 export default function ChatPage({ params }: { params: { id: string } }) {
-  return (
-    <ChatProvider>
-      <ChatPageInner params={params} />
-    </ChatProvider>
-  );
+  return <ChatPageInner params={params} />;
 }

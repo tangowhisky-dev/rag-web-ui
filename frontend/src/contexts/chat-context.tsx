@@ -22,8 +22,10 @@ interface ChatContextValue {
   chatList: Chat[];
   activeChat: number | null;
   folderList: Folder[];
+  graphRagActive: boolean;
   setChatList: React.Dispatch<React.SetStateAction<Chat[]>>;
   setActiveChat: React.Dispatch<React.SetStateAction<number | null>>;
+  setGraphRagActive: React.Dispatch<React.SetStateAction<boolean>>;
   renameChat: (id: number, title: string) => Promise<void>;
   deleteChat: (id: number) => Promise<void>;
   patchChat: (id: number, patch: Partial<Chat>) => Promise<void>;
@@ -37,10 +39,35 @@ interface ChatContextValue {
 
 const ChatContext = createContext<ChatContextValue | null>(null);
 
+const CHAT_LIST_CACHE_KEY = "rag_chat_list_cache";
+
+// Module-level cache: survives ChatProvider remounts during client-side navigation.
+// Server-side: always [] (no persistence between requests).
+// Client-side: populated after first fetch, reused on any subsequent mount.
+let _chatListCache: Chat[] = [];
+
+function saveChatListCache(list: Chat[]) {
+  _chatListCache = list;
+  try { sessionStorage.setItem(CHAT_LIST_CACHE_KEY, JSON.stringify(list)); } catch {}
+}
+
 export function ChatProvider({ children }: { children: React.ReactNode }) {
-  const [chatList, setChatList] = useState<Chat[]>([]);
+  // Initialize from module-level cache so remounts never flash empty.
+  const [chatList, _setChatList] = useState<Chat[]>(_chatListCache);
+
+  const setChatList: React.Dispatch<React.SetStateAction<Chat[]>> = useCallback(
+    (action) => {
+      _setChatList((prev) => {
+        const next = typeof action === "function" ? action(prev) : action;
+        saveChatListCache(next);
+        return next;
+      });
+    },
+    []
+  );
   const [activeChat, setActiveChat] = useState<number | null>(null);
   const [folderList, setFolderList] = useState<Folder[]>([]);
+  const [graphRagActive, setGraphRagActive] = useState(false);
 
   const fetchFolders = useCallback(async () => {
     try {
@@ -123,8 +150,10 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         chatList,
         activeChat,
         folderList,
+        graphRagActive,
         setChatList,
         setActiveChat,
+        setGraphRagActive,
         renameChat,
         deleteChat,
         patchChat,

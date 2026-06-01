@@ -3,7 +3,6 @@
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2 } from "lucide-react";
-import ChatLayout from "@/components/layout/chat-layout";
 import { useChatContext } from "@/contexts/chat-context";
 
 function ChatIndexInner() {
@@ -11,13 +10,8 @@ function ChatIndexInner() {
   const { chatList } = useChatContext();
 
   useEffect(() => {
-    // chatList starts empty while fetching; wait until the context has resolved.
-    // We detect "resolved" by checking localStorage for a token — if present,
-    // the fetch has been initiated. We redirect once chatList stabilises.
-    // A small delay avoids redirecting before the first fetch completes.
     const timer = setTimeout(() => {
       if (chatList.length > 0) {
-        // chatList is already sorted descending; first item is the latest
         router.replace(`/dashboard/chat/${chatList[0].id}`);
       } else {
         router.replace("/dashboard/chat/new");
@@ -34,9 +28,5 @@ function ChatIndexInner() {
 }
 
 export default function ChatPage() {
-  return (
-    <ChatLayout>
-      <ChatIndexInner />
-    </ChatLayout>
-  );
+  return <ChatIndexInner />;
 }

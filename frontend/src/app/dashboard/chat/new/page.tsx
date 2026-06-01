@@ -3,7 +3,6 @@
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import ChatLayout from "@/components/layout/chat-layout";
 import { api, ApiError } from "@/lib/api";
 import { useToast } from "@/components/ui/use-toast";
 import { Plus } from "lucide-react";
@@ -40,25 +39,16 @@ export default function NewChatPage() {
     } catch (error) {
       console.error("Failed to fetch knowledge bases:", error);
       if (error instanceof ApiError) {
-        toast({
-          title: "Error",
-          description: error.message,
-          variant: "destructive",
-        });
+        toast({ title: "Error", description: error.message, variant: "destructive" });
       }
     }
   };
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!selectedKB) {
-      setError("Please select a knowledge base");
-      return;
-    }
-
+    if (!selectedKB) { setError("Please select a knowledge base"); return; }
     setError("");
     setIsSubmitting(true);
-
     try {
       const data = await api.post("/api/chat", {
         title,
@@ -68,17 +58,12 @@ export default function NewChatPage() {
         use_sparse:    useSparse,
         use_exact:     useExact,
       });
-
       router.push(`/dashboard/chat/${data.id}`);
     } catch (error) {
       console.error("Failed to create chat:", error);
       if (error instanceof ApiError) {
         setError(error.message);
-        toast({
-          title: "Error",
-          description: error.message,
-          variant: "destructive",
-        });
+        toast({ title: "Error", description: error.message, variant: "destructive" });
       } else {
         setError("Failed to create chat");
       }
@@ -87,167 +72,141 @@ export default function NewChatPage() {
     }
   };
 
-  const selectKnowledgeBase = (id: number) => {
-    setSelectedKB(id);
-  };
-
   if (!isLoading && knowledgeBases.length === 0) {
     return (
-      <ChatLayout>
-        <div className="max-w-2xl mx-auto text-center py-16">
-          <h2 className="text-3xl font-bold tracking-tight mb-4">
-            No Knowledge Bases Found
-          </h2>
-          <p className="text-muted-foreground mb-8">
-            You need to create at least one knowledge base before starting a
-            chat.
-          </p>
-          <Link
-            href="/dashboard/knowledge"
-            className="inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-4 py-2"
-          >
-            <Plus className="mr-2 h-4 w-4" />
-            Create Knowledge Base
-          </Link>
-        </div>
-      </ChatLayout>
+      <div className="max-w-2xl mx-auto text-center py-16">
+        <h2 className="text-3xl font-bold tracking-tight mb-4">No Knowledge Bases Found</h2>
+        <p className="text-muted-foreground mb-8">
+          You need to create at least one knowledge base before starting a chat.
+        </p>
+        <Link
+          href="/dashboard/knowledge"
+          className="inline-flex items-center justify-center rounded-md text-sm font-medium bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-4 py-2"
+        >
+          <Plus className="mr-2 h-4 w-4" />
+          Create Knowledge Base
+        </Link>
+      </div>
     );
   }
 
   return (
-    <ChatLayout>
-      <div className="max-w-2xl mx-auto space-y-4 pt-16">
-        <div>
-          <h2 className="text-3xl font-bold tracking-tight">Start New Chat</h2>
+    <div className="max-w-2xl mx-auto space-y-4 pt-16">
+      <div>
+        <h2 className="text-3xl font-bold tracking-tight">Start New Chat</h2>
+      </div>
+
+      <form onSubmit={handleSubmit} className="space-y-6">
+        <div className="space-y-2">
+          <label htmlFor="title" className="text-sm font-medium leading-none">
+            Chat Title
+          </label>
+          <input
+            id="title"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            type="text"
+            required
+            className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            placeholder="Enter chat title"
+          />
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-6">
-          <div className="space-y-2">
-            <label
-              htmlFor="title"
-              className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
-            >
-              Chat Title
-            </label>
-            <input
-              id="title"
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              type="text"
-              required
-              className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
-              placeholder="Enter chat title"
-            />
-          </div>
-
-          <div className="space-y-1">
-            <label className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70">
-              Select a knowledge base to chat with
-            </label>
-            <div className="text-xs text-muted-foreground">
-              Multiple selection coming soon...
-            </div>
-            <div className="grid gap-4 md:grid-cols-2">
-              {isLoading ? (
-                <div className="col-span-2 flex justify-center py-8">
-                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
-                </div>
-              ) : (
-                knowledgeBases.map((kb) => (
-                  <label
-                    key={kb.id}
-                    className={`group flex items-center space-x-3 rounded-lg border p-4 cursor-pointer transition-all duration-200 hover:shadow-md ${
-                      selectedKB === kb.id
-                        ? "border-primary bg-primary/5 shadow-sm"
-                        : "hover:border-primary/50"
-                    }`}
-                  >
-                    <div className="relative flex items-center justify-center">
-                      <input
-                        type="radio"
-                        name="knowledge-base"
-                        className="peer h-4 w-4 shrink-0 rounded-full border border-primary text-primary focus:outline-none focus:ring-2 focus:ring-primary/20 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
-                        checked={selectedKB === kb.id}
-                        onChange={() => selectKnowledgeBase(kb.id)}
-                      />
-                    </div>
-                    <div className="flex-1 space-y-1">
-                      <p className="font-medium group-hover:text-primary transition-colors">
-                        {kb.name}
-                      </p>
-                      <p className="text-sm text-muted-foreground line-clamp-2">
-                        {kb.description || "No description provided"}
-                      </p>
-                    </div>
-                  </label>
-                ))
-              )}
-            </div>
-          </div>
-
-          {error && <div className="text-sm text-red-500">{error}</div>}
-
-          <div className="space-y-1">
-            <label className="text-sm font-medium leading-none">
-              Retrieval Sources
-            </label>
-            <p className="text-xs text-muted-foreground">
-              Select which techniques/ sources to use for retrieval.
-            </p>
-            <div className="grid gap-2">
-              {([
-                { id: "use-exact",     label: "Keyword Search",   desc: "MySQL full-text search — fast, exact term matching",            checked: useExact,    onChange: setUseExact,    disabled: true  },
-                { id: "use-dense",     label: "Dense Vectors",    desc: "Qdrant cosine similarity — semantic / meaning-based retrieval", checked: useDense,    onChange: setUseDense,    disabled: false },
-                { id: "use-sparse",    label: "Sparse Vectors",   desc: "SPLADE — hybrid bag-of-words + learned expansion",              checked: useSparse,   onChange: setUseSparse,   disabled: false },
-                { id: "use-graph-rag", label: "Knowledge Graph",  desc: "Neo4j multi-hop GraphRAG — richer context, slower",            checked: useGraphRag, onChange: setUseGraphRag, disabled: false },
-              ] as const).map(({ id, label, desc, checked, onChange, disabled }) => (
+        <div className="space-y-1">
+          <label className="text-sm font-medium leading-none">
+            Select a knowledge base to chat with
+          </label>
+          <div className="text-xs text-muted-foreground">Multiple selection coming soon...</div>
+          <div className="grid gap-4 md:grid-cols-2">
+            {isLoading ? (
+              <div className="col-span-2 flex justify-center py-8">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary" />
+              </div>
+            ) : (
+              knowledgeBases.map((kb) => (
                 <label
-                  key={id}
-                  htmlFor={id}
-                  className={`flex items-start gap-3 rounded-lg border px-4 py-3 transition-colors ${
-                    disabled
-                      ? "border-primary bg-primary/5 cursor-default opacity-75"
-                      : checked
-                        ? "border-primary bg-primary/5 cursor-pointer"
-                        : "hover:border-primary/40 cursor-pointer"
+                  key={kb.id}
+                  className={`group flex items-center space-x-3 rounded-lg border p-4 cursor-pointer transition-all duration-200 hover:shadow-md ${
+                    selectedKB === kb.id ? "border-primary bg-primary/5 shadow-sm" : "hover:border-primary/50"
                   }`}
                 >
                   <input
-                    id={id}
-                    type="checkbox"
-                    checked={checked}
-                    onChange={(e) => !disabled && onChange(e.target.checked)}
-                    disabled={disabled}
-                    className="mt-0.5 h-4 w-4 shrink-0 rounded border border-input accent-primary disabled:cursor-not-allowed"
+                    type="radio"
+                    name="knowledge-base"
+                    className="peer h-4 w-4 shrink-0 rounded-full border border-primary"
+                    checked={selectedKB === kb.id}
+                    onChange={() => setSelectedKB(kb.id)}
                   />
-                  <div>
-                    <span className="text-sm font-medium">{label}</span>
-                    {disabled && <span className="ml-2 text-xs text-muted-foreground">(always on)</span>}
-                    <span className="block text-xs text-muted-foreground">{desc}</span>
+                  <div className="flex-1 space-y-1">
+                    <p className="font-medium group-hover:text-primary transition-colors">{kb.name}</p>
+                    <p className="text-sm text-muted-foreground line-clamp-2">
+                      {kb.description || "No description provided"}
+                    </p>
                   </div>
                 </label>
-              ))}
-            </div>
+              ))
+            )}
           </div>
+        </div>
 
-          <div className="flex justify-end space-x-4">
-            <button
-              type="button"
-              onClick={() => router.back()}
-              className="inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 border border-input bg-background hover:bg-accent hover:text-accent-foreground h-10 px-4 py-2"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={isSubmitting || !selectedKB}
-              className="inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-4 py-2"
-            >
-              {isSubmitting ? "Creating..." : "Start Chat"}
-            </button>
+        {error && <div className="text-sm text-red-500">{error}</div>}
+
+        <div className="space-y-1">
+          <label className="text-sm font-medium leading-none">Retrieval Sources</label>
+          <p className="text-xs text-muted-foreground">Select which techniques/sources to use for retrieval.</p>
+          <div className="grid gap-2">
+            {([
+              { id: "use-exact",     label: "Keyword Search",  desc: "MySQL full-text search — fast, exact term matching",            checked: useExact,    onChange: setUseExact,    disabled: true  },
+              { id: "use-dense",     label: "Dense Vectors",   desc: "Qdrant cosine similarity — semantic / meaning-based retrieval", checked: useDense,    onChange: setUseDense,    disabled: false },
+              { id: "use-sparse",    label: "Sparse Vectors",  desc: "SPLADE — hybrid bag-of-words + learned expansion",              checked: useSparse,   onChange: setUseSparse,   disabled: false },
+              { id: "use-graph-rag", label: "Knowledge Graph", desc: "Neo4j multi-hop GraphRAG — richer context, slower",            checked: useGraphRag, onChange: setUseGraphRag, disabled: false },
+            ] as const).map(({ id, label, desc, checked, onChange, disabled }) => (
+              <label
+                key={id}
+                htmlFor={id}
+                className={`flex items-start gap-3 rounded-lg border px-4 py-3 transition-colors ${
+                  disabled
+                    ? "border-primary bg-primary/5 cursor-default opacity-75"
+                    : checked
+                      ? "border-primary bg-primary/5 cursor-pointer"
+                      : "hover:border-primary/40 cursor-pointer"
+                }`}
+              >
+                <input
+                  id={id}
+                  type="checkbox"
+                  checked={checked}
+                  onChange={(e) => !disabled && onChange(e.target.checked)}
+                  disabled={disabled}
+                  className="mt-0.5 h-4 w-4 shrink-0 rounded border border-input accent-primary disabled:cursor-not-allowed"
+                />
+                <div>
+                  <span className="text-sm font-medium">{label}</span>
+                  {disabled && <span className="ml-2 text-xs text-muted-foreground">(always on)</span>}
+                  <span className="block text-xs text-muted-foreground">{desc}</span>
+                </div>
+              </label>
+            ))}
           </div>
-        </form>
-      </div>
-    </ChatLayout>
+        </div>
+
+        <div className="flex justify-end space-x-4">
+          <button
+            type="button"
+            onClick={() => router.back()}
+            className="inline-flex items-center justify-center rounded-md text-sm font-medium border border-input bg-background hover:bg-accent h-10 px-4 py-2"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            disabled={isSubmitting || !selectedKB}
+            className="inline-flex items-center justify-center rounded-md text-sm font-medium bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 h-10 px-4 py-2"
+          >
+            {isSubmitting ? "Creating..." : "Start Chat"}
+          </button>
+        </div>
+      </form>
+    </div>
   );
 }
