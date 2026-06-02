@@ -26,6 +26,17 @@ from app.schemas.knowledge import (
 from app.services.document_processor import process_document_background, upload_document, preview_document, PreviewResult, SUPPORTED_EXTENSIONS
 from app.core.config import settings
 from app.core.storage import save_file, delete_kb_files, delete_file
+from sqlalchemy import or_
+
+
+def _kb_owner_filter(current_user):
+    """Return SQLAlchemy filter clause scoping KB access.
+    Org users: filter by org_id (whole-org visibility).
+    No-org users: filter by user_id only (backward-compat).
+    """
+    if current_user.org_id is not None:
+        return KnowledgeBase.org_id == current_user.org_id
+    return KnowledgeBase.user_id == current_user.id
 
 
 router = APIRouter()
@@ -52,6 +63,7 @@ def create_knowledge_base(
         description=kb_in.description,
         user_id=current_user.id
     )
+    kb.org_id = current_user.org_id
     db.add(kb)
     db.commit()
     db.refresh(kb)
@@ -70,7 +82,7 @@ def get_knowledge_bases(
     """
     knowledge_bases = (
         db.query(KnowledgeBase)
-        .filter(KnowledgeBase.user_id == current_user.id)
+        .filter(_kb_owner_filter(current_user))
         .offset(skip)
         .limit(limit)
         .all()
@@ -97,7 +109,7 @@ def get_knowledge_base(
         )
         .filter(
             KnowledgeBase.id == kb_id,
-            KnowledgeBase.user_id == current_user.id
+            _kb_owner_filter(current_user)
         )
         .first()
     )
@@ -120,7 +132,7 @@ def update_knowledge_base(
     """
     kb = db.query(KnowledgeBase).filter(
         KnowledgeBase.id == kb_id,
-        KnowledgeBase.user_id == current_user.id
+        _kb_owner_filter(current_user)
     ).first()
     
     if not kb:
@@ -151,7 +163,7 @@ async def delete_knowledge_base(
         db.query(KnowledgeBase)
         .filter(
             KnowledgeBase.id == kb_id,
-            KnowledgeBase.user_id == current_user.id
+            _kb_owner_filter(current_user)
         )
         .first()
     )
@@ -233,7 +245,7 @@ async def upload_kb_documents(
     """
     kb = db.query(KnowledgeBase).filter(
         KnowledgeBase.id == kb_id,
-        KnowledgeBase.user_id == current_user.id
+        _kb_owner_filter(current_user)
     ).first()
     if not kb:
         raise HTTPException(status_code=404, detail="Knowledge base not found")
@@ -317,7 +329,7 @@ async def preview_kb_documents(
         document = db.query(Document).join(KnowledgeBase).filter(
             Document.id == doc_id,
             Document.knowledge_base_id == kb_id,
-            KnowledgeBase.user_id == current_user.id
+            _kb_owner_filter(current_user)
         ).first()
         
         if document:
@@ -326,7 +338,7 @@ async def preview_kb_documents(
             upload = db.query(DocumentUpload).join(KnowledgeBase).filter(
                 DocumentUpload.id == doc_id,
                 DocumentUpload.knowledge_base_id == kb_id,
-                KnowledgeBase.user_id == current_user.id
+                _kb_owner_filter(current_user)
             ).first()
             
             if not upload:
@@ -358,7 +370,7 @@ async def process_kb_documents(
     
     kb = db.query(KnowledgeBase).filter(
         KnowledgeBase.id == kb_id,
-        KnowledgeBase.user_id == current_user.id
+        _kb_owner_filter(current_user)
     ).first()
     
     if not kb:
@@ -486,7 +498,7 @@ async def get_processing_tasks(
     
     kb = db.query(KnowledgeBase).filter(
         KnowledgeBase.id == kb_id,
-        KnowledgeBase.user_id == current_user.id
+        _kb_owner_filter(current_user)
     ).first()
     
     if not kb:
@@ -536,12 +548,12 @@ async def delete_document(
     from app.services.document_processor import _chunk_id_to_point_id
     from qdrant_client.models import PointIdsList
 
-    # Verify the KB belongs to this user
+    # Verify the KB belongs to this user/org
     kb = (
         db.query(KnowledgeBase)
         .filter(
             KnowledgeBase.id == kb_id,
-            KnowledgeBase.user_id == current_user.id
+            _kb_owner_filter(current_user)
         )
         .first()
     )
@@ -652,7 +664,7 @@ async def get_document(
         .filter(
             Document.id == doc_id,
             Document.knowledge_base_id == kb_id,
-            KnowledgeBase.user_id == current_user.id
+            _kb_owner_filter(current_user)
         )
         .first()
     )
@@ -675,7 +687,7 @@ async def test_retrieval(
     try:
         kb = db.query(KnowledgeBase).filter(
             KnowledgeBase.id == request.kb_id,
-            KnowledgeBase.user_id == current_user.id
+            _kb_owner_filter(current_user)
         ).first()
         
         if not kb:
