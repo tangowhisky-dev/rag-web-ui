@@ -21,6 +21,8 @@ from app.models.base import Base  # noqa
 import app.models.user  # noqa
 import app.models.knowledge  # noqa
 import app.models.chat  # noqa
+import app.models.organisation  # noqa
+from app.models.organisation import Organisation
 
 engine = _session_mod.engine
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -130,3 +132,128 @@ def test_admin_only_rejects_unauthenticated(client):
     resp = client.get("/api/auth/admin-only")
     assert resp.status_code in (401, 403), \
         f"Expected 401 or 403, got {resp.status_code}: {resp.text}"
+
+
+# ---------------------------------------------------------------------------
+# Org helpers
+# ---------------------------------------------------------------------------
+
+def create_org(db, name: str, parent_id=None) -> Organisation:
+    """Create an Organisation directly in the DB."""
+    org = Organisation(name=name, parent_id=parent_id)
+    db.add(org)
+    db.flush()
+    if parent_id is not None:
+        parent = db.query(Organisation).filter(Organisation.id == parent_id).first()
+        org.path = f"{parent.path}/{org.id}"
+    else:
+        org.path = f"/{org.id}"
+    db.commit()
+    db.refresh(org)
+    return org
+
+
+def get_admin_token(client, db) -> str:
+    create_user(db, "adminhelper", "pass123", UserRole.admin)
+    return get_token(client, "adminhelper", "pass123")
+
+
+# ---------------------------------------------------------------------------
+# Org tests
+# ---------------------------------------------------------------------------
+
+def test_admin_list_orgs_empty(client, db):
+    token = get_admin_token(client, db)
+    resp = client.get("/api/admin/orgs", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+def test_admin_create_org(client, db):
+    token = get_admin_token(client, db)
+    resp = client.post(
+        "/api/admin/orgs",
+        json={"name": "Acme"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["name"] == "Acme"
+    assert data["parent_id"] is None
+    assert data["path"] == f"/{data['id']}"
+
+
+def test_admin_create_child_org(client, db):
+    token = get_admin_token(client, db)
+
+    # Create parent first
+    parent_resp = client.post(
+        "/api/admin/orgs",
+        json={"name": "Parent"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert parent_resp.status_code == 201
+    parent_id = parent_resp.json()["id"]
+    parent_path = parent_resp.json()["path"]
+
+    # Create child
+    child_resp = client.post(
+        "/api/admin/orgs",
+        json={"name": "Child", "parent_id": parent_id},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert child_resp.status_code == 201
+    child = child_resp.json()
+    assert child["parent_id"] == parent_id
+    # Path must include parent id
+    assert str(parent_id) in child["path"]
+    assert child["path"] == f"{parent_path}/{child['id']}"
+
+
+def test_admin_update_org(client, db):
+    token = get_admin_token(client, db)
+    org = create_org(db, "Original")
+
+    resp = client.patch(
+        f"/api/admin/orgs/{org.id}",
+        json={"name": "Updated"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["name"] == "Updated"
+
+
+def test_admin_delete_org(client, db):
+    token = get_admin_token(client, db)
+    org = create_org(db, "ToDelete")
+
+    resp = client.delete(
+        f"/api/admin/orgs/{org.id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 204
+
+    # Confirm gone
+    list_resp = client.get("/api/admin/orgs", headers={"Authorization": f"Bearer {token}"})
+    ids = [o["id"] for o in list_resp.json()]
+    assert org.id not in ids
+
+
+def test_admin_delete_org_with_children_returns_409(client, db):
+    token = get_admin_token(client, db)
+    parent = create_org(db, "ParentOrg")
+    create_org(db, "ChildOrg", parent_id=parent.id)
+
+    resp = client.delete(
+        f"/api/admin/orgs/{parent.id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 409
+
+
+def test_admin_orgs_rejects_regular_user(client, db):
+    create_user(db, "regularuser2", "pass123", UserRole.user)
+    token = get_token(client, "regularuser2", "pass123")
+
+    resp = client.get("/api/admin/orgs", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 403

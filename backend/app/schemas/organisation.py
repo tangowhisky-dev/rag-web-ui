@@ -1,0 +1,37 @@
+from pydantic import BaseModel, field_serializer
+from typing import Optional
+from datetime import datetime
+
+
+def _as_utc_iso(dt: datetime) -> Optional[str]:
+    if dt is None:
+        return None
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class OrgBase(BaseModel):
+    name: str
+
+
+class OrgCreate(OrgBase):
+    parent_id: Optional[int] = None
+
+
+class OrgUpdate(BaseModel):
+    name: Optional[str] = None
+    parent_id: Optional[int] = None
+
+
+class OrgResponse(OrgBase):
+    id: int
+    parent_id: Optional[int] = None
+    path: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    @field_serializer("created_at", "updated_at")
+    def serialise_datetimes(self, v: datetime) -> Optional[str]:
+        return _as_utc_iso(v)
+
+    class Config:
+        from_attributes = True
