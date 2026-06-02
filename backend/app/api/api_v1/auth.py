@@ -1,3 +1,4 @@
+import logging
 from datetime import timedelta
 from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -12,6 +13,8 @@ from app.db.session import get_db
 from app.models.user import User
 from app.schemas.token import Token
 from app.schemas.user import UserCreate, UserResponse
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -76,9 +79,15 @@ def login_access_token(
     
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = security.create_access_token(
-        data={"sub": user.username}, expires_delta=access_token_expires
+        data={"sub": user.username, "role": user.role.value, "org_id": user.org_id}, expires_delta=access_token_expires
     )
+    logger.info("[AUTH] token_issued username=%s role=%s org_id=%s", user.username, user.role.value, user.org_id)
     return {"access_token": access_token, "token_type": "bearer"}
+
+@router.get("/admin-only", response_model=UserResponse)
+def admin_only(current_user: User = Depends(security.require_admin)) -> Any:
+    return current_user
+
 
 @router.post("/test-token", response_model=UserResponse)
 def test_token(current_user: User = Depends(get_current_user)) -> Any:
