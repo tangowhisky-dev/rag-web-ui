@@ -30,6 +30,16 @@ MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 
 router = APIRouter()
 
+
+def _chat_owner_filter(current_user):
+    """Return SQLAlchemy filter clause scoping Chat access.
+    Org users: filter by org_id.
+    No-org users: filter by user_id only (backward-compat).
+    """
+    if current_user.org_id is not None:
+        return Chat.org_id == current_user.org_id
+    return Chat.user_id == current_user.id
+
 @router.post("", response_model=ChatResponse)
 def create_chat(
     *,
@@ -55,6 +65,7 @@ def create_chat(
     chat = Chat(
         title=chat_in.title,
         user_id=current_user.id,
+        org_id=current_user.org_id,
         use_graph_rag=chat_in.use_graph_rag,
         use_dense=chat_in.use_dense,
         use_sparse=chat_in.use_sparse,
@@ -76,7 +87,7 @@ def get_chats(
 ) -> Any:
     chats = (
         db.query(Chat)
-        .filter(Chat.user_id == current_user.id)
+        .filter(_chat_owner_filter(current_user))
         .offset(skip)
         .limit(limit)
         .all()
@@ -102,7 +113,7 @@ def search_chats(
 
     # Get all chat ids belonging to this user
     chat_ids = [
-        r.id for r in db.query(Chat.id).filter(Chat.user_id == current_user.id).all()
+        r.id for r in db.query(Chat.id).filter(_chat_owner_filter(current_user)).all()
     ]
     if not chat_ids:
         logger.info("[SEARCH] query=%r result_count=0 latency_ms=0 mode=%s", q, mode)
@@ -161,7 +172,7 @@ def get_chat(
         db.query(Chat)
         .filter(
             Chat.id == chat_id,
-            Chat.user_id == current_user.id
+            _chat_owner_filter(current_user)
         )
         .first()
     )
@@ -210,7 +221,7 @@ def get_messages_paginated(
     """
     chat = (
         db.query(Chat)
-        .filter(Chat.id == chat_id, Chat.user_id == current_user.id)
+        .filter(Chat.id == chat_id, _chat_owner_filter(current_user))
         .first()
     )
     if not chat:
@@ -271,7 +282,7 @@ async def create_message(
         .options(joinedload(Chat.knowledge_bases))
         .filter(
             Chat.id == chat_id,
-            Chat.user_id == current_user.id
+            _chat_owner_filter(current_user)
         )
         .first()
     )
@@ -379,7 +390,7 @@ async def create_message_with_file(
     chat = (
         db.query(Chat)
         .options(joinedload(Chat.knowledge_bases))
-        .filter(Chat.id == chat_id, Chat.user_id == current_user.id)
+        .filter(Chat.id == chat_id, _chat_owner_filter(current_user))
         .first()
     )
     if not chat:
@@ -461,7 +472,7 @@ def delete_message(
     """Delete a single assistant message (and the user message that prompted it)."""
     chat = (
         db.query(Chat)
-        .filter(Chat.id == chat_id, Chat.user_id == current_user.id)
+        .filter(Chat.id == chat_id, _chat_owner_filter(current_user))
         .first()
     )
     if not chat:
@@ -492,7 +503,7 @@ def export_message(
     """Export a single assistant message as PDF, Word (.docx), or PNG image."""
     chat = (
         db.query(Chat)
-        .filter(Chat.id == chat_id, Chat.user_id == current_user.id)
+        .filter(Chat.id == chat_id, _chat_owner_filter(current_user))
         .first()
     )
     if not chat:
@@ -534,7 +545,7 @@ def export_chat(
     """Export all messages of a chat as a Markdown file."""
     chat = (
         db.query(Chat)
-        .filter(Chat.id == chat_id, Chat.user_id == current_user.id)
+        .filter(Chat.id == chat_id, _chat_owner_filter(current_user))
         .first()
     )
     if not chat:
@@ -581,7 +592,7 @@ def update_chat(
         db.query(Chat)
         .filter(
             Chat.id == chat_id,
-            Chat.user_id == current_user.id
+            _chat_owner_filter(current_user)
         )
         .first()
     )
@@ -615,7 +626,7 @@ def delete_chat(
         db.query(Chat)
         .filter(
             Chat.id == chat_id,
-            Chat.user_id == current_user.id
+            _chat_owner_filter(current_user)
         )
         .first()
     )
@@ -647,7 +658,7 @@ def edit_message(
     original = (
         db.query(Message)
         .join(Chat, Chat.id == Message.chat_id)
-        .filter(Message.id == message_id, Chat.user_id == current_user.id)
+        .filter(Message.id == message_id, _chat_owner_filter(current_user))
         .first()
     )
     if not original:
@@ -700,7 +711,7 @@ def get_message_siblings(
     target = (
         db.query(Message)
         .join(Chat, Chat.id == Message.chat_id)
-        .filter(Message.id == message_id, Chat.user_id == current_user.id)
+        .filter(Message.id == message_id, _chat_owner_filter(current_user))
         .first()
     )
     if not target:
