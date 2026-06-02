@@ -368,6 +368,7 @@ async def create_message(
             answering_mode=answering_mode,
             api_base=llm_cfg["api_base"],
             query_model=llm_cfg["query_model"],
+            org_id=current_user.org_id,
         ):
             yield chunk
 
@@ -457,6 +458,7 @@ async def create_message_with_file(
             display_query=message,
             api_base=llm_cfg["api_base"],
             query_model=llm_cfg["query_model"],
+            org_id=current_user.org_id,
         ):
             yield chunk
 

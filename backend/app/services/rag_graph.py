@@ -82,6 +82,9 @@ class RAGGraphState(TypedDict):
     temperature: float
     model_name: Optional[str]
     display_query: Optional[str]
+    api_base: Optional[str]
+    query_model: Optional[str]
+    org_id: Optional[int]
     _db: Any
 
 
@@ -257,6 +260,17 @@ async def rewrite_query_node(state: RAGGraphState) -> dict:
     api_base = state.get("api_base")
     query_model_override = state.get("query_model")
     temperature = state.get("temperature", 0.0)
+
+    # ── Abbreviation expansion (before LLM rewrite) ───────────────────────
+    from app.services.query_expander import expand, load_org_abbreviations
+    org_id = state.get("org_id")
+    _db = state.get("_db")
+    abbreviations = load_org_abbreviations(org_id, _db) if _db is not None else {}
+    if abbreviations:
+        expanded = expand(query, abbreviations)
+        if expanded != query:
+            logger.info("[EXPAND] org_id=%s substitutions=%d", org_id, len(abbreviations))
+            query = expanded
 
     llm = _get_llm(model_name, temperature, api_base=api_base)
 
@@ -1305,6 +1319,7 @@ async def run_stream(
     display_query: Optional[str] = None,
     api_base: Optional[str] = None,
     query_model: Optional[str] = None,
+    org_id: Optional[int] = None,
 ) -> AsyncGenerator[dict, None]:
     """
     Async generator that runs the full agentic RAG graph and streams events.
@@ -1347,9 +1362,10 @@ async def run_stream(
         "temperature": temperature,
         "model_name": model_name,
         "display_query": display_query,
-        "api_base": api_base,  # type: ignore[typeddict-unknown-key]
-        "query_model": query_model,  # type: ignore[typeddict-unknown-key]
-        "_db": db,  # type: ignore[typeddict-unknown-key]
+        "api_base": api_base,
+        "query_model": query_model,
+        "org_id": org_id,
+        "_db": db,
     }
 
     final_state: dict = dict(initial_state)

@@ -435,6 +435,7 @@ async def generate_response(
     answering_mode: str = "agentic",
     api_base: Optional[str] = None,
     query_model: Optional[str] = None,
+    org_id: Optional[int] = None,
 ) -> AsyncGenerator[str, None]:
     """
     Stream a chat response for the given query.
@@ -567,6 +568,7 @@ async def generate_response(
                 display_query=display_query,
                 api_base=api_base,
                 query_model=query_model,
+                org_id=org_id,
             )
 
         async for event in stream_iter:
