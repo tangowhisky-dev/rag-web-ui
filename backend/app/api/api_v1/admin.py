@@ -30,6 +30,9 @@ def create_org(
     db: Session = Depends(get_db),
     _: object = Depends(require_admin),
 ):
+    if db.query(Organisation).filter(Organisation.name == payload.name).first():
+        raise HTTPException(status_code=400, detail="Org name already exists")
+
     if payload.parent_id is not None:
         parent = db.query(Organisation).filter(Organisation.id == payload.parent_id).first()
         if parent is None:
@@ -63,6 +66,10 @@ def update_org(
         raise HTTPException(status_code=404, detail="Org not found")
 
     if payload.name is not None:
+        if payload.name != org.name and db.query(Organisation).filter(
+            Organisation.name == payload.name, Organisation.id != org_id
+        ).first():
+            raise HTTPException(status_code=400, detail="Org name already exists")
         org.name = payload.name
 
     if payload.parent_id is not None:
@@ -166,6 +173,12 @@ def create_user(
         org = db.query(Organisation).filter(Organisation.id == payload.org_id).first()
         if org is None:
             raise HTTPException(status_code=404, detail="Org not found")
+
+    if db.query(User).filter(User.email == payload.email).first():
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    if db.query(User).filter(User.username == payload.username).first():
+        raise HTTPException(status_code=400, detail="Username already taken")
 
     try:
         role_enum = UserRole(payload.role)

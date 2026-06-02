@@ -259,6 +259,48 @@ def test_admin_orgs_rejects_regular_user(client, db):
     assert resp.status_code == 403
 
 
+def test_admin_create_org_duplicate_name_returns_400(client, db):
+    """Creating two orgs with the same name must return 400, not 500."""
+    token = get_admin_token(client, db)
+    client.post("/api/admin/orgs", json={"name": "DuplicateOrg"},
+                headers={"Authorization": f"Bearer {token}"})
+
+    resp = client.post("/api/admin/orgs", json={"name": "DuplicateOrg"},
+                       headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 400, resp.text
+    assert "already exists" in resp.json()["detail"].lower()
+
+
+def test_admin_update_org_duplicate_name_returns_400(client, db):
+    """Renaming an org to a name already taken by another org must return 400."""
+    token = get_admin_token(client, db)
+    client.post("/api/admin/orgs", json={"name": "Taken"},
+                headers={"Authorization": f"Bearer {token}"})
+    second = client.post("/api/admin/orgs", json={"name": "Second"},
+                         headers={"Authorization": f"Bearer {token}"}).json()
+
+    resp = client.patch(
+        f"/api/admin/orgs/{second['id']}",
+        json={"name": "Taken"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 400, resp.text
+    assert "already exists" in resp.json()["detail"].lower()
+
+
+def test_admin_update_org_same_name_is_ok(client, db):
+    """PATCHing an org with its current name must succeed (no false duplicate)."""
+    token = get_admin_token(client, db)
+    org = create_org(db, "StableName")
+
+    resp = client.patch(
+        f"/api/admin/orgs/{org.id}",
+        json={"name": "StableName"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200, resp.text
+
+
 # ---------------------------------------------------------------------------
 # User tests
 # ---------------------------------------------------------------------------
@@ -323,6 +365,38 @@ def test_admin_users_rejects_regular_user(client, db):
 
     resp = client.get("/api/admin/users", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 403
+
+
+def test_admin_create_user_duplicate_email_returns_400(client, db):
+    """Creating a user with an already-registered email must return 400."""
+    token = get_admin_token(client, db)
+    client.post("/api/admin/users",
+                json={"username": "user_a", "email": "dup@example.com",
+                      "password": "pass123", "role": "user"},
+                headers={"Authorization": f"Bearer {token}"})
+
+    resp = client.post("/api/admin/users",
+                       json={"username": "user_b", "email": "dup@example.com",
+                             "password": "pass123", "role": "user"},
+                       headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 400, resp.text
+    assert "email" in resp.json()["detail"].lower()
+
+
+def test_admin_create_user_duplicate_username_returns_400(client, db):
+    """Creating a user with an already-taken username must return 400."""
+    token = get_admin_token(client, db)
+    client.post("/api/admin/users",
+                json={"username": "dupuser", "email": "a@example.com",
+                      "password": "pass123", "role": "user"},
+                headers={"Authorization": f"Bearer {token}"})
+
+    resp = client.post("/api/admin/users",
+                       json={"username": "dupuser", "email": "b@example.com",
+                             "password": "pass123", "role": "user"},
+                       headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 400, resp.text
+    assert "username" in resp.json()["detail"].lower()
 
 
 # ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey
+from sqlalchemy import Column, Integer, String, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from .base import Base, TimestampMixin
@@ -21,3 +21,17 @@ class Organisation(Base, TimestampMixin):
     knowledge_bases = relationship("KnowledgeBase", back_populates="organisation")
     chats = relationship("Chat", back_populates="organisation")
     llm_config = relationship("OrgLLMConfig", uselist=False, back_populates="organisation")
+    abbreviations = relationship("OrgAbbreviation", back_populates="organisation", cascade="all, delete-orphan")
+
+
+class OrgAbbreviation(Base):
+    __tablename__ = "org_abbreviations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    org_id = Column(Integer, ForeignKey("organisations.id"), nullable=False, index=True)
+    short = Column(String(64), nullable=False)
+    expansion = Column(String(512), nullable=False)
+
+    __table_args__ = (UniqueConstraint("org_id", "short", name="uq_org_abbreviations_org_short"),)
+
+    organisation = relationship("Organisation", back_populates="abbreviations")

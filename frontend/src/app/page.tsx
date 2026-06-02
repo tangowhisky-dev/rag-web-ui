@@ -106,7 +106,7 @@ export default function Home() {
               {/* Trust signals */}
               <div className="flex flex-wrap items-center gap-6 pt-2">
                 {[
-                  { icon: Shield, label: "SOC 2 ready" },
+                  { icon: Shield, label: "Enterprise ready" },
                   { icon: Network, label: "GraphRAG engine" },
                   { icon: Zap, label: "Sub-second retrieval" },
                 ].map(({ icon: Icon, label }) => (

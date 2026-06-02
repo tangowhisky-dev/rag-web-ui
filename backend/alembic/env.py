@@ -9,7 +9,7 @@ from alembic import context
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.models.base import Base
-from app.models.organisation import Organisation
+from app.models.organisation import Organisation, OrgAbbreviation
 from app.models.user import User
 from app.models.knowledge import KnowledgeBase, Document
 from app.models.chat import Chat, Message
