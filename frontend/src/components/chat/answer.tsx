@@ -654,9 +654,9 @@ export const Answer: FC<{
           <PopoverTrigger asChild>
             <button
               type="button"
-              className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/50 rounded hover:bg-blue-100 dark:hover:bg-blue-900/60 transition-colors relative"
+              className="inline-flex items-center px-1 py-0.5 text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/50 rounded hover:bg-blue-100 dark:hover:bg-blue-900/60 transition-colors"
             >
-              <span className="absolute -top-3 -right-1">[{props.href}]</span>
+              [{props.href}]
             </button>
           </PopoverTrigger>
           <PopoverContent
