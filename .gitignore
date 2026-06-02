@@ -64,6 +64,9 @@ backend/.env
 /samples
 .webui_secret_key
 
+# Hermes specific
+.hermes/
+
 # ── GSD baseline (auto-generated) ──
 .gsd
 .gsd-id
