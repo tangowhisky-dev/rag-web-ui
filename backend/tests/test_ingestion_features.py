@@ -381,3 +381,28 @@ def test_org_ingestion_status_rejects_non_admin(client, db):
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 403, resp.text
+
+
+# ── Group 4: ProgressTimeout ──────────────────────────────────────────────
+import asyncio as _asyncio
+from app.services.progress_timeout import ProgressTimeout
+
+
+@pytest.mark.asyncio
+async def test_progress_timeout_fires():
+    """Timeout callback fires when no ping arrives within the silence window."""
+    fired = []
+    async with ProgressTimeout(silence_seconds=1, on_timeout=lambda: fired.append(True)) as pt:
+        await _asyncio.sleep(2)  # exceed 1-second silence — do NOT call pt.ping()
+    assert fired, "on_timeout should have been called"
+
+
+@pytest.mark.asyncio
+async def test_progress_timeout_no_fire():
+    """Timeout callback does NOT fire when pings arrive before the silence window."""
+    fired = []
+    async with ProgressTimeout(silence_seconds=2, on_timeout=lambda: fired.append(True)) as pt:
+        for _ in range(5):
+            pt.ping()
+            await _asyncio.sleep(0.3)  # 5 x 0.3s = 1.5s total, silence never exceeds 2s
+    assert not fired, "on_timeout must not fire when pings arrive in time"
