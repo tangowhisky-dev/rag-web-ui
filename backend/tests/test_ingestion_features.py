@@ -22,6 +22,7 @@ import app.models.chat  # noqa
 import app.models.organisation  # noqa
 import app.models.org_llm_config  # noqa
 from app.models.organisation import Organisation
+from app.models.knowledge import KnowledgeBase, ProcessingTask
 from app.core.security import get_password_hash
 
 engine = _session_mod.engine
@@ -226,6 +227,157 @@ def test_admin_abbreviation_rejects_regular_user(client, db):
     resp = client.post(
         f"/api/admin/orgs/{org.id}/abbreviations",
         json={"short": "KB", "expansion": "Knowledge Base"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 403, resp.text
+
+
+# ---------------------------------------------------------------------------
+# 3. Org ingestion status tests
+# ---------------------------------------------------------------------------
+
+def create_kb(db, name: str, org_id: int, user_id: int) -> KnowledgeBase:
+    kb = KnowledgeBase(name=name, org_id=org_id, user_id=user_id)
+    db.add(kb)
+    db.commit()
+    db.refresh(kb)
+    return kb
+
+
+def create_task(db, kb_id: int, status: str) -> ProcessingTask:
+    task = ProcessingTask(knowledge_base_id=kb_id, status=status)
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    return task
+
+
+def test_org_ingestion_status_idle_no_tasks(client, db):
+    """Org with a KB but no processing tasks returns idle with zero counts."""
+    token = get_admin_token(client, db)
+    admin = db.query(User).filter(User.username == "adminuser").first()
+    org = create_org(db, "OrgIdle")
+    create_kb(db, "KB1", org.id, admin.id)
+
+    resp = client.get(
+        f"/api/admin/orgs/{org.id}/ingestion-status",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["org_id"] == org.id
+    assert data["status"] == "idle"
+    assert data["total_docs"] == 0
+    assert data["pending_docs"] == 0
+    assert data["completed_docs"] == 0
+    assert data["failed_docs"] == 0
+    assert data["last_run_at"] is None
+
+
+def test_org_ingestion_status_running(client, db):
+    """At least one processing task → status=running."""
+    token = get_admin_token(client, db)
+    admin = db.query(User).filter(User.username == "adminuser").first()
+    org = create_org(db, "OrgRunning")
+    kb = create_kb(db, "KB1", org.id, admin.id)
+    create_task(db, kb.id, "completed")
+    create_task(db, kb.id, "processing")
+
+    resp = client.get(
+        f"/api/admin/orgs/{org.id}/ingestion-status",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["status"] == "running"
+    assert data["total_docs"] == 2
+    assert data["processing_docs"] == 1
+    assert data["completed_docs"] == 1
+
+
+def test_org_ingestion_status_failed(client, db):
+    """No processing tasks but at least one failed → status=failed."""
+    token = get_admin_token(client, db)
+    admin = db.query(User).filter(User.username == "adminuser").first()
+    org = create_org(db, "OrgFailed")
+    kb = create_kb(db, "KB1", org.id, admin.id)
+    create_task(db, kb.id, "completed")
+    create_task(db, kb.id, "failed")
+
+    resp = client.get(
+        f"/api/admin/orgs/{org.id}/ingestion-status",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["status"] == "failed"
+    assert data["failed_docs"] == 1
+    assert data["completed_docs"] == 1
+
+
+def test_org_ingestion_status_completed(client, db):
+    """All tasks completed → status=completed, last_run_at is set."""
+    token = get_admin_token(client, db)
+    admin = db.query(User).filter(User.username == "adminuser").first()
+    org = create_org(db, "OrgCompleted")
+    kb = create_kb(db, "KB1", org.id, admin.id)
+    create_task(db, kb.id, "completed")
+    create_task(db, kb.id, "completed")
+
+    resp = client.get(
+        f"/api/admin/orgs/{org.id}/ingestion-status",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["status"] == "completed"
+    assert data["total_docs"] == 2
+    assert data["completed_docs"] == 2
+    assert data["last_run_at"] is not None
+
+
+def test_org_ingestion_status_multiple_kbs(client, db):
+    """Tasks aggregated across multiple KBs for the same org."""
+    token = get_admin_token(client, db)
+    admin = db.query(User).filter(User.username == "adminuser").first()
+    org = create_org(db, "OrgMultiKB")
+    kb1 = create_kb(db, "KB1", org.id, admin.id)
+    kb2 = create_kb(db, "KB2", org.id, admin.id)
+    create_task(db, kb1.id, "completed")
+    create_task(db, kb2.id, "pending")
+
+    resp = client.get(
+        f"/api/admin/orgs/{org.id}/ingestion-status",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["total_docs"] == 2
+    assert data["completed_docs"] == 1
+    assert data["pending_docs"] == 1
+    # not all completed and no processing/failed → idle
+    assert data["status"] == "idle"
+
+
+def test_org_ingestion_status_not_found(client, db):
+    """Unknown org_id returns 404."""
+    token = get_admin_token(client, db)
+
+    resp = client.get(
+        "/api/admin/orgs/99999/ingestion-status",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 404, resp.text
+
+
+def test_org_ingestion_status_rejects_non_admin(client, db):
+    """Regular user receives 403."""
+    create_user(db, "regularuser2", "pass123", UserRole.user)
+    token = get_token(client, "regularuser2", "pass123")
+    org = create_org(db, "OrgSecure")
+
+    resp = client.get(
+        f"/api/admin/orgs/{org.id}/ingestion-status",
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 403, resp.text
