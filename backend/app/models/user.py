@@ -1,6 +1,15 @@
-from sqlalchemy import Boolean, Column, Integer, String
+import enum
+from sqlalchemy import Boolean, Column, Integer, String, ForeignKey
+from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import relationship
 from app.models.base import Base, TimestampMixin
+
+
+class UserRole(str, enum.Enum):
+    user = 'user'
+    admin = 'admin'
+    super_admin = 'super_admin'
+
 
 class User(Base, TimestampMixin):
     __tablename__ = "users"
@@ -11,7 +20,10 @@ class User(Base, TimestampMixin):
     hashed_password = Column(String(255), nullable=False)
     is_active = Column(Boolean, default=True)
     is_superuser = Column(Boolean, default=False)
+    role = Column(SAEnum(UserRole), nullable=False, default=UserRole.user, server_default='user')
+    org_id = Column(Integer, ForeignKey('organisations.id'), nullable=True, index=True)
 
     # Relationships
     knowledge_bases = relationship("KnowledgeBase", back_populates="user")
     chats = relationship("Chat", back_populates="user")
+    organisation = relationship('Organisation', back_populates='users')

@@ -38,12 +38,14 @@ class Chat(Base, TimestampMixin):
     use_exact     = Column(Boolean, nullable=False, default=True,  server_default="1")
     pinned        = Column(Boolean, nullable=False, default=False, server_default="0")
     folder_id     = Column(Integer, ForeignKey("folders.id", ondelete="SET NULL"), nullable=True, index=True)
+    org_id        = Column(Integer, ForeignKey('organisations.id'), nullable=True, index=True)
 
     # Relationships
     messages = relationship("Message", back_populates="chat", cascade="all, delete-orphan")
     chat_files = relationship("ChatFile", back_populates="chat", cascade="all, delete-orphan")
     user = relationship("User", back_populates="chats")
     folder = relationship("Folder", back_populates="chats")
+    organisation = relationship('Organisation', back_populates='chats')
     knowledge_bases = relationship(
         "KnowledgeBase",
         secondary=chat_knowledge_bases,
