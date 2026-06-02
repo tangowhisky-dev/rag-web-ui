@@ -257,3 +257,69 @@ def test_admin_orgs_rejects_regular_user(client, db):
 
     resp = client.get("/api/admin/orgs", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# User tests
+# ---------------------------------------------------------------------------
+
+def test_admin_list_users(client, db):
+    token = get_admin_token(client, db)
+    resp = client.get("/api/admin/users", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200
+    # At minimum the admin helper user exists
+    assert isinstance(resp.json(), list)
+
+
+def test_admin_create_user_with_role_and_org(client, db):
+    token = get_admin_token(client, db)
+    org = create_org(db, "TestOrg")
+
+    resp = client.post(
+        "/api/admin/users",
+        json={"username": "newuser", "email": "newuser@example.com", "password": "secret123",
+              "role": "user", "org_id": org.id},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 201, resp.text
+    data = resp.json()
+    assert data["username"] == "newuser"
+    assert data["role"] == "user"
+    assert data["org_id"] == org.id
+
+
+def test_admin_update_user_role(client, db):
+    token = get_admin_token(client, db)
+    user = create_user(db, "roletest", "pass123", UserRole.user)
+
+    resp = client.patch(
+        f"/api/admin/users/{user.id}",
+        json={"role": "admin"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["role"] == "admin"
+
+
+def test_admin_deactivate_user(client, db):
+    token = get_admin_token(client, db)
+    user = create_user(db, "deactivatetest", "pass123", UserRole.user)
+
+    resp = client.delete(
+        f"/api/admin/users/{user.id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 204, resp.text
+
+    # User should still exist but is_active=False
+    list_resp = client.get("/api/admin/users", headers={"Authorization": f"Bearer {token}"})
+    users = {u["id"]: u for u in list_resp.json()}
+    assert users[user.id]["is_active"] is False
+
+
+def test_admin_users_rejects_regular_user(client, db):
+    create_user(db, "plainuser", "pass123", UserRole.user)
+    token = get_token(client, "plainuser", "pass123")
+
+    resp = client.get("/api/admin/users", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 403

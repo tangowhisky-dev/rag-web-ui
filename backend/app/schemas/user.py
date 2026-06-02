@@ -21,6 +21,21 @@ class UserCreate(UserBase):
 class UserUpdate(UserBase):
     password: Optional[str] = None
 
+
+class UserAdminCreate(BaseModel):
+    username: str
+    email: EmailStr
+    password: str
+    role: str = "user"
+    org_id: Optional[int] = None
+    is_active: bool = True
+
+
+class UserAdminUpdate(BaseModel):
+    role: Optional[str] = None
+    org_id: Optional[int] = None
+    is_active: Optional[bool] = None
+
 class UserResponse(UserBase):
     id: int
     role: Optional[str] = None

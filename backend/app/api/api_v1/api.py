@@ -11,6 +11,7 @@ api_router.include_router(chat_files.router, prefix="/chat", tags=["chat-files"]
 api_router.include_router(query.router, prefix="/query", tags=["query"])
 api_router.include_router(folders.router, prefix="/folders", tags=["folders"])
 api_router.include_router(admin.org_router, prefix="/admin", tags=["admin"])
+api_router.include_router(admin.user_router, prefix="/admin", tags=["admin"])
 
 
 @api_router.get("/config", tags=["config"])
