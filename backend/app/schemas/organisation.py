@@ -60,3 +60,25 @@ class OrgLLMConfigResponse(OrgLLMConfigBase):
 
     model_config = ConfigDict(from_attributes=True)
 
+
+# ---------------------------------------------------------------------------
+# Org ingestion status schema
+# ---------------------------------------------------------------------------
+
+from typing import Literal
+
+
+class OrgIngestionStatusResponse(BaseModel):
+    org_id: int
+    status: Literal["idle", "running", "completed", "failed"]
+    total_docs: int
+    pending_docs: int
+    processing_docs: int
+    completed_docs: int
+    failed_docs: int
+    last_run_at: Optional[datetime] = None
+
+    @field_serializer("last_run_at")
+    def serialise_last_run_at(self, v: Optional[datetime]) -> Optional[str]:
+        return _as_utc_iso(v) if v else None
+

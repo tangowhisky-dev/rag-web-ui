@@ -9,7 +9,8 @@ from app.db.session import get_db
 from app.models.organisation import Organisation
 from app.models.org_llm_config import OrgLLMConfig
 from app.models.organisation import OrgAbbreviation
-from app.schemas.organisation import OrgCreate, OrgUpdate, OrgResponse, OrgLLMConfigUpdate, OrgLLMConfigResponse
+from app.schemas.organisation import OrgCreate, OrgUpdate, OrgResponse, OrgLLMConfigUpdate, OrgLLMConfigResponse, OrgIngestionStatusResponse
+from app.models.knowledge import KnowledgeBase, ProcessingTask
 from app.schemas.user import UserAdminCreate, UserAdminUpdate, UserResponse
 from app.models.user import User, UserRole
 from app.core.security import get_password_hash
@@ -147,6 +148,64 @@ def upsert_org_llm_config(
     db.refresh(config)
     logging.info("[ADMIN] org_llm_config_updated id=%s", org_id)
     return config
+
+
+# ---------------------------------------------------------------------------
+# Org ingestion status endpoint
+# ---------------------------------------------------------------------------
+
+
+@org_router.get("/orgs/{org_id}/ingestion-status", response_model=OrgIngestionStatusResponse)
+def get_org_ingestion_status(
+    org_id: int,
+    db: Session = Depends(get_db),
+    _: object = Depends(require_admin),
+):
+    org = db.query(Organisation).filter(Organisation.id == org_id).first()
+    if org is None:
+        raise HTTPException(status_code=404, detail="Org not found")
+
+    # Aggregate ProcessingTask rows across all KBs belonging to this org
+    tasks = (
+        db.query(ProcessingTask)
+        .join(KnowledgeBase, ProcessingTask.knowledge_base_id == KnowledgeBase.id)
+        .filter(KnowledgeBase.org_id == org_id)
+        .all()
+    )
+
+    pending_docs = sum(1 for t in tasks if t.status == "pending")
+    processing_docs = sum(1 for t in tasks if t.status == "processing")
+    completed_docs = sum(1 for t in tasks if t.status == "completed")
+    failed_docs = sum(1 for t in tasks if t.status == "failed")
+    total_docs = len(tasks)
+
+    if processing_docs > 0:
+        status = "running"
+    elif failed_docs > 0:
+        status = "failed"
+    elif total_docs > 0 and completed_docs == total_docs:
+        status = "completed"
+    else:
+        status = "idle"
+
+    # last_run_at = max updated_at among completed or failed tasks
+    terminal_tasks = [t for t in tasks if t.status in ("completed", "failed")]
+    last_run_at = max((t.updated_at for t in terminal_tasks), default=None)
+
+    logging.info(
+        "[ADMIN] org_ingestion_status_fetched org_id=%s status=%s total_docs=%s",
+        org_id, status, total_docs,
+    )
+    return OrgIngestionStatusResponse(
+        org_id=org_id,
+        status=status,
+        total_docs=total_docs,
+        pending_docs=pending_docs,
+        processing_docs=processing_docs,
+        completed_docs=completed_docs,
+        failed_docs=failed_docs,
+        last_run_at=last_run_at,
+    )
 
 
 # ---------------------------------------------------------------------------
