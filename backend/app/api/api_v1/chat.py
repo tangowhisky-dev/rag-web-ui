@@ -21,7 +21,7 @@ from app.schemas.chat import (
     SearchResult,
 )
 from app.core.security import get_current_user
-from app.services.chat_service import generate_response
+from app.services.chat_service import generate_response, get_effective_llm_config
 from app.services.document_processor import _convert_to_markdown, SUPPORTED_EXTENSIONS
 
 logger = logging.getLogger(__name__)
@@ -345,6 +345,7 @@ async def create_message(
         query_text = "\n\n".join(file_context_parts) + "\n\n" + query_text
 
     knowledge_base_ids = [kb.id for kb in chat.knowledge_bases]
+    llm_cfg = get_effective_llm_config(current_user.org_id, db)
 
     async def response_stream():
         # After generate_response creates the user Message, link the chat_file to it
@@ -365,6 +366,8 @@ async def create_message(
             file_id=file_id,
             file_markdown=current_file_markdown,
             answering_mode=answering_mode,
+            api_base=llm_cfg["api_base"],
+            query_model=llm_cfg["query_model"],
         ):
             yield chunk
 
@@ -438,6 +441,7 @@ async def create_message_with_file(
         raise HTTPException(status_code=400, detail="'messages' must be valid JSON.")
 
     knowledge_base_ids = [kb.id for kb in chat.knowledge_bases]
+    llm_cfg = get_effective_llm_config(current_user.org_id, db)
 
     async def response_stream():
         async for chunk in generate_response(
@@ -451,6 +455,8 @@ async def create_message_with_file(
             use_exact=chat.use_exact,
             use_graph_rag=chat.use_graph_rag,
             display_query=message,
+            api_base=llm_cfg["api_base"],
+            query_model=llm_cfg["query_model"],
         ):
             yield chunk
 

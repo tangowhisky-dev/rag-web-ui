@@ -127,12 +127,12 @@ class _KeywordsOutput(BaseModel):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _get_llm(model_name: Optional[str] = None, temperature: float = 0.0):
+def _get_llm(model_name: Optional[str] = None, temperature: float = 0.0, api_base: Optional[str] = None):
     from langchain_openai import ChatOpenAI
     return ChatOpenAI(
         model=model_name or settings.OPENAI_MODEL,
         temperature=temperature,
-        openai_api_base=settings.OPENAI_API_BASE,
+        openai_api_base=api_base or settings.OPENAI_API_BASE,
         openai_api_key=settings.OPENAI_API_KEY,
         streaming=True,
     )
@@ -254,9 +254,11 @@ async def rewrite_query_node(state: RAGGraphState) -> dict:
     t0 = time.monotonic()
     query = state["query"]
     model_name = state.get("model_name")
+    api_base = state.get("api_base")
+    query_model_override = state.get("query_model")
     temperature = state.get("temperature", 0.0)
 
-    llm = _get_llm(model_name, temperature)
+    llm = _get_llm(model_name, temperature, api_base=api_base)
 
     system_prompt = (
         "You are a search query optimizer for a document retrieval system. "
@@ -334,8 +336,10 @@ async def context_router_node(state: RAGGraphState) -> dict:
     """
     t0 = time.monotonic()
     model_name = state.get("model_name")
+    api_base = state.get("api_base")
+    query_model_override = state.get("query_model")
     temperature = state.get("temperature", 0.0)
-    json_llm = _get_llm(model_name, 0.0)
+    json_llm = _get_llm(model_name, 0.0, api_base=api_base)
     # Router sees BOTH the original and rewritten query.
     # The rewriter strips conversational references ("your previous answer",
     # "as you mentioned") because they have no vector-search value — but those
@@ -520,7 +524,9 @@ async def decompose_query_node(state: RAGGraphState) -> dict:
     t0 = time.monotonic()
     query = state.get("rewritten_query") or state["query"]
     model_name = state.get("model_name")
-    llm = _get_llm(model_name or settings.QUERY_MODEL, 0.0)
+    api_base = state.get("api_base")
+    query_model_override = state.get("query_model")
+    llm = _get_llm((model_name or query_model_override or settings.QUERY_MODEL), 0.0, api_base=api_base)
 
     messages = [
         {"role": "system", "content": _DECOMPOSE_SYSTEM},
@@ -662,7 +668,9 @@ async def extract_file_sections_node(state: RAGGraphState) -> dict:
     sub_queries: List[str] = state.get("sub_queries") or [state.get("rewritten_query") or state["query"]]
     query = " ".join(sub_queries[:3])
     model_name = state.get("model_name")
-    llm = _get_llm(model_name, 0.0)
+    api_base = state.get("api_base")
+    query_model_override = state.get("query_model")
+    llm = _get_llm(model_name, 0.0, api_base=api_base)
 
     # Split into sections by markdown headings or double-newlines
     raw_sections = re.split(r"\n(?=#{1,3} )", file_markdown)
@@ -754,7 +762,9 @@ async def draft_answer_node(state: RAGGraphState) -> dict:
     docs: list = state.get("retrieved_docs") or []
     file_markdown: Optional[str] = state.get("file_markdown")
     model_name = state.get("model_name")
-    llm = _get_llm(model_name, 0.0)
+    api_base = state.get("api_base")
+    query_model_override = state.get("query_model")
+    llm = _get_llm(model_name, 0.0, api_base=api_base)
 
     context = _build_context_string(docs[:20], file_markdown)
     sub_q_block = "\n".join(f"{i+1}. {sq}" for i, sq in enumerate(sub_queries))
@@ -811,7 +821,9 @@ async def grade_coverage_node(state: RAGGraphState) -> dict:
     sub_queries: List[str] = state.get("sub_queries") or [state.get("rewritten_query") or state["query"]]
     draft: str = state.get("draft_answer") or ""
     model_name = state.get("model_name")
-    llm = _get_llm(model_name or settings.QUERY_MODEL, 0.0)
+    api_base = state.get("api_base")
+    query_model_override = state.get("query_model")
+    llm = _get_llm((model_name or query_model_override or settings.QUERY_MODEL), 0.0, api_base=api_base)
     attempt = state.get("retrieval_attempt", 0)
 
     if not draft or draft == "[DRAFT FAILED]":
@@ -1003,6 +1015,8 @@ async def keyword_search_loop_node(state: RAGGraphState) -> dict:
     kb_ids: List[int] = state.get("knowledge_base_ids") or []
     db = state.get("_db")
     model_name = state.get("model_name")
+    api_base = state.get("api_base")
+    query_model_override = state.get("query_model")
 
     if not uncovered or not kb_ids or not db:
         latency_ms = round((time.monotonic() - t0) * 1000, 1)
@@ -1013,7 +1027,7 @@ async def keyword_search_loop_node(state: RAGGraphState) -> dict:
         }
 
     from app.services.retrieval import _exact_search  # type: ignore[attr-defined]
-    llm = _get_llm(model_name or settings.QUERY_MODEL, 0.0)
+    llm = _get_llm((model_name or query_model_override or settings.QUERY_MODEL), 0.0, api_base=api_base)
 
     all_new_docs: List[dict] = []
     keyword_iterations: list = list(state.get("keyword_iterations") or [])
@@ -1128,12 +1142,14 @@ async def generate_answer_node(state: RAGGraphState) -> dict:
     uncovered: List[str] = state.get("uncovered_sub_queries") or []
     coverage_result: dict = state.get("coverage_result") or {}
     model_name = state.get("model_name")
+    api_base = state.get("api_base")
+    query_model_override = state.get("query_model")
     temperature: float = state.get("temperature", 0.0)
     existing_summary: Optional[str] = state.get("existing_summary")
     query = state.get("rewritten_query") or state["query"]
     attempt = state.get("retrieval_attempt", 0)
 
-    llm = _get_llm(model_name, temperature)
+    llm = _get_llm(model_name, temperature, api_base=api_base)
     context = _build_context_string(docs[:20], file_markdown)
 
     # Build coverage note for partial / unable answers
@@ -1287,6 +1303,8 @@ async def run_stream(
     temperature: float = 0.0,
     model_name: Optional[str] = None,
     display_query: Optional[str] = None,
+    api_base: Optional[str] = None,
+    query_model: Optional[str] = None,
 ) -> AsyncGenerator[dict, None]:
     """
     Async generator that runs the full agentic RAG graph and streams events.
@@ -1329,6 +1347,8 @@ async def run_stream(
         "temperature": temperature,
         "model_name": model_name,
         "display_query": display_query,
+        "api_base": api_base,  # type: ignore[typeddict-unknown-key]
+        "query_model": query_model,  # type: ignore[typeddict-unknown-key]
         "_db": db,  # type: ignore[typeddict-unknown-key]
     }
 

@@ -400,3 +400,38 @@ def test_admin_llm_config_rejects_regular_user(client, db):
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 403, resp.text
+
+
+# ── Unit tests: get_effective_llm_config ──────────────────────────────────────
+
+def test_effective_llm_config_fallback(db):
+    """When org_id is None, all values fall back to settings defaults."""
+    from app.services.chat_service import get_effective_llm_config
+    from app.core.config import settings
+
+    cfg = get_effective_llm_config(None, db)
+    assert cfg["api_base"] == settings.OPENAI_API_BASE
+    assert cfg["model_name"] == settings.OPENAI_MODEL
+    assert cfg["query_model"] == settings.effective_query_model
+
+
+def test_effective_llm_config_org_override(db):
+    """When an OrgLLMConfig row exists for the org, those values are returned."""
+    from app.services.chat_service import get_effective_llm_config
+    from app.models.org_llm_config import OrgLLMConfig
+    import app.models.org_llm_config  # noqa: ensure table is registered
+
+    org = create_org(db, "LLMConfigOrg5")
+    row = OrgLLMConfig(
+        org_id=org.id,
+        api_base="https://custom.example.com",
+        model_name="custom-model",
+        query_model="custom-query-model",
+    )
+    db.add(row)
+    db.commit()
+
+    cfg = get_effective_llm_config(org.id, db)
+    assert cfg["api_base"] == "https://custom.example.com"
+    assert cfg["model_name"] == "custom-model"
+    assert cfg["query_model"] == "custom-query-model"

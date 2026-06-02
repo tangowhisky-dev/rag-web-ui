@@ -49,13 +49,13 @@ def _preview(text: str, n: int = _PREVIEW_CHARS) -> str:
     return text[:n] + "…" if len(text) > n else text
 
 
-def _get_llm(model_name: str, temperature: float = 0.0):
+def _get_llm(model_name: str, temperature: float = 0.0, api_base: Optional[str] = None):
     from langchain_openai import ChatOpenAI
     from app.core.config import settings
     return ChatOpenAI(
         model=model_name,
         temperature=temperature,
-        openai_api_base=settings.OPENAI_API_BASE,
+        openai_api_base=api_base or settings.OPENAI_API_BASE,
         openai_api_key=settings.OPENAI_API_KEY,
         streaming=True,
     )
@@ -83,6 +83,8 @@ async def fast_stream(
     model_name: Optional[str] = None,
     display_query: Optional[str] = None,
     file_markdown: Optional[str] = None,
+    api_base: Optional[str] = None,
+    query_model: Optional[str] = None,
 ) -> AsyncGenerator[dict, None]:
     """
     Lean RAG pipeline: rewrite → hybrid_search → stream answer.
@@ -92,7 +94,7 @@ async def fast_stream(
     from app.services.retrieval import hybrid_search_with_legs
     from app.services.chat_service import _rewrite_query
 
-    effective_model = model_name or settings.OPENAI_MODEL
+    effective_model = model_name or query_model or settings.OPENAI_MODEL
 
     # ── 1. Query rewrite ──────────────────────────────────────────────────────
     # Emit "active" first so the UI shows "Rewriting query…"
@@ -102,7 +104,7 @@ async def fast_stream(
     try:
         # Only pass last 2 pairs (4 msgs) to rewriter — it only needs pronoun/reference
         # resolution; more history causes topic drift and query contamination.
-        rewritten = await _rewrite_query(query, recent_lc_history)
+        rewritten = await _rewrite_query(query, recent_lc_history, api_base=api_base, query_model=query_model)
     except Exception as exc:
         logger.warning("[FAST] rewrite failed (non-fatal): %s", exc)
         rewritten = query
@@ -269,7 +271,7 @@ async def fast_stream(
     yield {"event": "agent_step", "node": "generate_answer", "status": "active", "latency_ms": None}
 
     t2 = time.monotonic()
-    llm = _get_llm(effective_model, temperature)
+    llm = _get_llm(effective_model, temperature, api_base=api_base)
     streamed_parts: list[str] = []
     usage: dict = {"promptTokens": 0, "completionTokens": 0}
 

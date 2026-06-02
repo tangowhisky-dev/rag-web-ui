@@ -16,6 +16,32 @@ from app.models.knowledge import KnowledgeBase
 from app.services.retrieval import hybrid_search_with_legs
 from app.services.confidence import score_retrieval
 
+
+def get_effective_llm_config(org_id: Optional[int], db: Session) -> dict:
+    """Return LLM config dict for the given org, falling back to .env settings.
+
+    Keys: api_base, model_name, query_model.
+    When org_id is None or no OrgLLMConfig row exists, all values are None
+    (callers should fall back to settings).
+    """
+    api_base = None
+    model_name = None
+    query_model = None
+
+    if org_id is not None:
+        from app.models.org_llm_config import OrgLLMConfig
+        row = db.query(OrgLLMConfig).filter(OrgLLMConfig.org_id == org_id).first()
+        if row:
+            api_base = row.api_base or None
+            model_name = row.model_name or None
+            query_model = row.query_model or None
+
+    return {
+        "api_base": api_base or settings.OPENAI_API_BASE,
+        "model_name": model_name or settings.OPENAI_MODEL,
+        "query_model": query_model or settings.effective_query_model,
+    }
+
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 # Number of most-recent full user/assistant turn-pairs to include verbatim.
@@ -233,6 +259,8 @@ async def _maybe_update_summary(
 async def _rewrite_query(
     query: str,
     recent_history: List,  # LangChain message objects
+    api_base: Optional[str] = None,
+    query_model: Optional[str] = None,
 ) -> str:
     """
     Condense the current query + recent chat history into a self-contained
@@ -277,9 +305,9 @@ async def _rewrite_query(
     messages.append({"role": "user", "content": query})
 
     from openai import AsyncOpenAI as _OAI
-    client = _OAI(api_key=settings.OPENAI_API_KEY, base_url=settings.OPENAI_API_BASE)
+    client = _OAI(api_key=settings.OPENAI_API_KEY, base_url=api_base or settings.OPENAI_API_BASE)
     resp = await client.chat.completions.create(
-        model=settings.effective_query_model,
+        model=query_model or settings.effective_query_model,
         messages=messages,
         max_tokens=60,
         temperature=0,
@@ -311,7 +339,7 @@ async def _rewrite_query(
 
 # ── Query classification ──────────────────────────────────────────────────────
 
-async def classify_query(query: str) -> "QueryClassification":
+async def classify_query(query: str, api_base: Optional[str] = None, query_model: Optional[str] = None) -> "QueryClassification":
     """
     Classify a query into one of 4 types using LLM-based zero-shot classification.
     
@@ -333,13 +361,13 @@ async def classify_query(query: str) -> "QueryClassification":
         
         client = AsyncOpenAI(
             api_key=settings.OPENAI_API_KEY,
-            base_url=settings.OPENAI_API_BASE,
+            base_url=api_base or settings.OPENAI_API_BASE,
         )
         
         prompt = settings.QUERY_CLASSIFIER_PROMPT.format(query=query)
         
         response = await client.chat.completions.create(
-            model=settings.effective_query_model,
+            model=query_model or settings.effective_query_model,
             messages=[
                 {"role": "user", "content": prompt},
             ],
@@ -405,6 +433,8 @@ async def generate_response(
     file_id: Optional[int] = None,
     file_markdown: Optional[str] = None,
     answering_mode: str = "agentic",
+    api_base: Optional[str] = None,
+    query_model: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     """
     Stream a chat response for the given query.
@@ -425,6 +455,8 @@ async def generate_response(
     """
     logger.info("=" * 70)
     logger.info("[CHAT] chat_id=%s | kb_ids=%s | query=%r", chat_id, knowledge_base_ids, query)
+    if api_base is not None:
+        logger.info("[CHAT] api_base=%s", api_base)
 
     try:
         # ── Persist user message ───────────────────────────────────────────
@@ -512,6 +544,8 @@ async def generate_response(
                 ),
                 display_query=display_query,
                 file_markdown=file_markdown,
+                api_base=api_base,
+                query_model=query_model,
             )
         else:
             # Agentic: full LangGraph pipeline
@@ -531,6 +565,8 @@ async def generate_response(
                 temperature=temperature,
                 model_name=model_name,
                 display_query=display_query,
+                api_base=api_base,
+                query_model=query_model,
             )
 
         async for event in stream_iter:
