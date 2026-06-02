@@ -28,6 +28,7 @@ from qdrant_client.models import (
 from fastembed import SparseTextEmbedding
 from app.core.config import settings
 from app.core.storage import get_abs_path, save_file, move_file, delete_file
+from app.services.progress_timeout import ProgressTimeout
 from app.services.markdown_cleaner import clean_markdown
 from app.models.knowledge import ProcessingTask, Document, DocumentChunk
 from app.services.chunk_record import ChunkRecord
@@ -598,6 +599,7 @@ async def process_document_background(
                 task.progress = pct
                 task.progress_message = msg
                 db.commit()
+                pt.ping()
             except Exception:
                 try:
                     db.rollback()
@@ -609,207 +611,228 @@ async def process_document_background(
         task.progress_message = "Starting…"
         db.commit()
 
-        local_temp_path = get_abs_path(temp_path)
-        logger.info(f"Task {task_id}: Using file at {local_temp_path}")
-
-        # ── Step 1: Parse ────────────────────────────────────────────────────
-        _set_progress(5, "Parsing document…")
-        logger.info(f"Task {task_id}: Converting document with markitdown (enable_ocr={enable_ocr})")
-        # Run in a thread pool — markitdown is synchronous and CPU/IO-bound.
-        # Blocking the event loop here starves the poll endpoint for 60-120s on
-        # large PDFs, causing ECONNRESET storms on the frontend.
-        loop = asyncio.get_event_loop()
-        markdown_text = await loop.run_in_executor(
-            None, lambda: _convert_to_markdown(local_temp_path, file_name, enable_ocr=enable_ocr)
-        )
-
-        # ── Cleanup pass ─────────────────────────────────────────────────────
-        _chars_before = len(markdown_text)
-        try:
-            markdown_text = clean_markdown(markdown_text)
-            logger.info(
-                "[CLEANUP] chars_before=%d chars_after=%d file=%s",
-                _chars_before, len(markdown_text), file_name,
-            )
-        except Exception as _ce:
+        def _on_timeout() -> None:
             logger.warning(
-                "[CLEANUP] fallback to raw markdown. reason=%s file=%s",
-                str(_ce)[:200], file_name,
+                "[PROGRESS_TIMEOUT] task_id=%s silence_s=%s",
+                task_id, settings.PROCESSING_TIMEOUT_SILENCE_S,
             )
-
-        if not markdown_text or not markdown_text.strip():
-            raise ValueError(
-                f"Document produced no extractable text. "
-                f"The file may be empty, password-protected, or in an unreadable format."
-            )
-
-        # ── Step 2: Chunk ────────────────────────────────────────────────────
-        _set_progress(20, "Splitting into chunks…")
-        logger.info(f"Task {task_id}: Splitting document into chunks")
-        doc = LangchainDocument(
-            page_content=markdown_text,
-            metadata={"source": file_name},
-        )
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-        )
-        chunks = await loop.run_in_executor(
-            None, lambda: text_splitter.split_documents([doc])
-        )
-        logger.info(f"Task {task_id}: Document split into {len(chunks)} chunks")
-
-        if not chunks:
-            raise ValueError(
-                "Document produced no chunks after splitting. "
-                "It may contain only whitespace or unsupported content."
-            )
-
-        # ── Step 3: Ensure Qdrant collection ─────────────────────────────────
-        _set_progress(25, f"Preparing vector store ({len(chunks)} chunks)…")
-        logger.info(f"Task {task_id}: Ensuring Qdrant collection kb_{kb_id}")
-        _ensure_qdrant_collection(_get_qdrant_client(), kb_id)
-
-        # ── Step 4: Move to permanent storage ────────────────────────────────
-        _permanent_path = f"user_{user_id}/kb_{kb_id}/{file_name}"
-        logger.info(f"Task {task_id}: Moving file to permanent storage")
-        move_file(temp_path, _permanent_path)
-        permanent_path = _permanent_path          # mark: file now at permanent location
-        local_perm_path = get_abs_path(permanent_path)
-        logger.info(f"Task {task_id}: File moved to {permanent_path}")
-
-        # ── Step 5: Create Document record ───────────────────────────────────
-        logger.info(f"Task {task_id}: Creating document record")
-        document = Document(
-            file_name=file_name,
-            file_path=permanent_path,
-            file_hash=task.document_upload.file_hash,
-            file_size=task.document_upload.file_size,
-            content_type=task.document_upload.content_type,
-            knowledge_base_id=kb_id,
-        )
-        db.add(document)
-        db.commit()
-        db.refresh(document)
-        logger.info(f"Task {task_id}: Document record created with ID {document.id}")
-
-        # ── Step 6: Build chunk records (no commit yet) ───────────────────────
-        _set_progress(35, "Building chunk records…")
-        logger.info(f"Task {task_id}: Building {len(chunks)} chunk records")
-
-        def _build_chunk_records():
-            """CPU-bound: hashing + object construction. Returns payloads only — no db.add here."""
-            payloads = []
-            db_chunks = []
-            for i, chunk in enumerate(chunks):
-                chunk_id = hashlib.sha256(
-                    f"{kb_id}:{file_name}:{chunk.page_content}".encode()
-                ).hexdigest()
-                chunk.metadata["source"] = file_name
-                source_metadata = {
-                    k: v for k, v in chunk.metadata.items()
-                    if k not in ("kb_id", "document_id", "chunk_id", "file_name")
-                }
-                db_chunks.append(DocumentChunk(
-                    id=chunk_id,
-                    document_id=document.id,
-                    kb_id=kb_id,
-                    file_name=file_name,
-                    chunk_text=chunk.page_content,
-                    chunk_index=i,
-                    chunk_metadata=source_metadata,
-                    hash=hashlib.sha256(
-                        (chunk.page_content + str(chunk.metadata)).encode()
-                    ).hexdigest(),
-                ))
-                payloads.append((chunk_id, chunk.page_content, source_metadata, i))
-            return payloads, db_chunks
-
-        qdrant_payloads, db_chunks = await loop.run_in_executor(None, _build_chunk_records)
-        # db.add must happen on the event-loop thread — SQLAlchemy sessions are not thread-safe
-        for doc_chunk in db_chunks:
-            db.add(doc_chunk)
-
-        # ── Step 7: Upsert to Qdrant ─────────────────────────────────────────
-        _set_progress(40, f"Embedding {len(qdrant_payloads)} chunks…")
-        logger.info(f"Task {task_id}: Upserting {len(qdrant_payloads)} chunks to Qdrant")
-        await _upsert_to_qdrant(
-            qdrant_payloads, kb_id, document.id, file_name,
-            progress_cb=_set_progress,
-            progress_start=40,
-            progress_end=80,
-        )
-        logger.info(f"Task {task_id}: Chunks added to Qdrant")
-
-        # ── Step 8: Commit chunks + mark task complete ───────────────────────
-        _set_progress(82, "Saving to database…")
-        task.status = "completed"
-        task.progress = 90
-        task.progress_message = "Finalising…"
-        # Commit directly — SQLAlchemy sessions are not thread-safe, running
-        # db.commit() in run_in_executor risks concurrent access with the event loop.
-        db.commit()
-        task.document_id = document.id
-        upload = task.document_upload
-        if upload:
-            upload.status = "completed"
-        db.commit()
-        logger.info(f"Task {task_id}: Processing completed successfully")
-
-        # ── Step 9: Build Neo4j knowledge graph (non-fatal) ──────────────────
-        if settings.GRAPHRAG_ENABLED:
-            _doc_id = document.id   # capture plain int before session closes
-            _chunks = [p[1] for p in qdrant_payloads]
-            _chunk_ids = [p[0] for p in qdrant_payloads]
-            _task_id = task_id
-            async def _build_graph() -> None:
-                # Mark graph extraction as in-progress in the DB
-                from app.db.session import SessionLocal as _SessionLocal
-                from app.models.knowledge import ProcessingTask as _PT
-                _db = _SessionLocal()
+            try:
+                task.status = "failed"
+                task.progress_message = (
+                    f"Processing timed out: no progress for "
+                    f"{settings.PROCESSING_TIMEOUT_SILENCE_S}s"
+                )
+                db.commit()
+            except Exception:
                 try:
-                    _t = _db.query(_PT).filter(_PT.id == _task_id).first()
-                    if _t:
-                        _t.graph_status = "pending"
-                        _db.commit()
-                finally:
-                    _db.close()
+                    db.rollback()
+                except Exception:
+                    pass
 
-                try:
-                    from app.services.graph_service import build_graph_for_document
-                    await build_graph_for_document(
+        async with ProgressTimeout(settings.PROCESSING_TIMEOUT_SILENCE_S, _on_timeout) as pt:
+
+            local_temp_path = get_abs_path(temp_path)
+            logger.info(f"Task {task_id}: Using file at {local_temp_path}")
+    
+            # ── Step 1: Parse ────────────────────────────────────────────────────
+            _set_progress(5, "Parsing document…")
+            logger.info(f"Task {task_id}: Converting document with markitdown (enable_ocr={enable_ocr})")
+            # Run in a thread pool — markitdown is synchronous and CPU/IO-bound.
+            # Blocking the event loop here starves the poll endpoint for 60-120s on
+            # large PDFs, causing ECONNRESET storms on the frontend.
+            loop = asyncio.get_event_loop()
+            markdown_text = await loop.run_in_executor(
+                None, lambda: _convert_to_markdown(local_temp_path, file_name, enable_ocr=enable_ocr)
+            )
+    
+            # ── Cleanup pass ─────────────────────────────────────────────────────
+            _chars_before = len(markdown_text)
+            try:
+                markdown_text = clean_markdown(markdown_text)
+                logger.info(
+                    "[CLEANUP] chars_before=%d chars_after=%d file=%s",
+                    _chars_before, len(markdown_text), file_name,
+                )
+            except Exception as _ce:
+                logger.warning(
+                    "[CLEANUP] fallback to raw markdown. reason=%s file=%s",
+                    str(_ce)[:200], file_name,
+                )
+    
+            if not markdown_text or not markdown_text.strip():
+                raise ValueError(
+                    f"Document produced no extractable text. "
+                    f"The file may be empty, password-protected, or in an unreadable format."
+                )
+    
+            # ── Step 2: Chunk ────────────────────────────────────────────────────
+            _set_progress(20, "Splitting into chunks…")
+            logger.info(f"Task {task_id}: Splitting document into chunks")
+            doc = LangchainDocument(
+                page_content=markdown_text,
+                metadata={"source": file_name},
+            )
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+            )
+            chunks = await loop.run_in_executor(
+                None, lambda: text_splitter.split_documents([doc])
+            )
+            logger.info(f"Task {task_id}: Document split into {len(chunks)} chunks")
+    
+            if not chunks:
+                raise ValueError(
+                    "Document produced no chunks after splitting. "
+                    "It may contain only whitespace or unsupported content."
+                )
+    
+            # ── Step 3: Ensure Qdrant collection ─────────────────────────────────
+            _set_progress(25, f"Preparing vector store ({len(chunks)} chunks)…")
+            logger.info(f"Task {task_id}: Ensuring Qdrant collection kb_{kb_id}")
+            _ensure_qdrant_collection(_get_qdrant_client(), kb_id)
+    
+            # ── Step 4: Move to permanent storage ────────────────────────────────
+            _permanent_path = f"user_{user_id}/kb_{kb_id}/{file_name}"
+            logger.info(f"Task {task_id}: Moving file to permanent storage")
+            move_file(temp_path, _permanent_path)
+            permanent_path = _permanent_path          # mark: file now at permanent location
+            local_perm_path = get_abs_path(permanent_path)
+            logger.info(f"Task {task_id}: File moved to {permanent_path}")
+    
+            # ── Step 5: Create Document record ───────────────────────────────────
+            logger.info(f"Task {task_id}: Creating document record")
+            document = Document(
+                file_name=file_name,
+                file_path=permanent_path,
+                file_hash=task.document_upload.file_hash,
+                file_size=task.document_upload.file_size,
+                content_type=task.document_upload.content_type,
+                knowledge_base_id=kb_id,
+            )
+            db.add(document)
+            db.commit()
+            db.refresh(document)
+            logger.info(f"Task {task_id}: Document record created with ID {document.id}")
+    
+            # ── Step 6: Build chunk records (no commit yet) ───────────────────────
+            _set_progress(35, "Building chunk records…")
+            logger.info(f"Task {task_id}: Building {len(chunks)} chunk records")
+    
+            def _build_chunk_records():
+                """CPU-bound: hashing + object construction. Returns payloads only — no db.add here."""
+                payloads = []
+                db_chunks = []
+                for i, chunk in enumerate(chunks):
+                    chunk_id = hashlib.sha256(
+                        f"{kb_id}:{file_name}:{chunk.page_content}".encode()
+                    ).hexdigest()
+                    chunk.metadata["source"] = file_name
+                    source_metadata = {
+                        k: v for k, v in chunk.metadata.items()
+                        if k not in ("kb_id", "document_id", "chunk_id", "file_name")
+                    }
+                    db_chunks.append(DocumentChunk(
+                        id=chunk_id,
+                        document_id=document.id,
                         kb_id=kb_id,
-                        document_id=_doc_id,
                         file_name=file_name,
-                        chunks=_chunks,
-                        chunk_ids=_chunk_ids,
-                    )
-                    logger.info(f"Task {task_id}: Knowledge graph built in Neo4j")
-                    _db2 = _SessionLocal()
+                        chunk_text=chunk.page_content,
+                        chunk_index=i,
+                        chunk_metadata=source_metadata,
+                        hash=hashlib.sha256(
+                            (chunk.page_content + str(chunk.metadata)).encode()
+                        ).hexdigest(),
+                    ))
+                    payloads.append((chunk_id, chunk.page_content, source_metadata, i))
+                return payloads, db_chunks
+    
+            qdrant_payloads, db_chunks = await loop.run_in_executor(None, _build_chunk_records)
+            # db.add must happen on the event-loop thread — SQLAlchemy sessions are not thread-safe
+            for doc_chunk in db_chunks:
+                db.add(doc_chunk)
+    
+            # ── Step 7: Upsert to Qdrant ─────────────────────────────────────────
+            _set_progress(40, f"Embedding {len(qdrant_payloads)} chunks…")
+            logger.info(f"Task {task_id}: Upserting {len(qdrant_payloads)} chunks to Qdrant")
+            await _upsert_to_qdrant(
+                qdrant_payloads, kb_id, document.id, file_name,
+                progress_cb=_set_progress,
+                progress_start=40,
+                progress_end=80,
+            )
+            logger.info(f"Task {task_id}: Chunks added to Qdrant")
+    
+            # ── Step 8: Commit chunks + mark task complete ───────────────────────
+            _set_progress(82, "Saving to database…")
+            task.status = "completed"
+            task.progress = 90
+            task.progress_message = "Finalising…"
+            # Commit directly — SQLAlchemy sessions are not thread-safe, running
+            # db.commit() in run_in_executor risks concurrent access with the event loop.
+            db.commit()
+            task.document_id = document.id
+            upload = task.document_upload
+            if upload:
+                upload.status = "completed"
+            db.commit()
+            logger.info("[PROGRESS_TIMEOUT] task_id=%s completed_ok=true", task_id)
+            logger.info(f"Task {task_id}: Processing completed successfully")
+    
+            # ── Step 9: Build Neo4j knowledge graph (non-fatal) ──────────────────
+            if settings.GRAPHRAG_ENABLED:
+                _doc_id = document.id   # capture plain int before session closes
+                _chunks = [p[1] for p in qdrant_payloads]
+                _chunk_ids = [p[0] for p in qdrant_payloads]
+                _task_id = task_id
+                async def _build_graph() -> None:
+                    # Mark graph extraction as in-progress in the DB
+                    from app.db.session import SessionLocal as _SessionLocal
+                    from app.models.knowledge import ProcessingTask as _PT
+                    _db = _SessionLocal()
                     try:
-                        _t = _db2.query(_PT).filter(_PT.id == _task_id).first()
+                        _t = _db.query(_PT).filter(_PT.id == _task_id).first()
                         if _t:
-                            _t.graph_status = "completed"
-                            _t.graph_error = None
-                            _db2.commit()
+                            _t.graph_status = "pending"
+                            _db.commit()
                     finally:
-                        _db2.close()
-                except Exception as _e:
-                    logger.warning(
-                        f"Task {task_id}: Neo4j graph build failed (non-fatal): {_e}",
-                        exc_info=True,
-                    )
-                    _db3 = _SessionLocal()
+                        _db.close()
+    
                     try:
-                        _t = _db3.query(_PT).filter(_PT.id == _task_id).first()
-                        if _t:
-                            _t.graph_status = "failed"
-                            _t.graph_error = str(_e)[:1000]
-                            _db3.commit()
-                    finally:
-                        _db3.close()
-            asyncio.create_task(_build_graph())
-
+                        from app.services.graph_service import build_graph_for_document
+                        await build_graph_for_document(
+                            kb_id=kb_id,
+                            document_id=_doc_id,
+                            file_name=file_name,
+                            chunks=_chunks,
+                            chunk_ids=_chunk_ids,
+                        )
+                        logger.info(f"Task {task_id}: Knowledge graph built in Neo4j")
+                        _db2 = _SessionLocal()
+                        try:
+                            _t = _db2.query(_PT).filter(_PT.id == _task_id).first()
+                            if _t:
+                                _t.graph_status = "completed"
+                                _t.graph_error = None
+                                _db2.commit()
+                        finally:
+                            _db2.close()
+                    except Exception as _e:
+                        logger.warning(
+                            f"Task {task_id}: Neo4j graph build failed (non-fatal): {_e}",
+                            exc_info=True,
+                        )
+                        _db3 = _SessionLocal()
+                        try:
+                            _t = _db3.query(_PT).filter(_PT.id == _task_id).first()
+                            if _t:
+                                _t.graph_status = "failed"
+                                _t.graph_error = str(_e)[:1000]
+                                _db3.commit()
+                        finally:
+                            _db3.close()
+                asyncio.create_task(_build_graph())
+    
     except Exception as e:
         logger.error(f"Task {task_id}: Error processing document: {str(e)}")
         logger.error(f"Task {task_id}: Stack trace: {traceback.format_exc()}")
