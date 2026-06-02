@@ -252,6 +252,8 @@ class Settings(BaseSettings):
     # guiding the LLM through synthesize_documents → extract_entities → summarize_chunks.
     SYNTHESIS_MODE_ENABLED: bool = os.getenv("SYNTHESIS_MODE_ENABLED", "true").lower() == "true"
 
+    PROCESSING_TIMEOUT_SILENCE_S: int = int(os.getenv('PROCESSING_TIMEOUT_SILENCE_S', '300'))
+
     @property
     def graphrag_model(self) -> str:
         """Model to use for entity/relationship extraction. Falls back to OPENAI_MODEL."""
