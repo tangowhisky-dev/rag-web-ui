@@ -23,6 +23,8 @@ class UserUpdate(UserBase):
 
 class UserResponse(UserBase):
     id: int
+    role: Optional[str] = None
+    org_id: Optional[int] = None
     created_at: datetime
     updated_at: datetime
 

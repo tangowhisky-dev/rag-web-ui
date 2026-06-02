@@ -6,4 +6,6 @@ class Token(BaseModel):
     token_type: str
 
 class TokenPayload(BaseModel):
-    sub: Optional[int] = None 
+    sub: Optional[int] = None
+    role: Optional[str] = None
+    org_id: Optional[int] = None
