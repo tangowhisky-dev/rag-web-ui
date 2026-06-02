@@ -30,12 +30,56 @@ interface Org {
   path: string;
 }
 
+interface OrgIngestionStatus {
+  org_id: number;
+  status: 'idle' | 'running' | 'completed' | 'failed';
+  total_docs: number;
+  pending_docs: number;
+  processing_docs: number;
+  completed_docs: number;
+  failed_docs: number;
+  last_run_at: string | null;
+}
+
+const STATUS_COLORS: Record<string, string> = {
+  idle: 'bg-gray-100 text-gray-600',
+  running: 'bg-blue-100 text-blue-700',
+  completed: 'bg-green-100 text-green-700',
+  failed: 'bg-red-100 text-red-700',
+};
+
+function IngestionBadge({ status }: { status: OrgIngestionStatus | undefined }) {
+  if (!status) return <span className="text-xs text-muted-foreground">—</span>;
+
+  const cls = STATUS_COLORS[status.status] ?? STATUS_COLORS.idle;
+  const lastRun = status.last_run_at
+    ? new Date(status.last_run_at).toLocaleString()
+    : 'never';
+  const tooltip =
+    `total: ${status.total_docs} | pending: ${status.pending_docs} | ` +
+    `processing: ${status.processing_docs} | completed: ${status.completed_docs} | ` +
+    `failed: ${status.failed_docs} | last run: ${lastRun}`;
+
+  return (
+    <span
+      className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${cls}`}
+      title={tooltip}
+    >
+      {status.status}
+      {status.total_docs > 0 && (
+        <span className="opacity-70">{status.total_docs} docs</span>
+      )}
+    </span>
+  );
+}
+
 export default function AdminOrgsPage() {
   const router = useRouter();
   const { toast } = useToast();
 
   const [orgs, setOrgs] = useState<Org[]>([]);
   const [loading, setLoading] = useState(true);
+  const [ingestionStatuses, setIngestionStatuses] = useState<Record<number, OrgIngestionStatus>>({});
 
   // Create dialog
   const [createOpen, setCreateOpen] = useState(false);
@@ -69,10 +113,26 @@ export default function AdminOrgsPage() {
     fetchOrgs();
   }, [router]);
 
+  async function fetchIngestionStatuses(orgList: Org[]) {
+    const results = await Promise.allSettled(
+      orgList.map((org) =>
+        api.get(`/api/admin/orgs/${org.id}/ingestion-status`) as Promise<OrgIngestionStatus>
+      )
+    );
+    const map: Record<number, OrgIngestionStatus> = {};
+    results.forEach((result, idx) => {
+      if (result.status === 'fulfilled') {
+        map[orgList[idx].id] = result.value;
+      }
+    });
+    setIngestionStatuses(map);
+  }
+
   async function fetchOrgs() {
     try {
       const data = await api.get('/api/admin/orgs');
       setOrgs(data);
+      fetchIngestionStatuses(data);
     } catch (err) {
       toast({
         title: 'Error',
@@ -234,13 +294,14 @@ export default function AdminOrgsPage() {
               <TableHead>Name</TableHead>
               <TableHead>Parent</TableHead>
               <TableHead>Path</TableHead>
+              <TableHead>Ingestion Status</TableHead>
               <TableHead>Actions</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {orgs.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={5} className="text-center text-muted-foreground">
+                <TableCell colSpan={6} className="text-center text-muted-foreground">
                   No organisations yet.
                 </TableCell>
               </TableRow>
@@ -251,6 +312,9 @@ export default function AdminOrgsPage() {
                   <TableCell className="font-medium">{org.name}</TableCell>
                   <TableCell>{parentName(org.parent_id)}</TableCell>
                   <TableCell className="text-xs text-muted-foreground">{org.path}</TableCell>
+                  <TableCell>
+                    <IngestionBadge status={ingestionStatuses[org.id]} />
+                  </TableCell>
                   <TableCell className="space-x-2">
                     <Button variant="outline" size="sm" onClick={() => openRename(org)}>
                       Rename
