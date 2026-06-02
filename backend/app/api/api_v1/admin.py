@@ -8,6 +8,7 @@ from app.core.security import require_admin
 from app.db.session import get_db
 from app.models.organisation import Organisation
 from app.models.org_llm_config import OrgLLMConfig
+from app.models.organisation import OrgAbbreviation
 from app.schemas.organisation import OrgCreate, OrgUpdate, OrgResponse, OrgLLMConfigUpdate, OrgLLMConfigResponse
 from app.schemas.user import UserAdminCreate, UserAdminUpdate, UserResponse
 from app.models.user import User, UserRole
@@ -146,6 +147,83 @@ def upsert_org_llm_config(
     db.refresh(config)
     logging.info("[ADMIN] org_llm_config_updated id=%s", org_id)
     return config
+
+
+# ---------------------------------------------------------------------------
+# Org abbreviation endpoints
+# ---------------------------------------------------------------------------
+
+from pydantic import BaseModel as _BaseModel
+
+
+class AbbreviationCreate(_BaseModel):
+    short: str
+    expansion: str
+
+
+class AbbreviationOut(_BaseModel):
+    id: int
+    org_id: int
+    short: str
+    expansion: str
+
+    model_config = {"from_attributes": True}
+
+
+@org_router.post("/orgs/{org_id}/abbreviations", response_model=AbbreviationOut, status_code=201)
+def create_abbreviation(
+    org_id: int,
+    payload: AbbreviationCreate,
+    db: Session = Depends(get_db),
+    _: object = Depends(require_admin),
+):
+    org = db.query(Organisation).filter(Organisation.id == org_id).first()
+    if org is None:
+        raise HTTPException(status_code=404, detail="Org not found")
+    existing = (
+        db.query(OrgAbbreviation)
+        .filter(OrgAbbreviation.org_id == org_id, OrgAbbreviation.short == payload.short)
+        .first()
+    )
+    if existing:
+        raise HTTPException(status_code=409, detail="Abbreviation already exists for this org")
+    abbrev = OrgAbbreviation(org_id=org_id, short=payload.short, expansion=payload.expansion)
+    db.add(abbrev)
+    db.commit()
+    db.refresh(abbrev)
+    logging.info("[ADMIN] abbreviation_created org_id=%s short=%s", org_id, payload.short)
+    return abbrev
+
+
+@org_router.get("/orgs/{org_id}/abbreviations", response_model=List[AbbreviationOut])
+def list_abbreviations(
+    org_id: int,
+    db: Session = Depends(get_db),
+    _: object = Depends(require_admin),
+):
+    org = db.query(Organisation).filter(Organisation.id == org_id).first()
+    if org is None:
+        raise HTTPException(status_code=404, detail="Org not found")
+    return db.query(OrgAbbreviation).filter(OrgAbbreviation.org_id == org_id).all()
+
+
+@org_router.delete("/orgs/{org_id}/abbreviations/{abbrev_id}", status_code=204)
+def delete_abbreviation(
+    org_id: int,
+    abbrev_id: int,
+    db: Session = Depends(get_db),
+    _: object = Depends(require_admin),
+):
+    abbrev = (
+        db.query(OrgAbbreviation)
+        .filter(OrgAbbreviation.id == abbrev_id, OrgAbbreviation.org_id == org_id)
+        .first()
+    )
+    if abbrev is None:
+        raise HTTPException(status_code=404, detail="Abbreviation not found")
+    db.delete(abbrev)
+    db.commit()
+    logging.info("[ADMIN] abbreviation_deleted id=%s org_id=%s", abbrev_id, org_id)
 
 
 # ---------------------------------------------------------------------------
