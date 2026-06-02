@@ -1,4 +1,4 @@
-from pydantic import BaseModel, field_serializer
+from pydantic import BaseModel, field_serializer, ConfigDict
 from typing import Optional
 from datetime import datetime
 
@@ -35,3 +35,28 @@ class OrgResponse(OrgBase):
 
     class Config:
         from_attributes = True
+
+
+# ---------------------------------------------------------------------------
+# OrgLLMConfig schemas
+# ---------------------------------------------------------------------------
+
+class OrgLLMConfigBase(BaseModel):
+    api_base: Optional[str] = None
+    model_name: Optional[str] = None
+    query_model: Optional[str] = None
+
+
+class OrgLLMConfigCreate(OrgLLMConfigBase):
+    pass
+
+
+class OrgLLMConfigUpdate(OrgLLMConfigBase):
+    pass
+
+
+class OrgLLMConfigResponse(OrgLLMConfigBase):
+    org_id: int
+
+    model_config = ConfigDict(from_attributes=True)
+

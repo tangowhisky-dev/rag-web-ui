@@ -20,3 +20,4 @@ class Organisation(Base, TimestampMixin):
     users = relationship("User", back_populates="organisation")
     knowledge_bases = relationship("KnowledgeBase", back_populates="organisation")
     chats = relationship("Chat", back_populates="organisation")
+    llm_config = relationship("OrgLLMConfig", uselist=False, back_populates="organisation")

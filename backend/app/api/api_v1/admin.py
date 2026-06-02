@@ -7,7 +7,8 @@ from sqlalchemy.orm import Session
 from app.core.security import require_admin
 from app.db.session import get_db
 from app.models.organisation import Organisation
-from app.schemas.organisation import OrgCreate, OrgUpdate, OrgResponse
+from app.models.org_llm_config import OrgLLMConfig
+from app.schemas.organisation import OrgCreate, OrgUpdate, OrgResponse, OrgLLMConfigUpdate, OrgLLMConfigResponse
 from app.schemas.user import UserAdminCreate, UserAdminUpdate, UserResponse
 from app.models.user import User, UserRole
 from app.core.security import get_password_hash
@@ -101,6 +102,43 @@ def delete_org(
     db.delete(org)
     db.commit()
     logging.info(f"[ADMIN] org_deleted id={org_id} name={org.name}")
+
+
+@org_router.get("/orgs/{org_id}/llm-config", response_model=OrgLLMConfigResponse)
+def get_org_llm_config(
+    org_id: int,
+    db: Session = Depends(get_db),
+    _: object = Depends(require_admin),
+):
+    config = db.query(OrgLLMConfig).filter(OrgLLMConfig.org_id == org_id).first()
+    if config is None:
+        raise HTTPException(status_code=404, detail="LLM config not found for this org")
+    return config
+
+
+@org_router.put("/orgs/{org_id}/llm-config", response_model=OrgLLMConfigResponse)
+def upsert_org_llm_config(
+    org_id: int,
+    payload: OrgLLMConfigUpdate,
+    db: Session = Depends(get_db),
+    _: object = Depends(require_admin),
+):
+    org = db.query(Organisation).filter(Organisation.id == org_id).first()
+    if org is None:
+        raise HTTPException(status_code=404, detail="Org not found")
+
+    config = db.query(OrgLLMConfig).filter(OrgLLMConfig.org_id == org_id).first()
+    if config is None:
+        config = OrgLLMConfig(org_id=org_id)
+        db.add(config)
+
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        setattr(config, field, value)
+
+    db.commit()
+    db.refresh(config)
+    logging.info("[ADMIN] org_llm_config_updated id=%s", org_id)
+    return config
 
 
 # ---------------------------------------------------------------------------
