@@ -259,6 +259,11 @@ class Settings(BaseSettings):
 
     PROCESSING_TIMEOUT_SILENCE_S: int = int(os.getenv('PROCESSING_TIMEOUT_SILENCE_S', '300'))
 
+    # ── SMB Share Ingestion ───────────────────────────────────────────────────
+    SMB_ENABLED: bool = os.getenv("SMB_ENABLED", "false").lower() == "true"
+    SMB_POLL_INTERVAL: int = int(os.getenv("SMB_POLL_INTERVAL", "60"))
+    SMB_MASTER_KEY: Optional[str] = os.getenv("SMB_MASTER_KEY")
+
     @property
     def graphrag_model(self) -> str:
         """Model to use for entity/relationship extraction. Falls back to OPENAI_MODEL."""
