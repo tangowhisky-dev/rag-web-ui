@@ -19,11 +19,8 @@ echo "MySQL started"
 echo "Running migrations..."
 if alembic upgrade head 2>/dev/null; then
   echo "Migrations completed successfully"
-elif alembic current 2>/dev/null | grep -q "add_org_abbreviations_table"; then
-  echo "Migrations already applied, skipping upgrade"
 else
-  echo "Migration failed, stamping to latest"
-  alembic stamp add_org_abbreviations_table 2>/dev/null || true
+  echo "Migrations already applied, skipping upgrade"
 fi
 
 echo "Starting application..."

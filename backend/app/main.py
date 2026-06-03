@@ -47,7 +47,7 @@ async def startup_event():
     except Exception as e:
         logging.getLogger(__name__).warning("Failed to load best tuning config: %s", e)
 
-    # Start the file watcher service if enabled
+    # Start the file watcher service (local + SMB) if enabled
     if settings.WATCHER_ENABLED:
         try:
             watcher_service = WatcherService()

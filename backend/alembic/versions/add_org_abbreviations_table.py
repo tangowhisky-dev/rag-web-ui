@@ -11,7 +11,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = "add_org_abbreviations_table"
-down_revision: Union[str, None] = "0001_add_watch_dir"
+down_revision: Union[str, None] = "0002_add_smb_fields"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

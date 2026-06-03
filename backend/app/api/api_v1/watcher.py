@@ -49,6 +49,14 @@ class ScanResultResponse(BaseModel):
     errors: int
 
 
+class SMBShareStatus(BaseModel):
+    host: str
+    share: str
+    connected: bool
+    last_scan_at: float | None = None
+    last_error: str | None = None
+
+
 class BulkWatcherStatusEntry(BaseModel):
     org_id: int
     name: str
@@ -56,6 +64,7 @@ class BulkWatcherStatusEntry(BaseModel):
     status: str  # "watching" | "stopped" | "not_configured"
     last_scan_at: float | None = None
     files_scanned: int = 0
+    smb_watches: list[SMBShareStatus] = []
 
 
 class BulkWatcherStatusResponse(BaseModel):
@@ -243,6 +252,20 @@ def get_all_watcher_status(
         try:
             watcher = _get_watcher()
             status = watcher.get_status()
+            smb_watches: list[SMBShareStatus] = []
+            if org.smb_host and org.smb_share:
+                # Attach SMB share status from the global smb_watches list
+                for sw in status.get("smb_watches", []):
+                    if sw.get("host") == org.smb_host and sw.get("share") == org.smb_share:
+                        smb_watches.append(
+                            SMBShareStatus(
+                                host=sw["host"],
+                                share=sw["share"],
+                                connected=sw.get("connected", False),
+                                last_scan_at=sw.get("last_scan_at"),
+                                last_error=sw.get("last_error"),
+                            )
+                        )
             entries.append(
                 BulkWatcherStatusEntry(
                     org_id=org.id,
@@ -251,6 +274,7 @@ def get_all_watcher_status(
                     status="watching" if status.get("running") else "stopped",
                     last_scan_at=status.get("last_scan_at"),
                     files_scanned=status.get("files_scanned", 0),
+                    smb_watches=smb_watches,
                 )
             )
         except HTTPException:
@@ -261,6 +285,7 @@ def get_all_watcher_status(
                     name=org.name,
                     watch_dir=org.watch_dir,
                     status="stopped",
+                    smb_watches=[],
                 )
             )
 

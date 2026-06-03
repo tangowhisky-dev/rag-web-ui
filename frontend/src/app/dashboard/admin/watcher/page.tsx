@@ -30,6 +30,14 @@ interface Org {
   name: string;
 }
 
+interface SMBShareStatus {
+  host: string;
+  share: string;
+  connected: boolean;
+  last_scan_at: number | null;
+  last_error: string | null;
+}
+
 interface WatcherStatus {
   org_id: number;
   name: string;
@@ -37,6 +45,7 @@ interface WatcherStatus {
   status: 'watching' | 'stopped' | 'not_configured';
   last_scan_at: number | null;
   files_scanned: number;
+  smb_watches: SMBShareStatus[];
 }
 
 interface ScanResult {
@@ -52,12 +61,39 @@ const STATUS_CONFIG: Record<string, { cls: string; label: string }> = {
   not_configured: { cls: 'bg-gray-100 text-gray-500', label: '—' },
 };
 
+const SMB_STATUS_CONFIG: Record<string, { cls: string; label: string }> = {
+  connected: { cls: 'bg-emerald-100 text-emerald-700', label: 'Connected' },
+  disconnected: { cls: 'bg-red-100 text-red-700', label: 'Disconnected' },
+};
+
 function StatusBadge({ status }: { status: string }) {
   const config = STATUS_CONFIG[status] ?? STATUS_CONFIG.not_configured;
   return (
     <Badge variant="secondary" className={config.cls}>
       {config.label}
     </Badge>
+  );
+}
+
+function SMBStatusBadge({ share }: { share: SMBShareStatus }) {
+  const connected = share.connected;
+  const config = connected
+    ? SMB_STATUS_CONFIG.connected
+    : SMB_STATUS_CONFIG.disconnected;
+  return (
+    <div className="flex flex-col gap-1">
+      <Badge variant="secondary" className={config.cls}>
+        {config.label}
+      </Badge>
+      <span className="text-[10px] text-muted-foreground truncate max-w-[120px]" title={`${share.host}/${share.share}`}>
+        {share.host}/{share.share}
+      </span>
+      {share.last_error && (
+        <span className="text-[10px] text-red-500 truncate max-w-[120px]" title={share.last_error}>
+          ⚠ {share.last_error.slice(0, 40)}
+        </span>
+      )}
+    </div>
   );
 }
 
@@ -197,6 +233,7 @@ export default function AdminWatcherPage() {
           status: 'not_configured',
           last_scan_at: null,
           files_scanned: 0,
+          smb_watches: [],
         });
       }
     }
@@ -222,13 +259,14 @@ export default function AdminWatcherPage() {
               <TableHead>Status</TableHead>
               <TableHead>Last Scan</TableHead>
               <TableHead>Files Scanned</TableHead>
+              <TableHead>SMB Shares</TableHead>
               <TableHead>Actions</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {displayRows.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={6} className="text-center text-muted-foreground">
+                <TableCell colSpan={7} className="text-center text-muted-foreground">
                   No organisations configured.
                 </TableCell>
               </TableRow>
@@ -246,6 +284,17 @@ export default function AdminWatcherPage() {
                     {formatLastScan(row.last_scan_at)}
                   </TableCell>
                   <TableCell>{row.files_scanned}</TableCell>
+                  <TableCell>
+                    {row.smb_watches.length > 0 ? (
+                      <div className="space-y-1">
+                        {row.smb_watches.map((sw, i) => (
+                          <SMBStatusBadge key={i} share={sw} />
+                        ))}
+                      </div>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">—</span>
+                    )}
+                  </TableCell>
                   <TableCell className="space-x-1">
                     <Button
                       variant="outline"

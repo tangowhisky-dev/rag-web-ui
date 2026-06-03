@@ -220,7 +220,7 @@ export function InputBar({
             )}
             data-testid="chat-input-send-button"
           >
-            <ArrowRight className="h-4 w-4" />
+            <ArrowUp className="h-4 w-4" />
           </button>
         )}
       </div>

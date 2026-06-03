@@ -35,6 +35,17 @@ from app.services.document_processor import (
     process_document_background,
 )
 
+# Lazy import for SMB — only loaded when SMB is enabled
+_smb_auth: object | None = None
+
+def _get_smb_auth():
+    """Lazy-import SMBAuth to avoid hard dependency on smbprotocol at import time."""
+    global _smb_auth
+    if _smb_auth is None:
+        from app.services.smb_auth import get_smb_auth
+        _smb_auth = get_smb_auth(settings.SMB_MASTER_KEY)
+    return _smb_auth
+
 logger = logging.getLogger(__name__)
 
 # Regex to parse user_{uid}/kb_{kid}/ path segments
@@ -82,6 +93,7 @@ class WatcherService:
         self._debouncer = _Debouncer(delay=1.0)
         self._last_scan_at: Optional[float] = None
         self._files_scanned: int = 0
+        self._smb_watches: list = []  # list of SMBShareWatcher instances
 
     # ------------------------------------------------------------------
     # Public lifecycle
@@ -92,6 +104,9 @@ class WatcherService:
 
         Scans each organisation with a non-null ``watch_dir`` and registers it
         with the watchdog observer.  Skips directories that do not exist on disk.
+
+        If SMB is enabled, also loads orgs with SMB shares configured and
+        creates SMBShareWatcher instances for each.
         """
         with self._lock:
             if self._running:
@@ -111,6 +126,11 @@ class WatcherService:
             raise
 
         self._watch_all_dirs()
+
+        # Load SMB shares if enabled
+        if settings.SMB_ENABLED:
+            self._load_smb_watches()
+
         logger.info("[WATCHER] service started")
 
     def stop(self) -> None:
@@ -181,9 +201,10 @@ class WatcherService:
             db.close()
 
     def scan(self) -> dict:
-        """Manually scan all watched directories for new/modified files.
+        """Manually scan all watched directories and SMB shares for new/modified files.
 
-        Returns a summary dict with counts of scanned, new, and skipped files.
+        Returns a summary dict with counts of scanned, new, and skipped files
+        aggregated across local and SMB sources.
         """
         from watchdog.observers.api import BaseObserver
 
@@ -193,6 +214,7 @@ class WatcherService:
             logger.warning("[WATCHER] scan attempted but service is not running")
             return summary
 
+        # Scan local directories
         orgs = self._get_orgs_with_watch_dirs()
         for org in orgs:
             watch_dir = org.watch_dir
@@ -209,6 +231,18 @@ class WatcherService:
                         logger.error("[WATCHER] scan error for %s: %s", fpath, e)
                         summary["errors"] += 1
 
+        # Scan SMB shares
+        for watch in self._smb_watches:
+            try:
+                smb_result = watch.scan()
+                summary["scanned"] += smb_result.get("scanned", 0)
+                summary["new"] += smb_result.get("new", 0)
+                summary["skipped"] += smb_result.get("skipped", 0)
+                summary["errors"] += smb_result.get("errors", 0)
+            except Exception as e:
+                logger.error("[WATCHER] smb_scan_error host=%s share=%s: %s", watch.host, watch.share, e)
+                summary["errors"] += 1
+
         self._last_scan_at = time.time()
         logger.info(
             "[WATCHER] scan_complete scanned=%d new=%d skipped=%d errors=%d",
@@ -222,10 +256,15 @@ class WatcherService:
 
     def get_status(self) -> dict:
         """Return current watcher state for the admin status endpoint."""
+        smb_watches_status = []
+        for watch in self._smb_watches:
+            smb_watches_status.append(watch.get_status())
+
         return {
             "running": self._running,
             "last_scan_at": self._last_scan_at,
             "files_scanned": self._files_scanned,
+            "smb_watches": smb_watches_status,
         }
 
     # ------------------------------------------------------------------
@@ -272,6 +311,53 @@ class WatcherService:
             )
         finally:
             db.close()
+
+    def _load_smb_watches(self) -> None:
+        """Load organisations with SMB shares configured and create watchers.
+
+        Called during start() when SMB_ENABLED is True.
+        """
+        global _smb_auth
+        auth = _get_smb_auth()
+
+        db: Session = SessionLocal()
+        try:
+            orgs = (
+                db.query(Organisation)
+                .filter(
+                    Organisation.smb_host.isnot(None),
+                    Organisation.smb_share.isnot(None),
+                )
+                .all()
+            )
+            for org in orgs:
+                if not org.smb_host or not org.smb_share:
+                    continue
+
+                # Decrypt password
+                decrypted_pw = auth.decrypt(org.smb_password_encrypted or "")
+
+                watcher = SMBShareWatcher(
+                    host=org.smb_host,
+                    share=org.smb_share,
+                    username=org.smb_username or "",
+                    password=decrypted_pw,
+                    domain=org.smb_domain,
+                    kb_id=None,  # SMB shares are org-level, not kb-level
+                    poll_interval=settings.SMB_POLL_INTERVAL,
+                )
+                self._smb_watches.append(watcher)
+                logger.info(
+                    "[WATCHER] smb_watch_loaded host=%s share=%s org_id=%s",
+                    org.smb_host, org.smb_share, org.id,
+                )
+        finally:
+            db.close()
+
+        logger.info(
+            "[WATCHER] smb_watches_loaded count=%d",
+            len(self._smb_watches),
+        )
 
     def _handle_file(self, event_path: str, org_id: str, kb_id: Optional[str]) -> None:
         """Core logic: hash the file, check dedup, decide ingest or skip.

@@ -9,7 +9,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision = "add_org_llm_config"
-down_revision = "add_organisations_and_roles"
+down_revision = "add_org_abbreviations_table"
 branch_labels = None
 depends_on = None
 
