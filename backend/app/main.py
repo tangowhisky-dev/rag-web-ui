@@ -5,6 +5,7 @@ from app.core.config import settings
 from app.core.storage import init_storage
 from app.db.session import SessionLocal
 from app.models.knowledge import ProcessingTask
+from app.services.watcher_service import WatcherService
 from fastapi import FastAPI
 
 logging.basicConfig(
@@ -25,12 +26,17 @@ app = FastAPI(
     redirect_slashes=False,
 )
 
+# WatcherService — started on demand during startup
+watcher_service: WatcherService | None = None
+
 # Include routers
 app.include_router(api_router, prefix=settings.API_V1_STR)
 
 
 @app.on_event("startup")
 async def startup_event():
+    global watcher_service
+
     # Initialize local file storage
     init_storage()
 
@@ -40,6 +46,14 @@ async def startup_event():
         load_best_config()
     except Exception as e:
         logging.getLogger(__name__).warning("Failed to load best tuning config: %s", e)
+
+    # Start the file watcher service if enabled
+    if settings.WATCHER_ENABLED:
+        try:
+            watcher_service = WatcherService()
+            watcher_service.start()
+        except Exception as e:
+            logging.getLogger(__name__).error("Failed to start WatcherService: %s", e)
 
     # Reset any tasks left in "processing" state from a previous worker crash.
     # With --reload, a file-write event kills the worker mid-flight leaving tasks
@@ -63,6 +77,13 @@ async def startup_event():
 @app.get("/")
 def root():
     return {"message": "Welcome to InsightCore API"}
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    global watcher_service
+    if watcher_service is not None:
+        watcher_service.stop()
 
 
 @app.get("/api/health")

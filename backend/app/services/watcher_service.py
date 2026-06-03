@@ -131,6 +131,55 @@ class WatcherService:
         self._executor.shutdown(wait=False, cancel_futures=True)
         logger.info("[WATCHER] service stopped")
 
+    def add_watch(self, org_id: int, watch_dir: str) -> None:
+        """Start watching a specific directory for an organisation."""
+        abs_dir = os.path.abspath(watch_dir)
+        if not os.path.isdir(abs_dir):
+            logger.warning("[WATCHER] add_watch dir_not_found dir=%s", abs_dir)
+            return
+
+        # Unregister any existing watch for this org first
+        self.remove_watch(org_id)
+
+        if not self._running or self._observer is None:
+            logger.warning("[WATCHER] add_watch service_not_running org_id=%s", org_id)
+            return
+
+        handler = _WatcherHandler(
+            service=self,
+            org_id=org_id,
+            watch_dir=abs_dir,
+        )
+        try:
+            self._observer.schedule(handler, abs_dir, recursive=True)  # type: ignore[union-attr]
+            logger.info("[WATCHER] watch_added org_id=%s dir=%s", org_id, abs_dir)
+        except Exception as e:
+            logger.error("[WATCHER] watch_add_failed org_id=%s dir=%s: %s", org_id, abs_dir, e)
+
+    def remove_watch(self, org_id: int) -> None:
+        """Stop watching the directory for a specific organisation."""
+        if not self._observer:
+            return
+
+        db: Session = SessionLocal()
+        try:
+            org = (
+                db.query(Organisation)
+                .filter(Organisation.id == org_id)
+                .first()
+            )
+            if org and org.watch_dir:
+                abs_dir = os.path.abspath(org.watch_dir)
+                # Find and unschedule the handler for this org
+                if hasattr(self._observer, 'handlers'):
+                    for handler in self._observer.handlers:  # type: ignore[attr-defined]
+                        if getattr(handler, '_watch_dir', '').rstrip('/') == abs_dir.rstrip('/'):
+                            self._observer.unschedule(handler)  # type: ignore[union-attr]
+                            logger.info("[WATCHER] watch_removed org_id=%s dir=%s", org_id, abs_dir)
+                            return
+        finally:
+            db.close()
+
     def scan(self) -> dict:
         """Manually scan all watched directories for new/modified files.
 
