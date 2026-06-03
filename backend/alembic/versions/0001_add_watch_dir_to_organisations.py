@@ -1,7 +1,7 @@
 """add watch_dir to organisations
 
 Revision ID: 0001_add_watch_dir
-Revises: initial_schema
+Revises: merge_two_heads
 Create Date: 2026-06-03 05:07:00.000000
 
 """
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = '0001_add_watch_dir'
-down_revision: Union[str, None] = 'initial_schema'
+down_revision: Union[str, None] = 'merge_two_heads'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

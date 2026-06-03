@@ -21,6 +21,10 @@ class OrgUpdate(BaseModel):
     name: Optional[str] = None
     parent_id: Optional[int] = None
     watch_dir: Optional[str] = None
+    smb_host: Optional[str] = None
+    smb_share: Optional[str] = None
+    smb_username: Optional[str] = None
+    smb_domain: Optional[str] = None
 
 
 class OrgResponse(OrgBase):
@@ -28,6 +32,10 @@ class OrgResponse(OrgBase):
     parent_id: Optional[int] = None
     path: Optional[str] = None
     watch_dir: Optional[str] = None
+    smb_host: Optional[str] = None
+    smb_share: Optional[str] = None
+    smb_username: Optional[str] = None
+    smb_domain: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

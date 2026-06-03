@@ -1,7 +1,7 @@
 """add org abbreviations table
 
 Revision ID: add_org_abbreviations_table
-Revises: add_org_llm_config
+Revises: 0001_add_watch_dir
 Create Date: 2026-06-02
 
 """
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = "add_org_abbreviations_table"
-down_revision: Union[str, None] = "add_org_llm_config"
+down_revision: Union[str, None] = "0001_add_watch_dir"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

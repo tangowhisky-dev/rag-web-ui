@@ -13,6 +13,13 @@ class Organisation(Base, TimestampMixin):
     path = Column(String(1024), nullable=True)  # materialized path e.g. "/1/3/7"
     watch_dir = Column(String(1024), nullable=True)  # local directory to watch for file ingestion
 
+    # SMB share fields
+    smb_host = Column(String(255), nullable=True)  # SMB server hostname or IP
+    smb_share = Column(String(255), nullable=True)  # Share name
+    smb_username = Column(String(255), nullable=True)  # Username for authentication
+    smb_password_encrypted = Column(Text, nullable=True)  # Fernet-encrypted password
+    smb_domain = Column(String(255), nullable=True)  # Windows domain or workgroup
+
     # Adjacency-list relationships
     parent = relationship("Organisation", remote_side="Organisation.id", back_populates="children")
     children = relationship("Organisation", back_populates="parent")
