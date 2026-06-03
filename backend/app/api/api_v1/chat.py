@@ -22,6 +22,7 @@ from app.schemas.chat import (
 )
 from app.core.security import get_current_user
 from app.services.chat_service import generate_response, get_effective_llm_config
+from app.services.cancel_registry import set_cancel_token
 from app.services.document_processor import _convert_to_markdown, SUPPORTED_EXTENSIONS
 
 logger = logging.getLogger(__name__)
@@ -158,6 +159,34 @@ def search_chats(
         )
         for row in rows
     ]
+
+
+@router.post("/{chat_id}/cancel")
+def cancel_chat_stream(
+    *,
+    db: Session = Depends(get_db),
+    chat_id: int,
+    current_user: User = Depends(get_current_user)
+) -> Any:
+    """Signal cancellation for an in-progress streaming response.
+
+    Sets the cancel token in the registry so that the streaming pipeline
+    can detect cancellation on its next iteration step.
+    """
+    chat = (
+        db.query(Chat)
+        .filter(
+            Chat.id == chat_id,
+            _chat_owner_filter(current_user)
+        )
+        .first()
+    )
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    set_cancel_token(chat_id)
+    logger.info("[CHAT] cancelled chat_id=%d user_id=%d", chat_id, current_user.id)
+    return {"status": "cancelled"}
 
 
 @router.get("/{chat_id}", response_model=ChatResponse)
