@@ -4,6 +4,7 @@ Endpoints:
     POST   /api/admin/orgs/{org_id}/watch-dir       — set watch directory
     DELETE /api/admin/orgs/{org_id}/watch-dir       — remove watch directory
     GET    /api/admin/orgs/{org_id}/watcher-status   — get watcher status
+    GET    /api/admin/watcher-status-all             — bulk watcher status for all orgs
     POST   /api/admin/orgs/{org_id}/watcher-trigger  — manually trigger a scan
 """
 
@@ -46,6 +47,19 @@ class ScanResultResponse(BaseModel):
     new: int
     skipped: int
     errors: int
+
+
+class BulkWatcherStatusEntry(BaseModel):
+    org_id: int
+    name: str
+    watch_dir: str | None
+    status: str  # "watching" | "stopped" | "not_configured"
+    last_scan_at: float | None = None
+    files_scanned: int = 0
+
+
+class BulkWatcherStatusResponse(BaseModel):
+    orgs: list[BulkWatcherStatusEntry]
 
 
 # ---------------------------------------------------------------------------
@@ -200,6 +214,62 @@ def get_watcher_status(
             watch_dir=org.watch_dir,
             status="stopped",
         )
+
+
+@router.get(
+    "/watcher-status-all",
+    response_model=BulkWatcherStatusResponse,
+)
+def get_all_watcher_status(
+    db: Session = Depends(get_db),
+    _: object = Depends(require_admin),
+) -> BulkWatcherStatusResponse:
+    """Get watcher status for all organisations in a single call."""
+    orgs = db.query(Organisation).order_by(Organisation.id).all()
+
+    entries: list[BulkWatcherStatusEntry] = []
+    for org in orgs:
+        if not org.watch_dir:
+            entries.append(
+                BulkWatcherStatusEntry(
+                    org_id=org.id,
+                    name=org.name,
+                    watch_dir=None,
+                    status="not_configured",
+                )
+            )
+            continue
+
+        try:
+            watcher = _get_watcher()
+            status = watcher.get_status()
+            entries.append(
+                BulkWatcherStatusEntry(
+                    org_id=org.id,
+                    name=org.name,
+                    watch_dir=org.watch_dir,
+                    status="watching" if status.get("running") else "stopped",
+                    last_scan_at=status.get("last_scan_at"),
+                    files_scanned=status.get("files_scanned", 0),
+                )
+            )
+        except HTTPException:
+            # Watcher not initialized
+            entries.append(
+                BulkWatcherStatusEntry(
+                    org_id=org.id,
+                    name=org.name,
+                    watch_dir=org.watch_dir,
+                    status="stopped",
+                )
+            )
+
+    logger.info(
+        "[WATCHER] bulk_status_all orgs=%d",
+        len(entries),
+    )
+
+    return BulkWatcherStatusResponse(orgs=entries)
 
 
 @router.post(
