@@ -10,6 +10,7 @@ const NAV_ITEMS = [
   { label: 'Orgs', href: '/dashboard/admin/orgs' },
   { label: 'Users', href: '/dashboard/admin/users' },
   { label: 'LLM Config', href: '/dashboard/admin/llm-config' },
+  { label: 'Watcher', href: '/dashboard/admin/watcher' },
 ];
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
