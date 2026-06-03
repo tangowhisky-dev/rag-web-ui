@@ -21,6 +21,7 @@ import ChatSettings from "@/components/chat/chat-settings";
 import type { ChatPatch } from "@/components/chat/chat-settings";
 import { api, ApiError } from "@/lib/api";
 import { APP_LOGO_SRC } from "@/lib/app-config";
+import { cancelStream } from "@/lib/cancel-stream";
 import { useToast } from "@/components/ui/use-toast";
 import { Answer } from "@/components/chat/answer";
 import { InputBar, type AnsweringMode } from "@/components/chat/chat-input";
@@ -689,8 +690,10 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     }
   };
 
-  /** Abort the in-flight stream request. */
+  /** Abort the in-flight stream request and notify the server to cancel. */
   const handleStop = () => {
+    // Best-effort: notify server to cancel, then always abort the client-side stream.
+    cancelStream(params.id).catch(() => {});
     abortControllerRef.current?.abort();
   };
 

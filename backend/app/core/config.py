@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     # JWT
     SECRET_KEY: str = os.getenv("SECRET_KEY", "your-secret-key-here")
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "10080"))
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "360"))
 
     # File storage
     UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", "/app/uploads")
@@ -147,7 +147,7 @@ class Settings(BaseSettings):
     SPLADE_MODEL: str = os.getenv("SPLADE_MODEL", "prithivida/Splade_PP_en_v1")
     # Directory where FastEmbed caches downloaded ONNX models.
     # Mount as a volume so the model survives container restarts.
-    FASTEMBED_CACHE_DIR: str = os.getenv("FASTEMBED_CACHE_DIR", "./assets/fastembed")
+    FASTEMBED_CACHE_DIR: str = os.getenv("FASTEMBED_CACHE_DIR", "/app/assets/fastembed")
 
     # ── Retrieval ──────────────────────────────────────────────────────────────
     RETRIEVAL_TOP_K: int = int(os.getenv("RETRIEVAL_TOP_K", "10"))
@@ -163,7 +163,7 @@ class Settings(BaseSettings):
     # to the LLM. More accurate than RRF alone for cross-KB disambiguation.
     RERANKER_ENABLED: bool = os.getenv("RERANKER_ENABLED", "true").lower() == "true"
     RERANKER_MODEL: str = os.getenv("RERANKER_MODEL", "Xenova/ms-marco-MiniLM-L-12-v2")
-    RERANKER_CACHE_DIR: str = os.getenv("RERANKER_CACHE_DIR", "./assets/reranker")
+    RERANKER_CACHE_DIR: str = os.getenv("RERANKER_CACHE_DIR", "/app/assets/reranker")
     # How many chunks to keep after reranking. Must be <= RETRIEVAL_TOP_K.
     # Reducing this keeps only the most relevant chunks, further limiting noise.
     RERANKER_SCORE_THRESHOLD: float = float(os.getenv("RERANKER_SCORE_THRESHOLD", "-2.0"))

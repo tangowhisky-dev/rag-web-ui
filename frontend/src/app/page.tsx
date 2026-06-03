@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { api, ApiError } from "@/lib/api";
@@ -15,12 +15,47 @@ import {
   Network,
   ChevronRight,
   Loader2,
+  AlertTriangle,
 } from "lucide-react";
 
 export default function Home() {
   const router = useRouter();
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [retryAfter, setRetryAfter] = useState<number | null>(null);
+  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Countdown timer for rate limit backoff
+  useEffect(() => {
+    if (retryAfter === null || retryAfter <= 0) {
+      if (countdownRef.current) {
+        clearInterval(countdownRef.current);
+        countdownRef.current = null;
+      }
+      return;
+    }
+
+    countdownRef.current = setInterval(() => {
+      setRetryAfter((prev) => {
+        if (prev === null || prev <= 1) {
+          if (countdownRef.current) {
+            clearInterval(countdownRef.current);
+            countdownRef.current = null;
+          }
+          // Clear stale error message when countdown expires
+          setError("");
+          return null;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => {
+      if (countdownRef.current) {
+        clearInterval(countdownRef.current);
+      }
+    };
+  }, [retryAfter]);
 
   useEffect(() => {
     if (typeof window !== "undefined" && localStorage.getItem("token")) {
@@ -44,7 +79,19 @@ export default function Home() {
       document.cookie = `token=${data.access_token}; path=/; SameSite=Lax`;
       router.push("/dashboard");
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Invalid credentials");
+      if (err instanceof ApiError) {
+        // Handle rate limiting (429)
+        if (err.status === 429) {
+          const retryAfterHeader = err.headers?.get("retry-after");
+          const retryAfter = retryAfterHeader ? parseInt(retryAfterHeader, 10) : 30;
+          setRetryAfter(retryAfter);
+          setError(err.message);
+        } else {
+          setError(err.message);
+        }
+      } else {
+        setError("Invalid credentials");
+      }
     } finally {
       setLoading(false);
     }
@@ -94,7 +141,7 @@ export default function Home() {
                 {APP_NAME} transforms your enterprise documents into an intelligent knowledge base.
                 Ask questions in plain language and get precise, cited answers in seconds.
               </p>
-              <div className="flex flex-col sm:flex-row gap-3">
+              {/* <div className="flex flex-col sm:flex-row gap-3">
                 <Link
                   href="/register"
                   className="inline-flex items-center justify-center gap-2 rounded-full bg-primary text-primary-foreground px-6 py-3 text-sm font-semibold hover:bg-primary/90 transition-colors"
@@ -102,7 +149,7 @@ export default function Home() {
                   Create Account
                   <ChevronRight className="h-4 w-4" />
                 </Link>
-              </div>
+              </div> */}
               {/* Trust signals */}
               <div className="flex flex-wrap items-center gap-6 pt-2">
                 {[
@@ -126,30 +173,42 @@ export default function Home() {
                   <p className="text-sm text-muted-foreground mt-1">Welcome back — continue where you left off.</p>
                 </div>
 
-                <form onSubmit={handleLogin} className="space-y-4">
+                <form method="post" onSubmit={handleLogin} className="space-y-4">
                   <div>
                     <label htmlFor="username" className="block text-sm font-medium mb-1">Username</label>
                     <input
-                      id="username" name="username" type="text" required disabled={loading}
+                      id="username" name="username" type="text" required
+                      disabled={loading || retryAfter !== null}
                       placeholder="Enter your username"
-                      className="w-full px-3 py-2 rounded-lg border border-input bg-background text-foreground text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-ring placeholder:text-muted-foreground"
+                      className="w-full px-3 py-2 rounded-lg border border-input bg-background text-foreground text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-ring placeholder:text-muted-foreground disabled:opacity-50 disabled:cursor-not-allowed"
                     />
                   </div>
                   <div>
                     <label htmlFor="password" className="block text-sm font-medium mb-1">Password</label>
                     <input
-                      id="password" name="password" type="password" required disabled={loading}
+                      id="password" name="password" type="password" required
+                      disabled={loading || retryAfter !== null}
                       placeholder="Enter your password"
-                      className="w-full px-3 py-2 rounded-lg border border-input bg-background text-foreground text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-ring placeholder:text-muted-foreground"
+                      className="w-full px-3 py-2 rounded-lg border border-input bg-background text-foreground text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-ring placeholder:text-muted-foreground disabled:opacity-50 disabled:cursor-not-allowed"
                     />
                   </div>
 
-                  {error && (
+                  {retryAfter !== null && (
+                    <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400 text-sm flex items-center gap-2">
+                      <AlertTriangle className="h-4 w-4 flex-shrink-0" />
+                      <div>
+                        <p className="font-medium">Too many attempts</p>
+                        <p>Try again in {retryAfter}s</p>
+                      </div>
+                    </div>
+                  )}
+
+                  {error && retryAfter === null && (
                     <div className="p-3 rounded-lg bg-destructive/10 text-destructive text-sm">{error}</div>
                   )}
 
                   <button
-                    type="submit" disabled={loading}
+                    type="submit" disabled={loading || retryAfter !== null}
                     className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {loading ? <><Loader2 className="h-4 w-4 animate-spin" /> Signing in…</> : "Sign in"}
@@ -157,10 +216,10 @@ export default function Home() {
                 </form>
 
                 <p className="text-center text-sm text-muted-foreground">
-                  No account?{" "}
-                  <Link href="/register" className="text-foreground font-medium hover:underline">
+                  No account? Please contact your system administrator {" "}
+                  {/* <Link href="/register" className="text-foreground font-medium hover:underline">
                     Create one now
-                  </Link>
+                  </Link> */}
                 </p>
               </div>
             </div>

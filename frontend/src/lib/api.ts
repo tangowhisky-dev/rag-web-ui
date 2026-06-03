@@ -4,7 +4,11 @@ interface FetchOptions extends Omit<RequestInit, 'body' | 'headers'> {
 }
 
 export class ApiError extends Error {
-  constructor(public status: number, message: string) {
+  constructor(
+    public status: number,
+    message: string,
+    public headers?: Headers,
+  ) {
     super(message);
     this.name = 'ApiError';
   }
@@ -50,7 +54,8 @@ export async function fetchApi(fullUrl: string, options: FetchOptions = {}) {
   try {
     const response = await fetch(fullUrl, config);
 
-    if (response.status === 401) {
+    // Skip 401 redirect for login endpoint — let the page handle it
+    if (response.status === 401 && !fullUrl.includes('/api/auth/token')) {
       if (typeof window !== 'undefined') {
         localStorage.removeItem('token');
         document.cookie = 'token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT';
@@ -63,7 +68,8 @@ export async function fetchApi(fullUrl: string, options: FetchOptions = {}) {
       const errorData = await response.json().catch(() => ({}));
       throw new ApiError(
         response.status,
-        errorData.message || errorData.detail || 'An error occurred'
+        errorData.message || errorData.detail || 'An error occurred',
+        response.headers,
       );
     }
 

@@ -1,10 +1,14 @@
 import logging
+import os
 
 from app.api.api_v1.api import api_router
 from app.core.config import settings
+from app.core.security import get_password_hash
 from app.core.storage import init_storage
 from app.db.session import SessionLocal
 from app.models.knowledge import ProcessingTask
+from app.models.organisation import Organisation
+from app.models.user import User, UserRole
 from app.services.watcher_service import WatcherService
 from fastapi import FastAPI
 
@@ -12,6 +16,95 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
+
+
+def _seed_root_org_and_superadmin() -> None:
+    """Create ROOT_ORG and a superadmin user if none exists.
+
+    Reads from env:
+        ROOT_ORG       – org name (default: "Root Organization")
+        SUPERADMIN_USERNAME – admin username (default: "admin")
+        SUPERADMIN_PASSWORD – admin password (default: "admin123")
+    Only creates the org/user if they don't already exist.
+    """
+    org_name = os.environ.get("ROOT_ORG", "Root Organization").strip()
+    admin_username = os.environ.get("SUPERADMIN_USERNAME", "admin").strip()
+    admin_password = os.environ.get("SUPERADMIN_PASSWORD", "admin123").strip()
+
+    if not org_name or not admin_username or not admin_password:
+        logging.getLogger(__name__).warning(
+            "[SEED] Skipping root org/superadmin seed: ROOT_ORG, SUPERADMIN_USERNAME "
+            "and SUPERADMIN_PASSWORD must all be set and non-empty."
+        )
+        return
+
+    db = SessionLocal()
+    try:
+        # 1. Check if a superadmin already exists — if yes, skip entirely
+        superadmin = (
+            db.query(User)
+            .filter(User.role == UserRole.super_admin)
+            .first()
+        )
+        if superadmin:
+            logging.getLogger(__name__).info(
+                "[SEED] Superadmin '%s' already exists (id=%d), skipping.",
+                superadmin.username,
+                superadmin.id,
+            )
+            return
+
+        # 2. Ensure ROOT_ORG exists
+        org = db.query(Organisation).filter(Organisation.name == org_name).first()
+        if not org:
+            org = Organisation(name=org_name, path="/1")
+            db.add(org)
+            db.flush()
+            logging.getLogger(__name__).info(
+                "[SEED] Created organisation id=%d name=%s", org.id, org_name
+            )
+
+        # 3. Create superadmin user
+        # Check for duplicate username or email
+        existing = (
+            db.query(User)
+            .filter(
+                (User.username == admin_username)
+                | (User.email == f"{admin_username}@root.local")
+            )
+            .first()
+        )
+        if existing:
+            logging.getLogger(__name__).warning(
+                "[SEED] Username '%s' or email already exists, skipping superadmin creation.",
+                admin_username,
+            )
+            return
+
+        user = User(
+            username=admin_username,
+            email=f"{admin_username}@root.local",
+            hashed_password=get_password_hash(admin_password),
+            role=UserRole.super_admin,
+            is_superuser=True,
+            is_active=True,
+            org_id=org.id,
+        )
+        db.add(user)
+        db.commit()
+        logging.getLogger(__name__).info(
+            "[SEED] Created superadmin user username=%s id=%d org_id=%d",
+            admin_username,
+            user.id,
+            org.id,
+        )
+    except Exception as e:
+        db.rollback()
+        logging.getLogger(__name__).error(
+            "[SEED] Failed to seed root org/superadmin: %s", e
+        )
+    finally:
+        db.close()
 
 # Suppress noisy INFO notifications from the Neo4j driver and neo4j-graphrag
 # internals. These fire on every schema op ("index already exists") and every
@@ -36,6 +129,9 @@ app.include_router(api_router, prefix=settings.API_V1_STR)
 @app.on_event("startup")
 async def startup_event():
     global watcher_service
+
+    # Seed root organisation and superadmin (runs before other startup tasks)
+    _seed_root_org_and_superadmin()
 
     # Initialize local file storage
     init_storage()

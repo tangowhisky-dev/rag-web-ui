@@ -91,9 +91,11 @@ def download_reranker(model_name: str, cache_dir: str) -> None:
 def main() -> None:
     _load_dotenv()
 
-    default_splade_cache   = os.getenv("FASTEMBED_CACHE_DIR", "./assets/fastembed")
+    # Resolve defaults relative to the project root (parent of this script's dir)
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    default_splade_cache   = os.getenv("FASTEMBED_CACHE_DIR", os.path.join(project_root, "assets", "fastembed"))
     default_splade_model   = os.getenv("SPLADE_MODEL", "prithivida/Splade_PP_en_v1")
-    default_reranker_cache = os.getenv("RERANKER_CACHE_DIR", "./assets/reranker")
+    default_reranker_cache = os.getenv("RERANKER_CACHE_DIR", os.path.join(project_root, "assets", "reranker"))
     default_reranker_model = os.getenv("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-12-v2")
 
     parser = argparse.ArgumentParser(description="Pre-download RAG-Web-UI model assets.")

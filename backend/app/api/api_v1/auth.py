@@ -1,7 +1,8 @@
 import logging
+import time
 from datetime import timedelta
 from typing import Any
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from requests.exceptions import RequestException
@@ -18,6 +19,116 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# ── Rate limiting for login attempts ──────────────────────────────────────
+# Tracks failed login attempts per IP address with exponential backoff.
+# Format: { ip: { "attempts": int, "first_attempt_time": float, "backoff_until": float | None, "backoff_level": int } }
+# backoff_level: how many times backoff has escalated (0 = first backoff, 1 = second, etc.)
+# NOTE: In-progress redesign — current version has issues with correct-login reset and post-expiry escalation.
+_failed_login_attempts: dict[str, dict[str, Any]] = {}
+
+# Max attempts before first backoff kicks in
+MAX_LOGIN_ATTEMPTS = 3
+# Exponential backoff: 15s, 30s, 60s, 120s, 240s, 480s, 900s...
+BASE_BACKOFF_SECONDS = 15
+MAX_BACKOFF_SECONDS = 900
+
+
+def _get_client_ip(request: Request) -> str:
+    """Extract client IP from request, respecting proxy headers.
+
+    Priority: X-Real-IP (from Next.js middleware) > X-Forwarded-For > direct connection.
+    """
+    # X-Real-IP: set by Next.js middleware for proxied requests
+    real_ip = request.headers.get("x-real-ip")
+    if real_ip:
+        return real_ip.strip()
+    # X-Forwarded-For: set by reverse proxies (may contain chain)
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    # Fall back to direct connection IP
+    return request.client.host if request.client else "unknown"
+
+
+def _check_rate_limit(ip: str) -> tuple[bool, int]:
+    """Check if IP is rate limited.
+
+    Returns:
+        (is_limited, retry_after_seconds)
+    """
+    now = time.time()
+
+    # Clean up entries older than 10 minutes (prevent memory leak)
+    expired_ips = [
+        ip_key for ip_key, data in _failed_login_attempts.items()
+        if now - data["first_attempt_time"] > 600
+    ]
+    for ip_key in expired_ips:
+        del _failed_login_attempts[ip_key]
+
+    if ip not in _failed_login_attempts:
+        return False, 0
+
+    data = _failed_login_attempts[ip]
+    backoff_until = data.get("backoff_until")
+
+    # If still in backoff window, reject
+    if backoff_until and now < backoff_until:
+        retry_after = max(0, int(backoff_until - now))
+        return True, retry_after
+
+    # Backoff expired — increment level and immediately apply next backoff
+    if backoff_until:
+        data["backoff_level"] = data.get("backoff_level", 0) + 1
+        data["backoff_until"] = None
+        # Apply escalated backoff immediately if there are enough failures
+        if data["attempts"] >= MAX_LOGIN_ATTEMPTS:
+            backoff = min(
+                BASE_BACKOFF_SECONDS * (2 ** data["backoff_level"]),
+                MAX_BACKOFF_SECONDS
+            )
+            data["backoff_until"] = now + backoff
+            return True, int(backoff)
+
+    return False, 0
+
+
+def _record_failed_attempt(ip: str) -> int:
+    """Record a failed login attempt for the given IP.
+
+    Returns:
+        Current attempt count for this IP
+    """
+    now = time.time()
+
+    if ip not in _failed_login_attempts:
+        _failed_login_attempts[ip] = {
+            "attempts": 1,
+            "first_attempt_time": now,
+            "backoff_until": None,
+            "backoff_level": 0,
+        }
+    else:
+        _failed_login_attempts[ip]["attempts"] += 1
+
+    data = _failed_login_attempts[ip]
+
+    # First backoff: triggers at MAX_LOGIN_ATTEMPTS failures
+    # Subsequent backoffs are applied in _check_rate_limit when previous backoff expires
+    if data["attempts"] >= MAX_LOGIN_ATTEMPTS and not data.get("backoff_until"):
+        backoff = min(
+            BASE_BACKOFF_SECONDS * (2 ** data.get("backoff_level", 0)),
+            MAX_BACKOFF_SECONDS
+        )
+        data["backoff_until"] = now + backoff
+
+    return data["attempts"]
+
+def _reset_failed_attempts(ip: str) -> None:
+    """Reset failed attempts after successful login."""
+    if ip in _failed_login_attempts:
+        del _failed_login_attempts[ip]
+
 @router.post("/register", response_model=UserResponse)
 def register(*, db: Session = Depends(get_db), user_in: UserCreate) -> Any:
     """
@@ -31,7 +142,7 @@ def register(*, db: Session = Depends(get_db), user_in: UserCreate) -> Any:
                 status_code=400,
                 detail="A user with this email already exists.",
             )
-        
+
         # Check if user with this username exists
         user = db.query(User).filter(User.username == user_in.username).first()
         if user:
@@ -39,7 +150,7 @@ def register(*, db: Session = Depends(get_db), user_in: UserCreate) -> Any:
                 status_code=400,
                 detail="A user with this username already exists.",
             )
-        
+
         # Create new user
         user = User(
             email=user_in.email,
@@ -58,13 +169,41 @@ def register(*, db: Session = Depends(get_db), user_in: UserCreate) -> Any:
 
 @router.post("/token", response_model=Token)
 def login_access_token(
-    db: Session = Depends(get_db), form_data: OAuth2PasswordRequestForm = Depends()
+    request: Request,
+    db: Session = Depends(get_db),
+    form_data: OAuth2PasswordRequestForm = Depends(),
 ) -> Any:
     """
     OAuth2 compatible token login, get an access token for future requests.
+    Rate limited: 3 attempts max, then exponential backoff.
     """
+    client_ip = _get_client_ip(request)
+
+    # Check rate limit
+    is_limited, retry_after = _check_rate_limit(client_ip)
+    if is_limited:
+        logger.warning(
+            "[AUTH] rate_limited ip=%s attempts=%d retry_after=%ds",
+            client_ip,
+            _failed_login_attempts[client_ip]["attempts"],
+            retry_after,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Too many failed attempts. Please try again in {retry_after} seconds.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
     user = db.query(User).filter(User.username == form_data.username).first()
     if not user or not security.verify_password(form_data.password, user.hashed_password):
+        # Record failed attempt
+        attempts = _record_failed_attempt(client_ip)
+        logger.warning(
+            "[AUTH] login_failed ip=%s username=%s attempts=%d",
+            client_ip,
+            form_data.username,
+            attempts,
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
@@ -76,7 +215,10 @@ def login_access_token(
             detail="Inactive user",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
+    # Successful login — reset failed attempts
+    _reset_failed_attempts(client_ip)
+
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = security.create_access_token(
         data={"sub": user.username, "role": user.role.value, "org_id": user.org_id}, expires_delta=access_token_expires
