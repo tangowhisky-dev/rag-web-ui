@@ -15,6 +15,7 @@ from app.models.chat import Chat, Message
 from app.models.knowledge import KnowledgeBase
 from app.services.retrieval import hybrid_search_with_legs
 from app.services.confidence import score_retrieval
+from app.services.cancel_registry import get_cancel_token, clear_cancel_token
 
 
 def get_effective_llm_config(org_id: Optional[int], db: Session) -> dict:
@@ -572,6 +573,11 @@ async def generate_response(
             )
 
         async for event in stream_iter:
+            # Check for cancellation before processing each event
+            if get_cancel_token(chat_id).is_set():
+                logger.info("[CHAT] cancelled | chat_id=%d | response_length=%d chars", chat_id, len(full_response))
+                break
+
             event_type = event.get("event")
 
             if event_type == "agent_step":
@@ -633,9 +639,19 @@ async def generate_response(
 
         logger.info("[CHAT] stream complete | response_length=%d chars", len(full_response))
 
+        # ── Handle cancellation after stream ends ──────────────────────────
+        if get_cancel_token(chat_id).is_set():
+            # Save partial response (stream was cancelled)
+            bot_message.content = full_response or "(generation stopped)"
+            db.commit()
+            logger.info("[CHAT] partial response saved | chat_id=%d | chars=%d", chat_id, len(bot_message.content))
+            clear_cancel_token(chat_id)
+            return
+
         # ── Persist final answer ───────────────────────────────────────────
         bot_message.content = full_response
         db.commit()
+        clear_cancel_token(chat_id)
 
         # ── Post-turn: schedule summary update (fire-and-forget) ──────────
         def _log_task_error(task: asyncio.Task) -> None:
@@ -660,5 +676,6 @@ async def generate_response(
         if 'bot_message' in locals():
             bot_message.content = error_message
             db.commit()
+        clear_cancel_token(chat_id)
     finally:
         db.close()
