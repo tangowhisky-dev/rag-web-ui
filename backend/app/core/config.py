@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     # File storage
     UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", "/app/uploads")
 
+    # Watcher — per-org directory watch settings (defaults in Organisation model)
+    WATCH_DIR: str = os.getenv("WATCH_DIR", "/app/uploads")  # legacy: default fallback
+    WATCH_POLL_INTERVAL: int = int(os.getenv("WATCH_POLL_INTERVAL", "2"))  # seconds between scans
+    WATCHER_ENABLED: bool = os.getenv("WATCHER_ENABLED", "true").lower() == "true"
+
     # LLM + Embeddings (OpenAI-compatible)
     OPENAI_API_BASE: str = os.getenv("OPENAI_API_BASE", "http://localhost:1234/v1")
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "lmstudio")

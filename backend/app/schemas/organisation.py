@@ -20,12 +20,14 @@ class OrgCreate(OrgBase):
 class OrgUpdate(BaseModel):
     name: Optional[str] = None
     parent_id: Optional[int] = None
+    watch_dir: Optional[str] = None
 
 
 class OrgResponse(OrgBase):
     id: int
     parent_id: Optional[int] = None
     path: Optional[str] = None
+    watch_dir: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

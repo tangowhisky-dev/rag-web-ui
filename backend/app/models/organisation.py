@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, UniqueConstraint
+from sqlalchemy import Column, Integer, String, ForeignKey, UniqueConstraint, Text
 from sqlalchemy.orm import relationship
 
 from .base import Base, TimestampMixin
@@ -11,6 +11,7 @@ class Organisation(Base, TimestampMixin):
     name = Column(String(255), nullable=False)
     parent_id = Column(Integer, ForeignKey("organisations.id"), nullable=True, index=True)
     path = Column(String(1024), nullable=True)  # materialized path e.g. "/1/3/7"
+    watch_dir = Column(String(1024), nullable=True)  # local directory to watch for file ingestion
 
     # Adjacency-list relationships
     parent = relationship("Organisation", remote_side="Organisation.id", back_populates="children")

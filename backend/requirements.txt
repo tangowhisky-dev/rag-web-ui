@@ -27,4 +27,5 @@ markitdown-ocr>=0.1.0
 pyarrow>=14.0.0
 neo4j>=5.26
 neo4j-graphrag[qdrant]>=1.8.0
+watchdog>=3.0.0
 pytest-asyncio
