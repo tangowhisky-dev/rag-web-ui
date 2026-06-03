@@ -269,8 +269,7 @@ class Settings(BaseSettings):
         """Model to use for entity/relationship extraction. Falls back to OPENAI_MODEL."""
         return self.GRAPHRAG_LLM or self.OPENAI_MODEL
 
-    class Config:
-        env_file = ".env"
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
 
 settings = Settings()
