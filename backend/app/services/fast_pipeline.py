@@ -131,6 +131,18 @@ async def fast_stream(
     retrieval_result: dict = {}
     raw_docs: list = []
     try:
+        # Get linked datastores for these KBs
+        datastore_ids = []
+        if knowledge_base_ids and db:
+            from app.models.knowledge import KnowledgeBaseDataStore
+            datastore_links = (
+                db.query(KnowledgeBaseDataStore.data_store_id)
+                .filter(KnowledgeBaseDataStore.knowledge_base_id.in_(knowledge_base_ids))
+                .distinct()
+                .all()
+            )
+            datastore_ids = [row.data_store_id for row in datastore_links]
+
         retrieval_result = await hybrid_search_with_legs(
             query=rewritten,
             kb_ids=knowledge_base_ids,
@@ -139,6 +151,7 @@ async def fast_stream(
             use_sparse=use_sparse,
             use_exact=use_exact,
             use_graph_rag=use_graph_rag,
+            datastore_ids=datastore_ids,
         )
         raw_docs = retrieval_result.get("docs", [])
     except Exception as exc:

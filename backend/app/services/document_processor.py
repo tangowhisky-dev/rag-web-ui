@@ -105,6 +105,40 @@ def _get_sparse_embedder() -> SparseTextEmbedding:
     return _sparse_embedder
 
 
+def _get_qdrant_collection_name(data_store_id: Optional[int], kb_id: Optional[int]) -> str:
+    """Determine Qdrant collection name based on document source.
+    
+    - DataStore documents: ds_{data_store_id}
+    - Direct KB uploads: kb_{kb_id}
+    """
+    if data_store_id:
+        return f"ds_{data_store_id}"
+    elif kb_id:
+        return f"kb_{kb_id}"
+    else:
+        raise ValueError("Either data_store_id or kb_id must be provided")
+
+
+def _ensure_qdrant_collection(client: QdrantClient, collection_name: str) -> None:
+    """Create a Qdrant collection if it does not exist."""
+    existing = {c.name for c in client.get_collections().collections}
+    if collection_name not in existing:
+        client.create_collection(
+            collection_name=collection_name,
+            vectors_config={
+                "dense": VectorParams(
+                    size=settings.DENSE_EMBEDDING_DIM,
+                    distance=Distance.COSINE,
+                )
+            },
+            sparse_vectors_config={
+                "sparse": SparseVectorParams(
+                    index=SparseIndexParams(on_disk=False)
+                )
+            },
+        )
+
+
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 def _get_markitdown() -> MarkItDown:
@@ -279,8 +313,12 @@ def _build_qdrant_points(
     kb_id: int,
     document_id: int,
     file_name: str,
+    data_store_id: Optional[int] = None,
 ) -> List[PointStruct]:
-    """Build Qdrant PointStruct list from pre-computed embeddings."""
+    """Build Qdrant PointStruct list from pre-computed embeddings.
+    
+    Payload includes both kb_id and data_store_id for proper source tracking.
+    """
     points = []
     for (chunk_id, chunk_text, source_meta, chunk_index), dense_emb, sparse_emb in zip(
         chunk_payloads, dense_embeddings, sparse_embeddings
@@ -298,6 +336,7 @@ def _build_qdrant_points(
                 payload={
                     "chunk_text": chunk_text,
                     "kb_id": kb_id,
+                    "data_store_id": data_store_id,
                     "document_id": document_id,
                     "file_name": file_name,
                     "chunk_index": chunk_index,
@@ -314,6 +353,7 @@ async def _upsert_to_qdrant(
     kb_id: int,
     document_id: int,
     file_name: str,
+    data_store_id: Optional[int] = None,
     progress_cb=None,   # optional callable(pct: int, msg: str)
     progress_start: int = 40,
     progress_end: int = 80,
@@ -353,7 +393,8 @@ async def _upsert_to_qdrant(
     # requests through — otherwise the event loop is blocked for 10-30 seconds
     # while 2795 PointStruct objects are built, causing ECONNRESET on the frontend.
     client = _get_qdrant_client()
-    _ensure_qdrant_collection(client, kb_id)
+    collection_name = _get_qdrant_collection_name(data_store_id, kb_id)
+    _ensure_qdrant_collection(client, collection_name)
     n = len(chunk_payloads)
     for batch_start in range(0, n, _QDRANT_UPSERT_BATCH):
         batch_end = min(batch_start + _QDRANT_UPSERT_BATCH, n)
@@ -362,8 +403,8 @@ async def _upsert_to_qdrant(
         batch_sparse = sparse_embs[batch_start:batch_end]
 
         def _build_upsert_batch(bc=batch_chunks, bd=batch_dense, bs=batch_sparse):
-            pts = _build_qdrant_points(bc, bd, bs, kb_id, document_id, file_name)
-            client.upsert(collection_name=f"kb_{kb_id}", points=pts)
+            pts = _build_qdrant_points(bc, bd, bs, kb_id, document_id, file_name, data_store_id)
+            client.upsert(collection_name=collection_name, points=pts)
 
         await loop.run_in_executor(None, _build_upsert_batch)
         # Yield the event loop so poll requests can be served between batches
@@ -384,8 +425,20 @@ class PreviewResult(BaseModel):
     chunks: List[TextChunk]
     total_chunks: int
 
-async def process_document(file_path: str, file_name: str, kb_id: int, document_id: int, chunk_size: int = None, chunk_overlap: int = None) -> None:
-    """Process document and store in vector database with incremental updates"""
+async def process_document(
+    file_path: str, 
+    file_name: str, 
+    kb_id: int, 
+    document_id: int, 
+    data_store_id: Optional[int] = None,
+    chunk_size: int = None, 
+    chunk_overlap: int = None
+) -> None:
+    """Process document and store in vector database with incremental updates
+    
+    data_store_id: If set, vectors stored in ds_{data_store_id} collection.
+                   Otherwise, stored in kb_{kb_id} collection.
+    """
     logger = logging.getLogger(__name__)
     # Use env-configured defaults when callers do not supply explicit values.
     # WARNING: chunk_size and chunk_overlap must stay consistent across all
@@ -450,7 +503,7 @@ async def process_document(file_path: str, file_name: str, kb_id: int, document_
                 (c["id"], c["chunk_text"], c.get("metadata") or {}, c["chunk_index"])
                 for c in new_chunks
             ]
-            await _upsert_to_qdrant(chunk_payloads, kb_id, document_id, file_name)
+            await _upsert_to_qdrant(chunk_payloads, kb_id, document_id, file_name, data_store_id)
         
         # Delete removed chunks from MySQL + Qdrant
         chunks_to_delete = chunk_manager.get_deleted_chunks(current_hashes, file_name)
@@ -789,6 +842,7 @@ async def process_document_background(
             logger.info(f"Task {task_id}: Upserting {len(qdrant_payloads)} chunks to Qdrant")
             await _upsert_to_qdrant(
                 qdrant_payloads, kb_id, document.id, file_name,
+                data_store_id=data_store_id,
                 progress_cb=_set_progress,
                 progress_start=40,
                 progress_end=80,

@@ -14,10 +14,33 @@ Endpoints:
 
 import logging
 import os
-from datetime import datetime
-from typing import List, Optional
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import List, Optional, Dict, Any
 
 from fastapi import APIRouter, Depends, HTTPException
+
+# Helper function to count files in folder
+def count_files_in_folder(folder_path: str, scan_pattern: str = "*") -> int:
+    """Count files matching pattern in folder."""
+    try:
+        path = Path(folder_path)
+        if not path.exists():
+            return 0
+        
+        patterns = [p.strip() for p in scan_pattern.split(",")]
+        all_files = set()
+        
+        for pattern in patterns:
+            if "*" in pattern:
+                matched = list(path.rglob(pattern))
+            else:
+                matched = list(path.glob(pattern))
+            all_files.update(f for f in matched if f.is_file())
+        
+        return len(all_files)
+    except Exception:
+        return 0
 from pydantic import BaseModel, Field
 from pydantic.config import ConfigDict
 from sqlalchemy.orm import Session
@@ -217,6 +240,9 @@ def create_datastore(
             detail=f"DataStore with this path already exists (id={existing.id})",
         )
 
+    # Count files on creation
+    file_count = count_files_in_folder(abs_path, payload.scan_pattern)
+
     ds = DataStore(
         name=payload.name,
         description=payload.description,
@@ -224,11 +250,17 @@ def create_datastore(
         scan_pattern=payload.scan_pattern,
         auto_scan_enabled=payload.auto_scan_enabled,
         auto_scan_interval_minutes=payload.auto_scan_interval_minutes,
+        last_scan_total_files=file_count,
+        last_scan_at=datetime.now(timezone.utc),
+        last_scan_status="completed",
     )
     db.add(ds)
     db.commit()
     db.refresh(ds)
-    logger.info("[DATASTORE] created id=%d name=%s path=%s", ds.id, ds.name, ds.folder_path)
+    logger.info(
+        "[DATASTORE] created id=%d name=%s path=%s file_count=%d",
+        ds.id, ds.name, ds.folder_path, file_count,
+    )
     return ds
 
 
@@ -322,7 +354,12 @@ def delete_datastore(
     db: Session = Depends(get_db),
     _: object = Depends(require_admin),
 ):
-    """Delete a datastore (and its org assignments)."""
+    """
+    Delete a datastore and all its associated data.
+    
+    Note: Actual files in the DataStore folder are NOT deleted from disk.
+    Only database records (DataStore, Documents, Chunks, Vectors, Graph data) are removed.
+    """
     ds = _get_datastore_or_404(db, datastore_id)
 
     # Check if any orgs are assigned
@@ -336,7 +373,48 @@ def delete_datastore(
             status_code=409,
             detail="Cannot delete datastore — it is assigned to one or more organisations",
         )
+    
+    # Get all documents in this DataStore before deletion
+    datastore_docs = db.query(Document).filter(Document.data_store_id == datastore_id).all()
+    logger.info(f"[DATASTORE] preparing to delete datastore_id={datastore_id} with {len(datastore_docs)} documents")
+    
+    # Clean up Qdrant vectors: delete the ds_{datastore_id} collection entirely
+    try:
+        from qdrant_client import QdrantClient
+        from app.core.config import settings
+        
+        qdrant = QdrantClient(host=settings.QDRANT_HOST, port=settings.QDRANT_PORT)
+        collection_name = f"ds_{datastore_id}"
+        
+        # Check if collection exists
+        collections = [c.name for c in qdrant.get_collections().collections]
+        if collection_name in collections:
+            qdrant.delete_collection(collection_name)
+            logger.info(f"[DATASTORE] deleted Qdrant collection {collection_name}")
+        else:
+            logger.info(f"[DATASTORE] collection {collection_name} does not exist, skipping")
+    except Exception as e:
+        logger.warning(f"[DATASTORE] Qdrant cleanup failed for {collection_name}: {e}")
+    
+    # Clean up Neo4j graph data for all documents in this DataStore
+    # Delete all Chunk nodes with data_store_id = this datastore
+    try:
+        from app.services.graph_service import _get_driver, settings as graph_settings
+        if graph_settings.NEO4J_URI:
+            driver = _get_driver()
+            with driver.session() as session:
+                session.run(
+                    """
+                    MATCH (c:Chunk {data_store_id: $data_store_id})
+                    DETACH DELETE c
+                    """,
+                    data_store_id=str(datastore_id),
+                )
+            logger.info(f"[DATASTORE] cleaned up Neo4j Chunk nodes for datastore_id={datastore_id}")
+    except Exception as e:
+        logger.warning(f"[DATASTORE] Neo4j cleanup failed for datastore_id={datastore_id}: {e}")
 
+    # Delete DB records (CASCADE will handle documents, chunks, tasks)
     db.delete(ds)
     db.commit()
     logger.info("[DATASTORE] deleted id=%d name=%s", ds.id, ds.name)
@@ -447,7 +525,11 @@ def trigger_datastore_scan(
     db: Session = Depends(get_db),
     _: object = Depends(require_admin),
 ):
-    """Manually trigger a scan of a specific datastore."""
+    """Manually trigger a scan of a specific datastore.
+    
+    Returns scan results with file counts. The watcher processes files
+    in the background and updates progress.
+    """
     ds = _get_datastore_or_404(db, datastore_id)
 
     if not ds.folder_path or not os.path.isdir(ds.folder_path):
@@ -456,12 +538,16 @@ def trigger_datastore_scan(
             detail=f"DataStore folder does not exist: {ds.folder_path}",
         )
 
+    # Update status to "running"
+    ds.last_scan_status = "running"
+    ds.last_scan_error = None
+    db.commit()
+
     watcher = _get_watcher()
     result = watcher.scan_single_datastore(datastore_id)
 
     # Update datastore status
-    from datetime import datetime
-    ds.last_scan_at = datetime.utcnow()
+    ds.last_scan_at = datetime.now(timezone.utc)
     ds.last_scan_status = "completed" if result["errors"] == 0 else "error"
     ds.last_scan_total_files = result["scanned"]
     ds.last_scan_processed = result["new"]

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { api, ApiError } from '@/lib/api';
 import { getTokenClaims } from '@/lib/auth';
@@ -63,10 +63,10 @@ const STATUS_CONFIG: Record<string, { cls: string; label: string }> = {
   error: { cls: 'bg-red-100 text-red-700', label: 'Error' },
 };
 
-function StatusBadge({ status }: { status: string }) {
+function StatusBadge({ status, isRunning }: { status: string; isRunning?: boolean }) {
   const config = STATUS_CONFIG[status] ?? STATUS_CONFIG.never;
   return (
-    <Badge variant="secondary" className={config.cls}>
+    <Badge variant="secondary" className={`${config.cls} ${isRunning ? 'animate-pulse' : ''}`}>
       {config.label}
     </Badge>
   );
@@ -88,6 +88,7 @@ export default function DataSourcesPage() {
   const [orgs, setOrgs] = useState<Org[]>([]);
   const [loading, setLoading] = useState(true);
   const [triggering, setTriggering] = useState<Set<number>>(new Set());
+  const pollingRef = useRef<NodeJS.Timeout | null>(null);
 
   // Create/Edit dialog
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -109,6 +110,27 @@ export default function DataSourcesPage() {
   const [assignOpen, setAssignOpen] = useState(false);
   const [assigningId, setAssigningId] = useState<number | null>(null);
   const [selectedOrgIds, setSelectedOrgIds] = useState<number[]>([]);
+
+  // Poll for status updates when running
+  useEffect(() => {
+    if (triggering.size > 0) {
+      // Poll every 2 seconds while scanning
+      pollingRef.current = setInterval(() => {
+        fetchData();
+      }, 2000);
+    } else {
+      if (pollingRef.current) {
+        clearInterval(pollingRef.current);
+        pollingRef.current = null;
+      }
+    }
+
+    return () => {
+      if (pollingRef.current) {
+        clearInterval(pollingRef.current);
+      }
+    };
+  }, [triggering]);
 
   useEffect(() => {
     fetchData();
@@ -167,8 +189,13 @@ export default function DataSourcesPage() {
         await api.patch(`/api/admin/datastores/${editingId}`, form);
         toast({ title: 'Data source updated' });
       } else {
-        await api.post('/api/admin/datastores', form);
-        toast({ title: 'Data source created' });
+        const result = await api.post('/api/admin/datastores', form);
+        // Show file count after creation
+        const fileCount = (result as DataStore).last_scan_total_files || 0;
+        toast({ 
+          title: 'Data source created',
+          description: `Found ${fileCount} files in folder`,
+        });
       }
       setDialogOpen(false);
       await fetchData();
@@ -225,13 +252,8 @@ export default function DataSourcesPage() {
         description: (err as ApiError).message ?? 'Failed to trigger scan',
         variant: 'destructive',
       });
-    } finally {
-      setTriggering((prev) => {
-        const next = new Set(prev);
-        next.delete(dsId);
-        return next;
-      });
     }
+    // Polling will clear triggering automatically
   }
 
   function openAssign(dsId: number) {
@@ -286,8 +308,8 @@ export default function DataSourcesPage() {
               <TableHead>Name</TableHead>
               <TableHead>Folder Path</TableHead>
               <TableHead>Assigned Orgs</TableHead>
-              <TableHead>Auto-Process</TableHead>
-              <TableHead>Last Scan</TableHead>
+              <TableHead>Background Processing</TableHead>
+              <TableHead>Status</TableHead>
               <TableHead>Files</TableHead>
               <TableHead>Actions</TableHead>
             </TableRow>
@@ -331,13 +353,33 @@ export default function DataSourcesPage() {
                     )}
                   </TableCell>
                   <TableCell className="text-xs text-muted-foreground">
-                    <StatusBadge status={ds.last_scan_status} />
-                    <div>{formatLastScan(ds.last_scan_at)}</div>
+                    <StatusBadge status={ds.last_scan_status} isRunning={ds.last_scan_status === 'running'} />
+                    <div className="mt-1">{formatLastScan(ds.last_scan_at)}</div>
                   </TableCell>
-                  <TableCell className="text-xs">
-                    {ds.last_scan_total_files} scanned
-                    <br />
-                    {ds.last_scan_processed} processed
+                  <TableCell>
+                    {ds.last_scan_status === 'running' ? (
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-2">
+                          <div className="w-3 h-3 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+                          <span className="text-xs text-blue-600">Processing...</span>
+                        </div>
+                        <div className="w-full bg-gray-200 rounded-full h-2">
+                          <div 
+                            className="bg-blue-500 h-2 rounded-full transition-all duration-300"
+                            style={{ width: `${Math.min((ds.last_scan_processed / Math.max(ds.last_scan_total_files, 1)) * 100, 100)}%` }}
+                          ></div>
+                        </div>
+                        <div className="flex justify-between text-xs text-muted-foreground">
+                          <span>{ds.last_scan_processed} / {ds.last_scan_total_files}</span>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="text-xs">
+                        {ds.last_scan_total_files} files
+                        <br />
+                        {ds.last_scan_processed} processed
+                      </div>
+                    )}
                   </TableCell>
                   <TableCell className="space-x-1">
                     <Button
@@ -466,7 +508,7 @@ export default function DataSourcesPage() {
                 }
                 className="h-4 w-4 rounded border-gray-300"
               />
-              <Label htmlFor="ds-auto">Auto-scan enabled</Label>
+              <Label htmlFor="ds-auto">Background processing enabled</Label>
             </div>
             {form.auto_scan_enabled && (
               <div className="space-y-1">

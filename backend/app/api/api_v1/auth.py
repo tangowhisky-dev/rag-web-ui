@@ -13,7 +13,7 @@ from app.core.config import settings
 from app.db.session import get_db
 from app.models.user import User
 from app.schemas.token import Token
-from app.schemas.user import UserCreate, UserResponse
+from app.schemas.user import UserCreate, UserResponse, PasswordChange
 
 logger = logging.getLogger(__name__)
 
@@ -229,6 +229,22 @@ def login_access_token(
 @router.get("/admin-only", response_model=UserResponse)
 def admin_only(current_user: User = Depends(security.require_admin)) -> Any:
     return current_user
+
+
+@router.post("/change-password", status_code=200)
+def change_password(
+    payload: PasswordChange,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Any:
+    """
+    Change current user's password.
+    """
+    current_user.hashed_password = security.get_password_hash(payload.new_password)
+    db.commit()
+    db.refresh(current_user)
+    logging.info("[AUTH] password_changed username=%s user_id=%s", current_user.username, current_user.id)
+    return {"message": "Password changed successfully"}
 
 
 @router.post("/test-token", response_model=UserResponse)

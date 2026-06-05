@@ -92,6 +92,15 @@ export default function AdminUsersPage() {
   const [deleting, setDeleting] = useState(false);
   const [userToDelete, setUserToDelete] = useState<User | null>(null);
 
+  // Change password dialog
+  const [passwordOpen, setPasswordOpen] = useState(false);
+  const [changingPassword, setChangingPassword] = useState(false);
+  const [userForPassword, setUserForPassword] = useState<User | null>(null);
+  const [passwordForm, setPasswordForm] = useState({
+    new_password: '',
+    confirm_password: '',
+  });
+
   useEffect(() => {
     // Auth check is handled by the layout.tsx middleware.
     setAvailableRoles(getAvailableRoles());
@@ -204,6 +213,49 @@ export default function AdminUsersPage() {
     }
   }
 
+  function openChangePassword(user: User) {
+    setUserForPassword(user);
+    setPasswordForm({ new_password: '', confirm_password: '' });
+    setPasswordOpen(true);
+  }
+
+  async function handleChangePassword() {
+    if (!userForPassword) return;
+    if (!passwordForm.new_password || passwordForm.new_password.length < 1) {
+      toast({
+        title: 'Error',
+        description: 'Password cannot be empty',
+        variant: 'destructive',
+      });
+      return;
+    }
+    if (passwordForm.new_password !== passwordForm.confirm_password) {
+      toast({
+        title: 'Error',
+        description: 'Passwords do not match',
+        variant: 'destructive',
+      });
+      return;
+    }
+    setChangingPassword(true);
+    try {
+      await api.post(`/api/admin/users/${userForPassword.id}/change-password`, {
+        new_password: passwordForm.new_password,
+      });
+      toast({ title: 'Password changed successfully' });
+      setPasswordOpen(false);
+      setUserForPassword(null);
+    } catch (err) {
+      toast({
+        title: 'Error',
+        description: (err as { message?: string }).message ?? 'Failed to change password',
+        variant: 'destructive',
+      });
+    } finally {
+      setChangingPassword(false);
+    }
+  }
+
   const orgName = (orgId: number | null) =>
     orgId ? (orgs.find((o) => o.id === orgId)?.name ?? String(orgId)) : '—';
 
@@ -219,7 +271,7 @@ export default function AdminUsersPage() {
   });
 
   const createValid =
-    createForm.username.trim() && createForm.email.trim() && createForm.password.length >= 1 && !!createForm.org_id;
+    createForm.username.trim() && createForm.password.length >= 1 && !!createForm.org_id;
   const editValid = !!selectedUser && !!editForm.org_id && orgs.length > 0;
 
   return (
@@ -295,7 +347,15 @@ export default function AdminUsersPage() {
                       </Badge>
                     )}
                   </TableCell>
-                  <TableCell className="space-x-2">
+                  <TableCell className="space-x-1">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => openChangePassword(user)}
+                      title="Change password"
+                    >
+                      Password
+                    </Button>
                     <Button variant="outline" size="sm" onClick={() => openEdit(user)}>
                       Edit
                     </Button>
@@ -323,51 +383,66 @@ export default function AdminUsersPage() {
             <DialogTitle>New User</DialogTitle>
           </DialogHeader>
           <div className="space-y-3 py-2">
-            <Input
-              placeholder="Username"
-              value={createForm.username}
-              onChange={(e) => setCreateForm((f) => ({ ...f, username: e.target.value }))}
-            />
-            <Input
-              placeholder="Email"
-              type="email"
-              value={createForm.email}
-              onChange={(e) => setCreateForm((f) => ({ ...f, email: e.target.value }))}
-            />
-            <Input
-              placeholder="Password"
-              type="password"
-              value={createForm.password}
-              onChange={(e) => setCreateForm((f) => ({ ...f, password: e.target.value }))}
-            />
-            <select
-              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-              value={createForm.role}
-              onChange={(e) =>
-                setCreateForm((f) => ({ ...f, role: e.target.value as RoleOption }))
-              }
-            >
-              {availableRoles.map((r) => (
-                <option key={r} value={r}>
-                  {r}
-                </option>
-              ))}
-            </select>
-            <select
-              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-              value={createForm.org_id}
-              onChange={(e) => setCreateForm((f) => ({ ...f, org_id: e.target.value }))}
-            >
-              <option value="">Select organisation</option>
-              {orgs.map((o) => (
-                <option key={o.id} value={String(o.id)}>
-                  {o.name}
-                </option>
-              ))}
-            </select>
-            {orgs.length === 0 && (
-              <p className="text-xs text-muted-foreground">No organisations available — create one first.</p>
-            )}
+            <div className="space-y-1">
+              <label className="text-sm font-medium">Username *</label>
+              <Input
+                placeholder="e.g. john.doe"
+                value={createForm.username}
+                onChange={(e) => setCreateForm((f) => ({ ...f, username: e.target.value }))}
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="text-sm font-medium">Email (optional)</label>
+              <Input
+                placeholder="e.g. john@example.com"
+                type="email"
+                value={createForm.email}
+                onChange={(e) => setCreateForm((f) => ({ ...f, email: e.target.value }))}
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="text-sm font-medium">Password *</label>
+              <Input
+                placeholder="Minimum 1 character"
+                type="password"
+                value={createForm.password}
+                onChange={(e) => setCreateForm((f) => ({ ...f, password: e.target.value }))}
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="text-sm font-medium">Role</label>
+              <select
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                value={createForm.role}
+                onChange={(e) =>
+                  setCreateForm((f) => ({ ...f, role: e.target.value as RoleOption }))
+                }
+              >
+                {availableRoles.map((r) => (
+                  <option key={r} value={r}>
+                    {r}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="space-y-1">
+              <label className="text-sm font-medium">Organisation *</label>
+              <select
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                value={createForm.org_id}
+                onChange={(e) => setCreateForm((f) => ({ ...f, org_id: e.target.value }))}
+              >
+                <option value="">Select organisation</option>
+                {orgs.map((o) => (
+                  <option key={o.id} value={String(o.id)}>
+                    {o.name}
+                  </option>
+                ))}
+              </select>
+              {orgs.length === 0 && (
+                <p className="text-xs text-muted-foreground">No organisations available — create one first.</p>
+              )}
+            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setCreateOpen(false)} disabled={creating}>
@@ -387,45 +462,52 @@ export default function AdminUsersPage() {
             <DialogTitle>Edit User — {selectedUser?.username}</DialogTitle>
           </DialogHeader>
           <div className="space-y-3 py-2">
-            <select
-              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-              value={editForm.role}
-              onChange={(e) => setEditForm((f) => ({ ...f, role: e.target.value as RoleOption }))}
-            >
-              {selectedUser && getTokenClaims()?.role !== 'super_admin' && selectedUser.role !== 'user' ? (
-                <option key={selectedUser.role} value={selectedUser.role} disabled>
-                  {selectedUser.role} (cannot change — requires super admin)
-                </option>
-              ) : null}
-              {availableRoles.map((r) => (
-                <option key={r} value={r}>
-                  {r}
-                </option>
-              ))}
-            </select>
-            <select
-              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-              value={editForm.org_id}
-              onChange={(e) => setEditForm((f) => ({ ...f, org_id: e.target.value }))}
-            >
-              {orgs.map((o) => (
-                <option key={o.id} value={String(o.id)}>
-                  {o.name}
-                </option>
-              ))}
-            </select>
-            {orgs.length === 0 && (
-              <p className="text-xs text-muted-foreground">No organisations available — cannot edit user.</p>
-            )}
-            <label className="flex items-center gap-2 text-sm">
+            <div className="space-y-1">
+              <label className="text-sm font-medium">Role</label>
+              <select
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                value={editForm.role}
+                onChange={(e) => setEditForm((f) => ({ ...f, role: e.target.value as RoleOption }))}
+              >
+                {selectedUser && getTokenClaims()?.role !== 'super_admin' && selectedUser.role !== 'user' ? (
+                  <option key={selectedUser.role} value={selectedUser.role} disabled>
+                    {selectedUser.role} (cannot change — requires super admin)
+                  </option>
+                ) : null}
+                {availableRoles.map((r) => (
+                  <option key={r} value={r}>
+                    {r}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="space-y-1">
+              <label className="text-sm font-medium">Organisation *</label>
+              <select
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                value={editForm.org_id}
+                onChange={(e) => setEditForm((f) => ({ ...f, org_id: e.target.value }))}
+              >
+                {orgs.map((o) => (
+                  <option key={o.id} value={String(o.id)}>
+                    {o.name}
+                  </option>
+                ))}
+              </select>
+              {orgs.length === 0 && (
+                <p className="text-xs text-muted-foreground">No organisations available — cannot edit user.</p>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
               <input
                 type="checkbox"
+                id="is-active"
                 checked={editForm.is_active}
                 onChange={(e) => setEditForm((f) => ({ ...f, is_active: e.target.checked }))}
                 className="h-4 w-4"
               />
-              Active
-            </label>
+              <label htmlFor="is-active" className="text-sm font-medium">Active</label>
+            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setEditOpen(false)} disabled={editing}>
@@ -433,6 +515,46 @@ export default function AdminUsersPage() {
             </Button>
             <Button onClick={handleEdit} disabled={editing || !editValid}>
               Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Change Password dialog */}
+      <Dialog open={passwordOpen} onOpenChange={setPasswordOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Change Password — {userForPassword?.username}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <div className="space-y-1">
+              <label className="text-sm font-medium">New Password *</label>
+              <Input
+                type="password"
+                placeholder="Minimum 1 character"
+                value={passwordForm.new_password}
+                onChange={(e) => setPasswordForm({ ...passwordForm, new_password: e.target.value })}
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="text-sm font-medium">Confirm Password *</label>
+              <Input
+                type="password"
+                placeholder="Re-enter new password"
+                value={passwordForm.confirm_password}
+                onChange={(e) => setPasswordForm({ ...passwordForm, confirm_password: e.target.value })}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPasswordOpen(false)} disabled={changingPassword}>
+              Cancel
+            </Button>
+            <Button
+              onClick={handleChangePassword}
+              disabled={changingPassword || !passwordForm.new_password || passwordForm.new_password !== passwordForm.confirm_password}
+            >
+              {changingPassword ? 'Changing…' : 'Change Password'}
             </Button>
           </DialogFooter>
         </DialogContent>

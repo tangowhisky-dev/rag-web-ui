@@ -11,7 +11,7 @@ from app.models.org_llm_config import OrgLLMConfig
 from app.models.organisation import OrgAbbreviation
 from app.schemas.organisation import OrgCreate, OrgUpdate, OrgResponse, OrgLLMConfigUpdate, OrgLLMConfigResponse, OrgIngestionStatusResponse
 from app.models.knowledge import KnowledgeBase, ProcessingTask
-from app.schemas.user import UserAdminCreate, UserAdminUpdate, UserResponse, UserDeleteResponse
+from app.schemas.user import UserAdminCreate, UserAdminUpdate, UserResponse, UserDeleteResponse, PasswordChange
 from app.models.user import User, UserRole
 from app.core.security import get_password_hash
 
@@ -436,6 +436,31 @@ def update_user(
     db.commit()
     db.refresh(user)
     return user
+
+
+@user_router.post("/users/{user_id}/change-password", status_code=200)
+def change_user_password(
+    user_id: int,
+    payload: PasswordChange,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Change a user's password. Only super_admin can change other users' passwords."""
+    if current_user.role != UserRole.super_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Only super admin can change user passwords",
+        )
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    user.hashed_password = get_password_hash(payload.new_password)
+    db.commit()
+    db.refresh(user)
+    logging.info(f"[ADMIN] password_changed user_id={user_id} username={user.username}")
+    return {"message": "Password changed successfully"}
 
 
 @user_router.delete("/users/{user_id}", status_code=200, response_model=UserDeleteResponse)

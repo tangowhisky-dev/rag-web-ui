@@ -66,8 +66,20 @@ def search_documents(
         import asyncio
         _db = SessionLocal()
         try:
+            # Get linked datastores for these KBs
+            datastore_ids = []
+            if kb_ids:
+                from app.models.knowledge import KnowledgeBaseDataStore
+                datastore_links = (
+                    _db.query(KnowledgeBaseDataStore.data_store_id)
+                    .filter(KnowledgeBaseDataStore.knowledge_base_id.in_(kb_ids))
+                    .distinct()
+                    .all()
+                )
+                datastore_ids = [row.data_store_id for row in datastore_links]
+
             return asyncio.run(
-                hybrid_search_with_legs(query=query, kb_ids=kb_ids, db=_db)
+                hybrid_search_with_legs(query=query, kb_ids=kb_ids, db=_db, datastore_ids=datastore_ids)
             )
         finally:
             _db.close()
@@ -251,9 +263,21 @@ def synthesize_documents(
         from app.db.session import SessionLocal
         _db = SessionLocal()
         try:
+            # Get linked datastores for these KBs
+            datastore_ids = []
+            if kb_ids:
+                from app.models.knowledge import KnowledgeBaseDataStore
+                datastore_links = (
+                    _db.query(KnowledgeBaseDataStore.data_store_id)
+                    .filter(KnowledgeBaseDataStore.knowledge_base_id.in_(kb_ids))
+                    .distinct()
+                    .all()
+                )
+                datastore_ids = [row.data_store_id for row in datastore_links]
+
             async def _gather():
                 tasks = [
-                    hybrid_search_with_legs(query=q, kb_ids=kb_ids, db=_db)
+                    hybrid_search_with_legs(query=q, kb_ids=kb_ids, db=_db, datastore_ids=datastore_ids)
                     for q in sub_queries
                 ]
                 return await asyncio.gather(*tasks, return_exceptions=True)

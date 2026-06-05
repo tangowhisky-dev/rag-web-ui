@@ -148,8 +148,11 @@ def _qdrant_payload_to_doc(payload: dict) -> LangchainDocument:
 
 # ── Search legs ───────────────────────────────────────────────────────────────
 
-def _dense_search(query: str, kb_ids: List[int], candidates: int) -> Dict[str, _Candidate]:
-    """Qdrant cosine-similarity search using the dense (OpenAI) embedding."""
+def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], candidates: int) -> Dict[str, _Candidate]:
+    """Qdrant cosine-similarity search using the dense (OpenAI) embedding.
+    
+    Searches both KB collections (kb_{kb_id}) and DataStore collections (ds_{datastore_id}).
+    """
     logger.info("[DENSE] embedding request | model=%s | query=%r", settings.DENSE_EMBEDDINGS_MODEL, query[:120])
     response = _get_openai_client().embeddings.create(
         input=query,
@@ -161,6 +164,8 @@ def _dense_search(query: str, kb_ids: List[int], candidates: int) -> Dict[str, _
 
     result: Dict[str, _Candidate] = {}
     rank = 0
+    
+    # Search KB collections
     for kb_id in kb_ids:
         logger.info("[DENSE] qdrant query | collection=kb_%d | using=dense | limit=%d", kb_id, candidates)
         try:
@@ -186,12 +191,42 @@ def _dense_search(query: str, kb_ids: List[int], candidates: int) -> Dict[str, _
                 )
                 logger.debug("[DENSE]   rank=%d score=%.4f text=%r", rank, getattr(hit, 'score', -1), text[:80])
                 rank += 1
+    
+    # Search DataStore collections
+    for ds_id in datastore_ids:
+        logger.info("[DENSE] qdrant query | collection=ds_%d | using=dense | limit=%d", ds_id, candidates)
+        try:
+            hits = _get_qdrant_client().query_points(
+                collection_name=f"ds_{ds_id}",
+                query=query_vector,
+                using="dense",
+                limit=candidates,
+                with_payload=True,
+            ).points
+        except Exception as e:
+            logger.warning("dense_search: Qdrant query failed for ds_%d: %s", ds_id, e)
+            continue
+        logger.info("[DENSE] qdrant response | ds_%d | hits=%d", ds_id, len(hits))
+        for hit in hits:
+            text = (hit.payload or {}).get("chunk_text", "")
+            h = _content_hash(text)
+            if h not in result:
+                result[h] = _Candidate(
+                    doc=_qdrant_payload_to_doc(hit.payload or {}),
+                    content_hash=h,
+                    dense_rank=rank,
+                )
+                logger.debug("[DENSE]   rank=%d score=%.4f text=%r", rank, getattr(hit, 'score', -1), text[:80])
+                rank += 1
     logger.info("[DENSE] unique candidates=%d", len(result))
     return result
 
 
-def _qdrant_sparse_search(query: str, kb_ids: List[int], candidates: int) -> Dict[str, _Candidate]:
-    """Qdrant learned-sparse search (SPLADE via FastEmbed)."""
+def _qdrant_sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], candidates: int) -> Dict[str, _Candidate]:
+    """Qdrant learned-sparse search (SPLADE via FastEmbed).
+    
+    Searches both KB collections (kb_{kb_id}) and DataStore collections (ds_{datastore_id}).
+    """
     logger.info("[SPARSE] SPLADE embed | model=%s | query=%r", settings.SPLADE_MODEL, query[:120])
     sparse_emb = next(iter(_get_sparse_embedder().embed([query])))
     query_sparse = SparseVector(
@@ -205,6 +240,8 @@ def _qdrant_sparse_search(query: str, kb_ids: List[int], candidates: int) -> Dic
 
     result: Dict[str, _Candidate] = {}
     rank = 0
+    
+    # Search KB collections
     for kb_id in kb_ids:
         logger.info("[SPARSE] qdrant query | collection=kb_%d | using=sparse | limit=%d", kb_id, candidates)
         try:
@@ -230,41 +267,99 @@ def _qdrant_sparse_search(query: str, kb_ids: List[int], candidates: int) -> Dic
                 )
                 logger.debug("[SPARSE]   rank=%d score=%.4f text=%r", rank, getattr(hit, 'score', -1), text[:80])
                 rank += 1
+    
+    # Search DataStore collections
+    for ds_id in datastore_ids:
+        logger.info("[SPARSE] qdrant query | collection=ds_%d | using=sparse | limit=%d", ds_id, candidates)
+        try:
+            hits = _get_qdrant_client().query_points(
+                collection_name=f"ds_{ds_id}",
+                query=query_sparse,
+                using="sparse",
+                limit=candidates,
+                with_payload=True,
+            ).points
+        except Exception as e:
+            logger.warning("qdrant_sparse_search: Qdrant query failed for ds_%d: %s", ds_id, e)
+            continue
+        logger.info("[SPARSE] qdrant response | ds_%d | hits=%d", ds_id, len(hits))
+        for hit in hits:
+            text = (hit.payload or {}).get("chunk_text", "")
+            h = _content_hash(text)
+            if h not in result:
+                result[h] = _Candidate(
+                    doc=_qdrant_payload_to_doc(hit.payload or {}),
+                    content_hash=h,
+                    qdrant_sparse_rank=rank,
+                )
+                logger.debug("[SPARSE]   rank=%d score=%.4f text=%r", rank, getattr(hit, 'score', -1), text[:80])
+                rank += 1
     logger.info("[SPARSE] unique candidates=%d", len(result))
     return result
 
 
-def _exact_search(query: str, kb_ids: List[int], db: Session, candidates: int) -> Dict[str, _Candidate]:
-    """MySQL InnoDB FULLTEXT search — exact keyword / BM25 scoring, server-side."""
+def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: Session, candidates: int) -> Dict[str, _Candidate]:
+    """MySQL InnoDB FULLTEXT search — exact keyword / BM25 scoring, server-side.
+    
+    Searches both KB documents and DataStore documents.
+    """
     if not query.strip():
         return {}
 
-    sql = text(
+    # Query KB documents (direct uploads)
+    kb_sql = text(
         """
-        SELECT chunk_text, chunk_metadata,
+        SELECT chunk_text, chunk_metadata, kb_id,
                MATCH(chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE) AS fts_score
         FROM   document_chunks
         WHERE  kb_id IN :kb_ids
+          AND  data_store_id IS NULL
           AND  MATCH(chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE) > 0
         ORDER  BY fts_score DESC
         LIMIT  :candidates
         """
     ).bindparams(bindparam("kb_ids", expanding=True))
 
-    logger.info("[EXACT] MySQL FTS query | query=%r | kb_ids=%s | candidates=%d", query[:120], kb_ids, candidates)
+    # Query DataStore documents
+    ds_sql = text(
+        """
+        SELECT chunk_text, chunk_metadata, kb_id,
+               MATCH(chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE) AS fts_score
+        FROM   document_chunks
+        WHERE  data_store_id IN :ds_ids
+          AND  MATCH(chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE) > 0
+        ORDER  BY fts_score DESC
+        LIMIT  :candidates
+        """
+    ).bindparams(bindparam("ds_ids", expanding=True))
+
+    logger.info("[EXACT] MySQL FTS query | query=%r | kb_ids=%s | ds_ids=%s | candidates=%d", 
+                query[:120], kb_ids, datastore_ids, candidates)
+    
+    kb_rows = []
+    ds_rows = []
+    
     try:
-        rows = db.execute(sql, {"query": query, "kb_ids": kb_ids, "candidates": candidates}).fetchall()
+        if kb_ids:
+            kb_rows = db.execute(kb_sql, {"query": query, "kb_ids": kb_ids, "candidates": candidates}).fetchall()
+        if datastore_ids:
+            ds_rows = db.execute(ds_sql, {"query": query, "ds_ids": datastore_ids, "candidates": candidates}).fetchall()
     except Exception as e:
         logger.warning("exact_search: MySQL FTS query failed: %s", e)
         return {}
 
-    logger.info("[EXACT] MySQL FTS response | rows=%d", len(rows))
-    if rows:
-        for i, row in enumerate(rows[:5]):
+    # Merge results and re-rank by FTS score
+    all_rows = list(kb_rows) + list(ds_rows)
+    all_rows.sort(key=lambda r: r.fts_score or 0, reverse=True)
+    all_rows = all_rows[:candidates]
+
+    logger.info("[EXACT] MySQL FTS response | rows=%d (kb=%d, ds=%d)", len(all_rows), len(kb_rows), len(ds_rows))
+    if all_rows:
+        for i, row in enumerate(all_rows[:5]):
             logger.info("  exact[%d] fts_score=%.4f text=%r", i, row.fts_score, (row.chunk_text or "")[:80])
 
     result: Dict[str, _Candidate] = {}
-    for rank, row in enumerate(rows):
+    for rank, row in enumerate(all_rows):
         chunk_text = row.chunk_text or ""
         h = _content_hash(chunk_text)
         if h not in result:
@@ -355,6 +450,7 @@ async def hybrid_search_with_legs(
     use_exact:     bool = True,
     use_graph_rag: bool = False,
     query_type: Optional[QueryType] = None,
+    datastore_ids: Optional[List[int]] = None,
 ) -> dict:
     """
     Like hybrid_search but returns a richer dict:
@@ -410,7 +506,7 @@ async def hybrid_search_with_legs(
     legs: dict[str, dict] = {}
 
     if enabled["dense"]:
-        results, err = _run_leg("dense", _dense_search, query, kb_ids, pool)
+        results, err = _run_leg("dense", _dense_search, query, kb_ids, datastore_ids or [], pool)
         legs["dense"] = {"status": "failed" if err else "ok", "count": len(results), "error": err}
         dense = results
     else:
@@ -418,7 +514,7 @@ async def hybrid_search_with_legs(
         legs["dense"] = {"status": "disabled", "count": 0, "error": None}
 
     if enabled["qdrant_sparse"]:
-        results, err = _run_leg("qdrant_sparse", _qdrant_sparse_search, query, kb_ids, pool)
+        results, err = _run_leg("qdrant_sparse", _qdrant_sparse_search, query, kb_ids, datastore_ids or [], pool)
         legs["qdrant_sparse"] = {"status": "failed" if err else "ok", "count": len(results), "error": err}
         qdrant_sparse = results
     else:
@@ -426,7 +522,7 @@ async def hybrid_search_with_legs(
         legs["qdrant_sparse"] = {"status": "disabled", "count": 0, "error": None}
 
     if enabled["exact"]:
-        results, err = _run_leg("exact", _exact_search, query, kb_ids, db, pool)
+        results, err = _run_leg("exact", _exact_search, query, kb_ids, datastore_ids or [], db, pool)
         legs["exact"] = {"status": "failed" if err else "ok", "count": len(results), "error": err}
         exact = results
     else:
@@ -536,10 +632,15 @@ async def hybrid_search(
     kb_ids: List[int],
     db: Session,
     use_graph_rag: bool = False,
+    datastore_ids: Optional[List[int]] = None,
 ) -> List[LangchainDocument]:
-    """Run enabled retrieval legs in parallel (sync calls) and merge via RRF."""
+    """Run enabled retrieval legs in parallel (sync calls) and merge via RRF.
+    
+    Searches both KB collections and DataStore collections.
+    """
     top_k = settings.RETRIEVAL_TOP_K
     pool = top_k * 4
+    datastore_ids = datastore_ids or []
 
     enabled = {
         "dense": settings.RETRIEVAL_DENSE_ENABLED,
@@ -548,17 +649,14 @@ async def hybrid_search(
         "graph": use_graph_rag and settings.RETRIEVAL_GRAPH_ENABLED,
     }
     logger.info(
-        "hybrid_search | kb_ids=%s top_k=%d legs=%s weights=(%.2f, %.2f, %.2f)",
-        kb_ids, top_k,
+        "hybrid_search | kb_ids=%s | ds_ids=%s | top_k=%d | legs=%s",
+        kb_ids, datastore_ids, top_k,
         [k for k, v in enabled.items() if v],
-        settings.HYBRID_DENSE_WEIGHT,
-        settings.HYBRID_QDRANT_SPARSE_WEIGHT,
-        settings.HYBRID_EXACT_WEIGHT,
     )
 
-    dense        = _dense_search(query, kb_ids, pool)           if enabled["dense"]          else {}
-    qdrant_sparse = _qdrant_sparse_search(query, kb_ids, pool)  if enabled["qdrant_sparse"]  else {}
-    exact        = _exact_search(query, kb_ids, db, pool)       if enabled["exact"]          else {}
+    dense        = _dense_search(query, kb_ids, datastore_ids, pool)           if enabled["dense"]          else {}
+    qdrant_sparse = _qdrant_sparse_search(query, kb_ids, datastore_ids, pool)  if enabled["qdrant_sparse"]  else {}
+    exact        = _exact_search(query, kb_ids, datastore_ids, db, pool)       if enabled["exact"]          else {}
 
     docs = [c.doc for c in _rrf_merge_candidates(dense, qdrant_sparse, exact, top_k)]
 

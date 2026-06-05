@@ -412,6 +412,7 @@ async def build_graph_for_document(
     file_name: str,
     chunks: list[str],
     chunk_ids: list[str],
+    data_store_id: Optional[int] = None,
 ) -> None:
     """
     Extract entity/relationship graph from document chunks and store in Neo4j.
@@ -423,10 +424,11 @@ async def build_graph_for_document(
 
     Chunk nodes carry:
       qdrant_point_id    — primary cross-reference key (UUID string)
-      qdrant_collection  — which Qdrant collection (kb_<kb_id>)
+      qdrant_collection  — which Qdrant collection (kb_<kb_id> or ds_<data_store_id>)
       document_id        — for deletion queries
       chunk_index        — ordinal position within the document
       kb_id              — knowledge base
+      data_store_id      — datastore (optional)
       file_name          — human-readable source
     """
     if not settings.GRAPHRAG_ENABLED:
@@ -437,7 +439,11 @@ async def build_graph_for_document(
 
     # Convert SHA-256 chunk IDs → the actual UUIDs Qdrant uses as point IDs
     qdrant_point_ids = [_chunk_id_to_point_id(cid) for cid in chunk_ids]
-    collection_name = f"kb_{kb_id}"
+    # Determine collection based on document source
+    if data_store_id:
+        collection_name = f"ds_{data_store_id}"
+    else:
+        collection_name = f"kb_{kb_id}"
 
     logger.info(
         "GraphService[llm]: writing %d Chunk nodes for doc %d (kb=%d)",
@@ -456,6 +462,7 @@ async def build_graph_for_document(
                         c.document_id       = $document_id,
                         c.chunk_index       = $chunk_index,
                         c.kb_id             = $kb_id,
+                        c.data_store_id     = $data_store_id,
                         c.file_name         = $file_name
                     """,
                     point_id=point_id,
@@ -463,6 +470,7 @@ async def build_graph_for_document(
                     document_id=str(document_id),
                     chunk_index=idx,
                     kb_id=str(kb_id),
+                    data_store_id=str(data_store_id) if data_store_id else None,
                     file_name=file_name,
                 )
 
@@ -792,17 +800,19 @@ def delete_graph_for_kb(kb_id: int) -> None:
             rec["deleted_rels"] if rec else 0, kb_id,
         )
 
-        # 2. Delete all Chunk nodes for this KB (DETACH DELETE removes FROM_CHUNK edges too).
+        # 2. Delete Chunk nodes for direct uploads only (data_store_id IS NULL).
+        #    DataStore document chunks are preserved — they belong to the datastore, not the KB.
         rec = session.run(
             """
             MATCH (n {kb_id: $kb_id})
+            WHERE n.data_store_id IS NULL
             DETACH DELETE n
             RETURN count(n) AS deleted
             """,
             kb_id=str(kb_id),
         ).single()
         logger.info(
-            "GraphService: deleted %d nodes for kb_%d",
+            "GraphService: deleted %d Chunk nodes (direct uploads only) for kb_%d",
             rec["deleted"] if rec else 0, kb_id,
         )
 
@@ -875,12 +885,14 @@ def purge_stale_graph_data(active_kb_ids: list[int]) -> None:
 
     with driver.session() as session:
         # Find kb_ids present in Neo4j that are no longer in MySQL.
+        # Only consider direct uploads (data_store_id IS NULL) — DataStore docs persist.
         # Wrap in a try-catch to handle case when Chunk label doesn't exist.
         try:
             stale_rec = session.run(
                 """
                 MATCH (c:Chunk)
-                WHERE NOT c.kb_id IN $active_ids
+                WHERE c.data_store_id IS NULL
+                  AND NOT c.kb_id IN $active_ids
                 RETURN DISTINCT c.kb_id AS stale_kb_id
                 """,
                 active_ids=active_str,

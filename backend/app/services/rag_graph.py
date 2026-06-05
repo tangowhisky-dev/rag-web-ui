@@ -600,6 +600,20 @@ async def parallel_retrieval_node(state: RAGGraphState) -> dict:
     use_exact = state.get("use_exact", True)
     use_graph_rag = state.get("use_graph_rag", False)
 
+    # Get linked datastores for these KBs
+    datastore_ids = []
+    if kb_ids and db:
+        from app.models.knowledge import KnowledgeBaseDataStore
+        datastore_links = (
+            db.query(KnowledgeBaseDataStore.data_store_id)
+            .filter(KnowledgeBaseDataStore.knowledge_base_id.in_(kb_ids))
+            .distinct()
+            .all()
+        )
+        datastore_ids = [row.data_store_id for row in datastore_links]
+        if datastore_ids:
+            logger.info("[RETRIEVE] Found %d linked datastores for KBs %s", len(datastore_ids), kb_ids)
+
     from app.services.retrieval import hybrid_search_with_legs
 
     async def _retrieve_one(sq: str) -> List[dict]:
@@ -608,6 +622,7 @@ async def parallel_retrieval_node(state: RAGGraphState) -> dict:
                 query=sq, kb_ids=kb_ids, db=db,
                 use_dense=use_dense, use_sparse=use_sparse,
                 use_exact=use_exact, use_graph_rag=use_graph_rag,
+                datastore_ids=datastore_ids,
             )
             return [_serialise_doc(d) for d in result.get("docs", [])]
         except Exception as exc:
@@ -952,12 +967,27 @@ async def widened_retrieval_node(state: RAGGraphState) -> dict:
 
     logger.info("[WIDENED] re-retrieving for %d uncovered sub-queries (attempt 1)", len(uncovered))
 
+    # Get linked datastores for these KBs
+    datastore_ids = []
+    if kb_ids and db:
+        from app.models.knowledge import KnowledgeBaseDataStore
+        datastore_links = (
+            db.query(KnowledgeBaseDataStore.data_store_id)
+            .filter(KnowledgeBaseDataStore.knowledge_base_id.in_(kb_ids))
+            .distinct()
+            .all()
+        )
+        datastore_ids = [row.data_store_id for row in datastore_links]
+        if datastore_ids:
+            logger.info("[WIDENED] Found %d linked datastores for KBs %s", len(datastore_ids), kb_ids)
+
     from app.services.retrieval import hybrid_search_with_legs
 
     async def _widened_one(sq: str) -> List[dict]:
         try:
             # All legs, no query_type preset (uses global top_k but pool is 4× so wider)
             result = await hybrid_search_with_legs(
+                datastore_ids=datastore_ids,
                 query=sq, kb_ids=kb_ids, db=db,
                 use_dense=True, use_sparse=True, use_exact=True,
                 use_graph_rag=use_graph_rag,
