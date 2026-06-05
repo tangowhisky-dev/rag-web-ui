@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { api, ApiError } from '@/lib/api';
-import { isAdmin } from '@/lib/auth';
+import { getTokenClaims } from '@/lib/auth';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -40,7 +40,15 @@ interface Org {
 
 type RoleOption = 'user' | 'admin' | 'super_admin';
 
-const ROLE_OPTIONS: RoleOption[] = ['user', 'admin', 'super_admin'];
+const ALL_ROLE_OPTIONS: RoleOption[] = ['user', 'admin', 'super_admin'];
+
+const adminRoleOptions: RoleOption[] = ['user'];
+
+function getAvailableRoles(): RoleOption[] {
+  const claims = getTokenClaims();
+  if (claims?.role === 'super_admin') return ALL_ROLE_OPTIONS;
+  return adminRoleOptions;
+}
 
 function roleBadgeVariant(role: string): 'default' | 'secondary' | 'destructive' {
   if (role === 'super_admin') return 'destructive';
@@ -55,6 +63,8 @@ export default function AdminUsersPage() {
   const [users, setUsers] = useState<User[]>([]);
   const [orgs, setOrgs] = useState<Org[]>([]);
   const [loading, setLoading] = useState(true);
+  const [availableRoles, setAvailableRoles] = useState<RoleOption[]>([]);
+  const [search, setSearch] = useState('');
 
   // Create dialog
   const [createOpen, setCreateOpen] = useState(false);
@@ -77,11 +87,14 @@ export default function AdminUsersPage() {
     is_active: true,
   });
 
+  // Delete confirmation dialog
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [userToDelete, setUserToDelete] = useState<User | null>(null);
+
   useEffect(() => {
-    if (!isAdmin()) {
-      router.replace('/dashboard');
-      return;
-    }
+    // Auth check is handled by the layout.tsx middleware.
+    setAvailableRoles(getAvailableRoles());
     fetchAll();
   }, [router]);
 
@@ -130,10 +143,14 @@ export default function AdminUsersPage() {
   }
 
   function openEdit(user: User) {
+    const claims = getTokenClaims();
+    const isSuperAdmin = claims?.role === 'super_admin';
     setSelectedUser(user);
+    // Always assign a valid org — first org if none assigned
+    const orgId = user.org_id || (orgs.length > 0 ? orgs[0].id : null);
     setEditForm({
-      role: user.role as RoleOption,
-      org_id: user.org_id ? String(user.org_id) : '',
+      role: isSuperAdmin ? (user.role as RoleOption) : 'user',
+      org_id: orgId ? String(orgId) : '',
       is_active: user.is_active,
     });
     setEditOpen(true);
@@ -162,31 +179,71 @@ export default function AdminUsersPage() {
     }
   }
 
-  async function handleDeactivate(user: User) {
+  function openDeleteConfirm(user: User) {
+    setUserToDelete(user);
+    setDeleteOpen(true);
+  }
+
+  async function handleDelete() {
+    if (!userToDelete) return;
+    setDeleting(true);
     try {
-      await api.delete(`/api/admin/users/${user.id}`);
-      toast({ title: `User ${user.username} deactivated` });
+      await api.delete(`/api/admin/users/${userToDelete.id}`);
+      toast({ title: `User ${userToDelete.username} permanently deleted` });
+      setDeleteOpen(false);
+      setUserToDelete(null);
       await fetchAll();
     } catch (err) {
       toast({
         title: 'Error',
-        description: (err as { message?: string }).message ?? 'Failed to deactivate user',
+        description: (err as { message?: string }).message ?? 'Failed to delete user',
         variant: 'destructive',
       });
+    } finally {
+      setDeleting(false);
     }
   }
 
   const orgName = (orgId: number | null) =>
     orgId ? (orgs.find((o) => o.id === orgId)?.name ?? String(orgId)) : '—';
 
+  // Filter by search (username, email, org name)
+  const filteredUsers = users.filter((u) => {
+    if (!search.trim()) return true;
+    const q = search.toLowerCase();
+    return (
+      u.username.toLowerCase().includes(q) ||
+      u.email.toLowerCase().includes(q) ||
+      orgName(u.org_id).toLowerCase().includes(q)
+    );
+  });
+
   const createValid =
-    createForm.username.trim() && createForm.email.trim() && createForm.password.length >= 1;
+    createForm.username.trim() && createForm.email.trim() && createForm.password.length >= 1 && !!createForm.org_id;
+  const editValid = !!selectedUser && !!editForm.org_id && orgs.length > 0;
 
   return (
-    <div className="space-y-4">
+    <div className="px-4 sm:px-6 lg:px-8 py-6 pt-16 space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold">Users</h1>
-        <Button onClick={() => setCreateOpen(true)}>+ New User</Button>
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight">Users</h1>
+          <p className="text-muted-foreground">Manage users and their roles</p>
+        </div>
+        <div className="flex items-center gap-3">
+          <div className="relative">
+            <input
+              type="text"
+              placeholder="Search users…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="w-64 rounded-md border border-input bg-background pl-9 pr-3 py-2 text-sm"
+            />
+            <svg className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
+          </div>
+          <Button onClick={() => setCreateOpen(true)}>+ New User</Button>
+        </div>
       </div>
 
       {loading ? (
@@ -200,7 +257,7 @@ export default function AdminUsersPage() {
               <TableHead>Email</TableHead>
               <TableHead>Role</TableHead>
               <TableHead>Org</TableHead>
-              <TableHead>Active</TableHead>
+              <TableHead>Status</TableHead>
               <TableHead>Actions</TableHead>
             </TableRow>
           </TableHeader>
@@ -211,8 +268,14 @@ export default function AdminUsersPage() {
                   No users yet.
                 </TableCell>
               </TableRow>
+            ) : filteredUsers.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={7} className="text-center text-muted-foreground">
+                  No users match "{search}".
+                </TableCell>
+              </TableRow>
             ) : (
-              users.map((user) => (
+              filteredUsers.map((user) => (
                 <TableRow key={user.id}>
                   <TableCell>{user.id}</TableCell>
                   <TableCell className="font-medium">{user.username}</TableCell>
@@ -221,19 +284,30 @@ export default function AdminUsersPage() {
                     <Badge variant={roleBadgeVariant(user.role)}>{user.role}</Badge>
                   </TableCell>
                   <TableCell>{orgName(user.org_id)}</TableCell>
-                  <TableCell>{user.is_active ? 'Yes' : 'No'}</TableCell>
+                  <TableCell>
+                    {user.is_active ? (
+                      <Badge variant="default" className="bg-green-100 text-green-700 hover:bg-green-100">
+                        Active
+                      </Badge>
+                    ) : (
+                      <Badge variant="secondary" className="bg-red-100 text-red-700 hover:bg-red-100">
+                        Deactivated
+                      </Badge>
+                    )}
+                  </TableCell>
                   <TableCell className="space-x-2">
                     <Button variant="outline" size="sm" onClick={() => openEdit(user)}>
                       Edit
                     </Button>
-                    <Button
-                      variant="destructive"
-                      size="sm"
-                      disabled={!user.is_active}
-                      onClick={() => handleDeactivate(user)}
-                    >
-                      Deactivate
-                    </Button>
+                    {user.role !== 'super_admin' && (
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        onClick={() => openDeleteConfirm(user)}
+                      >
+                        Delete
+                      </Button>
+                    )}
                   </TableCell>
                 </TableRow>
               ))
@@ -273,7 +347,7 @@ export default function AdminUsersPage() {
                 setCreateForm((f) => ({ ...f, role: e.target.value as RoleOption }))
               }
             >
-              {ROLE_OPTIONS.map((r) => (
+              {availableRoles.map((r) => (
                 <option key={r} value={r}>
                   {r}
                 </option>
@@ -284,13 +358,16 @@ export default function AdminUsersPage() {
               value={createForm.org_id}
               onChange={(e) => setCreateForm((f) => ({ ...f, org_id: e.target.value }))}
             >
-              <option value="">No organisation</option>
+              <option value="">Select organisation</option>
               {orgs.map((o) => (
                 <option key={o.id} value={String(o.id)}>
                   {o.name}
                 </option>
               ))}
             </select>
+            {orgs.length === 0 && (
+              <p className="text-xs text-muted-foreground">No organisations available — create one first.</p>
+            )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setCreateOpen(false)} disabled={creating}>
@@ -315,7 +392,12 @@ export default function AdminUsersPage() {
               value={editForm.role}
               onChange={(e) => setEditForm((f) => ({ ...f, role: e.target.value as RoleOption }))}
             >
-              {ROLE_OPTIONS.map((r) => (
+              {selectedUser && getTokenClaims()?.role !== 'super_admin' && selectedUser.role !== 'user' ? (
+                <option key={selectedUser.role} value={selectedUser.role} disabled>
+                  {selectedUser.role} (cannot change — requires super admin)
+                </option>
+              ) : null}
+              {availableRoles.map((r) => (
                 <option key={r} value={r}>
                   {r}
                 </option>
@@ -326,13 +408,15 @@ export default function AdminUsersPage() {
               value={editForm.org_id}
               onChange={(e) => setEditForm((f) => ({ ...f, org_id: e.target.value }))}
             >
-              <option value="">No organisation</option>
               {orgs.map((o) => (
                 <option key={o.id} value={String(o.id)}>
                   {o.name}
                 </option>
               ))}
             </select>
+            {orgs.length === 0 && (
+              <p className="text-xs text-muted-foreground">No organisations available — cannot edit user.</p>
+            )}
             <label className="flex items-center gap-2 text-sm">
               <input
                 type="checkbox"
@@ -347,8 +431,36 @@ export default function AdminUsersPage() {
             <Button variant="outline" onClick={() => setEditOpen(false)} disabled={editing}>
               Cancel
             </Button>
-            <Button onClick={handleEdit} disabled={editing}>
+            <Button onClick={handleEdit} disabled={editing || !editValid}>
               Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete confirmation dialog */}
+      <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="text-destructive">Permanently Delete User</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <p className="text-sm">
+              Are you sure you want to permanently delete <strong>{userToDelete?.username}</strong>? This action:
+            </p>
+            <ul className="list-disc pl-5 text-sm text-muted-foreground space-y-1">
+              <li>Removes the user permanently (cannot be undone)</li>
+              <li>Deletes all knowledge bases owned by this user</li>
+              <li>Deletes all chats owned by this user</li>
+              <li>Deletes all messages, files, and chunks associated with the above</li>
+            </ul>
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setDeleteOpen(false)} disabled={deleting}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={handleDelete} disabled={deleting}>
+              {deleting ? 'Deleting…' : 'Delete Permanently'}
             </Button>
           </DialogFooter>
         </DialogContent>

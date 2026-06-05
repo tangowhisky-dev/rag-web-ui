@@ -193,7 +193,7 @@ export default function KnowledgeSidebar({ isOpen, onClose }: KnowledgeSidebarPr
                         <div className="min-w-0">
                           <p className="truncate text-sm font-medium">{kb.name}</p>
                           <p className="text-[10px] text-muted-foreground">
-                            {kb.documents?.length ?? 0} doc{(kb.documents?.length ?? 0) !== 1 ? "s" : ""}
+                            {kb.documents?.length ?? 0} doc{(kb.documents?.length ?? 0) !== 1 ? "s" : ""} • {kb.data_source_count ?? 0} data source{(kb.data_source_count ?? 0) !== 1 ? "s" : ""}
                           </p>
                         </div>
                       </Link>

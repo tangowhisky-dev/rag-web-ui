@@ -13,22 +13,122 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { PlusIcon } from "lucide-react";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Badge } from "@/components/ui/badge";
+import { PlusIcon, LinkIcon, XIcon } from "lucide-react";
 import KnowledgeLayout from "@/components/layout/knowledge-layout";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
+import { useToast } from "@/components/ui/use-toast";
+
+interface DataSource {
+  id: number;
+  name: string;
+  folder_path: string;
+}
+
+interface AvailableDataSource extends DataSource {
+  assigned_orgs: Array<{ org_id: number; org_name: string }>;
+}
 
 export default function KnowledgeBasePage() {
   const params = useParams();
   const knowledgeBaseId = parseInt(params.id as string);
   const [refreshKey, setRefreshKey] = useState(0);
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [kbName, setKbName] = useState<string | undefined>();
+  const [kbName, setKbName] = useState<string>("Loading...");
+  const [dataSources, setDataSources] = useState<DataSource[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [linkDialogOpen, setLinkDialogOpen] = useState(false);
+  const [availableSources, setAvailableSources] = useState<AvailableDataSource[]>([]);
+  const [selectedSourceId, setSelectedSourceId] = useState<string>("");
+  const [linking, setLinking] = useState(false);
+  const { toast } = useToast();
 
   useEffect(() => {
     api.get(`/api/knowledge-base/${knowledgeBaseId}`)
-      .then((data) => setKbName(data.name))
-      .catch(() => {});
+      .then((data) => {
+        setKbName(data.name || "Knowledge Base");
+        setDataSources(data.data_sources || []);
+        setLoading(false);
+      })
+      .catch(() => {
+        setKbName("Knowledge Base");
+        setLoading(false);
+      });
   }, [knowledgeBaseId]);
+
+  const fetchAvailableSources = async () => {
+    try {
+      const data = await api.get("/api/admin/datastores");
+      // Filter to only show data sources assigned to user's org
+      const filtered = (data as AvailableDataSource[]).filter(ds => 
+        ds.assigned_orgs && ds.assigned_orgs.length > 0
+      );
+      setAvailableSources(filtered);
+    } catch (err) {
+      console.error("Failed to fetch data sources:", err);
+    }
+  };
+
+  const handleLinkSource = async () => {
+    if (!selectedSourceId) {
+      toast({
+        title: "Error",
+        description: "Please select a data source",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setLinking(true);
+    try {
+      await api.post(`/api/knowledge-base/${knowledgeBaseId}/link-datastore`, {
+        data_store_id: parseInt(selectedSourceId),
+      });
+      toast({
+        title: "Success",
+        description: "Data source linked to knowledge base",
+      });
+      setLinkDialogOpen(false);
+      setSelectedSourceId("");
+      // Refresh data sources
+      const data = await api.get(`/api/knowledge-base/${knowledgeBaseId}`);
+      setDataSources(data.data_sources || []);
+    } catch (err) {
+      toast({
+        title: "Error",
+        description: (err as ApiError).message ?? "Failed to link data source",
+        variant: "destructive",
+      });
+    } finally {
+      setLinking(false);
+    }
+  };
+
+  const handleUnlinkSource = async (sourceId: number) => {
+    try {
+      await api.delete(`/api/knowledge-base/${knowledgeBaseId}/unlink-datastore/${sourceId}`);
+      toast({
+        title: "Success",
+        description: "Data source unlinked from knowledge base",
+      });
+      // Refresh data sources
+      const data = await api.get(`/api/knowledge-base/${knowledgeBaseId}`);
+      setDataSources(data.data_sources || []);
+    } catch (err) {
+      toast({
+        title: "Error",
+        description: (err as ApiError).message ?? "Failed to unlink data source",
+        variant: "destructive",
+      });
+    }
+  };
 
   const handleUploadComplete = useCallback(() => {
     setRefreshKey((prev) => prev + 1);
@@ -42,12 +142,27 @@ export default function KnowledgeBasePage() {
     }
   }, []);
 
+  const handleLinkDialogOpenChange = useCallback((open: boolean) => {
+    setLinkDialogOpen(open);
+    if (open) {
+      fetchAvailableSources();
+    }
+  }, []);
+
   return (
     <KnowledgeLayout pageTitle={kbName}>
       <div className="h-full overflow-y-auto">
-        <div className="p-6 pt-16">
-          <div className="flex justify-between items-center mb-8">
-            <h1 className="text-3xl font-bold">{kbName || "Knowledge Base"}</h1>
+        <div className="p-6 pt-16 space-y-6">
+          <div className="flex justify-between items-center">
+            <h1 className="text-3xl font-bold tracking-tight">{loading ? "Loading..." : kbName}</h1>
+          </div>
+
+          {loading ? (
+            <div className="flex justify-center items-center h-64">
+              <div className="text-muted-foreground">Loading knowledge base...</div>
+            </div>
+          ) : (
+            <>
             <Dialog open={dialogOpen} onOpenChange={handleDialogOpenChange}>
               <DialogTrigger asChild>
                 <Button>
@@ -69,10 +184,93 @@ export default function KnowledgeBasePage() {
                 />
               </DialogContent>
             </Dialog>
-          </div>
-          <div className="mt-8">
-            <DocumentList knowledgeBaseId={knowledgeBaseId} refreshKey={refreshKey} />
-          </div>
+
+            {/* Data Sources Section */}
+            <div className="border rounded-lg p-4 bg-card">
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-lg font-semibold">Linked Data Sources</h2>
+                <Button variant="outline" size="sm" onClick={() => handleLinkDialogOpenChange(true)}>
+                  <LinkIcon className="w-4 h-4 mr-2" />
+                  Link Data Source
+                </Button>
+              </div>
+              {dataSources.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No data sources linked. Link a data source to automatically ingest documents.</p>
+              ) : (
+                <div className="space-y-2">
+                  {dataSources.map((ds) => (
+                    <div key={ds.id} className="flex items-center justify-between p-3 bg-muted rounded-lg">
+                      <div className="flex-1">
+                        <div className="font-medium flex items-center gap-2">
+                          {ds.name}
+                          <Badge variant="secondary" className="text-xs">
+                            Auto-process
+                          </Badge>
+                        </div>
+                        <div className="text-xs text-muted-foreground truncate">{ds.folder_path}</div>
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleUnlinkSource(ds.id)}
+                        title="Unlink data source"
+                      >
+                        <XIcon className="w-4 h-4" />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Link Data Source Dialog */}
+            <Dialog open={linkDialogOpen} onOpenChange={handleLinkDialogOpenChange}>
+              <DialogContent>
+                <DialogHeader>
+                  <DialogTitle>Link Data Source</DialogTitle>
+                  <DialogDescription>
+                    Select a data source to link to this knowledge base. Documents from the linked data source will be automatically available.
+                  </DialogDescription>
+                </DialogHeader>
+                <div className="space-y-4">
+                  <Select value={selectedSourceId} onValueChange={setSelectedSourceId}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select a data source" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {availableSources.map((ds) => (
+                        <SelectItem key={ds.id} value={String(ds.id)}>
+                          <div className="flex items-center justify-between">
+                            <span>{ds.name}</span>
+                            <span className="text-xs text-muted-foreground">
+                              {ds.folder_path}
+                            </span>
+                          </div>
+                        </SelectItem>
+                      ))}
+                      {availableSources.length === 0 && (
+                        <div className="p-4 text-center text-muted-foreground">
+                          No data sources available. Ask an admin to configure data sources for your organization.
+                        </div>
+                      )}
+                    </SelectContent>
+                  </Select>
+                  <Button
+                    onClick={handleLinkSource}
+                    disabled={!selectedSourceId || linking}
+                    className="w-full"
+                  >
+                    {linking ? "Linking..." : "Link Data Source"}
+                  </Button>
+                </div>
+              </DialogContent>
+            </Dialog>
+
+            <div>
+              <DocumentList knowledgeBaseId={knowledgeBaseId} refreshKey={refreshKey} />
+            </div>
+            </>
+          )}
         </div>
       </div>
     </KnowledgeLayout>

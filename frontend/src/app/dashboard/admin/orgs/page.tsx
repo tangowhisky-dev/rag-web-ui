@@ -3,7 +3,6 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { api, ApiError } from '@/lib/api';
-import { isAdmin } from '@/lib/auth';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
@@ -28,6 +27,8 @@ interface Org {
   name: string;
   parent_id: number | null;
   path: string;
+  level: number;
+  user_count: number;
 }
 
 interface OrgIngestionStatus {
@@ -87,11 +88,15 @@ export default function AdminOrgsPage() {
   const [newOrgParentId, setNewOrgParentId] = useState<string>('');
   const [creating, setCreating] = useState(false);
 
-  // Rename dialog
-  const [renameOpen, setRenameOpen] = useState(false);
+  // Edit dialog
+  const [editOpen, setEditOpen] = useState(false);
   const [selectedOrg, setSelectedOrg] = useState<Org | null>(null);
-  const [renameName, setRenameName] = useState('');
-  const [renaming, setRenaming] = useState(false);
+  const [editName, setEditName] = useState('');
+  const [editParentId, setEditParentId] = useState<string>('');
+  const [editing, setEditing] = useState(false);
+
+  // Search
+  const [search, setSearch] = useState('');
 
   // Delete dialog
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -106,10 +111,7 @@ export default function AdminOrgsPage() {
   const [llmSaving, setLlmSaving] = useState(false);
 
   useEffect(() => {
-    if (!isAdmin()) {
-      router.replace('/dashboard');
-      return;
-    }
+    // Auth check is handled by the layout.tsx middleware.
     fetchOrgs();
   }, [router]);
 
@@ -150,7 +152,7 @@ export default function AdminOrgsPage() {
     try {
       await api.post('/api/admin/orgs', {
         name: newOrgName.trim(),
-        parent_id: newOrgParentId ? parseInt(newOrgParentId, 10) : null,
+        parent_id: parseInt(newOrgParentId, 10),
       });
       toast({ title: 'Organisation created' });
       setCreateOpen(false);
@@ -168,28 +170,35 @@ export default function AdminOrgsPage() {
     }
   }
 
-  function openRename(org: Org) {
+  function openEdit(org: Org) {
     setSelectedOrg(org);
-    setRenameName(org.name);
-    setRenameOpen(true);
+    setEditName(org.name);
+    // For edit: parent_id can be any org except itself
+    // If self-referencing root, default to first available org
+    const validParent = org.parent_id !== org.id ? String(org.parent_id) : '';
+    setEditParentId(validParent || (orgs.length > 0 ? String(orgs[0].id) : ''));
+    setEditOpen(true);
   }
 
-  async function handleRename() {
-    if (!selectedOrg || !renameName.trim()) return;
-    setRenaming(true);
+  async function handleEdit() {
+    if (!selectedOrg || !editName.trim() || !editParentId) return;
+    setEditing(true);
     try {
-      await api.patch(`/api/admin/orgs/${selectedOrg.id}`, { name: renameName.trim() });
-      toast({ title: 'Organisation renamed' });
-      setRenameOpen(false);
+      await api.patch(`/api/admin/orgs/${selectedOrg.id}`, {
+        name: editName.trim(),
+        parent_id: parseInt(editParentId, 10),
+      });
+      toast({ title: 'Organisation updated' });
+      setEditOpen(false);
       await fetchOrgs();
     } catch (err) {
       toast({
         title: 'Error',
-        description: (err as { message?: string }).message ?? 'Failed to rename organisation',
+        description: (err as { message?: string }).message ?? 'Failed to update organisation',
         variant: 'destructive',
       });
     } finally {
-      setRenaming(false);
+      setEditing(false);
     }
   }
 
@@ -274,14 +283,58 @@ export default function AdminOrgsPage() {
     }
   }
 
-  const parentName = (parentId: number | null) =>
-    parentId ? (orgs.find((o) => o.id === parentId)?.name ?? String(parentId)) : '—';
+  // Build full hierarchy path: "GrandParent -> Parent -> Current"
+  const hierarchyPath = (org: Org): string => {
+    if (!org.path) return org.name;
+    const parts = org.path.split('/').filter(Boolean);
+    const names: string[] = [];
+    for (const part of parts) {
+      const id = parseInt(part, 10);
+      const found = orgs.find((o) => o.id === id);
+      if (found) names.push(found.name);
+    }
+    return names.join(' → ');
+  };
+
+  // Filter by search (case-insensitive on name)
+  const filteredOrgs = orgs.filter((o) =>
+    o.name.toLowerCase().includes(search.toLowerCase())
+  );
+
+  // Check if candidateOrg is a descendant of org (or org itself)
+  const isDescendantOf = (candidateOrg: Org, ancestorOrg: Org): boolean => {
+    if (!candidateOrg.path || !ancestorOrg.path) return false;
+    // ancestor's path must be a prefix of candidate's path
+    return candidateOrg.path.startsWith(ancestorOrg.path + '/') || candidateOrg.id === ancestorOrg.id;
+  };
+
+  // For edit dialog: exclude self and all descendants from parent options
+  const availableParents = selectedOrg
+    ? orgs.filter((o) => !isDescendantOf(o, selectedOrg))
+    : orgs;
 
   return (
-    <div className="space-y-4">
+    <div className="px-4 sm:px-6 lg:px-8 py-6 pt-16 space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold">Organisations</h1>
-        <Button onClick={() => setCreateOpen(true)}>+ New Org</Button>
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight">Organisations</h1>
+          <p className="text-muted-foreground">Manage your organisations and LLM configurations</p>
+        </div>
+        <div className="flex items-center gap-3">
+          <div className="relative">
+            <input
+              type="text"
+              placeholder="Search organisations…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="w-64 rounded-md border border-input bg-background pl-9 pr-3 py-2 text-sm"
+            />
+            <svg className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
+          </div>
+          <Button onClick={() => setCreateOpen(true)}>+ New Organization</Button>
+        </div>
       </div>
 
       {loading ? (
@@ -292,7 +345,7 @@ export default function AdminOrgsPage() {
             <TableRow>
               <TableHead>ID</TableHead>
               <TableHead>Name</TableHead>
-              <TableHead>Parent</TableHead>
+              <TableHead>Users</TableHead>
               <TableHead>Path</TableHead>
               <TableHead>Ingestion Status</TableHead>
               <TableHead>Actions</TableHead>
@@ -306,25 +359,36 @@ export default function AdminOrgsPage() {
                 </TableCell>
               </TableRow>
             ) : (
-              orgs.map((org) => (
-                <TableRow key={org.id}>
+              filteredOrgs.map((org) => (
+                <TableRow key={org.id} title={hierarchyPath(org)}>
                   <TableCell>{org.id}</TableCell>
-                  <TableCell className="font-medium">{org.name}</TableCell>
-                  <TableCell>{parentName(org.parent_id)}</TableCell>
+                  <TableCell className="font-medium">
+                    <div className="flex items-center gap-1">
+                      {org.level > 0 && (
+                        <span className="text-muted-foreground text-xs select-none">
+                          {'—'.repeat(org.level)}
+                        </span>
+                      )}
+                      <span>{org.name}</span>
+                    </div>
+                  </TableCell>
+                  <TableCell>{org.user_count}</TableCell>
                   <TableCell className="text-xs text-muted-foreground">{org.path}</TableCell>
                   <TableCell>
                     <IngestionBadge status={ingestionStatuses[org.id]} />
                   </TableCell>
                   <TableCell className="space-x-2">
-                    <Button variant="outline" size="sm" onClick={() => openRename(org)}>
-                      Rename
+                    <Button variant="outline" size="sm" onClick={() => openEdit(org)} title="Change name and parent organization">
+                      Edit
                     </Button>
-                    <Button variant="outline" size="sm" onClick={() => openLlmConfig(org)}>
+                    <Button variant="outline" size="sm" onClick={() => openLlmConfig(org)} title="Configure LLM settings for this organization">
                       LLM Config
                     </Button>
-                    <Button variant="destructive" size="sm" onClick={() => openDelete(org)}>
-                      Delete
-                    </Button>
+                    {org.parent_id !== null && (
+                      <Button variant="destructive" size="sm" onClick={() => openDelete(org)} title="Permanently delete this organization">
+                        Delete
+                      </Button>
+                    )}
                   </TableCell>
                 </TableRow>
               ))
@@ -340,53 +404,81 @@ export default function AdminOrgsPage() {
             <DialogTitle>New Organisation</DialogTitle>
           </DialogHeader>
           <div className="space-y-3 py-2">
-            <Input
-              placeholder="Organisation name"
-              value={newOrgName}
-              onChange={(e) => setNewOrgName(e.target.value)}
-            />
-            <select
-              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-              value={newOrgParentId}
-              onChange={(e) => setNewOrgParentId(e.target.value)}
-            >
-              <option value="">No parent</option>
-              {orgs.map((o) => (
-                <option key={o.id} value={String(o.id)}>
-                  {o.name}
-                </option>
-              ))}
-            </select>
+            <div className="space-y-1">
+              <label className="text-sm font-medium">Organisation name</label>
+              <Input
+                placeholder="Organisation name"
+                value={newOrgName}
+                onChange={(e) => setNewOrgName(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="text-sm font-medium">Parent organization</label>
+              <select
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                value={newOrgParentId}
+                onChange={(e) => setNewOrgParentId(e.target.value)}
+              >
+                {orgs.map((o) => (
+                  <option key={o.id} value={String(o.id)}>
+                    {o.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            {orgs.length === 0 && (
+              <p className="text-xs text-muted-foreground">No organisations available — cannot create child org.</p>
+            )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setCreateOpen(false)} disabled={creating}>
               Cancel
             </Button>
-            <Button onClick={handleCreate} disabled={creating || !newOrgName.trim()}>
+            <Button onClick={handleCreate} disabled={creating || !newOrgName.trim() || !newOrgParentId}>
               Create
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      {/* Rename dialog */}
-      <Dialog open={renameOpen} onOpenChange={setRenameOpen}>
+      {/* Edit dialog */}
+      <Dialog open={editOpen} onOpenChange={setEditOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Rename Organisation</DialogTitle>
+            <DialogTitle>Edit Organisation — {selectedOrg?.name}</DialogTitle>
           </DialogHeader>
-          <div className="py-2">
-            <Input
-              placeholder="New name"
-              value={renameName}
-              onChange={(e) => setRenameName(e.target.value)}
-            />
+          <div className="space-y-3 py-2">
+            <div className="space-y-1">
+              <label className="text-sm font-medium">Organisation name</label>
+              <Input
+                placeholder="Organisation name"
+                value={editName}
+                onChange={(e) => setEditName(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="text-sm font-medium">Parent organization</label>
+              <select
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                value={editParentId}
+                onChange={(e) => setEditParentId(e.target.value)}
+              >
+                {availableParents.map((o) => (
+                  <option key={o.id} value={String(o.id)}>
+                    {o.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            {availableParents.length === 0 && (
+              <p className="text-xs text-muted-foreground">No organisations available — cannot edit.</p>
+            )}
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setRenameOpen(false)} disabled={renaming}>
+            <Button variant="outline" onClick={() => setEditOpen(false)} disabled={editing}>
               Cancel
             </Button>
-            <Button onClick={handleRename} disabled={renaming || !renameName.trim()}>
+            <Button onClick={handleEdit} disabled={editing || !editName.trim() || !editParentId}>
               Save
             </Button>
           </DialogFooter>

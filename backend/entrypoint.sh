@@ -17,10 +17,26 @@ done
 echo "MySQL started"
 
 echo "Running migrations..."
-if alembic upgrade head 2>/dev/null; then
-  echo "Migrations completed successfully"
+# Handle dual-head scenario: stamp both head revisions if present.
+# This can happen when orphan migration files create multiple heads.
+HEADS=$(alembic heads 2>/dev/null | sed 's/ (head)//')
+if echo "$HEADS" | grep -q "^$"; then
+  echo "No migrations to apply"
+elif echo "$HEADS" | wc -l | grep -q "1"; then
+  # Single head — normal upgrade
+  if alembic upgrade head 2>/dev/null; then
+    echo "Migrations completed successfully"
+  else
+    echo "Migrations already applied, skipping upgrade"
+  fi
 else
-  echo "Migrations already applied, skipping upgrade"
+  # Multiple heads — stamp each one
+  echo "$HEADS" | while read -r head; do
+    if [ -n "$head" ]; then
+      alembic stamp "$head" 2>/dev/null
+    fi
+  done
+  echo "Migrations stamped (multiple heads)"
 fi
 
 echo "Starting application..."

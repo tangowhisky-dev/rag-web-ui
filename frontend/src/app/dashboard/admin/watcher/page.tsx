@@ -4,7 +4,6 @@ import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { FolderOpen, Play, Trash2 } from 'lucide-react';
 import { api, ApiError } from '@/lib/api';
-import { isAdmin } from '@/lib/auth';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import {
@@ -113,10 +112,7 @@ export default function AdminWatcherPage() {
   const [watchDirSaving, setWatchDirSaving] = useState(false);
 
   useEffect(() => {
-    if (!isAdmin()) {
-      router.replace('/dashboard');
-      return;
-    }
+    // Auth check is handled by the layout.tsx middleware.
     fetchData();
   }, [router]);
 
@@ -243,9 +239,10 @@ export default function AdminWatcherPage() {
   const displayRows = getDisplayRows();
 
   return (
-    <div className="space-y-4">
+    <div className="px-4 sm:px-6 lg:px-8 py-6 pt-16 space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold">Watcher Management</h1>
+        <h1 className="text-3xl font-bold tracking-tight">Watcher Management</h1>
+        <p className="text-muted-foreground">Monitor and manage file watching and SMB shares</p>
       </div>
 
       {loading ? (

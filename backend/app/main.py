@@ -9,7 +9,7 @@ from app.db.session import SessionLocal
 from app.models.knowledge import ProcessingTask
 from app.models.organisation import Organisation
 from app.models.user import User, UserRole
-from app.services.watcher_service import WatcherService
+from app.services.datastore_watcher import DataStoreWatcher
 from fastapi import FastAPI
 
 logging.basicConfig(
@@ -70,7 +70,7 @@ def _seed_root_org_and_superadmin() -> None:
             db.query(User)
             .filter(
                 (User.username == admin_username)
-                | (User.email == f"{admin_username}@root.local")
+                | (User.email == f"{admin_username}@example.com")
             )
             .first()
         )
@@ -83,10 +83,9 @@ def _seed_root_org_and_superadmin() -> None:
 
         user = User(
             username=admin_username,
-            email=f"{admin_username}@root.local",
+            email=f"{admin_username}@example.com",
             hashed_password=get_password_hash(admin_password),
             role=UserRole.super_admin,
-            is_superuser=True,
             is_active=True,
             org_id=org.id,
         )
@@ -119,8 +118,8 @@ app = FastAPI(
     redirect_slashes=False,
 )
 
-# WatcherService — started on demand during startup
-watcher_service: WatcherService | None = None
+# DataStoreWatcher — started on demand during startup
+watcher_service: DataStoreWatcher | None = None
 
 # Include routers
 app.include_router(api_router, prefix=settings.API_V1_STR)
@@ -143,13 +142,13 @@ async def startup_event():
     except Exception as e:
         logging.getLogger(__name__).warning("Failed to load best tuning config: %s", e)
 
-    # Start the file watcher service (local + SMB) if enabled
+    # Start the DataStore watcher service if enabled
     if settings.WATCHER_ENABLED:
         try:
-            watcher_service = WatcherService()
+            watcher_service = DataStoreWatcher()
             watcher_service.start()
         except Exception as e:
-            logging.getLogger(__name__).error("Failed to start WatcherService: %s", e)
+            logging.getLogger(__name__).error("Failed to start DataStoreWatcher: %s", e)
 
     # Reset any tasks left in "processing" state from a previous worker crash.
     # With --reload, a file-write event kills the worker mid-flight leaving tasks

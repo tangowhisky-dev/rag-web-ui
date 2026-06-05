@@ -88,12 +88,22 @@ class DocumentResponse(DocumentBase):
     class Config:
         from_attributes = True
 
+class DataStoreInfo(BaseModel):
+    id: int
+    name: str
+    folder_path: str
+
+    class Config:
+        from_attributes = True
+
 class KnowledgeBaseResponse(KnowledgeBaseBase):
     id: int
     user_id: int
     created_at: datetime
     updated_at: datetime
     documents: List[DocumentResponse] = []
+    data_sources: List[DataStoreInfo] = []
+    data_source_count: int = 0
 
     @field_serializer("created_at", "updated_at")
     def serialise_datetimes(self, v): return _as_utc_iso(v)

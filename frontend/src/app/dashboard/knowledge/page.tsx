@@ -61,7 +61,7 @@ function KnowledgeBaseList() {
                   <h3 className="text-lg font-semibold">{kb.name}</h3>
                   <p className="text-sm text-muted-foreground">{kb.description || "No description"}</p>
                   <p className="text-sm text-muted-foreground mt-1">
-                    {kb.documents.length} documents • {new Date(kb.created_at).toLocaleDateString()}
+                    {kb.documents.length} documents • {kb.data_source_count} data source{kb.data_source_count !== 1 ? 's' : ''} • {new Date(kb.created_at).toLocaleDateString()}
                   </p>
                 </div>
                 <div className="flex space-x-2">

@@ -1,40 +1,68 @@
 'use client';
 
-import { Building2, Users, Settings } from 'lucide-react';
+import { Building2, Users } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { api } from '@/lib/api';
+
+interface AdminCounts {
+  organizations: number;
+  users: number;
+}
+
+// LLM config is managed per-organisation on the Orgs page (LLM Config button).
+// The standalone /dashboard/admin/llm-config page does not exist.
 
 const STAT_CARDS = [
-  { label: 'Organisations', value: 0, icon: Building2 },
-  { label: 'Users', value: 0, icon: Users },
-  { label: 'LLM Configs', value: 0, icon: Settings },
+  { label: 'Organisations', key: 'organizations' as const, icon: Building2 },
+  { label: 'Users', key: 'users' as const, icon: Users },
 ];
 
 export default function AdminPage() {
-  return (
-    <div className="max-w-5xl mx-auto">
-      <div className="mb-8">
-        <h1 className="text-3xl font-bold tracking-tight text-foreground">Admin Panel</h1>
-        <p className="mt-2 text-muted-foreground">
-          Manage organisations, users, and LLM configuration.
-        </p>
-      </div>
+  const [counts, setCounts] = useState<AdminCounts | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-      <div className="grid gap-6 md:grid-cols-3">
-        {STAT_CARDS.map(({ label, value, icon: Icon }) => (
-          <div
-            key={label}
-            className="rounded-2xl border bg-card text-card-foreground p-8 hover:shadow-md transition-shadow"
-          >
-            <div className="flex items-center gap-4">
-              <div className="rounded-full bg-muted p-3">
-                <Icon className="h-6 w-6 text-foreground" />
-              </div>
-              <div>
-                <h3 className="text-3xl font-bold">{value}</h3>
-                <p className="text-muted-foreground mt-1 text-sm">{label}</p>
+  useEffect(() => {
+    api.get('/api/admin/counts')
+      .then((data) => setCounts(data))
+      .catch((e) => setError(e.message ?? 'Failed to load counts'));
+  }, []);
+
+  return (
+    <div className="px-4 sm:px-6 lg:px-8 py-6 pt-16">
+      <div className="max-w-5xl mx-auto">
+        <div className="mb-8">
+          <h1 className="text-3xl font-bold tracking-tight">Admin Panel</h1>
+          <p className="mt-2 text-muted-foreground">
+            Manage organisations, users, and LLM configuration.
+          </p>
+        </div>
+
+        {error && (
+          <div className="mb-6 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+            Unable to load counts: {error}
+          </div>
+        )}
+
+        <div className="grid gap-6 md:grid-cols-2">
+          {STAT_CARDS.map(({ label, key, icon: Icon }) => (
+            <div
+              key={label}
+              className="rounded-2xl border bg-card text-card-foreground p-8 hover:shadow-md transition-shadow"
+            >
+              <div className="flex items-center gap-4">
+                <div className="rounded-full bg-muted p-3">
+                  <Icon className="h-6 w-6 text-foreground" />
+                </div>
+                <div>
+                  <h3 className="text-3xl font-bold">
+                    {counts?.[key] ?? '—'}
+                  </h3>
+                  <p className="text-muted-foreground mt-1 text-sm">{label}</p>
+                </div>
               </div>
             </div>
-          </div>
-        ))}
+          ))}
+        </div>
       </div>
     </div>
   );

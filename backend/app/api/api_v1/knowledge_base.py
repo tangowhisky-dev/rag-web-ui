@@ -15,13 +15,40 @@ import asyncio
 from app.db.session import get_db
 from app.models.user import User
 from app.core.security import get_current_user
-from app.models.knowledge import KnowledgeBase, Document, ProcessingTask, DocumentChunk, DocumentUpload
+from app.models.knowledge import KnowledgeBase, Document, ProcessingTask, DocumentChunk, DocumentUpload, KnowledgeBaseDataStore
+from app.models.datastore import DataStore, OrganizationDataStore
+from app.models.organisation import Organisation
+
+
+def _get_user_org_ids(db: Session, org_id: int) -> List[int]:
+    """Get all org IDs in the user's hierarchy (user's org + all descendant orgs).
+    
+    Users can access data from their org and any child orgs.
+    """
+    org_ids = [org_id]
+    orgs_to_check = [org_id]
+    
+    for _ in range(100):  # Safety limit to prevent infinite loops
+        if not orgs_to_check:
+            break
+        parent_id = orgs_to_check.pop(0)
+        children = db.query(Organisation).filter(
+            Organisation.parent_id == parent_id,
+            Organisation.id != parent_id  # Exclude self-referencing root
+        ).all()
+        for child in children:
+            if child.id not in org_ids:
+                org_ids.append(child.id)
+                orgs_to_check.append(child.id)
+    
+    return org_ids
 from app.schemas.knowledge import (
     KnowledgeBaseCreate,
     KnowledgeBaseResponse,
     KnowledgeBaseUpdate,
     DocumentResponse,
-    PreviewRequest
+    PreviewRequest,
+    DataStoreInfo
 )
 from app.services.document_processor import process_document_background, upload_document, preview_document, PreviewResult, SUPPORTED_EXTENSIONS
 from app.core.config import settings
@@ -78,16 +105,56 @@ def get_knowledge_bases(
     limit: int = 100
 ) -> Any:
     """
-    Retrieve knowledge bases.
+    Retrieve knowledge bases with linked data sources.
     """
+    # Get datastores assigned to user's org and all descendant orgs
+    org_datastores = []
+    if current_user.org_id:
+        user_org_ids = _get_user_org_ids(db, current_user.org_id)
+        org_datastores = (
+            db.query(DataStore)
+            .join(OrganizationDataStore)
+            .filter(
+                OrganizationDataStore.org_id.in_(user_org_ids),
+                OrganizationDataStore.is_active == True,
+                DataStore.is_active == True,
+            )
+            .all()
+        )
+    
     knowledge_bases = (
         db.query(KnowledgeBase)
         .filter(_kb_owner_filter(current_user))
+        .options(selectinload(KnowledgeBase.data_sources))
         .offset(skip)
         .limit(limit)
         .all()
     )
-    return knowledge_bases
+    
+    # Add data_sources to each response (only explicitly linked ones)
+    result = []
+    for kb in knowledge_bases:
+        linked_ds_ids = [link.data_store_id for link in kb.data_sources]
+        linked_datastores = db.query(DataStore).filter(
+            DataStore.id.in_(linked_ds_ids),
+            DataStore.is_active == True
+        ).all()
+        data_sources = [DataStoreInfo(id=ds.id, name=ds.name, folder_path=ds.folder_path) for ds in linked_datastores]
+        
+        kb_dict = {
+            "id": kb.id,
+            "name": kb.name,
+            "description": kb.description,
+            "user_id": kb.user_id,
+            "created_at": kb.created_at,
+            "updated_at": kb.updated_at,
+            "documents": kb.documents or [],
+            "data_sources": data_sources,
+            "data_source_count": len(linked_datastores),
+        }
+        result.append(KnowledgeBaseResponse(**kb_dict))
+    
+    return result
 
 @router.get("/{kb_id}", response_model=KnowledgeBaseResponse)
 def get_knowledge_base(
@@ -97,7 +164,7 @@ def get_knowledge_base(
     current_user: User = Depends(get_current_user)
 ) -> Any:
     """
-    Get knowledge base by ID.
+    Get knowledge base by ID with linked data sources.
     """
     from sqlalchemy.orm import joinedload
     
@@ -117,7 +184,42 @@ def get_knowledge_base(
     if not kb:
         raise HTTPException(status_code=404, detail="Knowledge base not found")
     
-    return kb
+    # Get datastores assigned to user's org and all descendant orgs
+    org_datastores = []
+    if current_user.org_id:
+        user_org_ids = _get_user_org_ids(db, current_user.org_id)
+        org_datastores = (
+            db.query(DataStore)
+            .join(OrganizationDataStore)
+            .filter(
+                OrganizationDataStore.org_id.in_(user_org_ids),
+                OrganizationDataStore.is_active == True,
+                DataStore.is_active == True,
+            )
+            .all()
+        )
+    
+    # Get only explicitly linked datastores
+    linked_ds_ids = [link.data_store_id for link in kb.data_sources]
+    linked_datastores = db.query(DataStore).filter(
+        DataStore.id.in_(linked_ds_ids),
+        DataStore.is_active == True
+    ).all()
+    data_sources = [DataStoreInfo(id=ds.id, name=ds.name, folder_path=ds.folder_path) for ds in linked_datastores]
+    
+    # Build response with data_sources
+    kb_dict = {
+        "id": kb.id,
+        "name": kb.name,
+        "description": kb.description,
+        "user_id": kb.user_id,
+        "created_at": kb.created_at,
+        "updated_at": kb.updated_at,
+        "documents": kb.documents or [],
+        "data_sources": data_sources,
+        "data_source_count": len(linked_datastores),
+    }
+    return KnowledgeBaseResponse(**kb_dict)
 
 @router.put("/{kb_id}", response_model=KnowledgeBaseResponse)
 def update_knowledge_base(
@@ -710,3 +812,120 @@ async def test_retrieval(
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Data Source Linking Endpoints
+# ────────────────────────────────────────────────────────────────────────────
+
+class LinkDataSourceRequest(BaseModel):
+    data_store_id: int
+
+@router.post("/{kb_id}/link-datastore")
+def link_datastore_to_kb(
+    *,
+    db: Session = Depends(get_db),
+    kb_id: int,
+    request: LinkDataSourceRequest,
+    current_user: User = Depends(get_current_user)
+) -> Any:
+    """
+    Link a datastore to a knowledge base.
+    This creates an implicit relationship - documents from the datastore
+    that match the KB's folder structure will be automatically ingested.
+    """
+    from app.models.datastore import DataStore, OrganizationDataStore
+    
+    # Verify KB ownership
+    kb = db.query(KnowledgeBase).filter(
+        KnowledgeBase.id == kb_id,
+        _kb_owner_filter(current_user)
+    ).first()
+    if not kb:
+        raise HTTPException(status_code=404, detail="Knowledge base not found")
+    
+    # Verify datastore exists and is assigned to user's org or any descendant org
+    # Get all org IDs in the user's hierarchy (user's org + all descendants)
+    user_org_ids = [current_user.org_id]
+    
+    # Walk down the hierarchy to find all child orgs
+    orgs_to_check = [current_user.org_id]
+    for _ in range(100):  # Safety limit to prevent infinite loops
+        if not orgs_to_check:
+            break
+        parent_id = orgs_to_check.pop(0)
+        children = db.query(Organisation).filter(
+            Organisation.parent_id == parent_id,
+            Organisation.id != parent_id  # Exclude self-referencing root
+        ).all()
+        for child in children:
+            if child.id not in user_org_ids:
+                user_org_ids.append(child.id)
+                orgs_to_check.append(child.id)
+    
+    ds = db.query(DataStore).join(OrganizationDataStore).filter(
+        DataStore.id == request.data_store_id,
+        OrganizationDataStore.org_id.in_(user_org_ids),
+        OrganizationDataStore.is_active == True,
+        DataStore.is_active == True,
+    ).first()
+    if not ds:
+        raise HTTPException(
+            status_code=404,
+            detail="Data source not found or not assigned to your organisation"
+        )
+    
+    # Check if already linked
+    existing = db.query(KnowledgeBaseDataStore).filter(
+        KnowledgeBaseDataStore.knowledge_base_id == kb_id,
+        KnowledgeBaseDataStore.data_store_id == request.data_store_id
+    ).first()
+    
+    if existing:
+        return {"message": f"Data source '{ds.name}' already linked to knowledge base '{kb.name}'"}
+    
+    # Create the junction record
+    link = KnowledgeBaseDataStore(
+        knowledge_base_id=kb_id,
+        data_store_id=request.data_store_id
+    )
+    db.add(link)
+    db.commit()
+    
+    logger.info("Data source '%s' linked to knowledge base '%s' (kb_id=%d)", ds.name, kb.name, kb_id)
+    return {"message": f"Data source '{ds.name}' linked to knowledge base '{kb.name}'"}
+
+@router.delete("/{kb_id}/unlink-datastore/{data_store_id}")
+def unlink_datastore_from_kb(
+    *,
+    db: Session = Depends(get_db),
+    kb_id: int,
+    data_store_id: int,
+    current_user: User = Depends(get_current_user)
+) -> Any:
+    """
+    Unlink a datastore from a knowledge base.
+    """
+    # Verify KB ownership
+    kb = db.query(KnowledgeBase).filter(
+        KnowledgeBase.id == kb_id,
+        _kb_owner_filter(current_user)
+    ).first()
+    if not kb:
+        raise HTTPException(status_code=404, detail="Knowledge base not found")
+    
+    # Delete the junction record
+    link = db.query(KnowledgeBaseDataStore).filter(
+        KnowledgeBaseDataStore.knowledge_base_id == kb_id,
+        KnowledgeBaseDataStore.data_store_id == data_store_id
+    ).first()
+    
+    if not link:
+        raise HTTPException(status_code=404, detail="Data source not linked to this knowledge base")
+    
+    db.delete(link)
+    db.commit()
+    
+    ds = db.query(DataStore).filter(DataStore.id == data_store_id).first()
+    logger.info("Data source '%s' unlinked from knowledge base '%s' (kb_id=%d)", ds.name if ds else data_store_id, kb.name, kb_id)
+    return {"message": f"Data source unlinked from knowledge base '{kb.name}'"}

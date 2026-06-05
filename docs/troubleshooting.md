@@ -9,7 +9,7 @@ Quick reference for the web UIs available in development:
 | RAG Web UI | http://localhost:3000 | Your registered account |
 | Backend API Docs | http://localhost:8000/redoc | — |
 | Qdrant Dashboard | http://localhost:6333/dashboard | — (no login) |
-| Adminer (MySQL) | http://localhost:8080 | Server: `db`, User: `ragwebui`, Pass: `ragwebui`, DB: `ragwebui` |
+| Adminer (MySQL) | http://localhost:8081 | Server: `db`, User: `ragwebui`, Pass: `ragwebui`, DB: `ragwebui` |
 
 Start Adminer if it's not running:
 ```bash
@@ -148,7 +148,7 @@ The middleware checks for a `token` cookie (not localStorage). If you previously
 lsof -i :3000
 lsof -i :8000
 lsof -i :6333
-lsof -i :8080
+lsof -i :8081
 ```
 
 ### Check All Service Status

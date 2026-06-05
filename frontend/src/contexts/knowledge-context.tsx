@@ -8,6 +8,8 @@ export interface KnowledgeBase {
   name: string;
   description: string;
   documents: { id: number; file_name?: string; created_at?: string }[];
+  data_sources?: { id: number; name: string; folder_path: string }[];
+  data_source_count: number;
   created_at: string;
 }
 

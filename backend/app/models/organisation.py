@@ -30,6 +30,11 @@ class Organisation(Base, TimestampMixin):
     chats = relationship("Chat", back_populates="organisation")
     llm_config = relationship("OrgLLMConfig", uselist=False, back_populates="organisation")
     abbreviations = relationship("OrgAbbreviation", back_populates="organisation", cascade="all, delete-orphan")
+    data_store_links = relationship(
+        "OrganizationDataStore",
+        back_populates="organisation",
+        cascade="all, delete-orphan",
+    )
 
 
 class OrgAbbreviation(Base):

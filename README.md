@@ -216,7 +216,7 @@ MATCH (c:Chunk)-[:FROM_CHUNK]-(e:__Entity__ {name: "Apple"}) RETURN c, e
 | **Backend API Docs** | http://localhost:8000/redoc | OpenAPI reference |
 | **Qdrant Dashboard** | http://localhost:6333/dashboard | Browse collections, inspect points |
 | **Neo4j Browser** | http://localhost:7474/browser/ | Explore entity/relationship graph |
-| **Adminer** | http://localhost:8080 | MySQL web GUI (dev only) |
+| **Adminer** | http://localhost:8081 | MySQL web GUI (dev only) | Note: Adminer was moved from port 8080 to 8081 to avoid conflicts with other services.
 
 Adminer is in `docker-compose.dev.yml`:
 ```bash

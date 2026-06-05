@@ -14,12 +14,13 @@ class OrgBase(BaseModel):
 
 
 class OrgCreate(OrgBase):
-    parent_id: Optional[int] = None
+    parent_id: int
 
 
 class OrgUpdate(BaseModel):
     name: Optional[str] = None
     parent_id: Optional[int] = None
+    remove_parent: bool = False
     watch_dir: Optional[str] = None
     smb_host: Optional[str] = None
     smb_share: Optional[str] = None
@@ -31,6 +32,8 @@ class OrgResponse(OrgBase):
     id: int
     parent_id: Optional[int] = None
     path: Optional[str] = None
+    level: int = 0
+    user_count: int = 0
     watch_dir: Optional[str] = None
     smb_host: Optional[str] = None
     smb_share: Optional[str] = None

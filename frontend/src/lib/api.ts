@@ -73,6 +73,11 @@ export async function fetchApi(fullUrl: string, options: FetchOptions = {}) {
       );
     }
 
+    // Handle 204 No Content - return null instead of trying to parse JSON
+    if (response.status === 204) {
+      return null;
+    }
+
     return await response.json();
   } catch (error) {
     if (error instanceof ApiError) {

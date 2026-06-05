@@ -4,14 +4,14 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.core.security import require_admin
+from app.core.security import require_admin, require_super_admin
 from app.db.session import get_db
 from app.models.organisation import Organisation
 from app.models.org_llm_config import OrgLLMConfig
 from app.models.organisation import OrgAbbreviation
 from app.schemas.organisation import OrgCreate, OrgUpdate, OrgResponse, OrgLLMConfigUpdate, OrgLLMConfigResponse, OrgIngestionStatusResponse
 from app.models.knowledge import KnowledgeBase, ProcessingTask
-from app.schemas.user import UserAdminCreate, UserAdminUpdate, UserResponse
+from app.schemas.user import UserAdminCreate, UserAdminUpdate, UserResponse, UserDeleteResponse
 from app.models.user import User, UserRole
 from app.core.security import get_password_hash
 
@@ -23,7 +23,25 @@ def list_orgs(
     db: Session = Depends(get_db),
     _: object = Depends(require_admin),
 ):
-    return db.query(Organisation).order_by(Organisation.id).all()
+    orgs = db.query(Organisation).order_by(Organisation.id).all()
+    # Attach user_count and level to each org response
+    user_counts = {
+        o.id: db.query(User).filter(User.org_id == o.id).count()
+        for o in orgs
+    }
+    result = []
+    for org in orgs:
+        resp = OrgResponse.model_validate(org)
+        resp.user_count = user_counts.get(org.id, 0)
+        # level = number of segments in path minus 1 (root = level 0)
+        if org.path:
+            resp.level = max(0, len([p for p in org.path.split("/") if p]) - 1)
+        else:
+            resp.level = 0
+        result.append(resp)
+    # Sort hierarchically: by path (depth-first), then alphabetically within same level
+    result.sort(key=lambda o: (o.path or "", o.name))
+    return result
 
 
 @org_router.post("/orgs", response_model=OrgResponse, status_code=201)
@@ -35,20 +53,19 @@ def create_org(
     if db.query(Organisation).filter(Organisation.name == payload.name).first():
         raise HTTPException(status_code=400, detail="Org name already exists")
 
-    if payload.parent_id is not None:
-        parent = db.query(Organisation).filter(Organisation.id == payload.parent_id).first()
-        if parent is None:
-            raise HTTPException(status_code=404, detail="Parent org not found")
+    # parent_id is now required — every org must have a parent
+    parent = db.query(Organisation).filter(Organisation.id == payload.parent_id).first()
+    if parent is None:
+        raise HTTPException(status_code=404, detail="Parent org not found")
 
     org = Organisation(name=payload.name, parent_id=payload.parent_id)
     db.add(org)
     db.flush()  # get org.id before computing path
-
-    if payload.parent_id is not None:
-        parent = db.query(Organisation).filter(Organisation.id == payload.parent_id).first()
-        org.path = f"{parent.path}/{org.id}"
-    else:
+    # Guard against self-referencing root org
+    if parent.id == org.id:
         org.path = f"/{org.id}"
+    else:
+        org.path = f"{parent.path}/{org.id}"
 
     db.commit()
     db.refresh(org)
@@ -74,16 +91,28 @@ def update_org(
             raise HTTPException(status_code=400, detail="Org name already exists")
         org.name = payload.name
 
+    if payload.remove_parent:
+        raise HTTPException(status_code=400, detail="Organisation must always have a parent")
+
     if payload.parent_id is not None:
         parent = db.query(Organisation).filter(Organisation.id == payload.parent_id).first()
         if parent is None:
             raise HTTPException(status_code=404, detail="Parent org not found")
+        # Prevent setting a descendant as parent (would create a cycle)
+        if org.path and parent.path and org.id != parent.id:
+            # parent must not be a descendant of org
+            # i.e., org's path must not be a prefix of parent's path
+            if parent.path.startswith(org.path + "/"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Cannot set a child or descendant organisation as parent",
+                )
         org.parent_id = payload.parent_id
-        org.path = f"{parent.path}/{org.id}"
-    elif payload.parent_id is None and "parent_id" in payload.model_fields_set:
-        # Explicitly set to None → promote to root
-        org.parent_id = None
-        org.path = f"/{org.id}"
+        # Guard against self-referencing root org
+        if parent.id == org.id:
+            org.path = f"/{org.id}"
+        else:
+            org.path = f"{parent.path}/{org.id}"
 
     db.commit()
     db.refresh(org)
@@ -215,6 +244,29 @@ def get_org_ingestion_status(
 from pydantic import BaseModel as _BaseModel
 
 
+class AdminCountsResponse(_BaseModel):
+    organizations: int
+    users: int
+
+
+@org_router.get("/counts", response_model=AdminCountsResponse)
+def get_admin_counts(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    # Organisations: all admins see all orgs (consistent with list_orgs endpoint)
+    org_count = db.query(Organisation).count()
+
+    # Users: super admins see all, regular admins see their org's users
+    # (consistent with list_users endpoint visibility rules)
+    if current_user.role == UserRole.super_admin:
+        user_count = db.query(User).count()
+    else:
+        user_count = db.query(User).filter(User.org_id == current_user.org_id).count()
+
+    return AdminCountsResponse(organizations=org_count, users=user_count)
+
+
 class AbbreviationCreate(_BaseModel):
     short: str
     expansion: str
@@ -295,21 +347,31 @@ user_router = APIRouter()
 @user_router.get("/users", response_model=List[UserResponse])
 def list_users(
     db: Session = Depends(get_db),
-    _: object = Depends(require_admin),
+    current_user: User = Depends(require_admin),
 ):
-    return db.query(User).order_by(User.id).all()
+    if current_user.role == UserRole.super_admin:
+        return db.query(User).order_by(User.id).all()
+    return db.query(User).filter(User.org_id == current_user.org_id).order_by(User.id).all()
 
 
 @user_router.post("/users", response_model=UserResponse, status_code=201)
 def create_user(
     payload: UserAdminCreate,
     db: Session = Depends(get_db),
-    _: object = Depends(require_admin),
+    current_user: User = Depends(require_admin),
 ):
-    if payload.org_id is not None:
-        org = db.query(Organisation).filter(Organisation.id == payload.org_id).first()
-        if org is None:
-            raise HTTPException(status_code=404, detail="Org not found")
+    # Only super_admin can create admin or super_admin users
+    if current_user.role == UserRole.admin and payload.role not in ("user",):
+        raise HTTPException(
+            status_code=403,
+            detail="Only super admin can create users with admin or super admin role",
+        )
+
+    if not payload.org_id:
+        raise HTTPException(status_code=422, detail="User must belong to an organisation")
+    org = db.query(Organisation).filter(Organisation.id == payload.org_id).first()
+    if org is None:
+        raise HTTPException(status_code=404, detail="Org not found")
 
     if db.query(User).filter(User.email == payload.email).first():
         raise HTTPException(status_code=400, detail="Email already registered")
@@ -342,13 +404,19 @@ def update_user(
     user_id: int,
     payload: UserAdminUpdate,
     db: Session = Depends(get_db),
-    _: object = Depends(require_admin),
+    current_user: User = Depends(require_admin),
 ):
     user = db.query(User).filter(User.id == user_id).first()
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
 
     if payload.role is not None:
+        # Only super_admin can promote a user to admin or super_admin role
+        if current_user.role == UserRole.admin and payload.role not in ("user",):
+            raise HTTPException(
+                status_code=403,
+                detail="Only super admin can promote users to admin or super admin role",
+            )
         try:
             user.role = UserRole(payload.role)
         except ValueError:
@@ -360,7 +428,7 @@ def update_user(
             raise HTTPException(status_code=404, detail="Org not found")
         user.org_id = payload.org_id
     elif "org_id" in payload.model_fields_set:
-        user.org_id = None
+        raise HTTPException(status_code=422, detail="User must belong to an organisation")
 
     if payload.is_active is not None:
         user.is_active = payload.is_active
@@ -370,16 +438,27 @@ def update_user(
     return user
 
 
-@user_router.delete("/users/{user_id}", status_code=204)
-def deactivate_user(
+@user_router.delete("/users/{user_id}", status_code=200, response_model=UserDeleteResponse)
+def delete_user(
     user_id: int,
     db: Session = Depends(get_db),
-    _: object = Depends(require_admin),
+    current_user: User = Depends(require_admin),
 ):
+    """Permanently delete a user. The DB FK ON DELETE CASCADE removes all
+    knowledge_bases, chats, folders (and their children) automatically.
+    Only super_admins can permanently delete users."""
+    if current_user.role != UserRole.super_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Only super admin can permanently delete users",
+        )
+
     user = db.query(User).filter(User.id == user_id).first()
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
 
-    user.is_active = False
+    username = user.username
+    db.delete(user)
     db.commit()
-    logging.info(f"[ADMIN] user_deactivated id={user_id}")
+    logging.info(f"[ADMIN] user_deleted id={user_id} username={username}")
+    return UserDeleteResponse(id=user.id, username=username, email=user.email)

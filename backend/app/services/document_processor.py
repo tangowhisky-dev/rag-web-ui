@@ -564,10 +564,19 @@ async def process_document_background(
     chunk_size: int = None,
     chunk_overlap: int = None,
     enable_ocr: Optional[bool] = None,
+    document_id: Optional[int] = None,  # For updating existing documents
+    data_store_id: Optional[int] = None,  # For linking to datastore
+    file_path: Optional[str] = None,  # Original file path (for in-place processing)
+    file_hash: Optional[str] = None,  # Pre-computed hash
+    file_size: Optional[int] = None,  # Pre-computed size
+    content_type: Optional[str] = None,  # Pre-computed content type
 ) -> None:
     """Process document in background.
 
     enable_ocr: None = global setting, True = force on, False = force off.
+    document_id: If provided, update existing document instead of creating new one.
+    data_store_id: Link document to a datastore.
+    file_path: Original file path (for in-place processing, not copying).
     """
     logger = logging.getLogger(__name__)
     if chunk_size is None:
@@ -702,18 +711,41 @@ async def process_document_background(
     
             # ── Step 5: Create Document record ───────────────────────────────────
             logger.info(f"Task {task_id}: Creating document record")
-            document = Document(
-                file_name=file_name,
-                file_path=permanent_path,
-                file_hash=task.document_upload.file_hash,
-                file_size=task.document_upload.file_size,
-                content_type=task.document_upload.content_type,
-                knowledge_base_id=kb_id,
-            )
-            db.add(document)
-            db.commit()
-            db.refresh(document)
-            logger.info(f"Task {task_id}: Document record created with ID {document.id}")
+            
+            # Use provided values or fall back to task.upload values
+            doc_file_path = file_path if file_path else permanent_path
+            doc_file_hash = file_hash if file_hash else task.document_upload.file_hash
+            doc_file_size = file_size if file_size else task.document_upload.file_size
+            doc_content_type = content_type if content_type else task.document_upload.content_type
+            
+            if document_id:
+                # Update existing document
+                document = db.query(Document).get(document_id)
+                if document:
+                    document.file_path = doc_file_path
+                    document.file_hash = doc_file_hash
+                    document.file_size = doc_file_size
+                    document.content_type = doc_content_type
+                    document.data_store_id = data_store_id
+                    logger.info(f"Task {task_id}: Updated document ID {document.id}")
+                else:
+                    logger.error(f"Task {task_id}: Document {document_id} not found for update")
+                    return
+            else:
+                # Create new document
+                document = Document(
+                    file_name=file_name,
+                    file_path=doc_file_path,
+                    file_hash=doc_file_hash,
+                    file_size=doc_file_size,
+                    content_type=doc_content_type,
+                    knowledge_base_id=kb_id,
+                    data_store_id=data_store_id,
+                )
+                db.add(document)
+                db.commit()
+                db.refresh(document)
+                logger.info(f"Task {task_id}: Document record created with ID {document.id}")
     
             # ── Step 6: Build chunk records (no commit yet) ───────────────────────
             _set_progress(35, "Building chunk records…")

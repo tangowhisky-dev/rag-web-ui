@@ -77,7 +77,6 @@ def _register_and_login(client, username="testuser", password="testpass123",
         "username": username,
         "password": password,
         "is_active": True,
-        "is_superuser": False,
     })
     assert resp.status_code == 200, f"register failed: {resp.text}"
 
@@ -135,8 +134,9 @@ def test_admin_only_rejects_user_role(client):
 
 def test_admin_only_accepts_admin_role(client, db):
     """/api/auth/admin-only must return 200 for a user with role=admin."""
+    # The seed function creates admin@example.com, so use a different email.
     token = _register_and_login(client, username="adminuser",
-                                email="admin@example.com",
+                                email="adminuser@example.com",
                                 role=UserRole.admin, db=db)
 
     resp = client.get("/api/auth/admin-only",

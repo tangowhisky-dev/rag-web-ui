@@ -875,15 +875,20 @@ def purge_stale_graph_data(active_kb_ids: list[int]) -> None:
 
     with driver.session() as session:
         # Find kb_ids present in Neo4j that are no longer in MySQL.
-        stale_rec = session.run(
-            """
-            MATCH (c:Chunk)
-            WHERE NOT c.kb_id IN $active_ids
-            RETURN DISTINCT c.kb_id AS stale_kb_id
-            """,
-            active_ids=active_str,
-        )
-        stale_ids = [r["stale_kb_id"] for r in stale_rec if r["stale_kb_id"] is not None]
+        # Wrap in a try-catch to handle case when Chunk label doesn't exist.
+        try:
+            stale_rec = session.run(
+                """
+                MATCH (c:Chunk)
+                WHERE NOT c.kb_id IN $active_ids
+                RETURN DISTINCT c.kb_id AS stale_kb_id
+                """,
+                active_ids=active_str,
+            )
+            stale_ids = [r["stale_kb_id"] for r in stale_rec if r["stale_kb_id"] is not None]
+        except Exception:
+            # Chunk label doesn't exist or other error - no stale data to purge
+            stale_ids = []
 
     if not stale_ids:
         return

@@ -10,10 +10,9 @@ def _as_utc_iso(dt: datetime) -> str:
 
 
 class UserBase(BaseModel):
-    email: EmailStr
+    email: str
     username: str
     is_active: bool = True
-    is_superuser: bool = False
 
 class UserCreate(UserBase):
     password: str
@@ -24,10 +23,10 @@ class UserUpdate(UserBase):
 
 class UserAdminCreate(BaseModel):
     username: str
-    email: EmailStr
+    email: str
     password: str
     role: str = "user"
-    org_id: Optional[int] = None
+    org_id: int
     is_active: bool = True
 
 
@@ -35,6 +34,16 @@ class UserAdminUpdate(BaseModel):
     role: Optional[str] = None
     org_id: Optional[int] = None
     is_active: Optional[bool] = None
+
+
+class UserDeleteResponse(BaseModel):
+    id: int
+    username: str
+    email: str
+
+    class Config:
+        from_attributes = True
+
 
 class UserResponse(UserBase):
     id: int

@@ -6,12 +6,20 @@ import { Book, MessageSquare, ArrowRight, Plus, Upload, Brain, Sparkles, Shield 
 import { api, ApiError } from "@/lib/api";
 import { isAdmin } from "@/lib/auth";
 
+// Track hydration to avoid SSR/client mismatch
+const useHydrated = () => {
+  const [hydrated, setHydrated] = useState(false);
+  useEffect(() => setHydrated(true), []);
+  return hydrated;
+};
+
 interface Stats {
   knowledgeBases: number;
   chats: number;
 }
 
 export default function DashboardPage() {
+  const hydrated = useHydrated();
   const [stats, setStats] = useState<Stats>({ knowledgeBases: 0, chats: 0 });
 
   useEffect(() => {
@@ -53,7 +61,7 @@ export default function DashboardPage() {
                 <Plus className="mr-2 h-4 w-4" />
                 New Knowledge Base
               </a>
-              {isAdmin() && (
+              {hydrated && isAdmin() && (
                 <a
                   href="/dashboard/admin"
                   className="inline-flex items-center justify-center rounded-full border border-input bg-background w-64 px-6 py-3 text-sm font-medium hover:bg-accent transition-colors"

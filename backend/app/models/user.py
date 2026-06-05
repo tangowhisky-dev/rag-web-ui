@@ -1,5 +1,5 @@
 import enum
-from sqlalchemy import Boolean, Column, Integer, String, ForeignKey
+from sqlalchemy import Boolean, Column, Integer, String, ForeignKey, DateTime, func
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import relationship
 from app.models.base import Base, TimestampMixin
@@ -19,11 +19,11 @@ class User(Base, TimestampMixin):
     username = Column(String(255), unique=True, index=True, nullable=False)
     hashed_password = Column(String(255), nullable=False)
     is_active = Column(Boolean, default=True)
-    is_superuser = Column(Boolean, default=False)
     role = Column(SAEnum(UserRole), nullable=False, default=UserRole.user, server_default='user')
     org_id = Column(Integer, ForeignKey('organisations.id'), nullable=True, index=True)
 
     # Relationships
-    knowledge_bases = relationship("KnowledgeBase", back_populates="user")
-    chats = relationship("Chat", back_populates="user")
+    # cascade='all, delete-orphan' ensures KBs, chats, and their children are deleted when the user is deleted
+    knowledge_bases = relationship("KnowledgeBase", back_populates="user", cascade="all, delete-orphan")
+    chats = relationship("Chat", back_populates="user", cascade="all, delete-orphan")
     organisation = relationship('Organisation', back_populates='users')

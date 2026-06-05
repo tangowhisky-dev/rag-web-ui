@@ -1,43 +1,87 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import Link from 'next/link';
-import DashboardLayout from '@/components/layout/dashboard-layout';
+import { LogOut } from 'lucide-react';
+import { ThemeToggle } from '@/components/ui/theme-toggle';
+import Breadcrumb from '@/components/ui/breadcrumb';
+import AdminSidebar from '@/components/admin/admin-sidebar';
 import { isAdmin } from '@/lib/auth';
 
-const NAV_ITEMS = [
-  { label: 'Orgs', href: '/dashboard/admin/orgs' },
-  { label: 'Users', href: '/dashboard/admin/users' },
-  { label: 'LLM Config', href: '/dashboard/admin/llm-config' },
-  { label: 'Watcher', href: '/dashboard/admin/watcher' },
-];
+// LLM config is managed per-organisation on the Orgs page (LLM Config button).
+// The standalone /dashboard/admin/llm-config page does not exist.
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [hydrated, setHydrated] = useState(false);
+  const [isAuthorized, setIsAuthorized] = useState(false);
 
   useEffect(() => {
+    setHydrated(true);
     if (!isAdmin()) {
       router.replace('/dashboard');
+    } else {
+      setIsAuthorized(true);
     }
   }, [router]);
 
-  return (
-    <DashboardLayout pageTitle="Admin">
-      <div className="flex min-h-screen">
-        <nav className="w-48 shrink-0 border-r bg-card px-3 py-6 space-y-1">
-          {NAV_ITEMS.map(({ label, href }) => (
-            <Link
-              key={href}
-              href={href}
-              className="block rounded-lg px-3 py-2 text-sm font-medium text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
-            >
-              {label}
-            </Link>
-          ))}
-        </nav>
-        <main className="flex-1 px-6 py-6">{children}</main>
+  // Wait for hydration before checking authorization
+  if (!hydrated || !isAuthorized) {
+    return (
+      <div className="relative h-screen bg-background overflow-hidden flex items-center justify-center">
+        <div className="text-muted-foreground">Loading...</div>
       </div>
-    </DashboardLayout>
+    );
+  }
+
+  const handleLogout = () => {
+    localStorage.removeItem('token');
+    document.cookie = 'token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT';
+    router.push('/login');
+  };
+
+  return (
+    <div className="relative h-screen bg-background overflow-hidden">
+      {/* Header bar */}
+      <header className="absolute top-0 left-0 right-0 z-30 border-b bg-card/80 backdrop-blur-sm">
+        <div className="flex h-12 items-center gap-2 px-4">
+          <button
+            onClick={() => setIsSidebarOpen(true)}
+            className="lg:hidden p-1.5 rounded-lg hover:bg-muted transition-colors shrink-0"
+            aria-label="Open sidebar"
+          >
+            <span className="sr-only">Open sidebar</span>
+            <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h16" />
+            </svg>
+          </button>
+          <Breadcrumb overrideLastLabel="Admin" />
+          <div className="ml-auto flex items-center gap-1">
+            <ThemeToggle />
+            <button
+              onClick={handleLogout}
+              className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
+            >
+              <LogOut className="h-4 w-4" />
+              <span className="hidden sm:inline">Sign out</span>
+            </button>
+          </div>
+        </div>
+      </header>
+
+      {/* Sidebar + content */}
+      <div className="absolute inset-0 flex">
+        <div className="pt-12 flex-shrink-0 h-full">
+          <AdminSidebar
+            isOpen={isSidebarOpen}
+            onClose={() => setIsSidebarOpen(false)}
+          />
+        </div>
+        <main className="flex-1 min-w-0 overflow-hidden">
+          {children}
+        </main>
+      </div>
+    </div>
   );
 }

@@ -225,7 +225,7 @@ frontend/src/
 | `qdrant` | `qdrant/qdrant` | Vector database |
 | `db` | `mysql:8` | Relational data + FULLTEXT index |
 | `neo4j` | `neo4j:2026.04` | Entity/relationship graph (GraphRAG) |
-| `adminer` | `adminer` | MySQL web GUI (dev compose only) |
+| `adminer` | `adminer` | MySQL web GUI (dev compose only, port 8081) |
 
 ---
 

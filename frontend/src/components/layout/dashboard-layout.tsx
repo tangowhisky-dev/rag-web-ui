@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { LogOut } from "lucide-react";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
@@ -16,13 +16,27 @@ export default function DashboardLayout({
   graphRagActive?: boolean;
 }) {
   const router = useRouter();
+  const [hydrated, setHydrated] = useState(false);
+  const [isAuthorized, setIsAuthorized] = useState(false);
 
   useEffect(() => {
+    setHydrated(true);
     const token = localStorage.getItem("token");
     if (!token) {
       router.push("/login");
+    } else {
+      setIsAuthorized(true);
     }
   }, [router]);
+
+  // Wait for hydration before showing content
+  if (!hydrated || !isAuthorized) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="text-muted-foreground">Loading...</div>
+      </div>
+    );
+  }
 
   const handleLogout = () => {
     localStorage.removeItem("token");

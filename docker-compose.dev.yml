@@ -13,10 +13,12 @@ services:
       - DEBUG=1
       - PYTHONUNBUFFERED=1
       - TZ=UTC
+      - ENVIRONMENT=development
     volumes:
       - ./backend:/app
       - ./uploads:/app/uploads
       - ./assets:/app/assets
+      - ./data:/app/data
     networks:
       - app_network
     depends_on:
@@ -119,7 +121,7 @@ services:
   adminer:
     image: adminer:5
     ports:
-      - "8080:8080"
+      - "8081:8080"
     networks:
       - app_network
     depends_on:

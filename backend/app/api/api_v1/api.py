@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from app.api.api_v1 import auth, knowledge_base, chat, query, chat_files, folders, admin, watcher, smb
+from app.api.api_v1 import auth, knowledge_base, chat, query, chat_files, folders, admin, watcher, smb, datastores
 from app.core.config import settings
 
 api_router = APIRouter()
@@ -14,6 +14,7 @@ api_router.include_router(admin.org_router, prefix="/admin", tags=["admin"])
 api_router.include_router(admin.user_router, prefix="/admin", tags=["admin"])
 api_router.include_router(watcher.router, prefix="/admin", tags=["watcher"])
 api_router.include_router(smb.router, prefix="/admin", tags=["smb"])
+api_router.include_router(datastores.router, prefix="/admin", tags=["datastores"])
 
 
 @api_router.get("/config", tags=["config"])
