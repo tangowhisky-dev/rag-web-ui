@@ -7,6 +7,7 @@ import { useRouter } from "next/navigation";
 import KnowledgeSidebar from "@/components/knowledge/knowledge-sidebar";
 import { KnowledgeProvider } from "@/contexts/knowledge-context";
 import Breadcrumb from "@/components/ui/breadcrumb";
+import { ChangePasswordDialog } from "@/components/ui/change-password-dialog";
 
 interface KnowledgeLayoutProps {
   children: React.ReactNode;
@@ -22,6 +23,7 @@ export default function KnowledgeLayout({ children, pageTitle }: KnowledgeLayout
     document.cookie = "token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT";
     router.push("/login");
   };
+  const [passwordDialogOpen, setPasswordDialogOpen] = useState(false);
 
   return (
     <KnowledgeProvider>
@@ -40,6 +42,13 @@ export default function KnowledgeLayout({ children, pageTitle }: KnowledgeLayout
             <Breadcrumb overrideLastLabel={pageTitle} />
 
             <div className="ml-auto flex items-center gap-1">
+              <button
+                onClick={() => setPasswordDialogOpen(true)}
+                className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm text-muted-foreground hover:text-primary hover:bg-primary/10 transition-colors"
+              >
+                <span className="hidden sm:inline">Change Password</span>
+                <span className="sm:hidden">Password</span>
+              </button>
               <ThemeToggle />
               <button
                 onClick={handleLogout}
@@ -51,6 +60,12 @@ export default function KnowledgeLayout({ children, pageTitle }: KnowledgeLayout
             </div>
           </div>
         </header>
+
+        {/* Change Password Dialog */}
+        <ChangePasswordDialog
+          open={passwordDialogOpen}
+          onOpenChange={setPasswordDialogOpen}
+        />
 
         {/* Sidebar + content */}
         <div className="absolute inset-0 flex">

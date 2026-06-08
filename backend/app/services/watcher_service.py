@@ -92,7 +92,7 @@ class WatcherService:
         self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="watcher")
         self._debouncer = _Debouncer(delay=1.0)
         self._last_scan_at: Optional[float] = None
-        self._files_scanned: int = 0
+        self._files_scanned: dict[int, int] = {}
         self._smb_watches: list = []  # list of SMBShareWatcher instances
 
     # ------------------------------------------------------------------
@@ -263,7 +263,7 @@ class WatcherService:
         return {
             "running": self._running,
             "last_scan_at": self._last_scan_at,
-            "files_scanned": self._files_scanned,
+            "files_scanned": dict(self._files_scanned),
             "smb_watches": smb_watches_status,
         }
 
@@ -637,7 +637,10 @@ class _WatcherHandler:
 
         # Update scanned count
         with self._service._lock:
-            self._service._files_scanned += 1
+            with self._service._lock:
+                self._service._files_scanned[self._org_id] = (
+                    self._service._files_scanned.get(self._org_id, 0) + 1
+                )
 
         logger.info(
             "[WATCHER] file_detected path=%s type=%s org_id=%s",

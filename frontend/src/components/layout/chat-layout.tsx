@@ -7,6 +7,7 @@ import { useRouter } from "next/navigation";
 import ChatSidebar from "@/components/chat/chat-sidebar";
 import { ChatProvider, useChatContext } from "@/contexts/chat-context";
 import Breadcrumb from "@/components/ui/breadcrumb";
+import { ChangePasswordDialog } from "@/components/ui/change-password-dialog";
 
 interface ChatLayoutProps {
   children: React.ReactNode;
@@ -26,6 +27,7 @@ function ChatLayoutInner({ children }: ChatLayoutProps) {
     document.cookie = "token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT";
     router.push("/login");
   };
+  const [passwordDialogOpen, setPasswordDialogOpen] = useState(false);
 
   return (
     <div className="relative h-screen bg-background overflow-hidden">
@@ -48,6 +50,13 @@ function ChatLayoutInner({ children }: ChatLayoutProps) {
           )}
 
           <div className="ml-auto flex items-center gap-1">
+            <button
+              onClick={() => setPasswordDialogOpen(true)}
+              className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm text-muted-foreground hover:text-primary hover:bg-primary/10 transition-colors"
+            >
+              <span className="hidden sm:inline">Change Password</span>
+              <span className="sm:hidden">Password</span>
+            </button>
             <ThemeToggle />
             <button
               onClick={handleLogout}
@@ -59,6 +68,12 @@ function ChatLayoutInner({ children }: ChatLayoutProps) {
           </div>
         </div>
       </header>
+
+      {/* Change Password Dialog */}
+      <ChangePasswordDialog
+        open={passwordDialogOpen}
+        onOpenChange={setPasswordDialogOpen}
+      />
 
       <div className="absolute inset-0 flex">
         <div className="pt-12 flex-shrink-0 h-full">

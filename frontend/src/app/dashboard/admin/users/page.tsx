@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { api, ApiError } from '@/lib/api';
-import { getTokenClaims } from '@/lib/auth';
+import { getTokenClaims, validatePasswordStrength } from '@/lib/auth';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -221,10 +221,11 @@ export default function AdminUsersPage() {
 
   async function handleChangePassword() {
     if (!userForPassword) return;
-    if (!passwordForm.new_password || passwordForm.new_password.length < 1) {
+    const passwordError = validatePasswordStrength(passwordForm.new_password);
+    if (passwordError) {
       toast({
         title: 'Error',
-        description: 'Password cannot be empty',
+        description: passwordError,
         variant: 'destructive',
       });
       return;

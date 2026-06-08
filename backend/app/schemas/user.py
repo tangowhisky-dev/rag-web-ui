@@ -1,6 +1,7 @@
-from pydantic import BaseModel, EmailStr, field_serializer
+from pydantic import BaseModel, EmailStr, field_serializer, field_validator
 from typing import Optional
 from datetime import datetime
+from app.core.security import validate_password_strength
 
 
 def _as_utc_iso(dt: datetime) -> str:
@@ -17,6 +18,14 @@ class UserBase(BaseModel):
 class UserCreate(UserBase):
     password: str
 
+    @field_validator('password')
+    @classmethod
+    def validate_password_strength(cls, v: str) -> str:
+        error = validate_password_strength(v)
+        if error:
+            raise ValueError(error)
+        return v
+
 class UserUpdate(UserBase):
     password: Optional[str] = None
 
@@ -28,6 +37,14 @@ class UserAdminCreate(BaseModel):
     role: str = "user"
     org_id: int
     is_active: bool = True
+
+    @field_validator('password')
+    @classmethod
+    def validate_password_strength(cls, v: str) -> str:
+        error = validate_password_strength(v)
+        if error:
+            raise ValueError(error)
+        return v
 
 
 class UserAdminUpdate(BaseModel):
@@ -61,3 +78,11 @@ class UserResponse(UserBase):
 
 class PasswordChange(BaseModel):
     new_password: str
+
+    @field_validator('new_password')
+    @classmethod
+    def validate_password_strength(cls, v: str) -> str:
+        error = validate_password_strength(v)
+        if error:
+            raise ValueError(error)
+        return v

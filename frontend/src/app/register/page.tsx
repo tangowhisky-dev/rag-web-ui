@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { api, ApiError } from "@/lib/api";
 import { APP_NAME } from "@/lib/app-config";
+import { validatePasswordStrength } from "@/lib/auth";
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -26,8 +27,9 @@ export default function RegisterPage() {
   };
 
   const validatePassword = (password: string) => {
-    if (password.length < 6) {
-      setValidationErrors((prev) => ({ ...prev, password: "Password must be at least 6 characters long" }));
+    const error = validatePasswordStrength(password);
+    if (error) {
+      setValidationErrors((prev) => ({ ...prev, password: error }));
       return false;
     }
     setValidationErrors((prev) => ({ ...prev, password: "" }));

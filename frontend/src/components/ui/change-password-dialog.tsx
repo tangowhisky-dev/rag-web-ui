@@ -1,5 +1,6 @@
 'use client';
 
+import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -13,6 +14,7 @@ import {
 } from '@/components/ui/dialog';
 import { useToast } from '@/components/ui/use-toast';
 import { api } from '@/lib/api';
+import { validatePasswordStrength } from '@/lib/auth';
 
 interface ChangePasswordDialogProps {
   open: boolean;
@@ -21,6 +23,7 @@ interface ChangePasswordDialogProps {
 }
 
 export function ChangePasswordDialog({ open, onOpenChange, username }: ChangePasswordDialogProps) {
+  const router = useRouter();
   const { toast } = useToast();
   const [changing, setChanging] = useState(false);
   const [form, setForm] = useState({
@@ -33,10 +36,11 @@ export function ChangePasswordDialog({ open, onOpenChange, username }: ChangePas
   }
 
   async function handleChangePassword() {
-    if (!form.new_password || form.new_password.length < 1) {
+    const passwordError = validatePasswordStrength(form.new_password);
+    if (passwordError) {
       toast({
         title: 'Error',
-        description: 'Password cannot be empty',
+        description: passwordError,
         variant: 'destructive',
       });
       return;
@@ -55,9 +59,13 @@ export function ChangePasswordDialog({ open, onOpenChange, username }: ChangePas
       await api.post('/api/auth/change-password', {
         new_password: form.new_password,
       });
-      toast({ title: 'Password changed successfully' });
+      toast({ title: 'Password changed successfully. Logging you out...' });
       resetForm();
       onOpenChange(false);
+      // Clear auth and redirect to login
+      localStorage.removeItem('token');
+      document.cookie = 'token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT';
+      router.push('/login');
     } catch (err) {
       toast({
         title: 'Error',
@@ -81,7 +89,7 @@ export function ChangePasswordDialog({ open, onOpenChange, username }: ChangePas
             <Input
               id="new-password"
               type="password"
-              placeholder="Minimum 1 character"
+              placeholder="Min 8 chars, 1 letter + 1 number"
               value={form.new_password}
               onChange={(e) => setForm({ ...form, new_password: e.target.value })}
             />
@@ -103,7 +111,7 @@ export function ChangePasswordDialog({ open, onOpenChange, username }: ChangePas
           </Button>
           <Button
             onClick={handleChangePassword}
-            disabled={changing || !form.new_password || form.new_password !== form.confirm_password}
+            disabled={changing || !!validatePasswordStrength(form.new_password) || form.new_password !== form.confirm_password}
           >
             {changing ? 'Changing...' : 'Change Password'}
           </Button>

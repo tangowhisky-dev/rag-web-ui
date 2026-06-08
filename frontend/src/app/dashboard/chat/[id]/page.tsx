@@ -557,6 +557,25 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       const errorMessage = trimmedLine.slice(2);
       throw new Error(errorMessage || "Streaming request failed");
     }
+
+    // d: done — replace client-side UUID with server-side integer messageId
+    if (trimmedLine.startsWith("d:")) {
+      try {
+        const payload = JSON.parse(trimmedLine.slice(2)) as { messageId?: number };
+        if (payload.messageId != null) {
+          setMessages((prev) =>
+            prev.map((message) =>
+              message.id === assistantId
+                ? { ...message, id: payload.messageId!.toString() } as Message
+                : message
+            )
+          );
+        }
+      } catch (e) {
+        console.error("Failed to parse done event:", e);
+      }
+      return;
+    }
   };
 
   /** Core SSE streaming: POST to /messages and pipe events into the given assistantId slot. */

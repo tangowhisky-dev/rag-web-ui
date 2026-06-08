@@ -252,7 +252,10 @@ async def _maybe_update_summary(
     except Exception as e:
         logger.error("[SUMMARY] chat_id=%d | error: %s", chat_id, e)
     finally:
-        db.close()
+        try:
+            db.close()
+        except Exception:
+            pass  # session may already be closed by caller or during cancellation
 
 
 # ── Query rewrite ──────────────────────────────────────────────────────────────
@@ -483,7 +486,7 @@ async def generate_response(
         if _is_identity_question(query):
             logger.info("[CHAT] identity shortcut — skipping RAG")
             yield f'0:{json.dumps(_IDENTITY_RESPONSE)}\n'
-            yield 'd:{"finishReason":"stop","usage":{"promptTokens":0,"completionTokens":0}}\n'
+            yield f'd:{{"finishReason":"stop","usage":{{"promptTokens":0,"completionTokens":0}},"messageId":{bot_message.id}}}\n'
             bot_message.content = _IDENTITY_RESPONSE
             db.commit()
             return
@@ -497,7 +500,7 @@ async def generate_response(
         if not knowledge_bases:
             error_msg = "I don't have any knowledge base to help answer your question."
             yield f'0:"{error_msg}"\n'
-            yield 'd:{"finishReason":"stop","usage":{"promptTokens":0,"completionTokens":0}}\n'
+            yield f'd:{{"finishReason":"stop","usage":{{"promptTokens":0,"completionTokens":0}},"messageId":{bot_message.id}}}\n'
             bot_message.content = error_msg
             db.commit()
             return
@@ -635,7 +638,7 @@ async def generate_response(
 
             elif event_type == "done":
                 usage = event.get("usage", {"promptTokens": 0, "completionTokens": 0})
-                yield f'd:{json.dumps({"finishReason": "stop", "usage": usage})}\n'
+                yield f'd:{json.dumps({"finishReason": "stop", "usage": usage, "messageId": bot_message.id})}\n'
 
         logger.info("[CHAT] stream complete | response_length=%d chars", len(full_response))
 
@@ -672,10 +675,13 @@ async def generate_response(
         error_message = f"Error generating response: {str(e)}"
         print(error_message)
         yield f'3:{json.dumps(error_message)}\n'
-        yield 'd:{"finishReason":"error"}\n'
+        yield f'd:{{"finishReason":"error","messageId":{bot_message.id}}}\n'
         if 'bot_message' in locals():
             bot_message.content = error_message
             db.commit()
         clear_cancel_token(chat_id)
     finally:
-        db.close()
+        try:
+            db.close()
+        except Exception:
+            pass  # session may already be closed by caller or during cancellation

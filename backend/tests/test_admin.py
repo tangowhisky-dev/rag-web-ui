@@ -68,7 +68,7 @@ def client():
 # Helpers
 # ---------------------------------------------------------------------------
 
-def create_user(db, username: str, password: str, role: UserRole) -> User:
+def create_user(db, username: str, password: str, role: UserRole, org_id=None) -> User:
     """Create a User with the given role directly in the DB."""
     from app.core.security import get_password_hash
     user = User(
@@ -77,6 +77,7 @@ def create_user(db, username: str, password: str, role: UserRole) -> User:
         hashed_password=get_password_hash(password),
         is_active=True,
         role=role,
+        org_id=org_id,
     )
     db.add(user)
     db.commit()
@@ -154,7 +155,27 @@ def create_org(db, name: str, parent_id=None) -> Organisation:
 
 
 def get_admin_token(client, db) -> str:
-    create_user(db, "adminhelper", "pass123", UserRole.admin)
+    # Create or get root org if it doesn't exist
+    root_org = db.query(Organisation).filter(Organisation.parent_id.is_(None)).first()
+    if not root_org:
+        root_org = Organisation(name="Root", parent_id=None, path="/1")
+        db.add(root_org)
+        db.commit()
+
+    # Create or get admin helper user with org_id
+    from app.core.security import get_password_hash
+    admin = db.query(User).filter(User.username == "adminhelper").first()
+    if not admin:
+        admin = User(
+            username="adminhelper",
+            email="adminhelper@example.com",
+            hashed_password=get_password_hash("pass123"),
+            is_active=True,
+            role=UserRole.admin,
+            org_id=root_org.id,
+        )
+        db.add(admin)
+        db.commit()
     return get_token(client, "adminhelper", "pass123")
 
 
@@ -175,32 +196,30 @@ def test_admin_list_orgs_empty(client, db):
 
 def test_admin_create_org(client, db):
     token = get_admin_token(client, db)
+    # Use root org as parent
+    root_org = db.query(Organisation).filter(Organisation.parent_id.is_(None)).first()
     resp = client.post(
         "/api/admin/orgs",
-        json={"name": "Acme"},
+        json={"name": "Acme", "parent_id": root_org.id},
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 201
     data = resp.json()
     assert data["name"] == "Acme"
-    assert data["parent_id"] is None
-    assert data["path"] == f"/{data['id']}"
+    assert data["parent_id"] == root_org.id
+    assert root_org.path in data["path"]
 
 
 def test_admin_create_child_org(client, db):
     token = get_admin_token(client, db)
+    root_org = db.query(Organisation).filter(Organisation.parent_id.is_(None)).first()
 
-    # Create parent first
-    parent_resp = client.post(
-        "/api/admin/orgs",
-        json={"name": "Parent"},
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    assert parent_resp.status_code == 201
-    parent_id = parent_resp.json()["id"]
-    parent_path = parent_resp.json()["path"]
+    # Create parent via helper (root org)
+    parent_org = create_org(db, "Parent")
+    parent_id = parent_org.id
+    parent_path = parent_org.path
 
-    # Create child
+    # Create child via API
     child_resp = client.post(
         "/api/admin/orgs",
         json={"name": "Child", "parent_id": parent_id},
@@ -266,10 +285,13 @@ def test_admin_orgs_rejects_regular_user(client, db):
 def test_admin_create_org_duplicate_name_returns_400(client, db):
     """Creating two orgs with the same name must return 400, not 500."""
     token = get_admin_token(client, db)
-    client.post("/api/admin/orgs", json={"name": "DuplicateOrg"},
+    root_org = db.query(Organisation).filter(Organisation.parent_id.is_(None)).first()
+    client.post("/api/admin/orgs",
+                json={"name": "DuplicateOrg", "parent_id": root_org.id},
                 headers={"Authorization": f"Bearer {token}"})
 
-    resp = client.post("/api/admin/orgs", json={"name": "DuplicateOrg"},
+    resp = client.post("/api/admin/orgs",
+                       json={"name": "DuplicateOrg", "parent_id": root_org.id},
                        headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 400, resp.text
     assert "already exists" in resp.json()["detail"].lower()
@@ -278,9 +300,12 @@ def test_admin_create_org_duplicate_name_returns_400(client, db):
 def test_admin_update_org_duplicate_name_returns_400(client, db):
     """Renaming an org to a name already taken by another org must return 400."""
     token = get_admin_token(client, db)
-    client.post("/api/admin/orgs", json={"name": "Taken"},
+    root_org = db.query(Organisation).filter(Organisation.parent_id.is_(None)).first()
+    client.post("/api/admin/orgs",
+                json={"name": "Taken", "parent_id": root_org.id},
                 headers={"Authorization": f"Bearer {token}"})
-    second = client.post("/api/admin/orgs", json={"name": "Second"},
+    second = client.post("/api/admin/orgs",
+                         json={"name": "Second", "parent_id": root_org.id},
                          headers={"Authorization": f"Bearer {token}"}).json()
 
     resp = client.patch(
@@ -377,15 +402,20 @@ def test_super_admin_can_promote_user_to_admin(client, db):
 
 def test_admin_deactivate_user(client, db):
     token = get_admin_token(client, db)
-    user = create_user(db, "deactivatetest", "pass123", UserRole.user)
+    # Create user with the same org as the admin helper
+    root_org = db.query(Organisation).filter(Organisation.parent_id.is_(None)).first()
+    user = create_user(db, "deactivatetest", "pass123", UserRole.user, org_id=root_org.id)
 
-    resp = client.delete(
+    # Use PATCH to deactivate
+    resp = client.patch(
         f"/api/admin/users/{user.id}",
+        json={"is_active": False},
         headers={"Authorization": f"Bearer {token}"},
     )
-    assert resp.status_code == 204, resp.text
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["is_active"] is False
 
-    # User should still exist but is_active=False
+    # User should still exist in list
     list_resp = client.get("/api/admin/users", headers={"Authorization": f"Bearer {token}"})
     users = {u["id"]: u for u in list_resp.json()}
     assert users[user.id]["is_active"] is False
@@ -402,14 +432,15 @@ def test_admin_users_rejects_regular_user(client, db):
 def test_admin_create_user_duplicate_email_returns_400(client, db):
     """Creating a user with an already-registered email must return 400."""
     token = get_admin_token(client, db)
+    root_org = db.query(Organisation).filter(Organisation.parent_id.is_(None)).first()
     client.post("/api/admin/users",
                 json={"username": "user_a", "email": "dup@example.com",
-                      "password": "pass123", "role": "user"},
+                      "password": "pass123", "role": "user", "org_id": root_org.id},
                 headers={"Authorization": f"Bearer {token}"})
 
     resp = client.post("/api/admin/users",
                        json={"username": "user_b", "email": "dup@example.com",
-                             "password": "pass123", "role": "user"},
+                             "password": "pass123", "role": "user", "org_id": root_org.id},
                        headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 400, resp.text
     assert "email" in resp.json()["detail"].lower()
@@ -418,92 +449,54 @@ def test_admin_create_user_duplicate_email_returns_400(client, db):
 def test_admin_create_user_duplicate_username_returns_400(client, db):
     """Creating a user with an already-taken username must return 400."""
     token = get_admin_token(client, db)
+    root_org = db.query(Organisation).filter(Organisation.parent_id.is_(None)).first()
     client.post("/api/admin/users",
                 json={"username": "dupuser", "email": "a@example.com",
-                      "password": "pass123", "role": "user"},
+                      "password": "pass123", "role": "user", "org_id": root_org.id},
                 headers={"Authorization": f"Bearer {token}"})
 
     resp = client.post("/api/admin/users",
                        json={"username": "dupuser", "email": "b@example.com",
-                             "password": "pass123", "role": "user"},
+                             "password": "pass123", "role": "user", "org_id": root_org.id},
                        headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 400, resp.text
     assert "username" in resp.json()["detail"].lower()
 
 
 # ---------------------------------------------------------------------------
-# User hard delete tests
+# User deletion and deactivation tests
 # ---------------------------------------------------------------------------
 
-def test_admin_cannot_hard_delete_user(client, db):
-    """An admin user should NOT be able to hard-delete a user."""
+def test_admin_cannot_delete_user(client, db):
+    """An admin user should NOT be able to permanently delete a user (only super admin)."""
     token = get_admin_token(client, db)
-    user = create_user(db, "harddeletetest", "pass123", UserRole.user)
+    user = create_user(db, "deleteblocktest", "pass123", UserRole.user)
 
     resp = client.delete(
-        f"/api/admin/users/{user.id}/hard",
+        f"/api/admin/users/{user.id}",
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 403, resp.text
 
 
-def test_super_admin_can_hard_delete_user(client, db):
-    """A super_admin user SHOULD be able to hard-delete a user."""
+def test_super_admin_can_delete_user(client, db):
+    """A super_admin user SHOULD be able to permanently delete a user."""
     create_user(db, "superadmin", "pass123", UserRole.super_admin)
     token = get_token(client, "superadmin", "pass123")
-    user = create_user(db, "harddeletetest2", "pass123", UserRole.user)
+    user = create_user(db, "deletetest2", "pass123", UserRole.user)
 
-    resp = client.delete(
-        f"/api/admin/users/{user.id}/hard",
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    assert resp.status_code == 200, resp.text
-    data = resp.json()
-    assert data["is_deleted"] is True
-    assert data["is_active"] is False
-    assert data["username"] == "harddeletetest2"
-
-
-def test_cannot_hard_delete_already_deleted_user(client, db):
-    """Hard-deleting a user that is already deleted must return 400."""
-    create_user(db, "superadmin2", "pass123", UserRole.super_admin)
-    token = get_token(client, "superadmin2", "pass123")
-    user = create_user(db, "alreadydeleted", "pass123", UserRole.user)
-
-    # First delete
-    client.delete(
-        f"/api/admin/users/{user.id}/hard",
-        headers={"Authorization": f"Bearer {token}"},
-    )
-
-    # Second delete should fail
-    resp = client.delete(
-        f"/api/admin/users/{user.id}/hard",
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    assert resp.status_code == 400, resp.text
-    assert "already been deleted" in resp.json()["detail"].lower()
-
-
-def test_cannot_deactivate_already_deleted_user(client, db):
-    """Deactivating a user that is already deleted must return 400."""
-    create_user(db, "superadmin3", "pass123", UserRole.super_admin)
-    token = get_token(client, "superadmin3", "pass123")
-    user = create_user(db, "alreadydeleted2", "pass123", UserRole.user)
-
-    # First hard-delete
-    client.delete(
-        f"/api/admin/users/{user.id}/hard",
-        headers={"Authorization": f"Bearer {token}"},
-    )
-
-    # Deactivate should fail
     resp = client.delete(
         f"/api/admin/users/{user.id}",
         headers={"Authorization": f"Bearer {token}"},
     )
-    assert resp.status_code == 400, resp.text
-    assert "already been deleted" in resp.json()["detail"].lower()
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["username"] == "deletetest2"
+
+    # User should no longer exist in list
+    list_resp = client.get("/api/admin/users", headers={"Authorization": f"Bearer {token}"})
+    users = {u["id"]: u for u in list_resp.json()}
+    assert user.id not in users
 
 
 def test_reactivate_user(client, db):
@@ -512,8 +505,9 @@ def test_reactivate_user(client, db):
     user = create_user(db, "reactivatetest", "pass123", UserRole.user)
 
     # Deactivate first
-    client.delete(
+    client.patch(
         f"/api/admin/users/{user.id}",
+        json={"is_active": False},
         headers={"Authorization": f"Bearer {token}"},
     )
 
@@ -527,41 +521,60 @@ def test_reactivate_user(client, db):
     assert resp.json()["is_active"] is True
 
 
+def test_deactivated_user_cannot_login(client, db):
+    """A deactivated (is_active=False) user should not be able to login."""
+    token = get_admin_token(client, db)
+    user = create_user(db, "deactivatedtest", "pass123", UserRole.user)
+
+    # Deactivate the user
+    client.patch(
+        f"/api/admin/users/{user.id}",
+        json={"is_active": False},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    # Login should fail
+    resp = client.post("/api/auth/token",
+                       data={"username": "deactivatedtest", "password": "pass123"})
+    assert resp.status_code == 401, resp.text
+    assert "Inactive user" in resp.json()["detail"]
+
+
 def test_deleted_user_cannot_login(client, db):
-    """A deleted user should not be able to login."""
+    """A permanently deleted user should not be able to login (user no longer exists)."""
     create_user(db, "superadmin4", "pass123", UserRole.super_admin)
     token = get_token(client, "superadmin4", "pass123")
     user = create_user(db, "deletedlogin", "pass123", UserRole.user)
 
-    # Hard-delete the user
+    # Permanently delete the user
     client.delete(
-        f"/api/admin/users/{user.id}/hard",
+        f"/api/admin/users/{user.id}",
         headers={"Authorization": f"Bearer {token}"},
     )
 
-    # Try to login
+    # Try to login — should fail (user doesn't exist)
     resp = client.post("/api/auth/token",
                        data={"username": "deletedlogin", "password": "pass123"})
     assert resp.status_code == 401, resp.text
 
 
-def test_deleted_user_in_list_shows_is_deleted(client, db):
-    """A deleted user should appear in the list with is_deleted=True."""
+def test_deactivated_user_in_list_shows_is_active_false(client, db):
+    """A deactivated user should appear in the list with is_active=False."""
     create_user(db, "superadmin5", "pass123", UserRole.super_admin)
     token = get_token(client, "superadmin5", "pass123")
-    user = create_user(db, "deletedlist", "pass123", UserRole.user)
+    user = create_user(db, "deactivatedlist", "pass123", UserRole.user)
 
-    # Hard-delete
-    client.delete(
-        f"/api/admin/users/{user.id}/hard",
+    # Deactivate
+    client.patch(
+        f"/api/admin/users/{user.id}",
+        json={"is_active": False},
         headers={"Authorization": f"Bearer {token}"},
     )
 
-    # List should still include the deleted user
+    # List should still include the deactivated user
     list_resp = client.get("/api/admin/users", headers={"Authorization": f"Bearer {token}"})
     assert list_resp.status_code == 200
     users = {u["id"]: u for u in list_resp.json()}
-    assert users[user.id]["is_deleted"] is True
     assert users[user.id]["is_active"] is False
 
 

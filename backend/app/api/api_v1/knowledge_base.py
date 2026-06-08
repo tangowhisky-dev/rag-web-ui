@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from qdrant_client import QdrantClient
 from sqlalchemy import text
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pydantic import BaseModel
 from sqlalchemy.orm import selectinload
 import time
@@ -53,16 +53,12 @@ from app.schemas.knowledge import (
 from app.services.document_processor import process_document_background, upload_document, preview_document, PreviewResult, SUPPORTED_EXTENSIONS
 from app.core.config import settings
 from app.core.storage import save_file, delete_kb_files, delete_file
-from sqlalchemy import or_
 
 
 def _kb_owner_filter(current_user):
     """Return SQLAlchemy filter clause scoping KB access.
-    Org users: filter by org_id (whole-org visibility).
-    No-org users: filter by user_id only (backward-compat).
+    Users can only access KBs they personally own (user_id).
     """
-    if current_user.org_id is not None:
-        return KnowledgeBase.org_id == current_user.org_id
     return KnowledgeBase.user_id == current_user.id
 
 
@@ -584,7 +580,7 @@ async def cleanup_temp_files(
     """
     Clean up expired temporary files.
     """
-    expired_time = datetime.utcnow() - timedelta(hours=24)
+    expired_time = datetime.now(timezone.utc) - timedelta(hours=24)
     expired_uploads = db.query(DocumentUpload).filter(
         DocumentUpload.created_at < expired_time
     ).all()

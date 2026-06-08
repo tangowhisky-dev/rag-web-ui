@@ -9,6 +9,7 @@ from app.core.security import get_current_user
 from app.db.session import get_db
 from app.models.chat import Chat, Folder
 from app.models.user import User
+from app.api.api_v1.rbac import chat_owner_filter as _chat_owner_filter
 from app.schemas.chat import FolderCreate, FolderResponse, FolderUpdate
 
 logger = logging.getLogger(__name__)
@@ -72,7 +73,7 @@ def delete_folder(
         raise HTTPException(status_code=404, detail="Folder not found")
     # Unassign chats from this folder
     db.query(Chat).filter(
-        Chat.folder_id == folder_id, Chat.user_id == current_user.id
+        Chat.folder_id == folder_id, _chat_owner_filter(current_user)
     ).update({"folder_id": None})
     db.delete(folder)
     db.commit()
@@ -92,7 +93,7 @@ def assign_chat(
     if not folder:
         raise HTTPException(status_code=404, detail="Folder not found")
     chat = db.query(Chat).filter(
-        Chat.id == chat_id, Chat.user_id == current_user.id
+        Chat.id == chat_id, _chat_owner_filter(current_user)
     ).first()
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
@@ -115,7 +116,7 @@ def unassign_chat(
     chat = db.query(Chat).filter(
         Chat.id == chat_id,
         Chat.folder_id == folder_id,
-        Chat.user_id == current_user.id,
+        _chat_owner_filter(current_user),
     ).first()
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not in folder or not found")

@@ -201,12 +201,14 @@ class DatastoreFileEventHandler:
             )
 
     def force_process_pending(self) -> None:
+        changes_to_process: List[Dict[str, Any]] = []
         with self._lock:
             if self.pending_changes:
                 changes_to_process = self.pending_changes.copy()
                 self.pending_changes.clear()
         try:
-            self.callback(self.datastore_id, changes_to_process)
+            if changes_to_process:
+                self.callback(self.datastore_id, self.org_id, changes_to_process)
         except Exception as e:
             logger.error(
                 "[WATCHER] force_process_error datastore_id=%s: %s",

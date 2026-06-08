@@ -2,7 +2,7 @@ from sqlalchemy import Column, Integer, String, ForeignKey, Boolean, Table, BigI
 from sqlalchemy.dialects.mysql import LONGTEXT, JSON
 from sqlalchemy.orm import relationship
 from app.models.base import Base, TimestampMixin
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 class Folder(Base, TimestampMixin):
@@ -93,7 +93,7 @@ class ChatFile(Base):
     # status: processing | ready | error
     status = Column(String(20), nullable=False, default="processing")
     error_message = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     chat = relationship("Chat", back_populates="chat_files")
     message = relationship("Message", backref="chat_file", foreign_keys=[message_id])

@@ -59,7 +59,7 @@ def db():
 @pytest.fixture()
 def fake_user(db):
     user = User(
-        id=1, email="tester@example.com", username="tester",
+        email="tester@example.com", username="tester",
         hashed_password="x", is_active=True,
     )
     db.add(user)
@@ -71,7 +71,7 @@ def fake_user(db):
 @pytest.fixture()
 def other_user(db):
     user = User(
-        id=2, email="other@example.com", username="other",
+        email="other@example.com", username="other",
         hashed_password="x", is_active=True,
     )
     db.add(user)

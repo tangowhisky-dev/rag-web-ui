@@ -3,7 +3,7 @@ from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.orm import relationship
 from app.models.base import Base, TimestampMixin
 from app.models.datastore import DataStore
-from datetime import datetime
+from datetime import datetime, timezone
 import sqlalchemy as sa
 
 class KnowledgeBaseDataStore(Base, TimestampMixin):
@@ -30,8 +30,8 @@ class KnowledgeBase(Base, TimestampMixin):
     description = Column(LONGTEXT)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     org_id = Column(Integer, ForeignKey('organisations.id'), nullable=True, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     # Relationships
     # Note: We use event listener for conditional cascade:
@@ -56,8 +56,8 @@ class Document(Base, TimestampMixin):
     file_hash = Column(String(64), index=True)  # SHA-256 hash of file content
     knowledge_base_id = Column(Integer, ForeignKey("knowledge_bases.id", ondelete="SET NULL"), nullable=True, index=True)
     data_store_id = Column(Integer, ForeignKey("data_stores.id", ondelete="CASCADE"), nullable=True, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     
     # Relationships
     knowledge_base = relationship("KnowledgeBase", back_populates="documents") 
@@ -101,8 +101,8 @@ class ProcessingTask(Base):
     # Graph extraction status: null = not attempted, pending, completed, failed
     graph_status = Column(String(50), nullable=True)
     graph_error = Column(Text, nullable=True)                     # last error if graph_status=failed
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     knowledge_base = relationship("KnowledgeBase", back_populates="processing_tasks")
     document = relationship("Document", back_populates="processing_tasks")

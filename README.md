@@ -6,7 +6,7 @@
   </p>
   <p>
     <a href="https://github.com/rag-web-ui/rag-web-ui/blob/main/LICENSE"><img src="https://img.shields.io/github/license/rag-web-ui/rag-web-ui" alt="License"></a>
-    <a href="#"><img src="https://img.shields.io/badge/python-3.9+-blue.svg" alt="Python"></a>
+    <a href="#"><img src="https://img.shields.io/badge/python-3.12+-blue.svg" alt="Python"></a>
     <a href="#"><img src="https://img.shields.io/badge/node-%3E%3D18-green.svg" alt="Node"></a>
     <a href="#"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg" alt="PRs Welcome"></a>
   </p>
@@ -14,7 +14,7 @@
 
 ## Introduction
 
-RAG Web UI is a self-hosted knowledge base Q&A system. Upload your documents, then chat with them using any **OpenAI-compatible API** — works with OpenAI, LM Studio, Ollama, or any local model server.
+RAG Web UI is a self-hosted knowledge base Q&A system with multi-tenant org management. Upload your documents, then chat with them using any **OpenAI-compatible API** — works with OpenAI, LM Studio, Ollama, or any local model server.
 
 **Three answering modes:**
 
@@ -25,6 +25,8 @@ RAG Web UI is a self-hosted knowledge base Q&A system. Upload your documents, th
 | 🤖 Agentic | Full LangGraph pipeline with sub-query decomposition, draft-grade-retry loop, and keyword search fallback | Complex multi-source, ambiguous, or multi-part queries |
 
 **Retrieval:** 3-leg hybrid search (dense vector via Qdrant, sparse via SPLADE, exact via MySQL FULLTEXT) fused by Reciprocal Rank Fusion (RRF). Optional **GraphRAG** adds entity/relationship extraction into Neo4j for graph-traversal expansion.
+
+**Multi-tenancy:** Admins create organisations, assign users and data sources to orgs, and configure org-specific LLM settings and local/SMB file watchers.
 
 > **Based on:** An opinionated fork of [rag-web-ui/rag-web-ui](https://github.com/rag-web-ui/rag-web-ui). Credit to the original authors. Goal: minimal dependencies, visible RAG internals, and an agentic pipeline that genuinely improves retrieval on hard queries.
 
@@ -109,6 +111,16 @@ rewrite_query → context_router → decompose_query → parallel_retrieval
 ```
 
 All steps are streamed to the UI as collapsible timeline entries in real time.
+
+### Agentic Pipeline Features
+
+Beyond the basic pipeline, the Agentic mode includes:
+
+- **Reinforced scoring** — a chunk retrieved by N sub-queries has its RRF score multiplied by N, making broadly relevant chunks rank higher
+- **Confidence scoring** — per-query confidence levels (low/medium/high) based on coverage and chunk quality
+- **Query classification** — FACTUAL, ENTITY_CENTRIC, MULTI_PART, or AMBIGUOUS with confidence and latency metrics
+- **Tool trace** — collapsible timeline of tool calls during the pipeline (search, graph traversal, etc.)
+- **Synthesis mode** — LLM can synthesize across multiple retrieved contexts before answering
 
 ### Chunking
 
@@ -208,6 +220,202 @@ MATCH (c:Chunk)-[:FROM_CHUNK]-(e:__Entity__ {name: "Apple"}) RETURN c, e
 | `SECRET_KEY` | random string |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | `10080` (7 days) |
 
+## Multi-Tenancy & Admin Panel
+
+The admin panel at `/dashboard/admin` provides org-level management, per-org LLM configuration, file watchers, and data source management.
+
+### Organisations
+
+Admins create organisations and assign users, data sources, and LLM settings to them. Orgs support parent-child hierarchy with materialized paths.
+
+- **Per-org LLM config:** Each org can have its own API base URL, model name, and query model via `PUT /api/admin/orgs/{org_id}/llm-config`
+- **Per-org ingestion status:** Aggregated status across all KBs in an org (idle/running/completed/failed with doc counts)
+- **Per-org abbreviations:** Custom short-expansion mappings for query matching
+- **Per-org local folder watcher:** Set a watch directory for automatic document ingestion
+- **Per-org SMB share:** Configure an SMB share for network file access
+
+### Users
+
+- **Create users** with role (user/admin/super_admin) and org assignment
+- **Deactivate users** by setting `is_active=False` — deactivated users cannot log in
+- **Permanent delete** (super admin only) — cascades to KBs, chats, and messages
+- **Password change** for other users (super admin only)
+
+### Data Sources (DataStores)
+
+Folder-based document ingestion sources:
+
+- **Create:** Point to a local folder, set scan pattern (e.g., `*.pdf,*.docx`)
+- **Auto-scan:** Periodic scanning with configurable interval
+- **Assign to orgs:** Link data sources to specific organisations
+- **Scan status:** Progress bar showing last scan with processed/total counts
+- **Manual trigger:** Force a scan from the admin panel
+
+### Watcher Management
+
+- **Local folder watching:** Set a watch directory per org for automatic ingestion
+- **SMB share monitoring:** Status display for connected/disconnected SMB shares per org
+- **Manual scan trigger:** Force a scan of watched directories
+- **Bulk status:** View all orgs' watcher status in one place
+
+### File Watcher Configuration
+
+| Variable | Description |
+|---|---|
+| `WATCH_DIR` | Default local directory to watch (if set) |
+| `SMB_MASTER_KEY` | Fernet key for encrypting SMB passwords |
+
+## API Reference
+
+The OpenAPI reference is available at http://localhost:8000/redoc. Below are the key endpoints:
+
+### Auth (prefix: `/api/auth`)
+
+| Method | URL | Auth | Description |
+|---|---|---|---|
+| POST | `/register` | none | Register new user |
+| POST | `/token` | none | OAuth2 login (rate-limited, exponential backoff) |
+| GET | `/admin-only` | admin | Returns current admin user |
+| POST | `/change-password` | user | Change own password |
+| POST | `/test-token` | user | Validate token by returning current user |
+
+### Config
+
+| Method | URL | Auth | Description |
+|---|---|---|---|
+| GET | `/config` | none | Returns `chunk_size` and `chunk_overlap` settings |
+
+### Knowledge Base (prefix: `/api/knowledge-base`)
+
+| Method | URL | Auth | Description |
+|---|---|---|---|
+| POST | `/` | user | Create KB |
+| GET | `/` | user | List KBs (paginated, skip/limit) |
+| GET | `/{kb_id}` | user | Get KB with documents |
+| PUT | `/{kb_id}` | user | Update KB |
+| DELETE | `/{kb_id}` | user | Delete KB (direct uploads only) |
+| POST | `/{kb_id}/documents/upload` | user | Batch upload documents |
+| POST | `/{kb_id}/documents/preview` | user | Preview document chunks |
+| POST | `/{kb_id}/documents/process` | user | Process uploaded docs |
+| GET | `/{kb_id}/documents/tasks` | user | Get processing task statuses |
+| DELETE | `/{kb_id}/documents/{doc_id}` | user | Delete a single document |
+| GET | `/{kb_id}/documents/{doc_id}` | user | Get document details |
+| POST | `/cleanup` | user | Clean expired temp uploads (>24h) |
+| POST | `/test-retrieval` | user | Test retrieval quality for a query |
+| POST | `/{kb_id}/link-datastore` | user | Link a datastore to KB |
+| DELETE | `/{kb_id}/unlink-datastore/{data_store_id}` | user | Unlink a datastore from KB |
+
+### Chat (prefix: `/api/chat`)
+
+| Method | URL | Auth | Description |
+|---|---|---|---|
+| POST | `/` | user | Create chat |
+| GET | `/` | user | List chats (paginated) |
+| GET | `/search` | user | Full-text search across messages |
+| GET | `/{chat_id}` | user | Get chat (with messages) |
+| PATCH | `/{chat_id}` | user | Update chat (title, pinned, retrieval flags) |
+| DELETE | `/{chat_id}` | user | Delete chat |
+| POST | `/{chat_id}/cancel` | user | Cancel streaming response |
+| GET | `/{chat_id}/export` | user | Export chat as Markdown |
+| GET | `/{chat_id}/messages/paginated` | user | Paginated messages (cursor-based) |
+| POST | `/{chat_id}/messages` | user | Send message (JSON body, streaming) |
+| POST | `/{chat_id}/messages/with-file` | user | Send message with file upload (multipart) |
+| DELETE | `/{chat_id}/messages/{message_id}` | user | Delete an assistant message |
+| GET | `/{chat_id}/messages/{message_id}/export` | user | Export message as PDF/Word/image |
+| PATCH | `/messages/{message_id}` | user | Edit message (creates branch) |
+| GET | `/messages/{message_id}/siblings` | user | Get branch siblings |
+
+### Chat Files (prefix: `/api/chat`)
+
+| Method | URL | Auth | Description |
+|---|---|---|---|
+| POST | `/{chat_id}/files` | user | Upload file to chat (10MB limit, async conversion) |
+| GET | `/{chat_id}/files/{file_id}` | user | Poll file processing status |
+| DELETE | `/{chat_id}/files/{file_id}` | user | Delete file record |
+| GET | `/{chat_id}/files/{file_id}/download` | user | Download original file |
+
+### Folders (prefix: `/api/folders`)
+
+| Method | URL | Auth | Description |
+|---|---|---|---|
+| POST | `/` | user | Create folder |
+| GET | `/` | user | List folders |
+| PATCH | `/{folder_id}` | user | Rename folder |
+| DELETE | `/{folder_id}` | user | Delete folder |
+| PATCH | `/{folder_id}/chats/{chat_id}` | user | Assign chat to folder |
+| DELETE | `/{folder_id}/chats/{chat_id}` | user | Unassign chat from folder |
+
+### Query (prefix: `/api/query`)
+
+| Method | URL | Auth | Description |
+|---|---|---|---|
+| POST | `/` | user | Stateless RAG query (JSON, no SSE) |
+| GET | `/kb/{kb_id}/ingest-status` | user | KB processing readiness check |
+
+### Admin — Orgs (prefix: `/api/admin/orgs`)
+
+| Method | URL | Auth | Description |
+|---|---|---|---|
+| GET | `/` | admin | List all orgs (with user_count, hierarchy) |
+| POST | `/` | admin | Create org (parent_id required, auto-computes path) |
+| PATCH | `/{org_id}` | admin | Update org (name, parent, watch_dir, smb_host, smb_share) |
+| DELETE | `/{org_id}` | admin | Delete org (no children, no users) |
+| GET | `/{org_id}/llm-config` | admin | Get org LLM config |
+| PUT | `/{org_id}/llm-config` | admin | Upsert org LLM config (api_base, model_name, query_model) |
+| GET | `/{org_id}/ingestion-status` | admin | Aggregated ingestion status for all KBs in org |
+| POST | `/{org_id}/abbreviations` | admin | Create abbreviation |
+| GET | `/{org_id}/abbreviations` | admin | List abbreviations |
+| DELETE | `/{org_id}/abbreviations/{abbrev_id}` | admin | Delete abbreviation |
+
+### Admin — Users (prefix: `/api/admin/users`)
+
+| Method | URL | Auth | Description |
+|---|---|---|---|
+| GET | `/` | admin | List users (super_admin sees all; admin sees own org) |
+| POST | `/` | admin | Create user (requires org_id) |
+| PATCH | `/{user_id}` | admin | Update user (role, org_id, is_active) |
+| POST | `/{user_id}/change-password` | admin | Change password (super_admin only) |
+| DELETE | `/{user_id}` | admin | Delete user (super_admin only) |
+
+### Admin — Data Stores (prefix: `/api/admin/datastores`)
+
+| Method | URL | Auth | Description |
+|---|---|---|---|
+| GET | `/datastores` | admin | List all datastores |
+| POST | `/datastores` | admin | Create datastore |
+| GET | `/datastores/{id}` | admin | Get datastore details |
+| PATCH | `/datastores/{id}` | admin | Update datastore |
+| DELETE | `/datastores/{id}` | admin | Delete datastore |
+| POST | `/datastores/{id}/assign` | admin | Assign datastore to orgs |
+| DELETE | `/datastores/{id}/assign` | admin | Unassign datastore from orgs |
+| GET | `/datastores/{id}/status` | admin | Get scan status |
+| POST | `/datastores/{id}/scan` | admin | Trigger manual scan |
+
+### Admin — Watcher (prefix: `/api/admin`)
+
+| Method | URL | Auth | Description |
+|---|---|---|---|
+| POST | `/orgs/{org_id}/watch-dir` | admin | Set watch directory |
+| DELETE | `/orgs/{org_id}/watch-dir` | admin | Remove watch directory |
+| GET | `/orgs/{org_id}/watcher-status` | admin | Get watcher status |
+| GET | `/watcher-status-all` | admin | Bulk watcher status for all orgs |
+| POST | `/orgs/{org_id}/watcher-trigger` | admin | Manually trigger scan |
+
+### Admin — SMB (prefix: `/api/admin/orgs/{org_id}/smb`)
+
+| Method | URL | Auth | Description |
+|---|---|---|---|
+| POST | `/smb-config` | admin | Save SMB config (encrypts password) |
+| DELETE | `/smb-config` | admin | Clear SMB config |
+| POST | `/smb-test-connection` | admin | Test SMB connection |
+| POST | `/smb-scan` | admin | Manually trigger SMB scan |
+
+### Admin — Counts
+
+| Method | URL | Auth | Description |
+|---|---|---|---|
+| GET | `/counts` | admin | Returns `{ organizations, users }` |
+
 ## Admin & Developer Tools
 
 | Tool | URL | Purpose |
@@ -224,40 +432,25 @@ docker compose -f docker-compose.dev.yml up -d adminer
 ```
 Login: System=MySQL, Server=`db`, User=`ragwebui`, Password=`ragwebui`, Database=`ragwebui`.
 
-## Development
-
-```bash
-docker compose -f docker-compose.dev.yml up -d --build
-```
-
-Hot reload for frontend (Next.js) and backend (uvicorn `--reload`).
-
-**Useful commands:**
-```bash
-docker compose -f docker-compose.dev.yml logs -f backend
-docker compose -f docker-compose.dev.yml logs -f frontend
-docker compose -f docker-compose.dev.yml restart backend
-docker compose -f docker-compose.dev.yml ps
-```
-
 ## Features
 
 - Upload PDF, DOCX, PPTX, XLSX, Markdown, HTML, CSV, JSON, XML, email, EPUB, images (OCR), ZIP archives
 - Optional OCR for scanned PDFs and embedded images via `markitdown-ocr` — enabled by `VISION_MODEL`
 - **Three answering modes**: Fast ⚡ (low-latency), Thinking 🧠 (reasoning model), Agentic 🤖 (full pipeline)
 - **Agentic pipeline**: query decomposition → parallel sub-query retrieval with reinforced scoring → LLM draft-grade loop → widened retrieval retry → keyword search fallback → partial-answer transparency
+- **Agentic extras**: confidence scoring, query classification (FACTUAL/ENTITY_CENTRIC/MULTI_PART/AMBIGUOUS), tool trace, synthesis mode
 - **3-leg hybrid retrieval**: dense vector + SPLADE sparse + MySQL FULLTEXT, fused by weighted RRF
 - **GraphRAG**: optional entity/relationship extraction into Neo4j with graph-traversal retrieval expansion
 - **Cross-encoder reranking**: retrieved candidates re-ranked by a local cross-encoder before context assembly
 - **Chat file upload**: attach any supported document; content injected directly into pipeline (not indexed); 10 MB size limit + 25% context-window token budget; smart section extraction in Agentic mode
-- Streaming responses with real-time AgentTimeline showing each pipeline step (active → done with detail on click)
-- Clickable citations `[N]` in all answering modes — linked to source chunk
-- Stop button during generation (AbortController); partial message preserved with `*(generation stopped)*`
-- Collapsible chat sidebar with localStorage persistence
-- Chat branching (multiple answer variants), folder organisation
-- Dark / light / system theme toggle
-- Multi-turn chat with rolling conversation summary
-- Route protection: unauthenticated users redirected to `/login`
+- **Chat features**: branching (multiple answer variants), folder organisation, message search, chat export (Markdown), message export (PDF/Word/image), pagination (infinite scroll), collapsible sidebar with localStorage persistence
+- **Streaming responses** with real-time AgentTimeline showing each pipeline step (active → done with detail on click)
+- **Clickable citations** `[N]` in all answering modes — linked to source chunk with score bar and leg badge
+- **Stop button** during generation (AbortController); partial message preserved with `*(generation stopped)*`
+- **Rate limiting** on login: 3 failed attempts trigger exponential backoff (15s → 30s → 60s → 120s → 240s → 480s → 900s)
+- **Multi-tenancy**: org-level user management, per-org LLM config, data source assignment, file watchers, and SMB shares
+- **Dark / light / system theme toggle**
+- **Multi-turn chat** with rolling conversation summary
 
 ## Troubleshooting
 

@@ -48,6 +48,11 @@ The file is received by `POST /api/knowledge-base/{kb_id}/documents/upload`.
 - The file is saved to `uploads/user_{uid}/kb_{kb_id}/temp/{filename}` and a
   `DocumentUpload` record is created in MySQL with `status: "pending"`.
 
+> **Note:** The `POST /api/knowledge-base/{kb_id}/documents/preview` endpoint
+> allows previewing chunks without committing — useful for verifying chunking
+> before processing. The `POST /api/knowledge-base/cleanup` endpoint deletes
+> expired temporary uploads (>24h old).
+
 ### 2. Convert to Markdown
 
 `_convert_to_markdown(abs_path, file_name)` in `document_processor.py`.
@@ -96,9 +101,13 @@ The resulting Markdown string is wrapped in a single `LangchainDocument` with
 ### 3. Chunk
 
 `RecursiveCharacterTextSplitter` with configurable `chunk_size` and
-`chunk_overlap` (set via `.env`).
+`chunk_overlap` (computed from `OVERLAP_PERCENTAGE` in `.env`).
 
 Default values: `CHUNK_SIZE=1500`, `OVERLAP_PERCENTAGE=0.20` → 300-char overlap.
+
+Note: `chunk_overlap` is the computed overlap in characters, while `OVERLAP_PERCENTAGE`
+is the fraction stored in `.env`. The preview endpoint uses `chunk_overlap` while
+the `.env` variable is `OVERLAP_PERCENTAGE`.
 
 The splitter tries to break on paragraph boundaries first (`\n\n`), then line
 breaks (`\n`), then spaces, falling back to raw characters only as a last
@@ -415,7 +424,7 @@ Both errors surface in `task.error_message` and the document is not stored.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `CHUNK_SIZE` | Target chunk size in characters | `1500` |
+| `CHUNK_SIZE` | Target chunk size in characters. Keep ≤ 1800 for SPLADE. | `1500` |
 | `OVERLAP_PERCENTAGE` | Fraction of `CHUNK_SIZE` to overlap (0.0–1.0) | `0.20` |
 | `DENSE_EMBEDDING_DIM` | Output dimension of embedding model | `1024` |
 | `DENSE_EMBEDDINGS_MODEL` | Embedding model name | local model |

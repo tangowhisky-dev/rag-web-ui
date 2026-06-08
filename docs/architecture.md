@@ -2,7 +2,7 @@
 
 ## Overview
 
-A self-hosted knowledge base Q&A system with three answering modes, 3-leg hybrid retrieval, optional GraphRAG, and an agentic LangGraph pipeline for complex queries.
+A self-hosted knowledge base Q&A system with multi-tenant org management, three answering modes, 3-leg hybrid retrieval, optional GraphRAG, and an agentic LangGraph pipeline for complex queries.
 
 ```
 USER REQUEST → [Frontend:3000] → [Backend API:8000] → [Pipeline] → [LLM] → STREAMING RESPONSE
@@ -28,7 +28,7 @@ Fast uses `OPENAI_MODEL`; Thinking uses `REASONING_MODEL` (falls back to `OPENAI
 
 ### Agentic 🤖 (`rag_graph.py`)
 
-Full LangGraph `StateGraph` with 10 nodes and a coverage-driven retry loop:
+Full LangGraph `StateGraph` with 11 nodes and a coverage-driven retry loop:
 
 ```
 rewrite_query
@@ -47,7 +47,11 @@ rewrite_query
       └─ attempt ≥ 2          → generate_answer (partial / unable)
 ```
 
-**Reinforced scoring:** a chunk retrieved by N sub-queries has its RRF score multiplied by N, making broadly relevant chunks rank higher.
+**Reinforced scoring:** a chunk retrieved for N sub-queries has its RRF score accumulated across those N results — making broadly relevant chunks rank higher.
+
+**Confidence scoring:** each sub-query is graded for coverage, and the overall confidence level (low/medium/high) is computed from the coverage results and chunk quality metrics.
+
+**Query classification:** each query is classified as FACTUAL, ENTITY_CENTRIC, MULTI_PART, or AMBIGUOUS with confidence and latency metrics — used for retrieval config presets.
 
 **All nodes emit `active` and `done` events** — the UI shows live step labels ("Decomposing query…" → "Sub-queries: [list]") with collapsible detail panels.
 
@@ -56,6 +60,10 @@ rewrite_query
 ## Data Flow
 
 ### 1. Document Ingestion Pipeline
+
+**Supported formats:** PDF, DOCX, PPTX, XLSX, TXT, MD, HTML, CSV, JSON, XML, MSG, EML, EPUB, images (JPG/PNG/GIF/BMP/TIFF), ZIP
+
+**Parsing:** MarkItDown (Microsoft) — single library for all formats, producing consistent Markdown output. OCR via `markitdown-ocr` when `VISION_MODEL` is set.
 
 ```
 Upload (PDF / DOCX / PPTX / XLSX / TXT / MD / HTML / CSV / JSON /
@@ -118,7 +126,7 @@ chat_service.generate_response()
 | `grade_coverage` | LLM grades each sub-query as covered / partially_covered / not_covered | `coverage_result`, `uncovered_sub_queries` |
 | `widened_retrieval` | Retry for uncovered sub-queries; reranker threshold relaxed to −5.0 | `retrieved_docs` (accumulated), `retrieval_attempt=1` |
 | `keyword_search_loop` | MySQL FULLTEXT: broad keywords first, narrow if no results; max 3 sub-queries × 2 iterations | `retrieved_docs`, `keyword_iterations`, `retrieval_attempt=2` |
-| `generate_answer` | Final streaming answer with citation normalisation; transparent partial-answer note if uncovered sub-queries remain after all retries | `answer` |
+| `generate_answer` | Final streaming answer with citation normalisation, confidence score, and partial-answer note | `answer`, `confidence`, `query_classification` |
 
 #### Conditional routing
 
@@ -132,7 +140,7 @@ def _route_after_grade(state) -> str:
 
 ### 4. Chat File Upload Pipeline
 
-```
+```json
 POST /api/chat/{chat_id}/files
     ├── 10 MB size guard
     ├── Save to uploads/ephemeral/{chat_id}/
@@ -148,6 +156,25 @@ User sends message with file
 Chat delete → rm -rf uploads/ephemeral/{chat_id}/
 ```
 
+### 5. Multi-Tenancy Flow
+
+```
+Admin creates org
+    ├── Assign users (role: user/admin/super_admin, org_id)
+    ├── Assign data sources (DataStore → OrganisationDataStore)
+    ├── Configure LLM settings (org LLM config, ingestion status)
+    └── Configure file watchers (local dir + SMB share)
+
+User creates chat (user_id, org_id)
+    ├── Chats are user-scoped (Chat.user_id == current_user.id)
+    └── Knowledge bases are filtered by org_id
+
+Admin creates data store (folder_path, scan_pattern)
+    ├── Auto-scan with configurable interval
+    ├── Assign to orgs (OrganisationDataStore junction)
+    └── Per-org file watcher picks up new files from the folder
+```
+
 ---
 
 ## Backend Code Structure
@@ -155,22 +182,28 @@ Chat delete → rm -rf uploads/ephemeral/{chat_id}/
 ```
 backend/app/
 ├── api/api_v1/
-│   ├── auth.py             # JWT login / register
+│   ├── auth.py             # JWT login / register / rate limiting / token test
 │   ├── chat.py             # Chat endpoints; extracts answering_mode from request body
 │   ├── chat_files.py       # Ephemeral file upload, status poll, download, delete
 │   ├── folders.py          # Chat folder management
-│   └── knowledge_base.py   # KB + document CRUD, upload, processing
+│   ├── knowledge_base.py   # KB + document CRUD, upload, processing
+│   ├── admin.py            # Org CRUD, LLM config, ingestion status, users, watchers, SMB
+│   ├── datastores.py       # DataStore CRUD, assign/unassign, scan status
+│   ├── watcher.py          # Per-org file watcher endpoints
+│   ├── smb.py              # SMB share config, test connection, scan
+│   ├── query.py            # Stateless RAG query, KB ingest status
+│   └── api.py              # Router aggregation, /config endpoint
 ├── core/
 │   ├── config.py           # All settings (pydantic-settings); OPENAI_MODEL,
 │   │                         QUERY_MODEL, REASONING_MODEL, VISION_MODEL,
 │   │                         OPENAI_MODEL_CONTEXT_SIZE, RERANKER_*, GRAPHRAG_*
-│   ├── security.py         # Password hashing, JWT
+│   ├── security.py         # Password hashing, JWT, rate limiting
 │   └── storage.py          # Local filesystem helpers
 ├── models/                 # SQLAlchemy ORM: User, KnowledgeBase, Document,
 │                             DocumentChunk, ProcessingTask, Chat, Message, ChatFile
 ├── services/
 │   ├── fast_pipeline.py    # Fast/Thinking: rewrite → hybrid search → stream
-│   ├── rag_graph.py        # Agentic: 10-node LangGraph StateGraph
+│   ├── rag_graph.py        # Agentic: 11-node LangGraph StateGraph
 │   ├── chat_service.py     # Routes to fast_stream or run_stream by answering_mode
 │   ├── retrieval.py        # 3-leg hybrid search + weighted RRF + adaptive presets
 │   ├── reranker.py         # Cross-encoder reranking (score_threshold configurable)
@@ -193,7 +226,9 @@ frontend/src/
 │   │   ├── chat/[id]/page.tsx    # Chat view: messages, streaming, AgentTimeline,
 │   │   │                           mode selector, stop button, abort controller
 │   │   ├── chat/new/page.tsx     # New chat: select KB + retrieval options
-│   │   └── knowledge/            # KB management CRUD
+│   │   ├── admin/                # Admin panel: orgs, users, data sources, watcher
+│   │   ├── knowledge/            # KB management CRUD
+│   │   └── test-retrieval/[id]/  # KB retrieval test page
 │   └── api/chat/[id]/
 │       ├── messages/route.ts           # Streaming proxy
 │       ├── messages/with-file/route.ts # File+message streaming proxy
@@ -205,11 +240,15 @@ frontend/src/
 │   │                                draft_answer, grade_coverage, widened_retrieval,
 │   │                                keyword_search_loop, graph_enrichment, generate_answer
 │   ├── answer.tsx          # Markdown renderer with [N](N) citation link parsing
+│   │                         Think blocks, confidence score, query classification badge,
+│   │                         tool trace, retrieved context blocks, citation popovers
 │   ├── chat-input.tsx      # Textarea + mode selector (Fast/Thinking/Agentic pills)
 │   │                         + Stop button (replaces Send during generation)
-│   ├── chat-sidebar.tsx    # Collapsible sidebar; drag-to-folder; action buttons
+│   │                         + KB selector + file upload chip
+│   ├── chat-sidebar.tsx    # Collapsible sidebar; drag-to-folder; message search
+│   │                         Chat export, folder create/rename/delete
 │   ├── file-attachment.tsx # Pre-send dropzone chip + post-send download chip
-│   ├── branch-picker.tsx   # Chat branching (multiple answer variants)
+│   ├── branch-picker.tsx   # Chat branching (multiple answer variants) with sibling navigation
 │   └── mermaid-diagram.tsx # Mermaid diagram rendering in answers
 └── middleware.ts            # Route protection (redirect to /login)
 ```
@@ -260,3 +299,12 @@ Four model roles — `OPENAI_MODEL`, `QUERY_MODEL`, `REASONING_MODEL`, `VISION_M
 
 ### 10. AbortController for Stop
 The frontend holds an `AbortController` in a ref. The Stop button calls `abortControllerRef.current.abort()`. The `fetch` stream catches `AbortError` and preserves the partial message with `*(generation stopped)*` appended. Real errors show a toast and remove the placeholder.
+
+### 11. Multi-Tenancy with Org-Scoped Chats
+Chats are user-scoped (`Chat.user_id == current_user.id`), not org-scoped. Users can only see their own chats regardless of org membership. Knowledge bases are org-scoped, so users only see KBs in their org. Admins and super admins see across all orgs.
+
+### 12. Rate Limiting with Exponential Backoff
+The login endpoint tracks failed attempts per IP address with exponential backoff: 3 attempts trigger escalating delays (15s → 30s → 60s → 120s → 240s → 480s → 900s). Successful login resets the counter. Rate-limited responses return 429 with `Retry-After` header.
+
+### 13. Message Pagination with Infinite Scroll
+The chat page loads messages in pages of 20, using cursor-based pagination (`before_id`). An `IntersectionObserver` watches a sentinel element at the top of the message list and loads older messages when the sentinel enters the viewport. Scroll position is preserved across page loads using `useLayoutEffect`.

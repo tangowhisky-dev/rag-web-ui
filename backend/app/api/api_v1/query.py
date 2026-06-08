@@ -180,7 +180,10 @@ def ingest_status(
     """
     kb = (
         db.query(KnowledgeBase)
-        .filter(KnowledgeBase.id == kb_id, KnowledgeBase.user_id == current_user.id)
+        .filter(
+            KnowledgeBase.id == kb_id,
+            KnowledgeBase.user_id == current_user.id,
+        )
         .first()
     )
     if not kb:

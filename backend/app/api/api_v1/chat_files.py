@@ -16,6 +16,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Up
 from sqlalchemy.orm import Session
 
 from app.api.api_v1.auth import get_current_user
+from app.api.api_v1.rbac import chat_owner_filter as _chat_owner_filter
 from app.core.config import settings
 from app.core.storage import save_ephemeral_file, delete_ephemeral_chat_files
 from app.db.session import get_db
@@ -123,7 +124,7 @@ async def upload_chat_file(
     current_user: User = Depends(get_current_user),
 ):
     """Upload a file to a chat. Starts async markdown conversion immediately."""
-    chat = db.query(Chat).filter(Chat.id == chat_id, Chat.user_id == current_user.id).first()
+    chat = db.query(Chat).filter(Chat.id == chat_id, _chat_owner_filter(current_user)).first()
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
 
@@ -192,7 +193,7 @@ def get_chat_file_status(
         raise HTTPException(status_code=404, detail="File not found")
 
     # Verify ownership via chat
-    chat = db.query(Chat).filter(Chat.id == chat_id, Chat.user_id == current_user.id).first()
+    chat = db.query(Chat).filter(Chat.id == chat_id, _chat_owner_filter(current_user)).first()
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
 
@@ -214,7 +215,7 @@ def delete_chat_file(
     current_user: User = Depends(get_current_user),
 ):
     """Delete a chat file record."""
-    chat = db.query(Chat).filter(Chat.id == chat_id, Chat.user_id == current_user.id).first()
+    chat = db.query(Chat).filter(Chat.id == chat_id, _chat_owner_filter(current_user)).first()
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
 
@@ -232,7 +233,7 @@ def download_chat_file(
     current_user: User = Depends(get_current_user),
 ):
     """Download the original uploaded file."""
-    chat = db.query(Chat).filter(Chat.id == chat_id, Chat.user_id == current_user.id).first()
+    chat = db.query(Chat).filter(Chat.id == chat_id, _chat_owner_filter(current_user)).first()
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
 

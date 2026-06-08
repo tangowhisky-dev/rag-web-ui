@@ -11,6 +11,7 @@ from app.models.user import User
 from app.models.chat import Chat, Message, ChatFile
 from app.core.storage import delete_ephemeral_chat_files
 from app.models.knowledge import KnowledgeBase
+from app.api.api_v1.rbac import chat_owner_filter as _chat_owner_filter
 from app.schemas.chat import (
     ChatCreate,
     ChatResponse,
@@ -31,16 +32,6 @@ MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 
 router = APIRouter()
 
-
-def _chat_owner_filter(current_user):
-    """Return SQLAlchemy filter clause scoping Chat access.
-    Org users: filter by org_id.
-    No-org users: filter by user_id only (backward-compat).
-    """
-    if current_user.org_id is not None:
-        return Chat.org_id == current_user.org_id
-    return Chat.user_id == current_user.id
-
 @router.post("", response_model=ChatResponse)
 def create_chat(
     *,
@@ -53,7 +44,7 @@ def create_chat(
         db.query(KnowledgeBase)
         .filter(
             KnowledgeBase.id.in_(chat_in.knowledge_base_ids),
-            KnowledgeBase.user_id == current_user.id
+            KnowledgeBase.user_id == current_user.id,
         )
         .all()
     )
