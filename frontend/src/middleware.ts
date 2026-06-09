@@ -18,7 +18,7 @@ export function middleware(request: NextRequest) {
 
   if (request.nextUrl.pathname.startsWith('/dashboard/admin')) {
     if (!token) {
-      return NextResponse.redirect(new URL('/login', request.url));
+      return NextResponse.redirect(new URL('/', request.url));
     }
     try {
       const rawPayload = Buffer.from(token.split('.')[1], 'base64url').toString();
@@ -27,12 +27,12 @@ export function middleware(request: NextRequest) {
         return NextResponse.redirect(new URL('/dashboard', request.url));
       }
     } catch {
-      return NextResponse.redirect(new URL('/login', request.url));
+      return NextResponse.redirect(new URL('/', request.url));
     }
   }
 
   if (!token) {
-    return NextResponse.redirect(new URL('/login', request.url));
+    return NextResponse.redirect(new URL('/', request.url));
   }
 
   return NextResponse.next();

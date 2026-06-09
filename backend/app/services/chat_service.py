@@ -551,6 +551,7 @@ async def generate_response(
                 file_markdown=file_markdown,
                 api_base=api_base,
                 query_model=query_model,
+                org_id=org_id,
             )
         else:
             # Agentic: full LangGraph pipeline

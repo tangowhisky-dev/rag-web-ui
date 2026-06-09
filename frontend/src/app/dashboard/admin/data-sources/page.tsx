@@ -52,6 +52,7 @@ interface DataStore {
 interface ScanResult {
   scanned: number;
   new: number;
+  modified: number;
   skipped: number;
   errors: number;
 }
@@ -61,6 +62,8 @@ const STATUS_CONFIG: Record<string, { cls: string; label: string }> = {
   running: { cls: 'bg-blue-100 text-blue-700', label: 'Running' },
   completed: { cls: 'bg-green-100 text-green-700', label: 'Completed' },
   error: { cls: 'bg-red-100 text-red-700', label: 'Error' },
+  idle: { cls: 'bg-gray-100 text-gray-600', label: '—' },
+  cancelled: { cls: 'bg-yellow-100 text-yellow-700', label: 'Cancelled' },
 };
 
 function StatusBadge({ status, isRunning }: { status: string; isRunning?: boolean }) {
@@ -111,11 +114,12 @@ export default function DataSourcesPage() {
   const [assigningId, setAssigningId] = useState<number | null>(null);
   const [selectedOrgIds, setSelectedOrgIds] = useState<number[]>([]);
 
-  // Poll for status updates when running
+  // Poll for scan progress when scanning
   useEffect(() => {
     if (triggering.size > 0) {
-      // Poll every 2 seconds while scanning
+      // Poll every 2 seconds for scan progress
       pollingRef.current = setInterval(() => {
+        // Update scan progress for each scanning datastore
         fetchData();
       }, 2000);
     } else {
@@ -243,7 +247,7 @@ export default function DataSourcesPage() {
       )) as ScanResult;
       toast({
         title: 'Scan completed',
-        description: `Scanned: ${result.scanned} | New: ${result.new} | Skipped: ${result.skipped} | Errors: ${result.errors}`,
+        description: `Scanned: ${result.scanned} | New: ${result.new} | Modified: ${result.modified} | Skipped: ${result.skipped} | Errors: ${result.errors}`,
       });
       await fetchData();
     } catch (err) {
@@ -253,14 +257,44 @@ export default function DataSourcesPage() {
         variant: 'destructive',
       });
     }
-    // Polling will clear triggering automatically
+    // Clear triggering so polling stops and button re-enables
+    setTriggering((prev) => {
+      const next = new Set(prev);
+      next.delete(dsId);
+      return next;
+    });
   }
 
-  function openAssign(dsId: number) {
+  async function handleStopScan(dsId: number) {
+    try {
+      const resp = (await api.post(
+        `/api/admin/datastores/${dsId}/stop-scan`,
+      )) as { message: string };
+      toast({
+        title: 'Scan stopped',
+        description: resp.message,
+      });
+      await fetchData();
+    } catch (err) {
+      toast({
+        title: 'Error',
+        description: (err as ApiError).message ?? 'Failed to stop scan',
+        variant: 'destructive',
+      });
+    }
+  }
+
+  async function openAssign(dsId: number) {
     setAssigningId(dsId);
-    const ds = datastores.find((d) => d.id === dsId);
-    const assignedIds = ds?.assigned_orgs.map((o) => o.id) ?? [];
-    setSelectedOrgIds(assignedIds);
+    // Fetch current assignments directly instead of relying on stale datastores state
+    try {
+      const ds = await api.get(`/api/admin/datastores/${dsId}`) as DataStore;
+      setSelectedOrgIds(ds?.assigned_orgs?.map((o) => o.id) ?? []);
+    } catch {
+      // Fallback to state if fetch fails
+      const ds = datastores.find((d) => d.id === dsId);
+      setSelectedOrgIds(ds?.assigned_orgs?.map((o) => o.id) ?? []);
+    }
     setAssignOpen(true);
   }
 
@@ -355,6 +389,11 @@ export default function DataSourcesPage() {
                   <TableCell className="text-xs text-muted-foreground">
                     <StatusBadge status={ds.last_scan_status} isRunning={ds.last_scan_status === 'running'} />
                     <div className="mt-1">{formatLastScan(ds.last_scan_at)}</div>
+                    {ds.last_scan_status === 'error' && ds.last_scan_error && (
+                      <div className="mt-1 text-xs text-red-500 truncate max-w-[180px]" title={ds.last_scan_error}>
+                        {ds.last_scan_error}
+                      </div>
+                    )}
                   </TableCell>
                   <TableCell>
                     {ds.last_scan_status === 'running' ? (
@@ -373,6 +412,13 @@ export default function DataSourcesPage() {
                           <span>{ds.last_scan_processed} / {ds.last_scan_total_files}</span>
                         </div>
                       </div>
+                    ) : ds.last_scan_status === 'error' ? (
+                      <div className="space-y-1">
+                        <div className="text-xs text-red-600">Error</div>
+                        <div className="text-xs text-muted-foreground truncate max-w-[180px]" title={ds.last_scan_error || ''}>
+                          {ds.last_scan_error}
+                        </div>
+                      </div>
                     ) : (
                       <div className="text-xs">
                         {ds.last_scan_total_files} files
@@ -386,11 +432,22 @@ export default function DataSourcesPage() {
                       variant="outline"
                       size="sm"
                       onClick={() => handleTriggerScan(ds.id)}
-                      disabled={triggering.has(ds.id)}
+                      disabled={triggering.has(ds.id) || ds.last_scan_status === 'running'}
                       title="Trigger manual scan"
                     >
                       {triggering.has(ds.id) ? 'Scanning…' : 'Scan'}
                     </Button>
+                    {ds.last_scan_status === 'running' && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleStopScan(ds.id)}
+                        className="text-red-600 hover:text-red-700"
+                        title="Stop scan"
+                      >
+                        Stop
+                      </Button>
+                    )}
                     <Button
                       variant="outline"
                       size="sm"

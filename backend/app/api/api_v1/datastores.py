@@ -48,8 +48,11 @@ from sqlalchemy.orm import Session
 from app.core.security import require_admin
 from app.db.session import get_db
 from app.models.datastore import DataStore, OrganizationDataStore
+from app.models.knowledge import Document, DocumentChunk, ProcessingTask, KnowledgeBaseDataStore
 from app.models.organisation import Organisation
 from app.services.datastore_watcher import DataStoreWatcher
+from app.core.config import settings
+from qdrant_client import QdrantClient
 
 logger = logging.getLogger(__name__)
 
@@ -120,8 +123,30 @@ class DataStoreStatusResponse(BaseModel):
 class ScanResultResponse(BaseModel):
     scanned: int
     new: int
+    modified: int
     skipped: int
     errors: int
+
+
+class ScanProgressResponse(BaseModel):
+    datastore_id: int
+    datastore_name: str
+    scan_id: int | None
+    total_files: int
+    processed_files: int
+    new_files: int
+    modified_files: int
+    skipped_files: int
+    error_files: int
+    status: str  # running, completed, error, idle, cancelled
+    last_scan_at: Optional[str] = None
+    error_message: Optional[str] = None
+
+
+class ScanStatusResponse(BaseModel):
+    running: bool
+    active_scans: int
+    datastores: List[dict]
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +278,7 @@ def create_datastore(
         last_scan_total_files=file_count,
         last_scan_at=datetime.now(timezone.utc),
         last_scan_status="completed",
+        last_scan_processed=0,
     )
     db.add(ds)
     db.commit()
@@ -261,7 +287,9 @@ def create_datastore(
         "[DATASTORE] created id=%d name=%s path=%s file_count=%d",
         ds.id, ds.name, ds.folder_path, file_count,
     )
-    return ds
+    resp = _serialize_ds(ds)
+    resp["assigned_orgs"] = []
+    return DataStoreResponse(**resp)
 
 
 @router.get("/datastores/{datastore_id}", response_model=DataStoreResponse)
@@ -378,13 +406,43 @@ def delete_datastore(
     datastore_docs = db.query(Document).filter(Document.data_store_id == datastore_id).all()
     logger.info(f"[DATASTORE] preparing to delete datastore_id={datastore_id} with {len(datastore_docs)} documents")
     
+    # Delete documents — only DataStore documents (data_store_id IS NOT NULL)
+    # KB documents (data_store_id=NULL, kb_id set) should NOT be deleted here
+    # CASCADE will handle chunks/tasks automatically
+    datastore_docs = [d for d in datastore_docs if d.data_store_id is not None]
+    logger.info("[DATASTORE] deleting %d DataStore documents (skipping KB docs)", len(datastore_docs))
+    
+    if datastore_docs:
+        # Delete Qdrant vectors for this datastore's chunks
+        try:
+            from qdrant_client.models import PointIdsList
+            from app.services.document_processor import _chunk_id_to_point_id
+            qdrant = QdrantClient(host=settings.QDRANT_HOST, port=settings.QDRANT_PORT)
+            collection_name = f"ds_{datastore_id}"
+            # Get all chunks for DataStore documents in this collection
+            chunk_ids = [
+                cid[0] for cid in db.query(DocumentChunk.id).filter(
+                    DocumentChunk.document_id.in_([d.id for d in datastore_docs])
+                ).all()
+            ]
+            if chunk_ids:
+                point_ids = [_chunk_id_to_point_id(cid) for cid in chunk_ids]
+                qdrant.delete(
+                    collection_name=collection_name,
+                    points_selector=PointIdsList(points=point_ids),
+                )
+                logger.info("[DATASTORE] deleted %d Qdrant points from %s", len(point_ids), collection_name)
+        except Exception as e:
+            logger.warning(f"[DATASTORE] Qdrant delete failed for datastore_id={datastore_id}: {e}")
+        # Delete documents — CASCADE handles chunks/tasks
+        for doc in datastore_docs:
+            db.delete(doc)
+        db.commit()
+    
     # Clean up Qdrant vectors: delete the ds_{datastore_id} collection entirely
+    collection_name = f"ds_{datastore_id}"
     try:
-        from qdrant_client import QdrantClient
-        from app.core.config import settings
-        
         qdrant = QdrantClient(host=settings.QDRANT_HOST, port=settings.QDRANT_PORT)
-        collection_name = f"ds_{datastore_id}"
         
         # Check if collection exists
         collections = [c.name for c in qdrant.get_collections().collections]
@@ -414,7 +472,20 @@ def delete_datastore(
     except Exception as e:
         logger.warning(f"[DATASTORE] Neo4j cleanup failed for datastore_id={datastore_id}: {e}")
 
-    # Delete DB records (CASCADE will handle documents, chunks, tasks)
+    # Delete KB-to-DataStore junction records explicitly before deleting DataStore.
+    # SQLAlchemy's ORM cascade tries to SET NULL on FK, but data_store_id is NOT NULL.
+    # DB-level ON DELETE CASCADE is only used by the DB when it does the delete, not
+    # when SQLAlchemy's ORM does it.
+    db.query(KnowledgeBaseDataStore).filter(
+        KnowledgeBaseDataStore.data_store_id == datastore_id
+    ).delete(synchronize_session=False)
+    
+    # Also delete org-to-DataStore junction records
+    db.query(OrganizationDataStore).filter(
+        OrganizationDataStore.data_store_id == datastore_id
+    ).delete(synchronize_session=False)
+    
+    # Now delete the DataStore — CASCADE handles documents, chunks, tasks
     db.delete(ds)
     db.commit()
     logger.info("[DATASTORE] deleted id=%d name=%s", ds.id, ds.name)
@@ -427,8 +498,22 @@ def assign_datastore_to_orgs(
     db: Session = Depends(get_db),
     _: object = Depends(require_admin),
 ):
-    """Assign a datastore to one or more organisations."""
+    """Assign a datastore to one or more organisations. Empty org_ids removes all assignments."""
     ds = _get_datastore_or_404(db, datastore_id)
+
+    if not payload.org_ids:
+        # Remove all existing assignments
+        deleted = (
+            db.query(OrganizationDataStore)
+            .filter(OrganizationDataStore.data_store_id == datastore_id)
+            .delete(synchronize_session=False)
+        )
+        logger.info(
+            "[DATASTORE] removed %d existing assignments for id=%d (org_ids empty)",
+            deleted, datastore_id,
+        )
+        db.commit()
+        return
 
     for org_id in payload.org_ids:
         org = db.query(Organisation).filter(Organisation.id == org_id).first()
@@ -471,27 +556,34 @@ def unassign_datastore_from_orgs(
     db: Session = Depends(get_db),
     _: object = Depends(require_admin),
 ):
-    """Unassign a datastore from one or more organisations."""
+    """Unassign a datastore from one or more organisations. If org_ids is empty, unassign from all orgs."""
     _get_datastore_or_404(db, datastore_id)
 
-    for org_id in payload.org_ids:
-        link = (
+    if not payload.org_ids:
+        # Empty list = unassign from ALL orgs
+        deleted = (
             db.query(OrganizationDataStore)
-            .filter(
-                OrganizationDataStore.data_store_id == datastore_id,
-                OrganizationDataStore.org_id == org_id,
-            )
-            .first()
+            .filter(OrganizationDataStore.data_store_id == datastore_id)
+            .delete(synchronize_session=False)
         )
-        if link:
-            db.delete(link)
+        logger.info(
+            "[DATASTORE] unassigned id=%d from all orgs (%d removed)",
+            datastore_id, deleted,
+        )
+    else:
+        for org_id in payload.org_ids:
+            link = (
+                db.query(OrganizationDataStore)
+                .filter(
+                    OrganizationDataStore.data_store_id == datastore_id,
+                    OrganizationDataStore.org_id == org_id,
+                )
+                .first()
+            )
+            if link:
+                db.delete(link)
 
     db.commit()
-    logger.info(
-        "[DATASTORE] unassigned id=%d from orgs=%s",
-        datastore_id,
-        payload.org_ids,
-    )
 
 
 @router.get("/datastores/{datastore_id}/status", response_model=DataStoreStatusResponse)
@@ -519,6 +611,119 @@ def get_datastore_status(
     return DataStoreStatusResponse(**resp)
 
 
+@router.get("/datastores/{datastore_id}/scan-progress", response_model=ScanProgressResponse)
+def get_datastore_scan_progress(
+    datastore_id: int,
+    db: Session = Depends(get_db),
+    _: object = Depends(require_admin),
+):
+    """Get scan progress for a specific datastore."""
+    ds = _get_datastore_or_404(db, datastore_id)
+
+    try:
+        watcher = _get_watcher()
+        status = watcher.get_status()
+        active_scans = status.get("active_scans", [])
+
+        # Find the active scan for this datastore
+        scan_info = None
+        for scan in active_scans:
+            if scan.get("datastore_id") == datastore_id:
+                scan_info = scan
+                break
+
+        # If no active scan, check DB for last scan status
+        if not scan_info:
+            return ScanProgressResponse(
+                datastore_id=ds.id,
+                datastore_name=ds.name,
+                scan_id=None,
+                total_files=ds.last_scan_total_files or 0,
+                processed_files=ds.last_scan_processed or 0,
+                new_files=0,
+                modified_files=0,
+                skipped_files=0,
+                error_files=0,
+                status=ds.last_scan_status if ds.last_scan_status != "running" else "idle",
+                last_scan_at=ds.last_scan_at.isoformat() if ds.last_scan_at else None,
+                error_message=ds.last_scan_error,
+            )
+
+        return ScanProgressResponse(
+            datastore_id=ds.id,
+            datastore_name=ds.name,
+            scan_id=active_scans.index(scan_info) + 1 if scan_info in active_scans else None,
+            total_files=scan_info.get("total", 0),
+            processed_files=scan_info.get("processed", 0),
+            new_files=scan_info.get("new", 0),
+            modified_files=scan_info.get("modified", 0),
+            skipped_files=scan_info.get("skipped", 0),
+            error_files=scan_info.get("error", 0),
+            status=scan_info.get("status", "idle"),
+            last_scan_at=ds.last_scan_at.isoformat() if ds.last_scan_at else None,
+            error_message=scan_info.get("error"),
+        )
+    except HTTPException:
+        return ScanProgressResponse(
+            datastore_id=ds.id,
+            datastore_name=ds.name,
+            scan_id=None,
+            total_files=ds.last_scan_total_files or 0,
+            processed_files=ds.last_scan_processed or 0,
+            new_files=0,
+            modified_files=0,
+            skipped_files=0,
+            error_files=0,
+            status=ds.last_scan_status if ds.last_scan_status != "running" else "idle",
+            last_scan_at=ds.last_scan_at.isoformat() if ds.last_scan_at else None,
+            error_message=ds.last_scan_error,
+        )
+
+
+@router.get("/datastores/scan-status", response_model=ScanStatusResponse)
+def get_datastores_scan_status(
+    db: Session = Depends(get_db),
+    _: object = Depends(require_admin),
+):
+    """Get scan status for all datastores."""
+    try:
+        watcher = _get_watcher()
+        status = watcher.get_status()
+        return ScanStatusResponse(
+            running=status.get("running", False),
+            active_scans=len(status.get("active_scans", [])),
+            datastores=status.get("datastores", []),
+        )
+    except HTTPException:
+        return ScanStatusResponse(
+            running=False,
+            active_scans=0,
+            datastores=[],
+        )
+
+
+@router.post("/datastores/{datastore_id}/stop-scan")
+def stop_datastore_scan(
+    datastore_id: int,
+    db: Session = Depends(get_db),
+    _: object = Depends(require_admin),
+):
+    """Cancel a running scan on a datastore."""
+    ds = _get_datastore_or_404(db, datastore_id)
+
+    try:
+        watcher = _get_watcher()
+        cancelled = watcher._cancel_scan(datastore_id)
+        if cancelled:
+            return {"message": "Scan cancelled", "datastore_id": datastore_id}
+        else:
+            return {"message": f"No running scan to cancel (status: {ds.last_scan_status})", "status": ds.last_scan_status}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to stop scan: {str(e)}")
+
+
 @router.post("/datastores/{datastore_id}/scan", response_model=ScanResultResponse)
 def trigger_datastore_scan(
     datastore_id: int,
@@ -527,8 +732,9 @@ def trigger_datastore_scan(
 ):
     """Manually trigger a scan of a specific datastore.
     
-    Returns scan results with file counts. The watcher processes files
-    in the background and updates progress.
+    Scans all files in the datastore folder matching the scan_pattern.
+    New files are ingested, modified files are re-ingested, and unchanged
+    files are skipped. Progress is tracked via the scan-progress endpoint.
     """
     ds = _get_datastore_or_404(db, datastore_id)
 
@@ -546,23 +752,30 @@ def trigger_datastore_scan(
     watcher = _get_watcher()
     result = watcher.scan_single_datastore(datastore_id)
 
-    # Update datastore status
+    # Update datastore status with scan results
     ds.last_scan_at = datetime.now(timezone.utc)
-    ds.last_scan_status = "completed" if result["errors"] == 0 else "error"
-    ds.last_scan_total_files = result["scanned"]
-    ds.last_scan_processed = result["new"]
-    if result["errors"] > 0:
+    ds.last_scan_status = "completed" if result.get("errors", 0) == 0 else "error"
+    ds.last_scan_total_files = result.get("scanned", 0)
+    ds.last_scan_processed = result.get("new", 0) + result.get("modified", 0)
+    if result.get("errors", 0) > 0:
         ds.last_scan_error = f"{result['errors']} errors during scan"
     else:
         ds.last_scan_error = None
 
     db.commit()
     logger.info(
-        "[DATASTORE] scan_complete id=%d scanned=%d new=%d skipped=%d errors=%d",
+        "[DATASTORE] scan_complete id=%d scanned=%d new=%d modified=%d skipped=%d errors=%d",
         datastore_id,
-        result["scanned"],
-        result["new"],
-        result["skipped"],
-        result["errors"],
+        result.get("scanned", 0),
+        result.get("new", 0),
+        result.get("modified", 0),
+        result.get("skipped", 0),
+        result.get("errors", 0),
     )
-    return ScanResultResponse(**result)
+    return ScanResultResponse(
+        scanned=result.get("scanned", 0),
+        new=result.get("new", 0),
+        modified=result.get("modified", 0),
+        skipped=result.get("skipped", 0),
+        errors=result.get("errors", 0),
+    )

@@ -21,7 +21,7 @@ export default function KnowledgeLayout({ children, pageTitle }: KnowledgeLayout
   const handleLogout = () => {
     localStorage.removeItem("token");
     document.cookie = "token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT";
-    router.push("/login");
+    router.push("/");
   };
   const [passwordDialogOpen, setPasswordDialogOpen] = useState(false);
 

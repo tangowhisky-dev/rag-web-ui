@@ -85,6 +85,7 @@ async def fast_stream(
     file_markdown: Optional[str] = None,
     api_base: Optional[str] = None,
     query_model: Optional[str] = None,
+    org_id: Optional[int] = None,
 ) -> AsyncGenerator[dict, None]:
     """
     Lean RAG pipeline: rewrite → hybrid_search → stream answer.
@@ -142,6 +143,21 @@ async def fast_stream(
                 .all()
             )
             datastore_ids = [row.data_store_id for row in datastore_links]
+        # Also resolve datastores linked to the user's organization (standalone DataStores)
+        if org_id and db and datastore_ids is not None:
+            from app.models.datastore import OrganizationDataStore
+            ds_org_links = (
+                db.query(OrganizationDataStore.data_store_id)
+                .filter(OrganizationDataStore.org_id == org_id)
+                .distinct()
+                .all()
+            )
+            org_ds_ids = [row.data_store_id for row in ds_org_links]
+            for ds_id in org_ds_ids:
+                if ds_id not in datastore_ids:
+                    datastore_ids.append(ds_id)
+            if org_ds_ids:
+                logger.info("[FAST] Found %d org-linked datastores for org_id=%s", len(org_ds_ids), org_id)
 
         retrieval_result = await hybrid_search_with_legs(
             query=rewritten,

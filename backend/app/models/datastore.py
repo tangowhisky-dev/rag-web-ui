@@ -66,6 +66,13 @@ class DataStore(Base):
     documents = relationship(
         "Document", back_populates="data_store", cascade="all, delete-orphan"
     )
+    chunks = relationship(
+        "DocumentChunk", back_populates="data_store", cascade="all, delete-orphan"
+    )
+    processing_tasks = relationship(
+        "ProcessingTask", back_populates="data_store", cascade="all, delete-orphan",
+        primaryjoin="DataStore.id == ProcessingTask.data_store_id",
+    )
 
 
 class OrganizationDataStore(Base):

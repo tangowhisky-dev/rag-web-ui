@@ -92,6 +92,7 @@ class ProcessingTask(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     knowledge_base_id = Column(Integer, ForeignKey("knowledge_bases.id", ondelete="CASCADE"))
+    data_store_id = Column(Integer, ForeignKey("data_stores.id"), nullable=True)
     document_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=True)
     document_upload_id = Column(Integer, ForeignKey("document_uploads.id", ondelete="CASCADE"), nullable=True)
     status = Column(String(50), default="pending")  # pending, processing, completed, failed
@@ -105,6 +106,8 @@ class ProcessingTask(Base):
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     knowledge_base = relationship("KnowledgeBase", back_populates="processing_tasks")
+    data_store = relationship("DataStore", back_populates="processing_tasks",
+                               primaryjoin="ProcessingTask.data_store_id == DataStore.id")
     document = relationship("Document", back_populates="processing_tasks")
     document_upload = relationship("DocumentUpload", backref="processing_tasks")
 
@@ -112,7 +115,8 @@ class DocumentChunk(Base, TimestampMixin):
     __tablename__ = "document_chunks"
 
     id = Column(String(64), primary_key=True)  # SHA-256 hash as ID
-    kb_id = Column(Integer, ForeignKey("knowledge_bases.id"), nullable=False)
+    kb_id = Column(Integer, ForeignKey("knowledge_bases.id"), nullable=True)
+    data_store_id = Column(Integer, ForeignKey("data_stores.id"), nullable=True)
     document_id = Column(Integer, ForeignKey("documents.id"), nullable=False)
     file_name = Column(String(255), nullable=False)
     chunk_text = Column(LONGTEXT, nullable=False)   # the actual chunk text — FULLTEXT indexed
@@ -122,6 +126,8 @@ class DocumentChunk(Base, TimestampMixin):
 
     # Relationships
     knowledge_base = relationship("KnowledgeBase", back_populates="chunks")
+    data_store = relationship("DataStore", back_populates="chunks",
+                              primaryjoin="DocumentChunk.data_store_id == DataStore.id")
     document = relationship("Document", back_populates="chunks")
 
     __table_args__ = (

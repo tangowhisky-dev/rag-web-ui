@@ -602,6 +602,7 @@ async def parallel_retrieval_node(state: RAGGraphState) -> dict:
 
     # Get linked datastores for these KBs
     datastore_ids = []
+    org_id = state.get("org_id")
     if kb_ids and db:
         from app.models.knowledge import KnowledgeBaseDataStore
         datastore_links = (
@@ -613,6 +614,21 @@ async def parallel_retrieval_node(state: RAGGraphState) -> dict:
         datastore_ids = [row.data_store_id for row in datastore_links]
         if datastore_ids:
             logger.info("[RETRIEVE] Found %d linked datastores for KBs %s", len(datastore_ids), kb_ids)
+    # Also resolve datastores linked to the user's organization (standalone DataStores)
+    if org_id and db and datastore_ids is not None:
+        from app.models.datastore import OrganizationDataStore
+        ds_org_links = (
+            db.query(OrganizationDataStore.data_store_id)
+            .filter(OrganizationDataStore.org_id == org_id)
+            .distinct()
+            .all()
+        )
+        org_ds_ids = [row.data_store_id for row in ds_org_links]
+        for ds_id in org_ds_ids:
+            if ds_id not in datastore_ids:
+                datastore_ids.append(ds_id)
+        if org_ds_ids and org_id not in [row.data_store_id for row in datastore_links]:
+            logger.info("[RETRIEVE] Found %d org-linked datastores for org_id=%s", len(org_ds_ids), org_id)
 
     from app.services.retrieval import hybrid_search_with_legs
 
@@ -969,6 +985,7 @@ async def widened_retrieval_node(state: RAGGraphState) -> dict:
 
     # Get linked datastores for these KBs
     datastore_ids = []
+    org_id = state.get("org_id")
     if kb_ids and db:
         from app.models.knowledge import KnowledgeBaseDataStore
         datastore_links = (
@@ -980,6 +997,21 @@ async def widened_retrieval_node(state: RAGGraphState) -> dict:
         datastore_ids = [row.data_store_id for row in datastore_links]
         if datastore_ids:
             logger.info("[WIDENED] Found %d linked datastores for KBs %s", len(datastore_ids), kb_ids)
+    # Also resolve datastores linked to the user's organization (standalone DataStores)
+    if org_id and db and datastore_ids is not None:
+        from app.models.datastore import OrganizationDataStore
+        ds_org_links = (
+            db.query(OrganizationDataStore.data_store_id)
+            .filter(OrganizationDataStore.org_id == org_id)
+            .distinct()
+            .all()
+        )
+        org_ds_ids = [row.data_store_id for row in ds_org_links]
+        for ds_id in org_ds_ids:
+            if ds_id not in datastore_ids:
+                datastore_ids.append(ds_id)
+        if org_ds_ids and org_id not in [row.data_store_id for row in datastore_links]:
+            logger.info("[WIDENED] Found %d org-linked datastores for org_id=%s", len(org_ds_ids), org_id)
 
     from app.services.retrieval import hybrid_search_with_legs
 
@@ -1061,6 +1093,7 @@ async def keyword_search_loop_node(state: RAGGraphState) -> dict:
     model_name = state.get("model_name")
     api_base = state.get("api_base")
     query_model_override = state.get("query_model")
+    org_id = state.get("org_id")
 
     if not uncovered or not kb_ids or not db:
         latency_ms = round((time.monotonic() - t0) * 1000, 1)
@@ -1070,8 +1103,22 @@ async def keyword_search_loop_node(state: RAGGraphState) -> dict:
             "agent_steps": (state.get("agent_steps") or []) + [step],
         }
 
+    from app.models.datastore import OrganizationDataStore
     from app.services.retrieval import _exact_search  # type: ignore[attr-defined]
     llm = _get_llm((model_name or query_model_override or settings.QUERY_MODEL), 0.0, api_base=api_base)
+
+    # Resolve datastore_ids from org_id (standalone DataStores)
+    datastore_ids: List[int] = []
+    if org_id and db:
+        ds_org_links = (
+            db.query(OrganizationDataStore.data_store_id)
+            .filter(OrganizationDataStore.org_id == org_id)
+            .distinct()
+            .all()
+        )
+        datastore_ids = [row.data_store_id for row in ds_org_links]
+        if datastore_ids:
+            logger.info("[KEYWORD] Found %d org-linked datastores for org_id=%s", len(datastore_ids), org_id)
 
     all_new_docs: List[dict] = []
     keyword_iterations: list = list(state.get("keyword_iterations") or [])
@@ -1100,7 +1147,7 @@ async def keyword_search_loop_node(state: RAGGraphState) -> dict:
         broad_candidates: dict = {}
         if broad_query.strip():
             try:
-                broad_candidates = _exact_search(broad_query, kb_ids, db, 20)
+                broad_candidates = _exact_search(broad_query, kb_ids, datastore_ids, db, 20)
             except Exception as exc:
                 logger.warning("[KEYWORD] broad search failed: %s", exc)
 
@@ -1115,7 +1162,7 @@ async def keyword_search_loop_node(state: RAGGraphState) -> dict:
             narrow_query = " ".join(narrow_kw)
             narrow_candidates: dict = {}
             try:
-                narrow_candidates = _exact_search(narrow_query, kb_ids, db, 15)
+                narrow_candidates = _exact_search(narrow_query, kb_ids, datastore_ids, db, 15)
             except Exception as exc:
                 logger.warning("[KEYWORD] narrow search failed: %s", exc)
 

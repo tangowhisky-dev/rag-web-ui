@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import Link from "next/link";
 import { api, ApiError } from "@/lib/api";
 import { APP_NAME } from "@/lib/app-config";
 import { validatePasswordStrength } from "@/lib/auth";
@@ -58,7 +57,7 @@ export default function RegisterPage() {
 
     try {
       await api.post("/api/auth/register", { username, email, password });
-      router.push("/login");
+      router.push("/");
     } catch (err) {
       if (err instanceof ApiError) {
         setError(err.message);
@@ -130,12 +129,6 @@ export default function RegisterPage() {
               Create Account
             </button>
           </form>
-
-          <div className="text-center">
-            <Link href="/login" className="text-sm text-muted-foreground hover:text-foreground transition-colors">
-              Already have an account? Sign in
-            </Link>
-          </div>
         </div>
       </div>
     </main>
