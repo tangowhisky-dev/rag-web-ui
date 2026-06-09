@@ -182,6 +182,21 @@ class DatastoreFileEventHandler:
 
                     db.query(DocumentChunk).filter(DocumentChunk.document_id == doc.id).delete()
                     db.query(ProcessingTask).filter(ProcessingTask.document_id == doc.id).delete()
+
+                    # Clean up Neo4j graph nodes for this document
+                    try:
+                        from app.services.graph_service import delete_graph_for_document
+                        delete_graph_for_document(kb_id=None, document_id=doc.id)
+                        logger.info(
+                            "[WATCHER] Neo4j cleanup done for document_id=%s",
+                            doc.id,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "[WATCHER] Neo4j cleanup failed for document_id=%s: %s",
+                            doc.id, e,
+                        )
+
                     db.delete(doc)
                     logger.info(
                         "[WATCHER] document_deleted path=%s datastore_id=%s doc_id=%s",
@@ -232,6 +247,21 @@ class DatastoreFileEventHandler:
 
                         db.query(DocumentChunk).filter(DocumentChunk.document_id == doc.id).delete()
                         db.query(ProcessingTask).filter(ProcessingTask.document_id == doc.id).delete()
+
+                        # Clean up Neo4j graph nodes for this document
+                        try:
+                            from app.services.graph_service import delete_graph_for_document
+                            delete_graph_for_document(kb_id=kb_id, document_id=doc.id)
+                            logger.info(
+                                "[WATCHER] Neo4j cleanup done for kb_id=%s doc_id=%s",
+                                kb_id, doc.id,
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                "[WATCHER] Neo4j cleanup failed for kb_id=%s doc_id=%s: %s",
+                                kb_id, doc.id, e,
+                            )
+
                         db.delete(doc)
                         logger.info(
                             "[WATCHER] document_deleted path=%s kb_id=%s doc_id=%s",

@@ -2,6 +2,7 @@ import hashlib
 import os
 from typing import List, Any, Dict
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks, Query
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from qdrant_client import QdrantClient
 from sqlalchemy import text
@@ -52,7 +53,7 @@ from app.schemas.knowledge import (
 )
 from app.services.document_processor import process_document_background, upload_document, preview_document, PreviewResult, SUPPORTED_EXTENSIONS
 from app.core.config import settings
-from app.core.storage import save_file, delete_kb_files, delete_file
+from app.core.storage import save_file, delete_file
 
 
 def _kb_owner_filter(current_user):
@@ -259,8 +260,6 @@ async def delete_knowledge_base(
     - Direct uploads (data_store_id=NULL): Deleted with KB (files, vectors, chunks, Neo4j)
     - DataStore docs (data_store_id!=NULL): KB link only is removed; documents persist
     """
-    logger = logging.getLogger(__name__)
-    
     kb = (
         db.query(KnowledgeBase)
         .filter(
@@ -272,78 +271,9 @@ async def delete_knowledge_base(
     if not kb:
         raise HTTPException(status_code=404, detail="Knowledge base not found")
     
-    try:
-        # Categorize documents by source type
-        direct_docs = [doc for doc in kb.documents if doc.data_store_id is None]
-        datastore_docs = [doc for doc in kb.documents if doc.data_store_id is not None]
-        
-        # Clean up external resources for DIRECT uploads only
-        cleanup_errors = []
-
-        # 1. Clean up stored files (only for direct uploads, not DataStore files)
-        try:
-            delete_kb_files(current_user.id, kb_id)
-            logger.info(f"Cleaned up storage files for knowledge base {kb_id} (direct uploads only)")
-        except Exception as e:
-            cleanup_errors.append(f"Failed to clean up storage files: {str(e)}")
-            logger.error(f"Storage cleanup error for kb {kb_id}: {str(e)}")
-        
-        # 2. Clean up Qdrant collection for direct uploads only
-        # Note: DataStore document vectors remain in Qdrant for potential future KB linking
-        if direct_docs:
-            try:
-                qdrant = QdrantClient(host=settings.QDRANT_HOST, port=settings.QDRANT_PORT)
-                qdrant.delete_collection(f"kb_{kb_id}")
-                logger.info(f"Cleaned up Qdrant collection for KB {kb_id} (direct uploads)")
-            except Exception as e:
-                cleanup_errors.append(f"Failed to clean up Qdrant collection: {str(e)}")
-                logger.error(f"Qdrant cleanup error for kb {kb_id}: {str(e)}")
-        else:
-            logger.info(f"No direct uploads in KB {kb_id}, skipping Qdrant deletion")
-
-        # 3. Clean up Neo4j graph nodes for direct uploads only
-        if direct_docs:
-            try:
-                from app.services.graph_service import delete_graph_for_kb, purge_stale_graph_data
-                remaining_kb_ids = [
-                    row.id for row in db.query(KnowledgeBase.id)
-                    .filter(KnowledgeBase.id != kb_id)
-                    .all()
-                ]
-                await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: delete_graph_for_kb(kb_id=kb_id)
-                )
-                await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: purge_stale_graph_data(active_kb_ids=remaining_kb_ids)
-                )
-                logger.info(f"Cleaned up Neo4j graph nodes for KB {kb_id} (direct uploads)")
-            except Exception as e:
-                cleanup_errors.append(f"Failed to clean up Neo4j graph: {str(e)}")
-                logger.error(f"Neo4j cleanup error for kb {kb_id}: {str(e)}")
-        else:
-            logger.info(f"No direct uploads in KB {kb_id}, skipping Neo4j deletion")
-
-        # Delete database records (event listener handles conditional document deletion)
-        db.delete(kb)
-        db.commit()
-        
-        # Report status
-        if direct_docs:
-            logger.info(f"KB {kb_id} deleted: {len(direct_docs)} direct uploads removed, {len(datastore_docs)} DataStore links severed")
-        else:
-            logger.info(f"KB {kb_id} deleted: {len(datastore_docs)} DataStore links severed (no direct uploads)")
-        
-        if cleanup_errors:
-            return {
-                "message": "Knowledge base deleted with cleanup warnings",
-                "warnings": cleanup_errors
-            }
-        
-        return {"message": "Knowledge base and all associated resources deleted successfully"}
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to delete knowledge base {kb_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to delete knowledge base: {str(e)}")
+    from app.services.deletion_service import delete_kb as _delete_kb
+    result, status = _delete_kb(db, kb_id, current_user.id)
+    return JSONResponse(status_code=status, content=result)
 
 # Batch upload documents
 @router.post("/{kb_id}/documents/upload")

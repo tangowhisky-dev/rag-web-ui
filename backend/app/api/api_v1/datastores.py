@@ -18,7 +18,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi.responses import JSONResponse
 
 # Helper function to count files in folder
 def count_files_in_folder(folder_path: str, scan_pattern: str = "*") -> int:
@@ -52,7 +53,6 @@ from app.models.knowledge import Document, DocumentChunk, ProcessingTask, Knowle
 from app.models.organisation import Organisation
 from app.services.datastore_watcher import DataStoreWatcher
 from app.core.config import settings
-from qdrant_client import QdrantClient
 
 logger = logging.getLogger(__name__)
 
@@ -388,107 +388,12 @@ def delete_datastore(
     Note: Actual files in the DataStore folder are NOT deleted from disk.
     Only database records (DataStore, Documents, Chunks, Vectors, Graph data) are removed.
     """
-    ds = _get_datastore_or_404(db, datastore_id)
-
-    # Check if any orgs are assigned
-    assigned = (
-        db.query(OrganizationDataStore)
-        .filter(OrganizationDataStore.data_store_id == datastore_id)
-        .count()
-    )
-    if assigned > 0:
-        raise HTTPException(
-            status_code=409,
-            detail="Cannot delete datastore — it is assigned to one or more organisations",
-        )
-    
-    # Get all documents in this DataStore before deletion
-    datastore_docs = db.query(Document).filter(Document.data_store_id == datastore_id).all()
-    logger.info(f"[DATASTORE] preparing to delete datastore_id={datastore_id} with {len(datastore_docs)} documents")
-    
-    # Delete documents — only DataStore documents (data_store_id IS NOT NULL)
-    # KB documents (data_store_id=NULL, kb_id set) should NOT be deleted here
-    # CASCADE will handle chunks/tasks automatically
-    datastore_docs = [d for d in datastore_docs if d.data_store_id is not None]
-    logger.info("[DATASTORE] deleting %d DataStore documents (skipping KB docs)", len(datastore_docs))
-    
-    if datastore_docs:
-        # Delete Qdrant vectors for this datastore's chunks
-        try:
-            from qdrant_client.models import PointIdsList
-            from app.services.document_processor import _chunk_id_to_point_id
-            qdrant = QdrantClient(host=settings.QDRANT_HOST, port=settings.QDRANT_PORT)
-            collection_name = f"ds_{datastore_id}"
-            # Get all chunks for DataStore documents in this collection
-            chunk_ids = [
-                cid[0] for cid in db.query(DocumentChunk.id).filter(
-                    DocumentChunk.document_id.in_([d.id for d in datastore_docs])
-                ).all()
-            ]
-            if chunk_ids:
-                point_ids = [_chunk_id_to_point_id(cid) for cid in chunk_ids]
-                qdrant.delete(
-                    collection_name=collection_name,
-                    points_selector=PointIdsList(points=point_ids),
-                )
-                logger.info("[DATASTORE] deleted %d Qdrant points from %s", len(point_ids), collection_name)
-        except Exception as e:
-            logger.warning(f"[DATASTORE] Qdrant delete failed for datastore_id={datastore_id}: {e}")
-        # Delete documents — CASCADE handles chunks/tasks
-        for doc in datastore_docs:
-            db.delete(doc)
-        db.commit()
-    
-    # Clean up Qdrant vectors: delete the ds_{datastore_id} collection entirely
-    collection_name = f"ds_{datastore_id}"
-    try:
-        qdrant = QdrantClient(host=settings.QDRANT_HOST, port=settings.QDRANT_PORT)
-        
-        # Check if collection exists
-        collections = [c.name for c in qdrant.get_collections().collections]
-        if collection_name in collections:
-            qdrant.delete_collection(collection_name)
-            logger.info(f"[DATASTORE] deleted Qdrant collection {collection_name}")
-        else:
-            logger.info(f"[DATASTORE] collection {collection_name} does not exist, skipping")
-    except Exception as e:
-        logger.warning(f"[DATASTORE] Qdrant cleanup failed for {collection_name}: {e}")
-    
-    # Clean up Neo4j graph data for all documents in this DataStore
-    # Delete all Chunk nodes with data_store_id = this datastore
-    try:
-        from app.services.graph_service import _get_driver, settings as graph_settings
-        if graph_settings.NEO4J_URI:
-            driver = _get_driver()
-            with driver.session() as session:
-                session.run(
-                    """
-                    MATCH (c:Chunk {data_store_id: $data_store_id})
-                    DETACH DELETE c
-                    """,
-                    data_store_id=str(datastore_id),
-                )
-            logger.info(f"[DATASTORE] cleaned up Neo4j Chunk nodes for datastore_id={datastore_id}")
-    except Exception as e:
-        logger.warning(f"[DATASTORE] Neo4j cleanup failed for datastore_id={datastore_id}: {e}")
-
-    # Delete KB-to-DataStore junction records explicitly before deleting DataStore.
-    # SQLAlchemy's ORM cascade tries to SET NULL on FK, but data_store_id is NOT NULL.
-    # DB-level ON DELETE CASCADE is only used by the DB when it does the delete, not
-    # when SQLAlchemy's ORM does it.
-    db.query(KnowledgeBaseDataStore).filter(
-        KnowledgeBaseDataStore.data_store_id == datastore_id
-    ).delete(synchronize_session=False)
-    
-    # Also delete org-to-DataStore junction records
-    db.query(OrganizationDataStore).filter(
-        OrganizationDataStore.data_store_id == datastore_id
-    ).delete(synchronize_session=False)
-    
-    # Now delete the DataStore — CASCADE handles documents, chunks, tasks
-    db.delete(ds)
-    db.commit()
-    logger.info("[DATASTORE] deleted id=%d name=%s", ds.id, ds.name)
+    from app.services.deletion_service import delete_datastore as _delete_ds
+    result, status = _delete_ds(db, datastore_id)
+    # Return 204 No Content for success (maintains backward compatibility)
+    if status == 204:
+        return Response(status_code=204)
+    return JSONResponse(status_code=status, content=result)
 
 
 @router.post("/datastores/{datastore_id}/assign")
