@@ -9,6 +9,7 @@ from app.db.session import get_db
 from app.models.organisation import Organisation
 from app.models.org_llm_config import OrgLLMConfig
 from app.models.organisation import OrgAbbreviation
+from app.models.datastore import DataStore
 from app.schemas.organisation import OrgCreate, OrgUpdate, OrgResponse, OrgLLMConfigUpdate, OrgLLMConfigResponse, OrgIngestionStatusResponse
 from app.models.knowledge import KnowledgeBase, ProcessingTask
 from app.schemas.user import UserAdminCreate, UserAdminUpdate, UserResponse, UserDeleteResponse, PasswordChange
@@ -247,6 +248,7 @@ from pydantic import BaseModel as _BaseModel
 class AdminCountsResponse(_BaseModel):
     organizations: int
     users: int
+    data_sources: int
 
 
 @org_router.get("/counts", response_model=AdminCountsResponse)
@@ -264,7 +266,12 @@ def get_admin_counts(
     else:
         user_count = db.query(User).filter(User.org_id == current_user.org_id).count()
 
-    return AdminCountsResponse(organizations=org_count, users=user_count)
+    # Data sources: all admins see all data stores
+    ds_count = db.query(DataStore).count()
+
+    return AdminCountsResponse(
+        organizations=org_count, users=user_count, data_sources=ds_count,
+    )
 
 
 class AbbreviationCreate(_BaseModel):

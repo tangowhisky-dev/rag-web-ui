@@ -34,7 +34,7 @@ import os
 import re
 import threading
 import time as time_module
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -361,6 +361,9 @@ class DataStoreWatcher:
         self._active_scans: Dict[int, Dict[str, Any]] = {}
         self._scan_id_counter: int = 0
         self._scan_id_lock = threading.Lock()
+        # Futures tracking: scan_id -> [Future, ...] for waiting on ingestion tasks
+        self._scan_futures: Dict[int, List[Future]] = {}
+        self._scan_futures_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Scan ID management (thread-safe)
@@ -515,6 +518,9 @@ class DataStoreWatcher:
                 "status": "running",
                 "error": None,
             }
+            # Initialize futures list for this scan
+            with self._scan_futures_lock:
+                self._scan_futures[scan_id] = []
 
             logger.info(
                 "[WATCHER] scan_init scan_id=%d datastore_id=%d total_files=%d",
@@ -580,6 +586,24 @@ class DataStoreWatcher:
                 ds.last_scan_status = "error"
                 ds.last_scan_error = error
 
+            db.commit()
+        finally:
+            db.close()
+
+    def _refresh_file_count(self, datastore_id: int) -> None:
+        """Refresh last_scan_total_files from the filesystem.
+
+        Called after file changes are detected so the UI always shows
+        the latest file count even before a manual scan runs.
+        """
+        db: Session = SessionLocal()
+        try:
+            ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
+            if not ds or not ds.folder_path:
+                return
+
+            count = self._count_files_in_folder(ds.folder_path, ds.scan_pattern)
+            ds.last_scan_total_files = count
             db.commit()
         finally:
             db.close()
@@ -672,6 +696,9 @@ class DataStoreWatcher:
             # Count total files first
             total_files = self._count_files_in_folder(ds.folder_path, ds.scan_pattern)
 
+            # Collect futures from ingestion tasks
+            ingestion_futures: List[Future] = []
+
             # Walk all files in the folder
             for root, _dirs, files in os.walk(ds.folder_path):
                 # Check for cancellation
@@ -692,7 +719,9 @@ class DataStoreWatcher:
                             continue
 
                         # Process file for this datastore (no KB knowledge needed)
-                        self._handle_file_in_scan(fpath, datastore_id, scan_id)
+                        future = self._handle_file_in_scan(fpath, datastore_id, scan_id)
+                        if future is not None:
+                            ingestion_futures.append(future)
 
                         # Update progress
                         self._update_scan_progress(datastore_id, summary["scanned"])
@@ -703,8 +732,30 @@ class DataStoreWatcher:
                         )
                         summary["errors"] += 1
 
-            # Mark scan complete
-            self._complete_scan(datastore_id, True)
+            # Wait for all ingestion tasks to complete before marking scan done
+            if ingestion_futures:
+                logger.info(
+                    "[WATCHER] waiting_for_ingestion scan_id=%d datastore_id=%d tasks=%d",
+                    scan_id, datastore_id, len(ingestion_futures),
+                )
+                for future in ingestion_futures:
+                    try:
+                        future.result(timeout=3600)  # up to 1 hour per task
+                    except Exception as e:
+                        logger.error(
+                            "[WATCHER] ingestion_task_failed scan_id=%d: %s",
+                            scan_id, e,
+                        )
+                        summary["errors"] += 1
+
+            # Clean up futures tracking
+            with self._scan_futures_lock:
+                self._scan_futures.pop(scan_id, None)
+
+            # Mark scan complete — success only if no ingestion errors
+            scan_success = summary["errors"] == 0
+            scan_error = f"{summary['errors']} file(s) failed ingestion" if not scan_success else None
+            self._complete_scan(datastore_id, scan_success, error=scan_error)
             logger.info(
                 "[WATCHER] scan_complete scan_id=%d datastore_id=%d scanned=%d new=%d modified=%d skipped=%d errors=%d",
                 scan_id,
@@ -741,9 +792,10 @@ class DataStoreWatcher:
         event_path: str,
         datastore_id: int,
         scan_id: int,
-    ) -> None:
+    ) -> Optional[Future]:
         """Handle a file during scan. Creates or updates Document records and triggers ingestion.
         
+        Returns the ingestion Future so the caller can wait for completion.
         DataStore files are processed independently — no KB knowledge needed.
         """
         db: Session = SessionLocal()
@@ -782,21 +834,22 @@ class DataStoreWatcher:
                             existing.id,
                             datastore_id,
                         )
-                        self._update_document(
+                        future = self._update_document(
                             existing.id, event_path, file_hash, datastore_id, scan_id
                         )
-                        return
+                        return future
                 else:
                     # File was modified - trigger re-ingestion
-                    self._update_document(
+                    future = self._update_document(
                         existing.id, event_path, file_hash, datastore_id, scan_id
                     )
-                    return
+                    return future
 
             # File is new - trigger ingestion
-            self._ingest_file(
+            future = self._ingest_file(
                 event_path, datastore_id, scan_id, file_hash=file_hash
             )
+            return future
         finally:
             db.close()
 
@@ -806,9 +859,10 @@ class DataStoreWatcher:
         datastore_id: int,
         scan_id: int,
         file_hash: Optional[str] = None,
-    ) -> None:
+    ) -> Optional[Future]:
         """Create Document + ProcessingTask records and enqueue background processing.
         
+        Returns the Future so the caller can wait for completion.
         DataStore files are processed independently — no KB knowledge needed.
         """
         fname = os.path.basename(event_path)
@@ -913,11 +967,19 @@ class DataStoreWatcher:
                 lambda f: self._on_ingestion_done(f, task.id, event_path)
             )
 
+            # Track future for scan completion
+            if scan_id > 0:
+                with self._scan_futures_lock:
+                    if scan_id in self._scan_futures:
+                        self._scan_futures[scan_id].append(future)
+
             # Count as "new"
             for sid, info in self._active_scans.items():
                 if info["datastore_id"] == datastore_id:
                     info["new"] = info.get("new", 0) + 1
                     break
+
+            return future
 
         except Exception as e:
             logger.error(
@@ -939,9 +1001,10 @@ class DataStoreWatcher:
         file_hash: str,
         datastore_id: int,
         scan_id: int,
-    ) -> None:
+    ) -> Optional[Future]:
         """Update an existing document when file content changes.
         
+        Returns the Future so the caller can wait for completion.
         DataStore documents don't use KBs — kb_id is always None.
         """
         fname = os.path.basename(event_path)
@@ -1023,11 +1086,19 @@ class DataStoreWatcher:
                 lambda f: self._on_ingestion_done(f, task.id, event_path)
             )
 
+            # Track future for scan completion
+            if scan_id > 0:
+                with self._scan_futures_lock:
+                    if scan_id in self._scan_futures:
+                        self._scan_futures[scan_id].append(future)
+
             # Count as "modified"
             for sid, info in self._active_scans.items():
                 if info["datastore_id"] == datastore_id:
                     info["modified"] = info.get("modified", 0) + 1
                     break
+
+            return future
 
         except Exception as e:
             logger.error(
@@ -1203,6 +1274,9 @@ class DataStoreWatcher:
                     "[WATCHER] handle_file_error path=%s event=%s: %s", fpath, event_type, e, exc_info=True
                 )
 
+        # Refresh file count so UI reflects latest state
+        self._refresh_file_count(datastore_id)
+
     def _matches_pattern(self, filepath: str, scan_pattern: str = "*") -> bool:
         """Check if a filepath matches the scan pattern."""
         import fnmatch as _fnmatch
@@ -1227,7 +1301,7 @@ class DataStoreWatcher:
         event_path: str,
         datastore_id: int,
         event_type: str = "modified"
-    ) -> None:
+    ) -> Optional[Future]:
         """Core logic: handle file events (created, modified, deleted).
 
         Files are processed in-place without copying. DataStore documents
@@ -1330,13 +1404,12 @@ class DataStoreWatcher:
                         existing.id,
                     )
                     # Update existing document
-                    self._update_document(
+                    return self._update_document(
                         existing.id, event_path, file_hash, datastore_id, scan_id=0
                     )
-                    return
 
             # File is new — trigger ingestion in-place
-            self._ingest_file(
+            return self._ingest_file(
                 event_path, datastore_id, scan_id=0, file_hash=file_hash
             )
         finally:
@@ -1471,6 +1544,8 @@ class DataStoreWatcher:
                     fresh_db.close()
             except Exception:
                 pass
+            # Re-raise so future.result() will surface the failure to the scan waiter
+            raise
         finally:
             loop.close()
 

@@ -126,7 +126,11 @@ def _get_llm_pipeline():
         LLMEntityRelationExtractor,
         OnError,
     )
-    from neo4j_graphrag.experimental.components.kg_writer import Neo4jWriter, KGWriterModel
+    from neo4j_graphrag.experimental.components.kg_writer import (
+        KGWriterModel,
+        LexicalGraphConfig,
+        Neo4jWriter,
+    )
     from neo4j_graphrag.experimental.components.types import Neo4jNode, Neo4jGraph
     from neo4j_graphrag.experimental.pipeline.pipeline import Pipeline
 
@@ -142,21 +146,12 @@ def _get_llm_pipeline():
         safest fix is to clear all embedding_properties before each write.
         """
 
-        async def run(
-            self,
-            graph: Neo4jGraph,
-            lexical_graph_config=None,
-        ) -> KGWriterModel:  # type: ignore[override]
-            """Clean nodes then delegate to parent run."""
-            cleaned_graph = self._clean_graph(graph)
-            return await super().run(cleaned_graph, lexical_graph_config)
-
         @staticmethod
-        def _clean_graph(graph: Neo4jGraph) -> Neo4jGraph:
-            """Return a new graph with invalid embedding_properties stripped."""
-            cleaned_nodes = []
-            for node in graph.nodes:
+        def _clean_nodes(nodes: list[Neo4jNode]) -> list[Neo4jNode]:
+            cleaned = []
+            for node in nodes:
                 if node.embedding_properties:
+                    # Keep only entries that are non-empty lists of finite floats
                     valid = {
                         k: v for k, v in node.embedding_properties.items()
                         if v and all(isinstance(x, (int, float)) and not (x != x or x == float("inf") or x == float("-inf")) for x in v)
@@ -168,8 +163,20 @@ def _get_llm_pipeline():
                             properties=node.properties,
                             embedding_properties=valid,
                         )
-                cleaned_nodes.append(node)
-            return Neo4jGraph(nodes=cleaned_nodes, relationships=graph.relationships)
+                cleaned.append(node)
+            return cleaned
+
+        def _upsert_nodes(self, nodes, lexical_graph_config):  # type: ignore[override]
+            super()._upsert_nodes(self._clean_nodes(nodes), lexical_graph_config)
+
+        async def run(
+            self,
+            graph: Neo4jGraph,
+            lexical_graph_config: LexicalGraphConfig = LexicalGraphConfig(),
+        ) -> KGWriterModel:
+            # Delegate to parent — _upsert_nodes override cleans nodes
+            # before writing via the parent's run() method.
+            return await super().run(graph, lexical_graph_config)
 
     llm = OpenAILLM(
         model_name=settings.GRAPHRAG_LLM,
@@ -413,7 +420,7 @@ async def _extract_with_llm(
 # ── Ingest ─────────────────────────────────────────────────────────────────────
 
 async def build_graph_for_document(
-    kb_id: int,
+    kb_id: Optional[int],
     document_id: int,
     file_name: str,
     chunks: list[str],
@@ -452,8 +459,8 @@ async def build_graph_for_document(
         collection_name = f"kb_{kb_id}"
 
     logger.info(
-        "GraphService[llm]: writing %d Chunk nodes for doc %d (kb=%d)",
-        len(chunks), document_id, kb_id,
+        "GraphService[llm]: writing %d Chunk nodes for doc %d (kb=%s, ds=%s)",
+        len(chunks), document_id, kb_id, data_store_id,
     )
 
     # Write Chunk nodes — sync Neo4j I/O, must run in executor to avoid
@@ -722,7 +729,7 @@ def enrich_docs_with_graph(docs: list[LangchainDocument]) -> list[LangchainDocum
 
 # ── Deletion ───────────────────────────────────────────────────────────────────
 
-def delete_graph_for_document(kb_id: int, document_id: int) -> None:
+def delete_graph_for_document(kb_id: Optional[int], document_id: int) -> None:
     """
     Remove all Neo4j Chunk nodes for a deleted document, and clean up
     any Entity nodes that no longer have any Chunk connections.

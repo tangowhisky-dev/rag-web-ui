@@ -265,7 +265,7 @@ def create_datastore(
             detail=f"DataStore with this path already exists (id={existing.id})",
         )
 
-    # Count files on creation
+    # Count files on creation (pre-scan heuristic — no ingestion yet)
     file_count = count_files_in_folder(abs_path, payload.scan_pattern)
 
     ds = DataStore(
@@ -276,8 +276,7 @@ def create_datastore(
         auto_scan_enabled=payload.auto_scan_enabled,
         auto_scan_interval_minutes=payload.auto_scan_interval_minutes,
         last_scan_total_files=file_count,
-        last_scan_at=datetime.now(timezone.utc),
-        last_scan_status="completed",
+        last_scan_status="never",
         last_scan_processed=0,
     )
     db.add(ds)
@@ -373,7 +372,25 @@ def update_datastore(
     db.commit()
     db.refresh(ds)
     logger.info("[DATASTORE] updated id=%d", ds.id)
-    return ds
+    # Get assigned orgs for this datastore
+    links = (
+        db.query(OrganizationDataStore)
+        .join(Organisation)
+        .filter(
+            OrganizationDataStore.data_store_id == ds.id,
+            OrganizationDataStore.is_active == True,
+        )
+        .all()
+    )
+    resp = _serialize_ds(ds)
+    resp["assigned_orgs"] = [
+        {
+            "id": link.organisation.id,
+            "name": link.organisation.name,
+        }
+        for link in links
+    ]
+    return DataStoreResponse(**resp)
 
 
 @router.delete("/datastores/{datastore_id}", status_code=204)
@@ -649,7 +666,13 @@ def trigger_datastore_scan(
             detail=f"DataStore folder does not exist: {ds.folder_path}",
         )
 
-    # Update status to "running"
+    # Count files BEFORE scan to capture the latest state
+    abs_path = os.path.abspath(ds.folder_path)
+    latest_file_count = count_files_in_folder(abs_path, ds.scan_pattern)
+    ds.last_scan_total_files = latest_file_count
+    ds.last_scan_at = datetime.now(timezone.utc)
+
+    # Start scan
     ds.last_scan_status = "running"
     ds.last_scan_error = None
     db.commit()

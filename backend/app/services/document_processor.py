@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from openai import AsyncOpenAI
 from qdrant_client import QdrantClient
+from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.models import (
     Distance,
     PointIdsList,
@@ -59,6 +60,8 @@ SUPPORTED_EXTENSIONS = {
     # Archives (recursively processes contents)
     ".zip",
 }
+
+logger = logging.getLogger(__name__)
 
 CONTENT_TYPE_MAP = {
     ".pdf":   "application/pdf",
@@ -121,23 +124,37 @@ def _get_qdrant_collection_name(data_store_id: Optional[int], kb_id: Optional[in
 
 
 def _ensure_qdrant_collection(client: QdrantClient, collection_name: str) -> None:
-    """Create a Qdrant collection if it does not exist."""
+    """Create a Qdrant collection if it does not exist.
+
+    Handles the race condition where two concurrent ingestion tasks both
+    try to create the same collection.  A 409 Conflict simply means
+    another thread already created it — that is fine.
+    """
     existing = {c.name for c in client.get_collections().collections}
     if collection_name not in existing:
-        client.create_collection(
-            collection_name=collection_name,
-            vectors_config={
-                "dense": VectorParams(
-                    size=settings.DENSE_EMBEDDING_DIM,
-                    distance=Distance.COSINE,
+        try:
+            client.create_collection(
+                collection_name=collection_name,
+                vectors_config={
+                    "dense": VectorParams(
+                        size=settings.DENSE_EMBEDDING_DIM,
+                        distance=Distance.COSINE,
+                    )
+                },
+                sparse_vectors_config={
+                    "sparse": SparseVectorParams(
+                        index=SparseIndexParams(on_disk=False)
+                    )
+                },
+            )
+        except UnexpectedResponse as e:
+            # 409 means another thread created the collection first — harmless
+            if "409" in str(e) or "already exists" in str(e).lower():
+                logger.debug(
+                    "Qdrant collection %s already created by concurrent task", collection_name
                 )
-            },
-            sparse_vectors_config={
-                "sparse": SparseVectorParams(
-                    index=SparseIndexParams(on_disk=False)
-                )
-            },
-        )
+            else:
+                raise
 
 
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
@@ -900,12 +917,16 @@ async def process_document_background(
             logger.info("[PROGRESS_TIMEOUT] task_id=%s completed_ok=true", task_id)
             logger.info(f"Task {task_id}: Processing completed successfully")
     
-            # ── Step 9: Build Neo4j knowledge graph (non-fatal) ──────────────────
+            # ── Step 9: Build Neo4j knowledge graph (non-fatal, awaited) ──
+            # Await the graph build directly so the event loop stays alive until
+            # it completes.  This prevents "Task was destroyed but it is pending"
+            # when the loop would otherwise close while the graph task is running.
             if settings.GRAPHRAG_ENABLED:
                 _doc_id = document.id   # capture plain int before session closes
                 _chunks = [p[1] for p in qdrant_payloads]
                 _chunk_ids = [p[0] for p in qdrant_payloads]
                 _task_id = task_id
+
                 async def _build_graph() -> None:
                     # Mark graph extraction as in-progress in the DB
                     from app.db.session import SessionLocal as _SessionLocal
@@ -918,7 +939,7 @@ async def process_document_background(
                             _db.commit()
                     finally:
                         _db.close()
-    
+
                     try:
                         from app.services.graph_service import build_graph_for_document
                         await build_graph_for_document(
@@ -927,8 +948,8 @@ async def process_document_background(
                             file_name=file_name,
                             chunks=_chunks,
                             chunk_ids=_chunk_ids,
+                            data_store_id=data_store_id,
                         )
-                        logger.info(f"Task {task_id}: Knowledge graph built in Neo4j")
                         _db2 = _SessionLocal()
                         try:
                             _t = _db2.query(_PT).filter(_PT.id == _task_id).first()
@@ -952,7 +973,17 @@ async def process_document_background(
                                 _db3.commit()
                         finally:
                             _db3.close()
-                asyncio.create_task(_build_graph())
+
+                try:
+                    await _build_graph()
+                    logger.info(f"Task {task_id}: Knowledge graph built in Neo4j")
+                except asyncio.CancelledError:
+                    logger.warning(f"Task {task_id}: Graph build cancelled")
+                except Exception as _e:
+                    logger.warning(
+                        f"Task {task_id}: Graph build failed (non-fatal): {_e}",
+                        exc_info=True,
+                    )
     
     except Exception as e:
         logger.error(f"Task {task_id}: Error processing document: {str(e)}")

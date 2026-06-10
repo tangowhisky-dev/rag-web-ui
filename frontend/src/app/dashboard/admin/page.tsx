@@ -1,23 +1,35 @@
 'use client';
 
-import { Building2, Users } from 'lucide-react';
+import { Building2, Database, Users } from 'lucide-react';
+import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 
 interface AdminCounts {
   organizations: number;
   users: number;
+  data_sources: number;
 }
+
+type AdminCountsKey = keyof AdminCounts;
 
 // LLM config is managed per-organisation on the Orgs page (LLM Config button).
 // The standalone /dashboard/admin/llm-config page does not exist.
 
+const ROUTE_MAP: Record<AdminCountsKey, string> = {
+  organizations: '/dashboard/admin/orgs',
+  users: '/dashboard/admin/users',
+  data_sources: '/dashboard/admin/data-sources',
+};
+
 const STAT_CARDS = [
   { label: 'Organisations', key: 'organizations' as const, icon: Building2 },
   { label: 'Users', key: 'users' as const, icon: Users },
+  { label: 'Data Sources', key: 'data_sources' as const, icon: Database },
 ];
 
 export default function AdminPage() {
+  const router = useRouter();
   const [counts, setCounts] = useState<AdminCounts | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -43,11 +55,12 @@ export default function AdminPage() {
           </div>
         )}
 
-        <div className="grid gap-6 md:grid-cols-2">
+        <div className="grid gap-6 md:grid-cols-3">
           {STAT_CARDS.map(({ label, key, icon: Icon }) => (
-            <div
+            <button
               key={label}
-              className="rounded-2xl border bg-card text-card-foreground p-8 hover:shadow-md transition-shadow"
+              onClick={() => router.push(ROUTE_MAP[key])}
+              className="rounded-2xl border bg-card text-card-foreground p-8 text-left hover:shadow-md transition-shadow cursor-pointer focus:outline-none focus:ring-2 focus:ring-primary"
             >
               <div className="flex items-center gap-4">
                 <div className="rounded-full bg-muted p-3">
@@ -60,7 +73,7 @@ export default function AdminPage() {
                   <p className="text-muted-foreground mt-1 text-sm">{label}</p>
                 </div>
               </div>
-            </div>
+            </button>
           ))}
         </div>
       </div>
