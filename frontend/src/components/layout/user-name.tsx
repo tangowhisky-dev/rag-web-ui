@@ -1,9 +1,15 @@
 'use client';
 
-import { getTokenClaims } from '@/lib/auth';
+import { useState, useEffect } from 'react';
+import { getTokenClaims, type TokenClaims } from '@/lib/auth';
 
 export function UserName() {
-  const claims = getTokenClaims();
+  const [claims, setClaims] = useState<TokenClaims | null>(null);
+
+  useEffect(() => {
+    setClaims(getTokenClaims());
+  }, []);
+
   const username = claims?.sub ?? null;
 
   if (!username || !claims) return null;

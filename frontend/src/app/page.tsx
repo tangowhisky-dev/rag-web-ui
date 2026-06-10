@@ -290,38 +290,17 @@ export default function Home() {
           </div>
           <div className="grid sm:grid-cols-3 gap-8">
             <div className="relative pl-12">
-              <span className="absolute left-0 top-0 text-4xl font-black text-muted/60 leading-none select-none">01</span>
+              <span className="absolute left-0 top-0 text-4xl font-black text-muted/100 leading-none select-none">01</span>
               <h3 className="font-semibold mb-2 mt-1">Create a Knowledge Base</h3>
               <p className="text-sm text-muted-foreground leading-relaxed">Name it, describe it, hit create. Takes ten seconds.</p>
             </div>
             <div className="relative pl-12">
-              <span className="absolute left-0 top-0 text-4xl font-black text-muted/60 leading-none select-none">02</span>
-              <h3 className="font-semibold mb-3">Add Your Data</h3>
-              <div className="space-y-3">
-                <Link
-                  href="/dashboard/knowledge"
-                  className="flex items-start gap-3 p-3 rounded-xl border hover:bg-muted/50 transition-colors text-left"
-                >
-                  <Upload className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground" />
-                  <div>
-                    <p className="text-sm font-medium">Upload Documents</p>
-                    <p className="text-xs text-muted-foreground">Drag in your PDFs, docs, images, CSVs</p>
-                  </div>
-                </Link>
-                <Link
-                  href="/dashboard/admin/data-sources"
-                  className="flex items-start gap-3 p-3 rounded-xl border hover:bg-muted/50 transition-colors text-left"
-                >
-                  <Link2 className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground" />
-                  <div>
-                    <p className="text-sm font-medium">Link Data Sources</p>
-                    <p className="text-xs text-muted-foreground">Connect SMB shares — auto-synced</p>
-                  </div>
-                </Link>
-              </div>
+              <span className="absolute left-0 top-0 text-4xl font-black text-muted/100 leading-none select-none">02</span>
+              <h3 className="font-semibold mb-2 mt-1">Add Your Data</h3>
+              <p className="text-sm text-muted-foreground leading-relaxed">Upload documents or link data sources — PDFs, docs, images, or SMB shares.</p>
             </div>
             <div className="relative pl-12">
-              <span className="absolute left-0 top-0 text-4xl font-black text-muted/60 leading-none select-none">03</span>
+              <span className="absolute left-0 top-0 text-4xl font-black text-muted/100 leading-none select-none">03</span>
               <h3 className="font-semibold mb-2 mt-1">Ask Anything</h3>
               <p className="text-sm text-muted-foreground leading-relaxed">Open a chat, type your question, get a cited answer with full context.</p>
             </div>
