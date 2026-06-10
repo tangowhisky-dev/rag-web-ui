@@ -2,7 +2,8 @@
 
 import { useEffect, useState } from "react";
 import DashboardLayout from "@/components/layout/dashboard-layout";
-import { Book, MessageSquare, ArrowRight, Plus, Upload, Brain, Sparkles, Shield } from "lucide-react";
+import { Book, MessageSquare, ArrowRight, Plus, Brain, Sparkles, Shield } from "lucide-react";
+import { Step2Options } from "@/components/layout/step2-options";
 import { api, ApiError } from "@/lib/api";
 import { isAdmin } from "@/lib/auth";
 
@@ -134,21 +135,7 @@ export default function DashboardPage() {
             </p>
           </a>
 
-          <a
-            href="/dashboard/knowledge"
-            className="relative flex flex-col items-center justify-center rounded-2xl border bg-card text-card-foreground p-5 hover:shadow-md hover:border-foreground/30 transition-all"
-          >
-            <span className="absolute top-2 left-2 flex h-7 w-7 items-center justify-center rounded-full bg-muted text-xs font-bold">
-              2
-            </span>
-            <div className="rounded-full bg-muted p-3 mb-3">
-              <Upload className="h-6 w-6 text-foreground" />
-            </div>
-            <h3 className="text-base font-medium mb-1">Upload Documents</h3>
-            <p className="text-sm text-muted-foreground text-center">
-              Add PDFs, documents or images to your knowledge bases
-            </p>
-          </a>
+          <Step2Options />
 
           <a
             href="/dashboard/chat/new"
