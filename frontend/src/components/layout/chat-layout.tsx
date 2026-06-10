@@ -59,7 +59,6 @@ function ChatLayoutInner({ children }: ChatLayoutProps) {
               <span className="sm:hidden">Password</span>
             </button>
             <ThemeToggle />
-            <UserName />
             <button
               onClick={handleLogout}
               className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
@@ -67,6 +66,7 @@ function ChatLayoutInner({ children }: ChatLayoutProps) {
               <LogOut className="h-4 w-4" />
               <span className="hidden sm:inline">Sign out</span>
             </button>
+            <UserName />
           </div>
         </div>
       </header>
