@@ -7,6 +7,7 @@ import { ThemeToggle } from '@/components/ui/theme-toggle';
 import Breadcrumb from '@/components/ui/breadcrumb';
 import AdminSidebar from '@/components/admin/admin-sidebar';
 import { isAdmin } from '@/lib/auth';
+import { UserName } from '@/components/layout/user-name';
 
 // LLM config is managed per-organisation on the Orgs page (LLM Config button).
 // The standalone /dashboard/admin/llm-config page does not exist.
@@ -59,6 +60,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
           <Breadcrumb overrideLastLabel="Admin" />
           <div className="ml-auto flex items-center gap-1">
             <ThemeToggle />
+            <UserName />
             <button
               onClick={handleLogout}
               className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"

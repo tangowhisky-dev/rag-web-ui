@@ -8,6 +8,7 @@ import ChatSidebar from "@/components/chat/chat-sidebar";
 import { ChatProvider, useChatContext } from "@/contexts/chat-context";
 import Breadcrumb from "@/components/ui/breadcrumb";
 import { ChangePasswordDialog } from "@/components/ui/change-password-dialog";
+import { UserName } from "./user-name";
 
 interface ChatLayoutProps {
   children: React.ReactNode;
@@ -58,6 +59,7 @@ function ChatLayoutInner({ children }: ChatLayoutProps) {
               <span className="sm:hidden">Password</span>
             </button>
             <ThemeToggle />
+            <UserName />
             <button
               onClick={handleLogout}
               className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"

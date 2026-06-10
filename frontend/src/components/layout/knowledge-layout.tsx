@@ -8,6 +8,7 @@ import KnowledgeSidebar from "@/components/knowledge/knowledge-sidebar";
 import { KnowledgeProvider } from "@/contexts/knowledge-context";
 import Breadcrumb from "@/components/ui/breadcrumb";
 import { ChangePasswordDialog } from "@/components/ui/change-password-dialog";
+import { UserName } from "./user-name";
 
 interface KnowledgeLayoutProps {
   children: React.ReactNode;
@@ -50,6 +51,7 @@ export default function KnowledgeLayout({ children, pageTitle }: KnowledgeLayout
                 <span className="sm:hidden">Password</span>
               </button>
               <ThemeToggle />
+              <UserName />
               <button
                 onClick={handleLogout}
                 className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
