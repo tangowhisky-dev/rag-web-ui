@@ -5,7 +5,7 @@ import { useRouter, usePathname } from 'next/navigation';
 import Link from 'next/link';
 import {
   PanelLeftClose, PanelLeftOpen,
-  Building2, Users, FolderOpen, Database,
+  Building2, Users, Database,
 } from 'lucide-react';
 
 interface AdminSidebarProps {
@@ -17,7 +17,6 @@ const NAV_ITEMS = [
   { label: 'Orgs', href: '/dashboard/admin/orgs', icon: Building2 },
   { label: 'Users', href: '/dashboard/admin/users', icon: Users },
   { label: 'Data Sources', href: '/dashboard/admin/data-sources', icon: Database },
-  { label: 'Watcher', href: '/dashboard/admin/watcher', icon: FolderOpen },
 ];
 
 // LLM config is managed per-organisation on the Orgs page (LLM Config button).

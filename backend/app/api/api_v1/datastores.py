@@ -100,6 +100,10 @@ class DataStoreResponse(BaseModel):
     assigned_orgs: List[dict] = []
     created_at: datetime
     updated_at: datetime
+    # Real-time scan progress (populated when a scan is running)
+    scan_progress: Optional[dict] = None
+    # Pending changes detected but not yet processed (batch deferral)
+    pending_changes: int = 0
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -117,7 +121,10 @@ class DataStoreStatusResponse(BaseModel):
     last_scan_error: Optional[str] = None
     last_scan_total_files: int
     last_scan_processed: int
+    # Pending changes detected but not yet processed (batch deferral)
     pending_changes: int = 0
+    # Real-time scan progress (populated when a scan is running)
+    scan_progress: Optional[dict] = None
 
 
 class ScanResultResponse(BaseModel):
@@ -226,6 +233,28 @@ def list_datastores(
             }
             for link in links
         ]
+        # Include real-time scan progress if a scan is running
+        try:
+            watcher = _get_watcher()
+            status = watcher.get_status()
+            resp["pending_changes"] = 0
+            for ds_status in status.get("datastores", []):
+                if ds_status.get("datastore_id") == ds.id:
+                    resp["pending_changes"] = ds_status.get("pending_changes", 0)
+                    break
+            for scan in status.get("active_scans", []):
+                if scan.get("datastore_id") == ds.id:
+                    resp["scan_progress"] = {
+                        "total_files": scan.get("total", 0),
+                        "processed_files": scan.get("processed", 0),
+                        "status": scan.get("status", "idle"),
+                        "new_files": scan.get("new", 0),
+                        "skipped_files": scan.get("skipped", 0),
+                        "error_files": scan.get("error", 0),
+                    }
+                    break
+        except HTTPException:
+            pass
         result.append(DataStoreResponse(**resp))
     return result
 
@@ -370,6 +399,18 @@ def update_datastore(
         ds.auto_scan_interval_minutes = payload.auto_scan_interval_minutes
 
     db.commit()
+
+    # Immediately sync watchers when auto-scan settings change
+    if payload.auto_scan_enabled is not None or payload.auto_scan_interval_minutes is not None:
+        try:
+            watcher = _get_watcher()
+            if watcher.is_running:
+                watcher.sync_watchers_with_database()
+        except Exception as e:
+            logger.warning(
+                "[DATASTORE] failed_to_sync_watchers_on_update id=%d: %s",
+                ds.id, e,
+            )
     db.refresh(ds)
     logger.info("[DATASTORE] updated id=%d", ds.id)
     # Get assigned orgs for this datastore
@@ -526,6 +567,19 @@ def get_datastore_status(
         for ds_status in status.get("datastores", []):
             if ds_status.get("datastore_id") == datastore_id:
                 resp["pending_changes"] = ds_status.get("pending_changes", 0)
+                break
+
+        # Include real-time scan progress
+        for scan in status.get("active_scans", []):
+            if scan.get("datastore_id") == datastore_id:
+                resp["scan_progress"] = {
+                    "total_files": scan.get("total", 0),
+                    "processed_files": scan.get("processed", 0),
+                    "status": scan.get("status", "idle"),
+                    "new_files": scan.get("new", 0),
+                    "skipped_files": scan.get("skipped", 0),
+                    "error_files": scan.get("error", 0),
+                }
                 break
     except HTTPException:
         pass

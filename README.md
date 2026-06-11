@@ -26,7 +26,7 @@ RAG Web UI is a self-hosted knowledge base Q&A system with multi-tenant org mana
 
 **Retrieval:** 3-leg hybrid search (dense vector via Qdrant, sparse via SPLADE, exact via MySQL FULLTEXT) fused by Reciprocal Rank Fusion (RRF). Optional **GraphRAG** adds entity/relationship extraction into Neo4j for graph-traversal expansion.
 
-**Multi-tenancy:** Admins create organisations, assign users and data sources to orgs, and configure org-specific LLM settings and local/SMB file watchers.
+**Multi-tenancy:** Admins create organisations, assign users and data sources to orgs, and configure org-specific LLM settings.
 
 > **Based on:** An opinionated fork of [rag-web-ui/rag-web-ui](https://github.com/rag-web-ui/rag-web-ui). Credit to the original authors. Goal: minimal dependencies, visible RAG internals, and an agentic pipeline that genuinely improves retrieval on hard queries.
 
@@ -222,7 +222,7 @@ MATCH (c:Chunk)-[:FROM_CHUNK]-(e:__Entity__ {name: "Apple"}) RETURN c, e
 
 ## Multi-Tenancy & Admin Panel
 
-The admin panel at `/dashboard/admin` provides org-level management, per-org LLM configuration, file watchers, and data source management.
+The admin panel at `/dashboard/admin` provides org-level management, per-org LLM configuration, and data source management.
 
 ### Organisations
 
@@ -231,8 +231,6 @@ Admins create organisations and assign users, data sources, and LLM settings to 
 - **Per-org LLM config:** Each org can have its own API base URL, model name, and query model via `PUT /api/admin/orgs/{org_id}/llm-config`
 - **Per-org ingestion status:** Aggregated status across all KBs in an org (idle/running/completed/failed with doc counts)
 - **Per-org abbreviations:** Custom short-expansion mappings for query matching
-- **Per-org local folder watcher:** Set a watch directory for automatic document ingestion
-- **Per-org SMB share:** Configure an SMB share for network file access
 
 ### Users
 
@@ -250,20 +248,6 @@ Folder-based document ingestion sources:
 - **Assign to orgs:** Link data sources to specific organisations
 - **Scan status:** Progress bar showing last scan with processed/total counts
 - **Manual trigger:** Force a scan from the admin panel
-
-### Watcher Management
-
-- **Local folder watching:** Set a watch directory per org for automatic ingestion
-- **SMB share monitoring:** Status display for connected/disconnected SMB shares per org
-- **Manual scan trigger:** Force a scan of watched directories
-- **Bulk status:** View all orgs' watcher status in one place
-
-### File Watcher Configuration
-
-| Variable | Description |
-|---|---|
-| `WATCH_DIR` | Default local directory to watch (if set) |
-| `SMB_MASTER_KEY` | Fernet key for encrypting SMB passwords |
 
 ## API Reference
 
@@ -358,7 +342,7 @@ The OpenAPI reference is available at http://localhost:8000/redoc. Below are the
 |---|---|---|---|
 | GET | `/` | admin | List all orgs (with user_count, hierarchy) |
 | POST | `/` | admin | Create org (parent_id required, auto-computes path) |
-| PATCH | `/{org_id}` | admin | Update org (name, parent, watch_dir, smb_host, smb_share) |
+| PATCH | `/{org_id}` | admin | Update org (name, parent) |
 | DELETE | `/{org_id}` | admin | Delete org (no children, no users) |
 | GET | `/{org_id}/llm-config` | admin | Get org LLM config |
 | PUT | `/{org_id}/llm-config` | admin | Upsert org LLM config (api_base, model_name, query_model) |
@@ -390,25 +374,6 @@ The OpenAPI reference is available at http://localhost:8000/redoc. Below are the
 | DELETE | `/datastores/{id}/assign` | admin | Unassign datastore from orgs |
 | GET | `/datastores/{id}/status` | admin | Get scan status |
 | POST | `/datastores/{id}/scan` | admin | Trigger manual scan |
-
-### Admin — Watcher (prefix: `/api/admin`)
-
-| Method | URL | Auth | Description |
-|---|---|---|---|
-| POST | `/orgs/{org_id}/watch-dir` | admin | Set watch directory |
-| DELETE | `/orgs/{org_id}/watch-dir` | admin | Remove watch directory |
-| GET | `/orgs/{org_id}/watcher-status` | admin | Get watcher status |
-| GET | `/watcher-status-all` | admin | Bulk watcher status for all orgs |
-| POST | `/orgs/{org_id}/watcher-trigger` | admin | Manually trigger scan |
-
-### Admin — SMB (prefix: `/api/admin/orgs/{org_id}/smb`)
-
-| Method | URL | Auth | Description |
-|---|---|---|---|
-| POST | `/smb-config` | admin | Save SMB config (encrypts password) |
-| DELETE | `/smb-config` | admin | Clear SMB config |
-| POST | `/smb-test-connection` | admin | Test SMB connection |
-| POST | `/smb-scan` | admin | Manually trigger SMB scan |
 
 ### Admin — Counts
 
@@ -448,7 +413,7 @@ Login: System=MySQL, Server=`db`, User=`ragwebui`, Password=`ragwebui`, Database
 - **Clickable citations** `[N]` in all answering modes — linked to source chunk with score bar and leg badge
 - **Stop button** during generation (AbortController); partial message preserved with `*(generation stopped)*`
 - **Rate limiting** on login: 3 failed attempts trigger exponential backoff (15s → 30s → 60s → 120s → 240s → 480s → 900s)
-- **Multi-tenancy**: org-level user management, per-org LLM config, data source assignment, file watchers, and SMB shares
+- **Multi-tenancy**: org-level user management, per-org LLM config, and data source assignment
 - **Dark / light / system theme toggle**
 - **Multi-turn chat** with rolling conversation summary
 

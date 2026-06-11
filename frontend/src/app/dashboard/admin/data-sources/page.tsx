@@ -47,6 +47,16 @@ interface DataStore {
   assigned_orgs: Array<{ id: number; name: string }>;
   created_at: string;
   updated_at: string;
+  // Real-time scan progress (populated when a scan is running)
+  scan_progress?: {
+    total_files: number;
+    processed_files: number;
+    status: string;
+    new_files: number;
+    skipped_files: number;
+    error_files: number;
+  };
+  pending_changes: number;
 }
 
 interface ScanResult {
@@ -114,14 +124,23 @@ export default function DataSourcesPage() {
   const [assigningId, setAssigningId] = useState<number | null>(null);
   const [selectedOrgIds, setSelectedOrgIds] = useState<number[]>([]);
 
-  // Poll for scan progress when scanning
+  // Poll for scan progress when ANY datastore is scanning
   useEffect(() => {
-    if (triggering.size > 0) {
-      // Poll every 2 seconds for scan progress
+    const hasRunningScan = datastores.some(
+      (ds) => ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running'
+    );
+    const hasManualTrigger = triggering.size > 0;
+
+    if (hasManualTrigger) {
+      // Poll every 2 seconds for manually triggered scans
       pollingRef.current = setInterval(() => {
-        // Update scan progress for each scanning datastore
         fetchData();
       }, 2000);
+    } else if (hasRunningScan) {
+      // Poll every 5 seconds for background file event scans
+      pollingRef.current = setInterval(() => {
+        fetchData();
+      }, 5000);
     } else {
       if (pollingRef.current) {
         clearInterval(pollingRef.current);
@@ -134,7 +153,7 @@ export default function DataSourcesPage() {
         clearInterval(pollingRef.current);
       }
     };
-  }, [triggering]);
+  }, [triggering, datastores]);
 
   useEffect(() => {
     fetchData();
@@ -387,7 +406,15 @@ export default function DataSourcesPage() {
                     )}
                   </TableCell>
                   <TableCell className="text-xs text-muted-foreground">
-                    <StatusBadge status={ds.last_scan_status} isRunning={ds.last_scan_status === 'running'} />
+                    <div className="flex items-center gap-1">
+                      <StatusBadge status={ds.last_scan_status} isRunning={ds.last_scan_status === 'running'} />
+                      {ds.pending_changes > 0 && ds.last_scan_status !== 'running' && (
+                        <span className="inline-flex items-center gap-1 text-[10px] text-yellow-600">
+                          <span className="w-1.5 h-1.5 rounded-full bg-yellow-500 animate-pulse"></span>
+                          {ds.pending_changes}
+                        </span>
+                      )}
+                    </div>
                     <div className="mt-1">{formatLastScan(ds.last_scan_at)}</div>
                     {ds.last_scan_status === 'error' && ds.last_scan_error && (
                       <div className="mt-1 text-xs text-red-500 truncate max-w-[180px]" title={ds.last_scan_error}>
@@ -424,30 +451,31 @@ export default function DataSourcesPage() {
                         {ds.last_scan_total_files} files
                         <br />
                         {ds.last_scan_processed} processed
+                        {ds.pending_changes > 0 && (
+                          <div className="mt-1 flex items-center gap-1">
+                            <div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse"></div>
+                            <span className="text-yellow-600">{ds.pending_changes} pending</span>
+                          </div>
+                        )}
                       </div>
                     )}
                   </TableCell>
                   <TableCell className="space-x-1">
                     <Button
-                      variant="outline"
+                      variant={ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' ? 'destructive' : 'outline'}
                       size="sm"
-                      onClick={() => handleTriggerScan(ds.id)}
-                      disabled={triggering.has(ds.id) || ds.last_scan_status === 'running'}
-                      title="Trigger manual scan"
+                      onClick={() => {
+                        if (ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running') {
+                          handleStopScan(ds.id);
+                        } else {
+                          handleTriggerScan(ds.id);
+                        }
+                      }}
+                      disabled={triggering.has(ds.id)}
+                      title={ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' ? 'Stop scan' : 'Trigger manual scan'}
                     >
-                      {triggering.has(ds.id) ? 'Scanning…' : 'Scan'}
+                      {ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' ? 'Stop' : 'Scan'}
                     </Button>
-                    {ds.last_scan_status === 'running' && (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => handleStopScan(ds.id)}
-                        className="text-red-600 hover:text-red-700"
-                        title="Stop scan"
-                      >
-                        Stop
-                      </Button>
-                    )}
                     <Button
                       variant="outline"
                       size="sm"

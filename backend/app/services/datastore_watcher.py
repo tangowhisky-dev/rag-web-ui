@@ -96,12 +96,14 @@ class DatastoreFileEventHandler:
         callback,
         debounce_ms: int = 1000,
         min_interval_seconds: int = 300,
+        debouncer: Optional[_Debouncer] = None,
     ) -> None:
         self.datastore_id = datastore_id
         self.org_id = org_id
         self.callback = callback
         self.debounce_ms = debounce_ms / 1000.0
         self.min_interval_seconds = min_interval_seconds
+        self.debouncer = debouncer
         self.last_call: Dict[str, float] = {}
         self.last_processing_time: float = 0
         self.pending_changes: List[Dict[str, Any]] = []
@@ -115,20 +117,30 @@ class DatastoreFileEventHandler:
             self.last_call[src_path] = now
             return True
 
-    def _queue_change(self, event, event_type: str) -> None:
-        with self._lock:
-            self.pending_changes.append(
-                {
-                    "datastore_id": self.datastore_id,
-                    "org_id": self.org_id,
-                    "path": event.src_path,
-                    "event_type": event_type,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                }
-            )
-            # Check if it's time to process batch
-            if time_module.time() - self.last_processing_time >= self.min_interval_seconds:
+        def _queue_change(self, event, event_type: str) -> None:
+            with self._lock:
+                self.pending_changes.append(
+                    {
+                        "datastore_id": self.datastore_id,
+                        "org_id": self.org_id,
+                        "path": event.src_path,
+                        "event_type": event_type,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+            pending_count = len(self.pending_changes)
+            time_since_last = time_module.time() - self.last_processing_time
+            if time_since_last >= self.min_interval_seconds:
+                logger.info(
+                    "[WATCHER] batch_trigger datastore_id=%d path=%s reason=immediate (time_since_last=%.1fs >= interval=%.0fs, pending=%d)",
+                    self.datastore_id, event.src_path, time_since_last, self.min_interval_seconds, pending_count,
+                )
                 self._process_batch()
+            else:
+                logger.info(
+                    "[WATCHER] batch_deferred datastore_id=%d path=%s reason=within_interval (time_since_last=%.1fs < interval=%.0fs, pending=%d, wait=%.1fs)",
+                    self.datastore_id, event.src_path, time_since_last, self.min_interval_seconds, pending_count, self.min_interval_seconds - time_since_last,
+                )
 
     def _handle_deletion(
         self,
@@ -282,6 +294,10 @@ class DatastoreFileEventHandler:
             self.pending_changes.clear()
             self.last_processing_time = time_module.time()
 
+        logger.info(
+            "[WATCHER] batch_process datastore_id=%d pending=%d",
+            self.datastore_id, len(changes_to_process),
+        )
         try:
             self.callback(self.datastore_id, self.org_id, changes_to_process)
         except Exception as e:
@@ -314,22 +330,88 @@ class DatastoreFileEventHandler:
         if event.is_directory:
             return
         if not self._should_process(event.src_path):
+            logger.debug(
+                "[WATCHER] event_debounced datastore_id=%d path=%s reason=short_gap",
+                self.datastore_id, event.src_path,
+            )
             return
-        self._queue_change(event, "created")
+        logger.info(
+            "[WATCHER] event_detected datastore_id=%d path=%s event=created",
+            self.datastore_id, event.src_path,
+        )
+        self._dispatch(event.src_path, "created")
 
     def on_modified(self, event) -> None:
         if event.is_directory:
             return
         if not self._should_process(event.src_path):
+            logger.debug(
+                "[WATCHER] event_debounced datastore_id=%d path=%s reason=short_gap",
+                self.datastore_id, event.src_path,
+            )
             return
-        self._queue_change(event, "modified")
+        logger.info(
+            "[WATCHER] event_detected datastore_id=%d path=%s event=modified",
+            self.datastore_id, event.src_path,
+        )
+        self._dispatch(event.src_path, "modified")
 
     def on_deleted(self, event) -> None:
         if event.is_directory:
             return
         if not self._should_process(event.src_path):
+            logger.debug(
+                "[WATCHER] event_debounced datastore_id=%d path=%s reason=short_gap",
+                self.datastore_id, event.src_path,
+            )
             return
-        self._queue_change(event, "deleted")
+        logger.info(
+            "[WATCHER] event_detected datastore_id=%d path=%s event=deleted",
+            self.datastore_id, event.src_path,
+        )
+        self._dispatch(event.src_path, "deleted")
+
+    def on_moved(self, event) -> None:
+        if event.is_directory:
+            return
+        if not self._should_process(event.dest_path):
+            logger.debug(
+                "[WATCHER] event_debounced datastore_id=%d path=%s reason=short_gap",
+                self.datastore_id, event.dest_path,
+            )
+            return
+        logger.info(
+            "[WATCHER] event_detected datastore_id=%d path=%s event=moved from=%s",
+            self.datastore_id, event.dest_path, event.src_path,
+        )
+        self._dispatch(event.dest_path, "moved")
+
+    def _dispatch(self, path: str, event_type: str) -> None:
+        """Apply debouncer then queue the change."""
+        if self.debouncer is not None:
+            coalesced = self.debouncer.touch(path, event_type)
+            if coalesced is None:
+                logger.debug(
+                    "[WATCHER] event_coalesced datastore_id=%d path=%s",
+                    self.datastore_id, path,
+                )
+                return  # debounced
+
+        # Delay processing by 1 second to allow file write to complete
+        logger.info(
+            "[WATCHER] event_queued datastore_id=%d path=%s event=%s reason=write_complete_delay",
+            self.datastore_id, path, event_type,
+        )
+        import threading as _threading
+        import time as _time
+
+        def _delayed_dispatch(p, et):
+            _time.sleep(1.0)
+            # Create a simple event-like object
+            event = type('_Event', (), {'src_path': p})()
+            self._queue_change(event, et)
+
+        _threading.Thread(target=_delayed_dispatch, args=(path, event_type), daemon=True).start()
 
 
 class DataStoreWatcher:
@@ -427,6 +509,18 @@ class DataStoreWatcher:
         self._executor.shutdown(wait=False, cancel_futures=True)
         logger.info("[WATCHER] service stopped")
 
+    @property
+    def is_running(self) -> bool:
+        """Check if the watcher service is running."""
+        return self._running
+
+    def sync_watchers_with_database(self) -> None:
+        """Sync watchers with database configuration.
+
+        Public method — called when datastore settings change via API.
+        """
+        self._sync_watchers_with_database()
+
     def add_datastore(self, datastore_id: int, org_id: int, folder_path: str, interval_minutes: int = 60) -> None:
         """Start watching a specific datastore folder."""
         abs_path = Path(folder_path).resolve()
@@ -452,6 +546,7 @@ class DataStoreWatcher:
             callback=self._on_changes,
             debounce_ms=1000,
             min_interval_seconds=interval_minutes * 60,
+            debouncer=self._debouncer,
         )
 
         try:
@@ -918,6 +1013,10 @@ class DataStoreWatcher:
             )
             return
 
+        logger.info(
+            "[WATCHER] ingestion_start datastore_id=%d path=%s doc_id=NEW",
+            datastore_id, event_path,
+        )
         db: Session = SessionLocal()
         try:
             # Create Document record (in-place, no copy to uploads)
@@ -1016,7 +1115,7 @@ class DataStoreWatcher:
         _, ext = os.path.splitext(fname)
         ext = ext.lower()
 
-        # Skip non-supported extensions
+       # Skip non-supported extensions
         if ext not in SUPPORTED_EXTENSIONS:
             return
 
@@ -1032,6 +1131,10 @@ class DataStoreWatcher:
 
         content_type = CONTENT_TYPE_MAP.get(ext, "application/octet-stream")
 
+        logger.info(
+            "[WATCHER] ingestion_update_start datastore_id=%d path=%s doc_id=%d",
+            datastore_id, event_path, document_id,
+        )
         db: Session = SessionLocal()
         try:
             doc = db.query(Document).filter(Document.id == document_id).first()
@@ -1370,6 +1473,12 @@ class DataStoreWatcher:
                     event_path,
                 )
                 return
+
+            # Log the file that is about to be processed
+            logger.info(
+                "[WATCHER] file_processing datastore_id=%d path=%s event=%s",
+                datastore_id, event_path, event_type,
+            )
         finally:
             db.close()
 
