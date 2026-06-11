@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(od *)",
+      "Bash(xxd)",
+      "Bash(python3 *)",
+      "Bash(python *)"
+    ]
+  },
+  "$version": 4
+}

@@ -657,7 +657,7 @@ class DataStoreWatcher:
                     matched = list(path.rglob(pattern))
                 else:
                     matched = list(path.glob(pattern))
-                all_files.update(f for f in matched if f.is_file())
+                all_files.update(f for f in matched if f.is_file() and not f.name.startswith("."))
 
             return len(all_files)
         except Exception:
@@ -710,13 +710,14 @@ class DataStoreWatcher:
 
                 for fname in files:
                     fpath = os.path.join(root, fname)
-                    summary["scanned"] += 1
 
                     try:
                         # Check if file matches scan_pattern
                         if not self._matches_pattern(fpath, ds.scan_pattern):
                             summary["skipped"] += 1
                             continue
+
+                        summary["scanned"] += 1
 
                         # Process file for this datastore (no KB knowledge needed)
                         future = self._handle_file_in_scan(fpath, datastore_id, scan_id)
@@ -772,6 +773,10 @@ class DataStoreWatcher:
 
     def _matches_pattern(self, filepath: str, pattern: str = "*") -> bool:
         """Check if a filepath matches the scan pattern."""
+        fname = os.path.basename(filepath)
+        # Exclude hidden files regardless of pattern
+        if fname.startswith("."):
+            return False
         if pattern == "*":
             return True
 
@@ -779,11 +784,11 @@ class DataStoreWatcher:
         for pat in patterns:
             if "*" in pat:
                 # Use fnmatch for glob patterns
-                if fnmatch.fnmatch(os.path.basename(filepath), pat):
+                if fnmatch.fnmatch(fname, pat):
                     return True
             else:
                 # Exact match
-                if os.path.basename(filepath) == pat:
+                if fname == pat:
                     return True
         return False
 
@@ -1149,12 +1154,12 @@ class DataStoreWatcher:
                 for root, _dirs, files in os.walk(ds.folder_path):
                     for fname in files:
                         fpath = os.path.join(root, fname)
-                        summary["scanned"] += 1
                         try:
                             # Check if file matches scan_pattern
                             if not self._matches_pattern(fpath, ds.scan_pattern):
                                 summary["skipped"] += 1
                                 continue
+                            summary["scanned"] += 1
                             self._handle_file(fpath, ds.id, "created")
                         except Exception as e:
                             logger.error(
@@ -1281,6 +1286,10 @@ class DataStoreWatcher:
         """Check if a filepath matches the scan pattern."""
         import fnmatch as _fnmatch
 
+        fname = os.path.basename(filepath)
+        # Exclude hidden files regardless of pattern
+        if fname.startswith("."):
+            return False
         if scan_pattern == "*":
             return True
 
@@ -1288,11 +1297,11 @@ class DataStoreWatcher:
         for pat in patterns:
             if "*" in pat:
                 # Use fnmatch for glob patterns
-                if _fnmatch.fnmatch(os.path.basename(filepath), pat):
+                if _fnmatch.fnmatch(fname, pat):
                     return True
             else:
                 # Exact match
-                if os.path.basename(filepath) == pat:
+                if fname == pat:
                     return True
         return False
 

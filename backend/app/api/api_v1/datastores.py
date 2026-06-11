@@ -37,7 +37,7 @@ def count_files_in_folder(folder_path: str, scan_pattern: str = "*") -> int:
                 matched = list(path.rglob(pattern))
             else:
                 matched = list(path.glob(pattern))
-            all_files.update(f for f in matched if f.is_file())
+            all_files.update(f for f in matched if f.is_file() and not f.name.startswith("."))
         
         return len(all_files)
     except Exception:
@@ -683,8 +683,8 @@ def trigger_datastore_scan(
     # Update datastore status with scan results
     ds.last_scan_at = datetime.now(timezone.utc)
     ds.last_scan_status = "completed" if result.get("errors", 0) == 0 else "error"
-    ds.last_scan_total_files = result.get("scanned", 0)
-    ds.last_scan_processed = result.get("new", 0) + result.get("modified", 0)
+    ds.last_scan_total_files = latest_file_count
+    ds.last_scan_processed = result.get("scanned", 0)
     if result.get("errors", 0) > 0:
         ds.last_scan_error = f"{result['errors']} errors during scan"
     else:
