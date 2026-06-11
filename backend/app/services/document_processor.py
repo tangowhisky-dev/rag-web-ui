@@ -157,7 +157,7 @@ def _ensure_qdrant_collection(client: QdrantClient, collection_name: str) -> Non
                 raise
 
 
-_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+from app.services.reasoning_tags import strip_reasoning_tags
 
 def _get_markitdown() -> MarkItDown:
     """
@@ -216,8 +216,8 @@ def _convert_to_markdown(abs_path: str, file_name: str, enable_ocr: Optional[boo
       True  → force OCR on (requires VISION_MODEL to be configured)
       False → force OCR off for this document regardless of global setting
 
-    Think traces (<think>...</think>) are stripped before returning.
-    Falls back gracefully to raw UTF-8 if conversion fails.
+    Think traces (reasoning tags configured in REASONING_TAGS) are stripped
+    before returning. Falls back gracefully to raw UTF-8 if conversion fails.
     """
     logger = logging.getLogger(__name__)
     try:
@@ -236,16 +236,13 @@ def _convert_to_markdown(abs_path: str, file_name: str, enable_ocr: Optional[boo
         result = md_instance.convert(abs_path)
         markdown_text = result.text_content or ""
 
-        # Strip thinking traces from reasoning models used for OCR.
-        # Pass 1: remove complete <think>...</think> blocks.
-        cleaned = _THINK_RE.sub("", markdown_text)
-        # Pass 2: remove any unclosed <think> prefix (truncated by max_tokens).
-        cleaned = re.sub(r"<think>.*", "", cleaned, flags=re.DOTALL).strip()
+        # Strip reasoning tag blocks configured in settings.REASONING_TAGS.
+        cleaned = strip_reasoning_tags(markdown_text)
 
         if len(cleaned) < len(markdown_text):
             stripped_chars = len(markdown_text) - len(cleaned)
             logger.info(
-                "[markitdown] stripped %d chars of thinking traces from %s",
+                "[markitdown] stripped %d chars of reasoning tags from %s",
                 stripped_chars, file_name,
             )
 

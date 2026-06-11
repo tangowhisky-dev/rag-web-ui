@@ -108,9 +108,12 @@ _SYNTHESIS_SYSTEM_PROMPT = (
 
 # ── LLM helpers ───────────────────────────────────────────────────────────────
 
+from app.services.reasoning_tags import strip_reasoning_tags
+
+
 def _strip_think(text: str) -> str:
-    """Remove <think>...</think> blocks emitted by reasoning models."""
-    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    """Remove reasoning tag blocks emitted by reasoning models."""
+    return strip_reasoning_tags(text)
 
 
 # ── Summary ───────────────────────────────────────────────────────────────────
@@ -320,7 +323,7 @@ async def _rewrite_query(
     )
     raw_rewrite = (resp.choices[0].message.content or "").strip()
 
-    had_think = bool(re.search(r"<think>", raw_rewrite))
+    had_think = bool(strip_reasoning_tags(raw_rewrite) != raw_rewrite)
     standalone = _strip_think(raw_rewrite) or query
 
     # Strip meta-commentary preamble that some models emit before the actual rewrite

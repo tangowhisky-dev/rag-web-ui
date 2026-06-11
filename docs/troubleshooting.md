@@ -86,7 +86,7 @@ Common causes:
 - **GraphRAG LLM batches failing with "Context size has been exceeded"**: llama.cpp shares one context pool across all parallel slots. With `_batch_sem=Semaphore(4)` and `NEO4J_LLM_CONTEXT=24000`, the 4 concurrent batches need ~12K tokens combined — more than an 8K model can provide. Fix: either keep `Semaphore(2)` (default, works with 8K) or increase the model's Context Length to 16K in LM Studio and use `Semaphore(4)`. This is a llama.cpp architecture constraint, not a per-request context size issue.
 - **OCR not working**: Ensure `VISION_MODEL` is set to a multimodal model and that the model is reachable at `OPENAI_API_BASE` (or `OPENAI_VISION_API_BASE` if set). Check backend logs for `[markitdown] OCR enabled` on startup.
 - **OCR calls failing / empty text**: The vision model must support the OpenAI chat completions API with image content. Test it directly: `curl $OPENAI_API_BASE/chat/completions` with a base64 image payload.
-- **Think-block noise in chunks**: If OCR output contains raw `<think>...</think>` text in retrieved chunks, confirm you are running the latest `document_processor.py` — stripping was added as part of the markitdown-ocr integration. Re-ingest affected documents.
+- **Reasoning tag noise in chunks**: If OCR output contains raw reasoning tag blocks in retrieved chunks, confirm you are running the latest `document_processor.py` — stripping was added as part of the markitdown-ocr integration. The supported formats are hardcoded in `reasoning_tags.py`. Re-ingest affected documents.
 
 ### SPLADE Model Download Issues
 

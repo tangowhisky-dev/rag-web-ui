@@ -65,9 +65,11 @@ standalone image uploads. When `VISION_MODEL` is unset, MarkItDown is
 initialised without a client and OCR is silently skipped (identical to the
 previous behaviour).
 
-Think-block traces (`<think>...</think>`) emitted by reasoning vision models are
-stripped from the converted text before it is chunked. Both complete blocks and
-truncated unclosed prefixes are handled.
+Reasoning tag blocks (e.g. <think>...</think>, <reasoning>...</reasoning>, or
+ <|channel>thought ... <channel|>) emitted by reasoning vision models are
+ stripped from the converted text before it is chunked. Both complete blocks and
+ truncated unclosed prefixes are handled. The two supported formats are
+ hardcoded in `backend/app/services/reasoning_tags.py`.
 
 MarkItDown applies the appropriate converter for each file type:
 
@@ -91,9 +93,10 @@ back to reading the raw file as UTF-8 (with `errors="replace"`). This ensures
 the pipeline never hard-fails on a conversion error — degraded output is always
 preferred over a processing failure.
 
-**Think-trace stripping:** after conversion the output is passed through two
-regex passes to strip `<think>...</think>` blocks that reasoning vision models
-may emit during OCR. This keeps thinking noise out of the chunk index.
+**Think-trace stripping:** after conversion the output is passed through
+`strip_reasoning_tags()` which removes reasoning tag blocks (hardcoded in
+`reasoning_tags.py`: <think>...</think>, <reasoning>...</reasoning>, and
+<|channel>thought<|channel>...). This keeps thinking noise out of the chunk index.
 
 The resulting Markdown string is wrapped in a single `LangchainDocument` with
 `metadata={"source": file_name}` before chunking.

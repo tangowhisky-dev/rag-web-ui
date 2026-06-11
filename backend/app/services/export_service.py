@@ -18,9 +18,11 @@ from typing import Literal
 ExportFormat = Literal["pdf", "word", "image"]
 
 
+from app.services.reasoning_tags import strip_reasoning_tags
+
 def _strip_markdown(text: str) -> str:
     """Very lightweight markdown stripper — enough for clean export."""
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    text = strip_reasoning_tags(text)
     text = re.sub(r"#{1,6}\s*", "", text)
     text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
     text = re.sub(r"\*(.*?)\*", r"\1", text)

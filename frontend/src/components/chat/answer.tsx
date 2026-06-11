@@ -559,31 +559,72 @@ export const Answer: FC<{
   }, [isStreaming]);
 
   const parsedContent = useMemo(() => {
-    // Non-anchored: handles models that emit text before <think> (preamble)
-    const completeMatch = markdown.match(/([\s\S]*?)<think>([\s\S]*?)<\/think>([\s\S]*)$/);
-    if (completeMatch) {
-      const preamble = completeMatch[1];
-      const thinkContent = completeMatch[2].trim();
-      const afterThink = completeMatch[3].trim();
-      return {
-        thinkContent,
-        isThinkingComplete: true,
-        // Preserve any preamble text before the <think> block
-        answerText: preamble ? `${preamble.trim()}\n\n${afterThink}`.trim() : afterThink,
-      };
-    }
-    // <think> opened but not yet closed — still streaming
-    const openMatch = markdown.match(/([\s\S]*?)<think>([\s\S]*)$/);
-    if (openMatch) {
-      const preamble = openMatch[1];
-      return {
-        thinkContent: openMatch[2],
-        isThinkingComplete: false,
-        answerText: preamble.trim(),
-      };
-    }
-    return { thinkContent: null, isThinkingComplete: false, answerText: markdown };
-  }, [markdown]);
+      // Two reasoning formats:
+      //   OpenAI/DeepSeek/Qwen: <think>content</think>  <reasoning>...</reasoning>
+      //   Gemma channel style:   <|channel>thought<|channel> ... <|channel|>
+      let thinkContent: string | null = null;
+      let isThinkingComplete = false;
+      let answerText = markdown;
+
+      // 1. OpenAI/DeepSeek/Qwen HTML-style (full block)
+      for (const tag of ["think", "reasoning"]) {
+        const completeMatch = markdown.match(
+          new RegExp(
+            `([\\s\\S]*?)<${tag}>([\\s\\S]*?)<\\s*/\\s*${tag}\\s*>([\\s\\S]*)$`,
+          ),
+        );
+        if (completeMatch) {
+          const preamble = completeMatch[1];
+          thinkContent = completeMatch[2].trim();
+          const afterThink = completeMatch[3].trim();
+          answerText = preamble ? `${preamble.trim()}\n\n${afterThink}`.trim() : afterThink;
+          isThinkingComplete = true;
+          break;
+        }
+        // Open/unclosed
+        const openMatch = markdown.match(
+          new RegExp(`([\\s\\S]*?)<${tag}>([\\s\\S]*)$`),
+        );
+        if (openMatch) {
+          thinkContent = openMatch[2];
+          answerText = openMatch[1].trim();
+          isThinkingComplete = false;
+          break;
+        }
+      }
+
+      // 2. Gemma channel-style (full block): <|channel>thought ... <channel|>
+          if (thinkContent === null) {
+            const channelMatch = markdown.match(
+              new RegExp(
+                `([\\s\\S]*?)<\\s*\\|channel\\s*>thought([\\s\\S]*?)<\\s*channel\\s*\\|>([\\s\\S]*)$`,
+              ),
+            );
+            if (channelMatch) {
+              const preamble = channelMatch[1];
+              thinkContent = channelMatch[2].trim();
+              const afterThink = channelMatch[3].trim();
+              answerText = preamble ? `${preamble.trim()}\n\n${afterThink}`.trim() : afterThink;
+              isThinkingComplete = true;
+            }
+            // Channel open: <|channel>thought... (no closing yet)
+            if (thinkContent === null) {
+              const channelOpenMatch = markdown.match(
+                new RegExp(
+                  `([\\s\\S]*?)<\\s*\\|channel\\s*>thought([\\s\\S]*)$`,
+                ),
+              );
+              if (channelOpenMatch) {
+                const preamble = channelOpenMatch[1];
+                thinkContent = channelOpenMatch[2];
+                answerText = preamble.trim();
+                isThinkingComplete = false;
+              }
+            }
+          }
+
+          return { thinkContent, isThinkingComplete, answerText };
+        }, [markdown]);
 
   useEffect(() => {
     const fetchCitationInfo = async () => {
