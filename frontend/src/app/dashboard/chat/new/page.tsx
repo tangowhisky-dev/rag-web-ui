@@ -19,8 +19,7 @@ export default function NewChatPage() {
   const [selectedKB, setSelectedKB] = useState<number | null>(null);
   const [title, setTitle] = useState("");
   const [useGraphRag, setUseGraphRag] = useState(false);
-  const [useDense,    setUseDense]    = useState(true);
-  const [useSparse,   setUseSparse]   = useState(true);
+  const [useVector,   setUseVector]   = useState(true);
   const [useExact,    setUseExact]    = useState(true);
   const [error, setError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -54,8 +53,8 @@ export default function NewChatPage() {
         title,
         knowledge_base_ids: [selectedKB],
         use_graph_rag: useGraphRag,
-        use_dense:     useDense,
-        use_sparse:    useSparse,
+        use_dense:     useVector,
+        use_sparse:    useVector,
         use_exact:     useExact,
       });
       router.push(`/dashboard/chat/${data.id}`);
@@ -156,10 +155,9 @@ export default function NewChatPage() {
           <p className="text-xs text-muted-foreground">Select which techniques/sources to use for retrieval.</p>
           <div className="grid gap-2">
             {([
-              { id: "use-exact",     label: "Keyword Search",  desc: "MySQL full-text search — fast, exact term matching",            checked: useExact,    onChange: setUseExact,    disabled: true  },
-              { id: "use-dense",     label: "Dense Vectors",   desc: "Qdrant cosine similarity — semantic / meaning-based retrieval", checked: useDense,    onChange: setUseDense,    disabled: false },
-              { id: "use-sparse",    label: "Sparse Vectors",  desc: "SPLADE — hybrid bag-of-words + learned expansion",              checked: useSparse,   onChange: setUseSparse,   disabled: false },
-              { id: "use-graph-rag", label: "Knowledge Graph", desc: "Neo4j multi-hop GraphRAG — richer context, slower",            checked: useGraphRag, onChange: setUseGraphRag, disabled: false },
+              { id: "use-exact",     label: "Keyword Search",        desc: "MySQL full-text search — fast, exact term matching",            checked: useExact,    onChange: setUseExact,    disabled: true  },
+              { id: "use-vector",    label: "Sparse + Dense Vectors", desc: "SPLADE + Qdrant — hybrid bag-of-words + semantic search",       checked: useVector,   onChange: setUseVector,   disabled: false },
+              { id: "use-graph-rag", label: "Knowledge Graph",       desc: "Neo4j multi-hop GraphRAG — richer context, slower",            checked: useGraphRag, onChange: setUseGraphRag, disabled: false },
             ] as const).map(({ id, label, desc, checked, onChange, disabled }) => (
               <label
                 key={id}

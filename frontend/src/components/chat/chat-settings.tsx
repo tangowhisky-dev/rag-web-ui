@@ -37,8 +37,9 @@ const MODELS = ["gpt-4o", "gpt-4o-mini", "gpt-3.5-turbo"];
 export default function ChatSettings({ chat, onClose, onUpdate }: ChatSettingsProps) {
   const [model, setModel] = useState(chat.model_name ?? "gpt-4o");
   const [temperature, setTemperature] = useState(chat.temperature ?? 0.7);
-  const [useDense, setUseDense] = useState(chat.use_dense ?? true);
-  const [useSparse, setUseSparse] = useState(chat.use_sparse ?? true);
+  const [useVector, setUseVector] = useState(
+    chat.use_dense ?? chat.use_sparse ?? true
+  );
   const [useExact, setUseExact] = useState(chat.use_exact ?? false);
   const [useGraphRag, setUseGraphRag] = useState(chat.use_graph_rag ?? false);
   const [saving, setSaving] = useState(false);
@@ -48,8 +49,8 @@ export default function ChatSettings({ chat, onClose, onUpdate }: ChatSettingsPr
     const patch: ChatPatch = {
       model_name: model,
       temperature,
-      use_dense: useDense,
-      use_sparse: useSparse,
+      use_dense: useVector,
+      use_sparse: useVector,
       use_exact: useExact,
       use_graph_rag: useGraphRag,
     };
@@ -113,8 +114,7 @@ export default function ChatSettings({ chat, onClose, onUpdate }: ChatSettingsPr
         <div className="space-y-2">
           <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Retrieval Legs</label>
           {[
-            { label: "Dense", value: useDense, set: setUseDense, testId: "toggle-dense" },
-            { label: "Sparse", value: useSparse, set: setUseSparse, testId: "toggle-sparse" },
+            { label: "Sparse + Dense Vectors", value: useVector, set: setUseVector, testId: "toggle-vector" },
             { label: "Exact", value: useExact, set: setUseExact, testId: "toggle-exact" },
             { label: "Graph RAG", value: useGraphRag, set: setUseGraphRag, testId: "toggle-graph" },
           ].map(({ label, value, set, testId }) => (

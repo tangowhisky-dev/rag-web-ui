@@ -29,12 +29,11 @@ describe("ChatSettings", () => {
     expect(screen.getByTestId("temperature-value")).toHaveTextContent("0.7");
   });
 
-  it("renders all four retrieval leg toggles", () => {
+  it("renders all retrieval leg toggles", () => {
     render(
       <ChatSettings chat={mockChat} onClose={jest.fn()} onUpdate={jest.fn()} />
     );
-    expect(screen.getByTestId("toggle-dense")).toBeInTheDocument();
-    expect(screen.getByTestId("toggle-sparse")).toBeInTheDocument();
+    expect(screen.getByTestId("toggle-vector")).toBeInTheDocument();
     expect(screen.getByTestId("toggle-exact")).toBeInTheDocument();
     expect(screen.getByTestId("toggle-graph")).toBeInTheDocument();
   });
@@ -43,10 +42,10 @@ describe("ChatSettings", () => {
     render(
       <ChatSettings chat={mockChat} onClose={jest.fn()} onUpdate={jest.fn()} />
     );
-    const denseToggle = screen.getByTestId("toggle-dense");
-    expect(denseToggle).toHaveAttribute("aria-checked", "true");
-    fireEvent.click(denseToggle);
-    expect(denseToggle).toHaveAttribute("aria-checked", "false");
+    const toggle = screen.getByTestId("toggle-vector");
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-checked", "false");
   });
 
   it("updates temperature value when slider changes", () => {
