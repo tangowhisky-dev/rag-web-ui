@@ -1,10 +1,14 @@
-"""DataStore Watcher Service — per-datastore file watching with batch processing.
+"""DataStore Watcher Service — global file watching with per-datastore batching.
 
 Architecture:
-- Single ``PollingObserver`` instance for all datastores (efficient resource usage)
-- One ``DatastoreFileEventHandler`` per datastore (per-folder event handler)
-- Each handler queues file events and processes them in batches at a configurable interval
-- Periodic DB sync (every 5 min) to add/remove watchers based on datastore configuration
+- Single ``watchdog.Observer`` instance with ``recursive=True`` watching the root
+  folder (/app/data/). On Linux this uses ``InotifyObserver`` (instant event
+  delivery via inotify), on macOS ``FSEventsObserver``, on Windows ``ReadDirectoryChangesW``.
+- Single ``DatastoreFileEventHandler`` that resolves datastore from event path
+- Handler maintains a mapping of datastore_id -> (org_id, folder_path, min_interval)
+- When an event fires, handler resolves datastore by checking folder_path prefix
+- Per-datastore batch timers fire at configurable intervals
+- Progress tracking for manual scans
 
 File path convention inside a watched directory:
     kb_{kb_id}/{file_name}
@@ -17,7 +21,7 @@ Progress tracking:
 - The scan_id is stored on the ProcessingTask so it can be matched to a running scan
 - When a scan starts, the datastore is updated with scan_id and progress=0
 - As files are processed, progress is updated
-- When the scan ends, the scan_id is cleared
+- When a scan ends, the scan_id is cleared
 
 Cancellation:
 - A running scan can be stopped by setting scan_id=None on the datastore
@@ -31,13 +35,12 @@ import fnmatch
 import hashlib
 import logging
 import os
-import re
 import threading
 import time as time_module
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 from qdrant_client.models import PointIdsList
@@ -54,7 +57,12 @@ from app.services.document_processor import (
     _chunk_id_to_point_id,
 )
 
+from watchdog.events import FileSystemEventHandler
+
 logger = logging.getLogger(__name__)
+
+# Root folder watched by the observer (all datastores live under this)
+WATCH_ROOT = "/app/data"
 
 
 class _Debouncer:
@@ -80,73 +88,771 @@ class _Debouncer:
             return event_type
 
 
-class DatastoreFileEventHandler:
-    """Per-datastore event handler with custom configuration.
+class _SyntheticEvent:
+    """A synthetic file event created for delayed dispatch after write-completion delay.
+
+    Watchdog's observer fires events immediately, but we want to delay processing
+    by ~1 second to let the file write complete (especially for editors like VS Code
+    that write via temp files and renames). This class provides a minimal event-like
+    object with the attributes needed by the handler (src_path, is_directory, etc.).
+    """
+
+    def __init__(self, src_path: str, is_directory: bool = False) -> None:
+        self.src_path = src_path
+        self.is_directory = is_directory
+        self.src_dir = os.path.dirname(src_path)
+        self.dest_path = ""
+        self.dest_dir = ""
+        self.cookie = 0
+        self.name = os.path.basename(src_path)
+        self.dir = is_directory
+
+
+class DatastoreFileEventHandler(FileSystemEventHandler):
+    """Global event handler that resolves datastore from event path.
+
+    Maintains a mapping of datastore_id -> (org_id, folder_path, min_interval_seconds).
+    When an event fires, it resolves the datastore by checking which datastore's
+    folder_path contains the event path.
 
     Features:
     - Debouncing per-file (prevents duplicate events from editors)
-    - Batch processing with configurable intervals
+    - Per-datastore batch processing with configurable intervals (default: 5 min)
     - org_id and datastore_id tracking for each event
+    - File processing (ingestion/update) via _handle_file
     """
 
     def __init__(
         self,
-        datastore_id: int,
-        org_id: int,
         callback,
         debounce_ms: int = 1000,
-        min_interval_seconds: int = 300,
+        default_min_interval_seconds: int = 300,  # 5 minutes
         debouncer: Optional[_Debouncer] = None,
     ) -> None:
-        self.datastore_id = datastore_id
-        self.org_id = org_id
         self.callback = callback
         self.debounce_ms = debounce_ms / 1000.0
-        self.min_interval_seconds = min_interval_seconds
+        self.default_min_interval_seconds = default_min_interval_seconds
         self.debouncer = debouncer
-        self.last_call: Dict[str, float] = {}
-        self.last_processing_time: float = 0
-        self.pending_changes: List[Dict[str, Any]] = []
+
+        # datastore_id -> (org_id, folder_path, min_interval_seconds)
+        self.folder_paths: Dict[int, Tuple[int, str, int]] = {}
+
+        # datastore_id -> list of pending changes
+        self.pending_changes: Dict[int, List[Dict[str, Any]]] = {}
+
+        # datastore_id -> threading.Timer for batch processing
+        self._batch_timers: Dict[int, threading.Timer] = {}
+
+        # Per-file debouncing: file_path -> last call timestamp (monotonic)
+        self._last_call: Dict[str, float] = {}
+
         self._lock = threading.Lock()
 
-    def _should_process(self, src_path: str) -> bool:
-        now = time_module.time()
+    # ------------------------------------------------------------------
+    # Folder management
+    # ------------------------------------------------------------------
+
+    def add_folder(self, datastore_id: int, org_id: int, folder_path: str, min_interval_seconds: int = 300) -> None:
+        """Register a datastore folder path for monitoring."""
         with self._lock:
-            if now - self.last_call.get(src_path, 0) < self.debounce_ms:
+            self.folder_paths[datastore_id] = (org_id, folder_path, min_interval_seconds)
+        logger.info(
+            "[WATCHER] handler_folder_added datastore_id=%d path=%s",
+            datastore_id, folder_path,
+        )
+
+    def remove_folder(self, datastore_id: int) -> None:
+        """Unregister a datastore folder path and flush pending changes."""
+        with self._lock:
+            if datastore_id in self._batch_timers:
+                timer = self._batch_timers.pop(datastore_id)
+                timer.cancel()
+            if datastore_id in self.pending_changes and self.pending_changes[datastore_id]:
+                # Flush pending changes before removing the folder
+                changes = self.pending_changes.pop(datastore_id)
+                org_id = self.folder_paths.get(datastore_id, (None,))[0]
+                logger.info(
+                    "[WATCHER] handler_folder_removed datastore_id=%d flushing %d pending changes",
+                    datastore_id, len(changes),
+                )
+                try:
+                    self.callback(datastore_id, org_id, changes)
+                except Exception as e:
+                    logger.error(
+                        "[WATCHER] handler_flush_on_remove datastore_id=%d: %s",
+                        datastore_id, e,
+                    )
+            if datastore_id in self.folder_paths:
+                del self.folder_paths[datastore_id]
+        logger.info("[WATCHER] handler_folder_removed datastore_id=%s", datastore_id)
+
+    # ------------------------------------------------------------------
+    # Datastore resolution from event path
+    # ------------------------------------------------------------------
+
+    def _resolve_datastore(self, event_path: str) -> Optional[int]:
+        """Find which datastore's folder_path contains the event path.
+
+        Returns datastore_id or None if no match found.
+        Sorts folder paths by length (descending) so longer paths match first.
+        This prevents a datastore with folder_path /app/data/reports from
+        incorrectly matching files in /app/data/reports/2024.
+        """
+        sorted_ids = sorted(
+            self.folder_paths.keys(),
+            key=lambda ds_id: len(self.folder_paths[ds_id][1]),
+            reverse=True,
+        )
+        for ds_id in sorted_ids:
+            _, folder_path, _ = self.folder_paths[ds_id]
+            if event_path.startswith(folder_path + '/') or event_path == folder_path:
+                return ds_id
+        return None
+
+    # ------------------------------------------------------------------
+    # Per-file debouncing
+    # ------------------------------------------------------------------
+
+    def _should_process(self, src_path: str) -> bool:
+        """Check if this file should be processed based on the debouncing window.
+
+        Does NOT update _last_call — that happens in _after_process to ensure
+        only processed events reset the debounce timer. Events rejected by
+        _should_process must not prevent future events from being processed.
+        """
+        now = time_module.monotonic()
+        with self._lock:
+            last = self._last_call.get(src_path)
+            if last is not None and (now - last) < self.debounce_ms:
                 return False
-            self.last_call[src_path] = now
             return True
 
-        def _queue_change(self, event, event_type: str) -> None:
-            with self._lock:
-                self.pending_changes.append(
-                    {
-                        "datastore_id": self.datastore_id,
-                        "org_id": self.org_id,
-                        "path": event.src_path,
-                        "event_type": event_type,
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                    }
+    def _after_process(self, src_path: str) -> None:
+        """Record that a file was processed. Must be called after _should_process
+        returns True and the event has been queued for processing.
+
+        This ensures only processed events (not rejected ones) reset the debounce timer.
+        """
+        now = time_module.monotonic()
+        with self._lock:
+            self._last_call[src_path] = now
+
+    # ------------------------------------------------------------------
+    # Batch timer management
+    # ------------------------------------------------------------------
+
+    def _start_batch_timer(self, datastore_id: int) -> None:
+        """Start a per-datastore batch timer. If one already exists, do nothing."""
+        with self._lock:
+            if datastore_id in self._batch_timers:
+                return
+            org_id, _, min_interval = self.folder_paths.get(datastore_id, (None, None, self.default_min_interval_seconds))
+            interval = min_interval if min_interval is not None else self.default_min_interval_seconds
+            timer = threading.Timer(interval, self._flush_batch, args=(datastore_id,))
+            timer.daemon = True
+            self._batch_timers[datastore_id] = timer
+            timer.start()
+            logger.info(
+                "[WATCHER] batch_timer_started datastore_id=%d interval=%ds",
+                datastore_id, interval,
+            )
+
+    def _stop_batch_timer(self, datastore_id: int) -> None:
+        """Stop a per-datastore batch timer."""
+        with self._lock:
+            timer = self._batch_timers.pop(datastore_id, None)
+            if timer:
+                timer.cancel()
+
+    # ------------------------------------------------------------------
+    # Event queueing
+    # ------------------------------------------------------------------
+
+    def _queue_change(self, datastore_id: int, event, event_type: str) -> None:
+        """Queue a change for batch processing.
+
+        If the datastore's batch timer is not running, start it.
+        If it's already running, the change will be processed when it fires.
+        """
+        change = {
+            "datastore_id": datastore_id,
+            "org_id": self.folder_paths.get(datastore_id, (None,))[0],
+            "path": event.src_path,
+            "event_type": event_type,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+        with self._lock:
+            self.pending_changes.setdefault(datastore_id, []).append(change)
+            if datastore_id not in self._batch_timers:
+                self._start_batch_timer(datastore_id)
+
+    def _flush_batch(self, datastore_id: int) -> None:
+        """Process all pending changes for a datastore and stop its timer."""
+        with self._lock:
+            changes = self.pending_changes.pop(datastore_id, [])
+            self._stop_batch_timer(datastore_id)
+
+        if changes:
+            org_id = self.folder_paths.get(datastore_id, (None,))[0]
+            logger.info(
+                "[WATCHER] batch_flush datastore_id=%d pending=%d",
+                datastore_id, len(changes),
+            )
+            try:
+                self.callback(datastore_id, org_id, changes)
+            except Exception as e:
+                logger.error(
+                    "[WATCHER] batch_flush_error datastore_id=%d: %s",
+                    datastore_id, e,
+                    exc_info=True,
                 )
-            pending_count = len(self.pending_changes)
-            time_since_last = time_module.time() - self.last_processing_time
-            if time_since_last >= self.min_interval_seconds:
+
+    def force_process_pending(self, datastore_id: int) -> None:
+        """Force process pending changes for a datastore (used on shutdown)."""
+        with self._lock:
+            changes = self.pending_changes.pop(datastore_id, [])
+            self._stop_batch_timer(datastore_id)
+
+        if changes:
+            org_id = self.folder_paths.get(datastore_id, (None,))[0]
+            logger.info(
+                "[WATCHER] force_process datastore_id=%d pending=%d",
+                datastore_id, len(changes),
+            )
+            try:
+                self.callback(datastore_id, org_id, changes)
+            except Exception as e:
+                logger.error(
+                    "[WATCHER] force_process_error datastore_id=%d: %s",
+                    datastore_id, e,
+                    exc_info=True,
+                )
+
+    # ------------------------------------------------------------------
+    # Watchdog event handlers
+    # ------------------------------------------------------------------
+
+    def on_created(self, event) -> None:
+        if event.is_directory:
+            return
+        datastore_id = self._resolve_datastore(event.src_path)
+        if datastore_id is None:
+            return
+        if not self._should_process(event.src_path):
+            logger.debug(
+                "[WATCHER] event_debounced path=%s datastore_id=%d reason=short_gap",
+                event.src_path, datastore_id,
+            )
+            return
+        self._after_process(event.src_path)
+        logger.info(
+            "[WATCHER] event_detected path=%s datastore_id=%d event=created",
+            event.src_path, datastore_id,
+        )
+        self._dispatch(event.src_path, "created")
+
+    def on_modified(self, event) -> None:
+        if event.is_directory:
+            return
+        datastore_id = self._resolve_datastore(event.src_path)
+        if datastore_id is None:
+            return
+        if not self._should_process(event.src_path):
+            logger.debug(
+                "[WATCHER] event_debounced path=%s datastore_id=%d reason=short_gap",
+                event.src_path, datastore_id,
+            )
+            return
+        self._after_process(event.src_path)
+        logger.info(
+            "[WATCHER] event_detected path=%s datastore_id=%d event=modified",
+            event.src_path, datastore_id,
+        )
+        self._dispatch(event.src_path, "modified")
+
+    def on_deleted(self, event) -> None:
+        if event.is_directory:
+            return
+        datastore_id = self._resolve_datastore(event.src_path)
+        if datastore_id is None:
+            return
+        if not self._should_process(event.src_path):
+            logger.debug(
+                "[WATCHER] event_debounced path=%s datastore_id=%d reason=short_gap",
+                event.src_path, datastore_id,
+            )
+            return
+        logger.info(
+            "[WATCHER] event_detected path=%s datastore_id=%d event=deleted",
+            event.src_path, datastore_id,
+        )
+        self._dispatch(event.src_path, "deleted")
+
+    def on_moved(self, event) -> None:
+        if event.is_directory:
+            return
+
+        # Resolve datastore for the destination path (file moved INTO a datastore)
+        dest_datastore_id = self._resolve_datastore(event.dest_path)
+        # Resolve datastore for the source path (file moved OUT of a datastore)
+        src_datastore_id = self._resolve_datastore(event.src_path)
+
+        # Handle source path: if the file was moved OUT of a datastore,
+        # treat it as a deletion to clean up the old document record.
+        if src_datastore_id is not None:
+            if self._should_process(event.src_path):
+                self._after_process(event.src_path)
                 logger.info(
-                    "[WATCHER] batch_trigger datastore_id=%d path=%s reason=immediate (time_since_last=%.1fs >= interval=%.0fs, pending=%d)",
-                    self.datastore_id, event.src_path, time_since_last, self.min_interval_seconds, pending_count,
+                    "[WATCHER] event_detected path=%s datastore_id=%d event=moved_out",
+                    event.src_path, src_datastore_id,
                 )
-                self._process_batch()
+                # Dispatch as "deleted" so the old document is cleaned up
+                self._dispatch(event.src_path, "deleted")
+
+        # Handle destination path: if the file was moved INTO a datastore,
+        # treat it as a "created" event to start ingestion.
+        if dest_datastore_id is not None:
+            if self._should_process(event.dest_path):
+                self._after_process(event.dest_path)
+                logger.info(
+                    "[WATCHER] event_detected path=%s datastore_id=%d event=moved_in from=%s",
+                    event.dest_path, dest_datastore_id, event.src_path,
+                )
+                # Dispatch as "created" so the file gets ingested as new
+                self._dispatch(event.dest_path, "created")
             else:
-                logger.info(
-                    "[WATCHER] batch_deferred datastore_id=%d path=%s reason=within_interval (time_since_last=%.1fs < interval=%.0fs, pending=%d, wait=%.1fs)",
-                    self.datastore_id, event.src_path, time_since_last, self.min_interval_seconds, pending_count, self.min_interval_seconds - time_since_last,
+                logger.debug(
+                    "[WATCHER] event_debounced path=%s datastore_id=%d reason=short_gap",
+                    event.dest_path, dest_datastore_id,
                 )
+        else:
+            # File was moved to a path that doesn't belong to any datastore
+            logger.info(
+                "[WATCHER] event_moved_out_of_watch path=%s datastore_id=%s reason=not_watched",
+                event.dest_path, src_datastore_id,
+            )
+
+    def _dispatch(self, path: str, event_type: str) -> None:
+        """Apply debouncer then queue the change."""
+        if self.debouncer is not None:
+            coalesced = self.debouncer.touch(path, event_type)
+            if coalesced is None:
+                logger.debug(
+                    "[WATCHER] event_coalesced path=%s",
+                    path,
+                )
+                return  # debounced
+
+        # Delay processing by 1 second to allow file write to complete
+        logger.info(
+            "[WATCHER] event_queued path=%s event=%s reason=write_complete_delay",
+            path, event_type,
+        )
+        import threading as _threading
+        import time as _time
+
+        def _delayed_dispatch(p, et):
+            _time.sleep(1.0)
+            # Create a synthetic event with is_directory attribute
+            event = _SyntheticEvent(src_path=p, is_directory=False)
+            self._queue_change(self._resolve_datastore(p) or 0, event, et)
+
+        _threading.Thread(target=_delayed_dispatch, args=(path, event_type), daemon=True).start()
+
+    # ------------------------------------------------------------------
+    # Watchdog dispatch — called by observer to route events to on_* methods
+    # ------------------------------------------------------------------
+
+    def dispatch(self, event) -> None:
+        """Called by the watchdog observer to dispatch events to on_* methods.
+        Overrides BaseEventHandler.dispatch — the on_* methods handle datastore resolution.
+        """
+        if event.is_directory:
+            return
+        super().dispatch(event)
+
+    # ------------------------------------------------------------------
+    # File processing (called by _on_changes callback)
+    # ------------------------------------------------------------------
+
+    def _handle_file(
+        self,
+        event_path: str,
+        datastore_id: int,
+        event_type: str = "modified"
+    ) -> Optional[Future]:
+        """Core logic: handle file events (created, modified, deleted).
+
+        Files are processed in-place without copying. DataStore documents
+        are independent of KnowledgeBases.
+
+        Args:
+            event_path: Full path to the file
+            datastore_id: ID of the datastore containing the file
+            event_type: One of 'created', 'modified', 'deleted'
+        """
+        # Handle deletion differently - no need to hash or check extensions
+        if event_type == "deleted":
+            self._handle_deletion(event_path, datastore_id)
+            return
+
+        fname = os.path.basename(event_path)
+        _, ext = os.path.splitext(fname)
+        ext = ext.lower()
+
+        # Skip non-supported extensions
+        if ext not in SUPPORTED_EXTENSIONS:
+            logger.debug(
+                "[WATCHER] file_detected path=%s ext=%s action=skip reason=unsupported_ext",
+                event_path,
+                ext,
+            )
+            return
+
+        # Skip hidden/system files
+        if fname.startswith("."):
+            logger.debug(
+                "[WATCHER] file_detected path=%s action=skip reason=hidden_file",
+                event_path,
+            )
+            return
+
+        # Check if file exists (for modified events, file might have been deleted)
+        if not os.path.exists(event_path):
+            logger.debug(
+                "[WATCHER] file_not_exists path=%s action=skip",
+                event_path,
+            )
+            return
+
+        # Get datastore scan_pattern
+        db: Session = SessionLocal()
+        try:
+            ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
+            if not ds:
+                return
+            scan_pattern = ds.scan_pattern or "*"
+
+            # Check scan pattern
+            if not self._matches_pattern(event_path, scan_pattern):
+                logger.debug(
+                    "[WATCHER] file_detected path=%s action=skip reason=pattern_mismatch",
+                    event_path,
+                )
+                return
+
+            # Log the file that is about to be processed
+            logger.info(
+                "[WATCHER] file_processing datastore_id=%d path=%s event=%s",
+                datastore_id, event_path, event_type,
+            )
+        finally:
+            db.close()
+
+        # Compute SHA-256 hash
+        file_hash = self._compute_hash(event_path)
+        hash_prefix = file_hash[:8] if file_hash else "none"
+        file_size = os.path.getsize(event_path)
+
+        # DataStore: process file independently (no KB knowledge needed)
+        db: Session = SessionLocal()
+        try:
+            # Check if document already exists for this file path
+            existing = (
+                db.query(Document)
+                .filter(
+                    Document.file_path == event_path,
+                    Document.data_store_id == datastore_id,
+                )
+                .first()
+            )
+
+            if existing:
+                # Document exists - check if hash changed (file modified)
+                if existing.file_hash == file_hash:
+                    logger.info(
+                        "[WATCHER] no_change path=%s hash=%s datastore_id=%s doc_id=%s",
+                        event_path,
+                        hash_prefix,
+                        datastore_id,
+                        existing.id,
+                    )
+                    return
+                else:
+                    # File was modified - trigger re-ingestion
+                    logger.info(
+                        "[WATCHER] file_modified path=%s old_hash=%s new_hash=%s datastore_id=%s doc_id=%s",
+                        event_path,
+                        existing.file_hash[:8],
+                        hash_prefix,
+                        datastore_id,
+                        existing.id,
+                    )
+                    # Update existing document — use scan_id=0 for event-driven processing
+                    return self._update_document(
+                        existing.id, event_path, file_hash, datastore_id, scan_id=0
+                    )
+
+            # File is new — trigger ingestion in-place
+            return self._ingest_file(
+                event_path, datastore_id, scan_id=0, file_hash=file_hash
+            )
+        finally:
+            db.close()
+
+    def _matches_pattern(self, filepath: str, scan_pattern: str = "*") -> bool:
+        """Check if a filepath matches the scan pattern."""
+        fname = os.path.basename(filepath)
+        # Exclude hidden files regardless of pattern
+        if fname.startswith("."):
+            return False
+        if scan_pattern == "*":
+            return True
+
+        patterns = [p.strip() for p in scan_pattern.split(",")]
+        for pat in patterns:
+            if "*" in pat:
+                # Use fnmatch for glob patterns
+                if fnmatch.fnmatch(fname, pat):
+                    return True
+            else:
+                # Exact match
+                if fname == pat:
+                    return True
+        return False
+
+    def _compute_hash(self, path: str) -> str:
+        """Compute SHA-256 hash of a file."""
+        h = hashlib.sha256()
+        try:
+            with open(path, "rb") as f:
+                for chunk in iter(lambda: f.read(8192), b""):
+                    h.update(chunk)
+            return h.hexdigest()
+        except OSError:
+            return ""
+
+    def _ingest_file(
+        self,
+        event_path: str,
+        datastore_id: int,
+        scan_id: int,
+        file_hash: Optional[str] = None,
+    ) -> Optional[Future]:
+        """Create Document + ProcessingTask records and enqueue background processing.
+
+        Returns the Future so the caller can wait for completion.
+        DataStore files are processed independently — no KB knowledge needed.
+        """
+        fname = os.path.basename(event_path)
+        _, ext = os.path.splitext(fname)
+        ext = ext.lower()
+
+        # Skip non-supported extensions
+        if ext not in SUPPORTED_EXTENSIONS:
+            logger.debug(
+                "[WATCHER] file_detected path=%s ext=%s action=skip reason=unsupported_ext",
+                event_path,
+                ext,
+            )
+            return
+
+        # Skip hidden/system files
+        if fname.startswith("."):
+            logger.debug(
+                "[WATCHER] file_detected path=%s action=skip reason=hidden_file",
+                event_path,
+            )
+            return
+
+        # Check if file exists
+        if not os.path.exists(event_path):
+            logger.debug(
+                "[WATCHER] file_not_exists path=%s action=skip",
+                event_path,
+            )
+            return
+
+        try:
+            file_size = os.path.getsize(event_path)
+        except OSError:
+            file_size = 0
+
+        from app.services.document_processor import CONTENT_TYPE_MAP
+
+        content_type = CONTENT_TYPE_MAP.get(ext, "application/octet-stream")
+
+        # Use pre-computed hash if available (avoids reading the file twice)
+        if file_hash is None:
+            file_hash = self._compute_hash(event_path)
+        if not file_hash:
+            logger.warning(
+                "[WATCHER] failed_to_compute_hash path=%s action=skip",
+                event_path,
+            )
+            return
+
+        logger.info(
+            "[WATCHER] ingestion_start datastore_id=%d path=%s doc_id=NEW",
+            datastore_id, event_path,
+        )
+        db: Session = SessionLocal()
+        try:
+            # Create Document record (in-place, no copy to uploads)
+            doc = Document(
+                knowledge_base_id=None,
+                data_store_id=datastore_id,
+                file_path=event_path,
+                file_name=fname,
+                file_hash=file_hash,
+                file_size=file_size,
+                content_type=content_type,
+            )
+            db.add(doc)
+            db.commit()
+            db.refresh(doc)
+
+            # Create ProcessingTask record
+            task = ProcessingTask(
+                knowledge_base_id=None,
+                data_store_id=datastore_id,
+                document_id=doc.id,
+                status="pending",
+                progress=0,
+                progress_message="Queued by watcher scan",
+            )
+            db.add(task)
+            db.commit()
+            db.refresh(task)
+
+            logger.info(
+                "[WATCHER] ingestion_started path=%s datastore_id=%s doc_id=%s task_id=%s",
+                event_path,
+                datastore_id,
+                doc.id,
+                task.id,
+            )
+
+            # Enqueue background processing — executor passed via self.callback
+            # The callback is DataStoreWatcher._on_changes which queues via _executor
+            return None  # Future returned later by watcher's ingestion method
+        except Exception as e:
+            logger.error(
+                "[WATCHER] failed_to_create_ingestion_records: %s",
+                e,
+                exc_info=True,
+            )
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        finally:
+            db.close()
+
+    def _update_document(
+        self,
+        document_id: int,
+        event_path: str,
+        file_hash: str,
+        datastore_id: int,
+        scan_id: int,
+    ) -> Optional[Future]:
+        """Update an existing document when file content changes.
+
+        Returns the Future so the caller can wait for completion.
+        DataStore documents don't use KBs — kb_id is always None.
+        """
+        fname = os.path.basename(event_path)
+        _, ext = os.path.splitext(fname)
+        ext = ext.lower()
+
+        # Skip non-supported extensions
+        if ext not in SUPPORTED_EXTENSIONS:
+            return
+
+        if not os.path.exists(event_path):
+            return
+
+        try:
+            file_size = os.path.getsize(event_path)
+        except OSError:
+            file_size = 0
+
+        from app.services.document_processor import CONTENT_TYPE_MAP
+
+        content_type = CONTENT_TYPE_MAP.get(ext, "application/octet-stream")
+
+        logger.info(
+            "[WATCHER] ingestion_update_start datastore_id=%d path=%s doc_id=%d",
+            datastore_id, event_path, document_id,
+        )
+        db: Session = SessionLocal()
+        try:
+            doc = db.query(Document).filter(Document.id == document_id).first()
+            if not doc:
+                return
+
+            # Update document metadata
+            doc.file_hash = file_hash
+            doc.file_size = file_size
+            doc.content_type = content_type
+            db.commit()
+
+            # Reset or create processing task
+            task = (
+                db.query(ProcessingTask)
+                .filter(ProcessingTask.document_id == document_id)
+                .first()
+            )
+            if task:
+                task.status = "pending"
+                task.progress = 0
+                task.progress_message = "Re-queued by watcher scan"
+            else:
+                # Re-ingest with no chunks — create a new task
+                task = ProcessingTask(
+                    knowledge_base_id=None,
+                    data_store_id=datastore_id,
+                    document_id=document_id,
+                    status="pending",
+                    progress=0,
+                    progress_message="Re-queued by watcher scan",
+                )
+                db.add(task)
+            db.commit()
+
+            logger.info(
+                "[WATCHER] update_started doc_id=%s path=%s",
+                document_id,
+                event_path,
+            )
+
+            # Enqueue background re-processing — executor passed via self.callback
+            return None  # Future returned later by watcher's ingestion method
+        except Exception as e:
+            logger.error(
+                "[WATCHER] update_error doc_id=%s path=%s: %s",
+                document_id,
+                event_path,
+                e,
+                exc_info=True,
+            )
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        finally:
+            db.close()
+
+    # ------------------------------------------------------------------
+    # Deletion handling
+    # ------------------------------------------------------------------
 
     def _handle_deletion(
         self,
         event_path: str,
-        org_id: Optional[int],
-        datastore_id: Optional[int] = None,
+        datastore_id: Optional[int],
     ) -> None:
         """Handle file deletion - remove Document records and Qdrant vectors.
 
@@ -154,9 +860,8 @@ class DatastoreFileEventHandler:
         For KB files: delete from all KBs for the org and their Qdrant vectors.
         """
         logger.info(
-            "[WATCHER] file_deleted path=%s org_id=%s datastore_id=%s",
+            "[WATCHER] file_deleted path=%s datastore_id=%s",
             event_path,
-            org_id,
             datastore_id,
         )
 
@@ -218,7 +923,8 @@ class DatastoreFileEventHandler:
                     )
                 return
 
-            # KB deletion: delete from all KBs for the org
+            # KB deletion: query by org_id from handler mapping
+            org_id = self.folder_paths.get(datastore_id, (None,))[0] if datastore_id else None
             if org_id is not None:
                 kb_list = (
                     db.query(KnowledgeBase)
@@ -286,142 +992,94 @@ class DatastoreFileEventHandler:
         finally:
             db.close()
 
-    def _process_batch(self) -> None:
-        with self._lock:
-            if not self.pending_changes:
+    # ------------------------------------------------------------------
+    # File count refresh
+    # ------------------------------------------------------------------
+
+    def _refresh_file_count(self, datastore_id: int) -> None:
+        """Refresh last_scan_total_files from the filesystem."""
+        db: Session = SessionLocal()
+        try:
+            ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
+            if not ds or not ds.folder_path:
                 return
-            changes_to_process = self.pending_changes.copy()
-            self.pending_changes.clear()
-            self.last_processing_time = time_module.time()
 
-        logger.info(
-            "[WATCHER] batch_process datastore_id=%d pending=%d",
-            self.datastore_id, len(changes_to_process),
-        )
+            count = self._count_files_in_folder(ds.folder_path, ds.scan_pattern)
+            ds.last_scan_total_files = count
+            db.commit()
+        finally:
+            db.close()
+
+    def _count_files_in_folder(self, folder_path: str, scan_pattern: str = "*") -> int:
+        """Count files matching pattern in folder."""
         try:
-            self.callback(self.datastore_id, self.org_id, changes_to_process)
-        except Exception as e:
-            logger.error(
-                "[WATCHER] batch_process_error datastore_id=%s org_id=%s: %s",
-                self.datastore_id,
-                self.org_id,
-                e,
-                exc_info=True,
-            )
+            path = Path(folder_path)
+            if not path.exists():
+                return 0
 
-    def force_process_pending(self) -> None:
-        changes_to_process: List[Dict[str, Any]] = []
-        with self._lock:
-            if self.pending_changes:
-                changes_to_process = self.pending_changes.copy()
-                self.pending_changes.clear()
-        try:
-            if changes_to_process:
-                self.callback(self.datastore_id, self.org_id, changes_to_process)
-        except Exception as e:
-            logger.error(
-                "[WATCHER] force_process_error datastore_id=%s: %s",
-                self.datastore_id,
-                e,
-                exc_info=True,
-            )
+            patterns = [p.strip() for p in scan_pattern.split(",")]
+            all_files = set()
 
-    def on_created(self, event) -> None:
-        if event.is_directory:
+            for pattern in patterns:
+                if "*" in pattern:
+                    matched = list(path.rglob(pattern))
+                else:
+                    matched = list(path.glob(pattern))
+                all_files.update(f for f in matched if f.is_file() and not f.name.startswith("."))
+
+            return len(all_files)
+        except Exception:
+            return 0
+
+    # ------------------------------------------------------------------
+    # Batch callback handler
+    # ------------------------------------------------------------------
+
+    def _on_changes(self, datastore_id: int, org_id: int, changes: List[Dict[str, Any]]) -> None:
+        """Callback when batch of changes is ready to process.
+
+        Args:
+            datastore_id: ID of the datastore with changes
+            org_id: Organization ID this datastore belongs to
+            changes: List of change events with path and event_type
+        """
+        if not changes:
             return
-        if not self._should_process(event.src_path):
-            logger.debug(
-                "[WATCHER] event_debounced datastore_id=%d path=%s reason=short_gap",
-                self.datastore_id, event.src_path,
-            )
-            return
+
         logger.info(
-            "[WATCHER] event_detected datastore_id=%d path=%s event=created",
-            self.datastore_id, event.src_path,
+            "[WATCHER] batch_ready datastore_id=%d org_id=%d changes=%d",
+            datastore_id,
+            org_id,
+            len(changes),
         )
-        self._dispatch(event.src_path, "created")
 
-    def on_modified(self, event) -> None:
-        if event.is_directory:
-            return
-        if not self._should_process(event.src_path):
-            logger.debug(
-                "[WATCHER] event_debounced datastore_id=%d path=%s reason=short_gap",
-                self.datastore_id, event.src_path,
-            )
-            return
-        logger.info(
-            "[WATCHER] event_detected datastore_id=%d path=%s event=modified",
-            self.datastore_id, event.src_path,
-        )
-        self._dispatch(event.src_path, "modified")
-
-    def on_deleted(self, event) -> None:
-        if event.is_directory:
-            return
-        if not self._should_process(event.src_path):
-            logger.debug(
-                "[WATCHER] event_debounced datastore_id=%d path=%s reason=short_gap",
-                self.datastore_id, event.src_path,
-            )
-            return
-        logger.info(
-            "[WATCHER] event_detected datastore_id=%d path=%s event=deleted",
-            self.datastore_id, event.src_path,
-        )
-        self._dispatch(event.src_path, "deleted")
-
-    def on_moved(self, event) -> None:
-        if event.is_directory:
-            return
-        if not self._should_process(event.dest_path):
-            logger.debug(
-                "[WATCHER] event_debounced datastore_id=%d path=%s reason=short_gap",
-                self.datastore_id, event.dest_path,
-            )
-            return
-        logger.info(
-            "[WATCHER] event_detected datastore_id=%d path=%s event=moved from=%s",
-            self.datastore_id, event.dest_path, event.src_path,
-        )
-        self._dispatch(event.dest_path, "moved")
-
-    def _dispatch(self, path: str, event_type: str) -> None:
-        """Apply debouncer then queue the change."""
-        if self.debouncer is not None:
-            coalesced = self.debouncer.touch(path, event_type)
-            if coalesced is None:
-                logger.debug(
-                    "[WATCHER] event_coalesced datastore_id=%d path=%s",
-                    self.datastore_id, path,
+        # Process each change
+        for change in changes:
+            fpath = change["path"]
+            event_type = change.get("event_type", "modified")
+            try:
+                self._handle_file(fpath, datastore_id, event_type)
+            except Exception as e:
+                logger.error(
+                    "[WATCHER] handle_file_error path=%s event=%s: %s", fpath, event_type, e, exc_info=True
                 )
-                return  # debounced
 
-        # Delay processing by 1 second to allow file write to complete
-        logger.info(
-            "[WATCHER] event_queued datastore_id=%d path=%s event=%s reason=write_complete_delay",
-            self.datastore_id, path, event_type,
-        )
-        import threading as _threading
-        import time as _time
-
-        def _delayed_dispatch(p, et):
-            _time.sleep(1.0)
-            # Create a simple event-like object
-            event = type('_Event', (), {'src_path': p})()
-            self._queue_change(event, et)
-
-        _threading.Thread(target=_delayed_dispatch, args=(path, event_type), daemon=True).start()
+        # Refresh file count so UI reflects latest state
+        self._refresh_file_count(datastore_id)
 
 
 class DataStoreWatcher:
-    """Watches multiple datastore folders with per-datastore configuration.
+    """Watches datastore folders with global handler and per-datastore batching.
+
+    Architecture:
+    - One PollingObserver watches the root folder (/app/data/)
+    - One DatastoreFileEventHandler resolves datastore from event path
+    - Per-datastore batch timers fire at configurable intervals
 
     Features:
-    - Single Observer instance for all datastores (efficient)
+    - Single Observer instance (efficient resource usage)
     - Dynamic add/remove based on database configuration
     - Per-datastore processing intervals
-    - Automatic sync with database every 5 minutes
     - Progress tracking for scans
     - Cancellation support for in-progress scans
     """
@@ -434,8 +1092,14 @@ class DataStoreWatcher:
             max_workers=4, thread_name_prefix="watcher"
         )
         self._debouncer = _Debouncer(delay=1.0)
-        self.datastore_handlers: Dict[int, DatastoreFileEventHandler] = {}
-        self.watched_paths: Dict[int, Path] = {}
+        self._handler = DatastoreFileEventHandler(
+            callback=self._on_changes,
+            debounce_ms=1000,
+            default_min_interval_seconds=300,  # 5 minutes
+            debouncer=self._debouncer,
+        )
+        # datastore_id -> folder_path for status reporting
+        self._datastore_paths: Dict[int, str] = {}
         self._last_scan_at: Optional[float] = None
         self._files_scanned: int = 0
 
@@ -461,7 +1125,17 @@ class DataStoreWatcher:
     # ------------------------------------------------------------------
 
     def start(self) -> None:
-        """Start the observer and begin watching all configured datastores."""
+        """Start the observer and begin watching all configured datastores.
+
+        Uses watchdog.Observer with recursive=True which auto-selects the
+        platform-native observer:
+        - Linux: InotifyObserver (instant event delivery via inotify)
+        - macOS: FSEventsObserver (instant event delivery)
+        - Windows: ReadDirectoryChangesWObserver (instant event delivery)
+
+        Falls back to PollingObserver when the platform-native observer is
+        unavailable (e.g., Docker volume incompatibility on Linux).
+        """
         with self._lock:
             if self._running:
                 logger.warning("[WATCHER] already running, ignoring start()")
@@ -469,21 +1143,34 @@ class DataStoreWatcher:
             self._running = True
 
         try:
+            from watchdog.observers import Observer
+
+            self._observer = Observer(timeout=settings.WATCH_POLL_INTERVAL)
+            self._observer.start()
+            logger.info(
+                "[WATCHER] observer started (Observer with recursive=True, "
+                "WATCHER_USE_INOTIFY=%s)",
+                settings.WATCHER_USE_INOTIFY,
+            )
+        except (ImportError, OSError) as e:
+            # Fallback to PollingObserver if native observer is unavailable
             from watchdog.observers.polling import PollingObserver
 
-            self._observer = PollingObserver()
+            self._observer = PollingObserver(timeout=settings.WATCH_POLL_INTERVAL)
             self._observer.start()
-            logger.info("[WATCHER] observer started (PollingObserver)")
-        except Exception as e:
-            logger.error("[WATCHER] failed to start observer: %s", e)
-            self._running = False
-            raise
+            logger.warning(
+                "[WATCHER] native observer unavailable, "
+                "falling back to PollingObserver (WATCH_POLL_INTERVAL=%ds): %s",
+                settings.WATCH_POLL_INTERVAL,
+                e,
+            )
+
+        # Register the observer on the root folder with recursive=True
+        # This tells the observer to watch subdirectories as well
+        self._observer.schedule(self._handler, WATCH_ROOT, recursive=True)
+        logger.info("[WATCHER] observer registered on root=%s (recursive=True)", WATCH_ROOT)
 
         self._sync_watchers_with_database()
-
-        # Start periodic sync thread
-        sync_thread = threading.Thread(target=self._sync_loop, daemon=True)
-        sync_thread.start()
 
         logger.info("[WATCHER] service started")
 
@@ -498,13 +1185,12 @@ class DataStoreWatcher:
             try:
                 self._observer.stop()
                 self._observer.join(timeout=10)
-                logger.info("[WATCHER] observer stopped")
             except Exception as e:
                 logger.warning("[WATCHER] error stopping observer: %s", e)
 
-        # Process all pending changes
-        for handler in self.datastore_handlers.values():
-            handler.force_process_pending()
+        # Process all pending changes for all datastores
+        for datastore_id in list(self._handler.pending_changes.keys()):
+            self._handler.force_process_pending(datastore_id)
 
         self._executor.shutdown(wait=False, cancel_futures=True)
         logger.info("[WATCHER] service stopped")
@@ -514,15 +1200,20 @@ class DataStoreWatcher:
         """Check if the watcher service is running."""
         return self._running
 
+    # ------------------------------------------------------------------
+    # Watcher sync (called on startup and on datastore add/remove)
+    # ------------------------------------------------------------------
+
     def sync_watchers_with_database(self) -> None:
         """Sync watchers with database configuration.
 
-        Public method — called when datastore settings change via API.
+        For each active datastore, adds it to the handler.
+        Removes any datastore that is no longer active.
         """
         self._sync_watchers_with_database()
 
     def add_datastore(self, datastore_id: int, org_id: int, folder_path: str, interval_minutes: int = 60) -> None:
-        """Start watching a specific datastore folder."""
+        """Register a datastore in the handler's path mapping."""
         abs_path = Path(folder_path).resolve()
         if not abs_path.exists() or not abs_path.is_dir():
             logger.warning(
@@ -533,49 +1224,33 @@ class DataStoreWatcher:
             return
 
         # Skip if already watching
-        if datastore_id in self.datastore_handlers:
+        if datastore_id in self._datastore_paths:
             logger.info(
                 "[WATCHER] add_datastore_already_watching datastore_id=%s",
                 datastore_id,
             )
             return
 
-        handler = DatastoreFileEventHandler(
-            datastore_id=datastore_id,
-            org_id=org_id,
-            callback=self._on_changes,
-            debounce_ms=1000,
-            min_interval_seconds=interval_minutes * 60,
-            debouncer=self._debouncer,
+        # Register the datastore in the handler's folder_paths map
+        self._handler.add_folder(datastore_id, org_id, abs_path, interval_minutes * 60)
+        self._datastore_paths[datastore_id] = str(abs_path)
+
+        logger.info(
+            "[WATCHER] datastore_added datastore_id=%s path=%s interval=%dm",
+            datastore_id,
+            folder_path,
+            interval_minutes,
         )
 
-        try:
-            self._observer.schedule(handler, str(abs_path), recursive=True)
-            self.datastore_handlers[datastore_id] = handler
-            self.watched_paths[datastore_id] = abs_path
-            logger.info(
-                "[WATCHER] datastore_added datastore_id=%s path=%s interval=%dm",
-                datastore_id,
-                folder_path,
-                interval_minutes,
-            )
-        except Exception as e:
-            logger.error(
-                "[WATCHER] add_datastore_failed datastore_id=%s: %s",
-                datastore_id,
-                e,
-                exc_info=True,
-            )
-
     def remove_datastore(self, datastore_id: int) -> None:
-        """Stop watching a datastore."""
-        if datastore_id not in self.datastore_handlers:
+        """Unregister a datastore and flush pending changes."""
+        if datastore_id not in self._datastore_paths:
             return
 
-        handler = self.datastore_handlers[datastore_id]
-        del self.datastore_handlers[datastore_id]
-        if datastore_id in self.watched_paths:
-            del self.watched_paths[datastore_id]
+        self._datastore_paths.pop(datastore_id)
+
+        # Remove from handler (flushes pending changes)
+        self._handler.remove_folder(datastore_id)
 
         logger.info("[WATCHER] datastore_removed datastore_id=%s", datastore_id)
 
@@ -894,13 +1569,12 @@ class DataStoreWatcher:
         scan_id: int,
     ) -> Optional[Future]:
         """Handle a file during scan. Creates or updates Document records and triggers ingestion.
-        
+
         Returns the ingestion Future so the caller can wait for completion.
         DataStore files are processed independently — no KB knowledge needed.
         """
         db: Session = SessionLocal()
         try:
-
             # Compute hash
             file_hash = self._compute_hash(event_path)
             if not file_hash:
@@ -934,64 +1608,44 @@ class DataStoreWatcher:
                             existing.id,
                             datastore_id,
                         )
-                        future = self._update_document(
+                        future = self._update_document_in_scan(
                             existing.id, event_path, file_hash, datastore_id, scan_id
                         )
                         return future
                 else:
                     # File was modified - trigger re-ingestion
-                    future = self._update_document(
+                    future = self._update_document_in_scan(
                         existing.id, event_path, file_hash, datastore_id, scan_id
                     )
                     return future
 
             # File is new - trigger ingestion
-            future = self._ingest_file(
+            future = self._ingest_file_in_scan(
                 event_path, datastore_id, scan_id, file_hash=file_hash
             )
             return future
         finally:
             db.close()
 
-    def _ingest_file(
+    def _ingest_file_in_scan(
         self,
         event_path: str,
         datastore_id: int,
         scan_id: int,
         file_hash: Optional[str] = None,
     ) -> Optional[Future]:
-        """Create Document + ProcessingTask records and enqueue background processing.
-        
-        Returns the Future so the caller can wait for completion.
-        DataStore files are processed independently — no KB knowledge needed.
-        """
+        """Create Document + ProcessingTask records and enqueue background processing for scans."""
         fname = os.path.basename(event_path)
         _, ext = os.path.splitext(fname)
         ext = ext.lower()
 
-        # Skip non-supported extensions
         if ext not in SUPPORTED_EXTENSIONS:
-            logger.debug(
-                "[WATCHER] file_detected path=%s ext=%s action=skip reason=unsupported_ext",
-                event_path,
-                ext,
-            )
             return
 
-        # Skip hidden/system files
         if fname.startswith("."):
-            logger.debug(
-                "[WATCHER] file_detected path=%s action=skip reason=hidden_file",
-                event_path,
-            )
             return
 
-        # Check if file exists
         if not os.path.exists(event_path):
-            logger.debug(
-                "[WATCHER] file_not_exists path=%s action=skip",
-                event_path,
-            )
             return
 
         try:
@@ -1000,26 +1654,15 @@ class DataStoreWatcher:
             file_size = 0
 
         from app.services.document_processor import CONTENT_TYPE_MAP
-
         content_type = CONTENT_TYPE_MAP.get(ext, "application/octet-stream")
 
-        # Use pre-computed hash if available (avoids reading the file twice)
         if file_hash is None:
             file_hash = self._compute_hash(event_path)
         if not file_hash:
-            logger.warning(
-                "[WATCHER] failed_to_compute_hash path=%s action=skip",
-                event_path,
-            )
             return
 
-        logger.info(
-            "[WATCHER] ingestion_start datastore_id=%d path=%s doc_id=NEW",
-            datastore_id, event_path,
-        )
         db: Session = SessionLocal()
         try:
-            # Create Document record (in-place, no copy to uploads)
             doc = Document(
                 knowledge_base_id=None,
                 data_store_id=datastore_id,
@@ -1033,7 +1676,6 @@ class DataStoreWatcher:
             db.commit()
             db.refresh(doc)
 
-            # Create ProcessingTask record
             task = ProcessingTask(
                 knowledge_base_id=None,
                 data_store_id=datastore_id,
@@ -1046,45 +1688,29 @@ class DataStoreWatcher:
             db.commit()
             db.refresh(task)
 
-            logger.info(
-                "[WATCHER] ingestion_started path=%s datastore_id=%s doc_id=%s task_id=%s",
-                event_path,
-                datastore_id,
-                doc.id,
-                task.id,
-            )
-
             # Enqueue background processing
             loop = asyncio.new_event_loop()
             future = self._executor.submit(
                 self._run_ingestion,
                 event_path,
                 fname,
-                None,  # kb_id — DataStore doesn't use KBs
+                None,  # kb_id
                 task.id,
                 doc.id,
                 datastore_id,
-                None,  # db — _run_ingestion creates its own session
+                None,
                 loop,
             )
             future.add_done_callback(
                 lambda f: self._on_ingestion_done(f, task.id, event_path)
             )
 
-            # Track future for scan completion
             if scan_id > 0:
                 with self._scan_futures_lock:
                     if scan_id in self._scan_futures:
                         self._scan_futures[scan_id].append(future)
 
-            # Count as "new"
-            for sid, info in self._active_scans.items():
-                if info["datastore_id"] == datastore_id:
-                    info["new"] = info.get("new", 0) + 1
-                    break
-
             return future
-
         except Exception as e:
             logger.error(
                 "[WATCHER] failed_to_create_ingestion_records: %s",
@@ -1098,7 +1724,7 @@ class DataStoreWatcher:
         finally:
             db.close()
 
-    def _update_document(
+    def _update_document_in_scan(
         self,
         document_id: int,
         event_path: str,
@@ -1106,19 +1732,13 @@ class DataStoreWatcher:
         datastore_id: int,
         scan_id: int,
     ) -> Optional[Future]:
-        """Update an existing document when file content changes.
-        
-        Returns the Future so the caller can wait for completion.
-        DataStore documents don't use KBs — kb_id is always None.
-        """
+        """Update an existing document when file content changes during a scan."""
         fname = os.path.basename(event_path)
         _, ext = os.path.splitext(fname)
         ext = ext.lower()
 
-       # Skip non-supported extensions
         if ext not in SUPPORTED_EXTENSIONS:
             return
-
         if not os.path.exists(event_path):
             return
 
@@ -1128,26 +1748,19 @@ class DataStoreWatcher:
             file_size = 0
 
         from app.services.document_processor import CONTENT_TYPE_MAP
-
         content_type = CONTENT_TYPE_MAP.get(ext, "application/octet-stream")
 
-        logger.info(
-            "[WATCHER] ingestion_update_start datastore_id=%d path=%s doc_id=%d",
-            datastore_id, event_path, document_id,
-        )
         db: Session = SessionLocal()
         try:
             doc = db.query(Document).filter(Document.id == document_id).first()
             if not doc:
                 return
 
-            # Update document metadata
             doc.file_hash = file_hash
             doc.file_size = file_size
             doc.content_type = content_type
             db.commit()
 
-            # Reset or create processing task
             task = (
                 db.query(ProcessingTask)
                 .filter(ProcessingTask.document_id == document_id)
@@ -1158,7 +1771,6 @@ class DataStoreWatcher:
                 task.progress = 0
                 task.progress_message = "Re-queued by watcher scan"
             else:
-                # Re-ingest with no chunks — create a new task
                 task = ProcessingTask(
                     knowledge_base_id=None,
                     data_store_id=datastore_id,
@@ -1170,44 +1782,29 @@ class DataStoreWatcher:
                 db.add(task)
             db.commit()
 
-            logger.info(
-                "[WATCHER] update_started doc_id=%s path=%s",
-                document_id,
-                event_path,
-            )
-
             # Enqueue background re-processing
-            # Note: pass db=None — _run_ingestion will create its own session
             loop = asyncio.new_event_loop()
             future = self._executor.submit(
                 self._run_ingestion,
                 event_path,
                 fname,
-                None,  # kb_id — DataStore doesn't use KBs
-                task.id,  # task.id is guaranteed to be set (created above if missing)
+                None,
+                task.id,
                 document_id,
                 datastore_id,
-                None,  # db — _run_ingestion creates its own session
+                None,
                 loop,
             )
             future.add_done_callback(
                 lambda f: self._on_ingestion_done(f, task.id, event_path)
             )
 
-            # Track future for scan completion
             if scan_id > 0:
                 with self._scan_futures_lock:
                     if scan_id in self._scan_futures:
                         self._scan_futures[scan_id].append(future)
 
-            # Count as "modified"
-            for sid, info in self._active_scans.items():
-                if info["datastore_id"] == datastore_id:
-                    info["modified"] = info.get("modified", 0) + 1
-                    break
-
             return future
-
         except Exception as e:
             logger.error(
                 "[WATCHER] update_error doc_id=%s path=%s: %s",
@@ -1224,17 +1821,13 @@ class DataStoreWatcher:
             db.close()
 
     def scan(self) -> Dict[str, Any]:
-        """Manually scan all watched datastores for new/modified files.
-
-        Returns a summary dict with counts of scanned, new, and skipped files.
-        """
+        """Manually scan all watched datastores for new/modified files."""
         summary: Dict[str, int] = {"scanned": 0, "new": 0, "modified": 0, "skipped": 0, "errors": 0}
 
         if not self._running or self._observer is None:
             logger.warning("[WATCHER] scan attempted but service is not running")
             return summary
 
-        # Get all active datastores with auto_scan_enabled
         db: Session = SessionLocal()
         try:
             datastores = (
@@ -1246,19 +1839,10 @@ class DataStoreWatcher:
                 if not ds.folder_path or not os.path.isdir(ds.folder_path):
                     continue
 
-                # Get org_id from first assignment
-                assignment = (
-                    db.query(OrganizationDataStore)
-                    .filter(OrganizationDataStore.data_store_id == ds.id)
-                    .first()
-                )
-                org_id = assignment.org_id if assignment else None
-
                 for root, _dirs, files in os.walk(ds.folder_path):
                     for fname in files:
                         fpath = os.path.join(root, fname)
                         try:
-                            # Check if file matches scan_pattern
                             if not self._matches_pattern(fpath, ds.scan_pattern):
                                 summary["skipped"] += 1
                                 continue
@@ -1292,12 +1876,11 @@ class DataStoreWatcher:
             "datastores": [
                 {
                     "datastore_id": ds_id,
-                    "path": str(self.watched_paths.get(ds_id, "unknown")),
-                    "pending_changes": len(handler.pending_changes),
-                    "min_interval_seconds": handler.min_interval_seconds,
-                    "last_processing_time": handler.last_processing_time,
+                    "path": self._datastore_paths.get(ds_id, "unknown"),
+                    "pending_changes": len(self._handler.pending_changes.get(ds_id, [])),
+                    "min_interval_seconds": self._handler.folder_paths.get(ds_id, (None, None, 300))[2],
                 }
-                for ds_id, handler in self.datastore_handlers.items()
+                for ds_id in self._handler.folder_paths
             ],
         }
 
@@ -1309,7 +1892,6 @@ class DataStoreWatcher:
         """Sync watchers with database configuration."""
         db: Session = SessionLocal()
         try:
-            # Get all active datastore-organization assignments
             assignments = (
                 db.query(OrganizationDataStore)
                 .join(DataStore)
@@ -1321,7 +1903,6 @@ class DataStoreWatcher:
                 .all()
             )
 
-            # Group by datastore_id (org_id comes from assignment)
             datastore_ids = set()
             for assignment in assignments:
                 ds_id = assignment.data_store_id
@@ -1329,29 +1910,21 @@ class DataStoreWatcher:
                 datastore_ids.add(ds_id)
 
                 ds = assignment.data_store
-                if ds_id not in self.datastore_handlers:
-                    self.add_datastore(
-                        ds_id,
-                        org_id,
-                        ds.folder_path,
-                        ds.auto_scan_interval_minutes or 60,
-                    )
+                interval = ds.auto_scan_interval_minutes or 60
+                self.add_datastore(
+                    ds_id,
+                    org_id,
+                    ds.folder_path,
+                    interval,
+                )
 
-            # Remove watchers for disabled/unassigned datastores
-            current_ids = set(self.datastore_handlers.keys())
+            current_ids = set(self._datastore_paths.keys())
             to_remove = current_ids - datastore_ids
             for ds_id in to_remove:
                 self.remove_datastore(ds_id)
 
         finally:
             db.close()
-
-    def _sync_loop(self) -> None:
-        """Periodic sync thread — checks every 5 minutes."""
-        while self._running:
-            time_module.sleep(300)  # 5 minutes
-            if self._running:
-                self._sync_watchers_with_database()
 
     def _on_changes(self, datastore_id: int, org_id: int, changes: List[Dict[str, Any]]) -> None:
         """Callback when batch of changes is ready to process.
@@ -1385,29 +1958,6 @@ class DataStoreWatcher:
         # Refresh file count so UI reflects latest state
         self._refresh_file_count(datastore_id)
 
-    def _matches_pattern(self, filepath: str, scan_pattern: str = "*") -> bool:
-        """Check if a filepath matches the scan pattern."""
-        import fnmatch as _fnmatch
-
-        fname = os.path.basename(filepath)
-        # Exclude hidden files regardless of pattern
-        if fname.startswith("."):
-            return False
-        if scan_pattern == "*":
-            return True
-
-        patterns = [p.strip() for p in scan_pattern.split(",")]
-        for pat in patterns:
-            if "*" in pat:
-                # Use fnmatch for glob patterns
-                if _fnmatch.fnmatch(fname, pat):
-                    return True
-            else:
-                # Exact match
-                if fname == pat:
-                    return True
-        return False
-
     def _handle_file(
         self,
         event_path: str,
@@ -1416,174 +1966,29 @@ class DataStoreWatcher:
     ) -> Optional[Future]:
         """Core logic: handle file events (created, modified, deleted).
 
-        Files are processed in-place without copying. DataStore documents
-        are independent of KnowledgeBases.
-
-        Args:
-            event_path: Full path to the file
-            datastore_id: ID of the datastore containing the file
-            event_type: One of 'created', 'modified', 'deleted'
+        This is the entry point for event-driven ingestion. It delegates
+        to the handler's methods for file processing.
         """
-        # Handle deletion differently - no need to hash or check extensions
-        if event_type == "deleted":
-            self._handle_deletion(event_path, None, datastore_id)
-            return
+        # Delegate to handler's _handle_file which handles all the logic
+        return self._handler._handle_file(event_path, datastore_id, event_type)
 
-        fname = os.path.basename(event_path)
-        _, ext = os.path.splitext(fname)
-        ext = ext.lower()
+    def _refresh_file_count(self, datastore_id: int) -> None:
+        """Refresh last_scan_total_files from the filesystem.
 
-        # Skip non-supported extensions
-        if ext not in SUPPORTED_EXTENSIONS:
-            logger.debug(
-                "[WATCHER] file_detected path=%s ext=%s action=skip reason=unsupported_ext",
-                event_path,
-                ext,
-            )
-            return
-
-        # Skip hidden/system files
-        if fname.startswith("."):
-            logger.debug(
-                "[WATCHER] file_detected path=%s action=skip reason=hidden_file",
-                event_path,
-            )
-            return
-
-        # Check if file exists (for modified events, file might have been deleted)
-        if not os.path.exists(event_path):
-            logger.debug(
-                "[WATCHER] file_not_exists path=%s action=skip",
-                event_path,
-            )
-            return
-
-        # Get datastore scan_pattern
+        Called after file changes are detected so the UI always shows
+        the latest file count even before a manual scan runs.
+        """
         db: Session = SessionLocal()
         try:
             ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
-            if not ds:
-                return
-            scan_pattern = ds.scan_pattern or "*"
-
-            # Check scan pattern
-            if not self._matches_pattern(event_path, scan_pattern):
-                logger.debug(
-                    "[WATCHER] file_detected path=%s action=skip reason=pattern_mismatch",
-                    event_path,
-                )
+            if not ds or not ds.folder_path:
                 return
 
-            # Log the file that is about to be processed
-            logger.info(
-                "[WATCHER] file_processing datastore_id=%d path=%s event=%s",
-                datastore_id, event_path, event_type,
-            )
+            count = self._count_files_in_folder(ds.folder_path, ds.scan_pattern)
+            ds.last_scan_total_files = count
+            db.commit()
         finally:
             db.close()
-
-        # Compute SHA-256 hash
-        file_hash = self._compute_hash(event_path)
-        hash_prefix = file_hash[:8] if file_hash else "none"
-        file_size = os.path.getsize(event_path)
-
-        # DataStore: process file independently (no KB knowledge needed)
-        db: Session = SessionLocal()
-        try:
-            # Check if document already exists for this file path
-            existing = (
-                db.query(Document)
-                .filter(
-                    Document.file_path == event_path,
-                    Document.data_store_id == datastore_id,
-                )
-                .first()
-            )
-
-            if existing:
-                # Document exists - check if hash changed (file modified)
-                if existing.file_hash == file_hash:
-                    logger.info(
-                        "[WATCHER] no_change path=%s hash=%s datastore_id=%s doc_id=%s",
-                        event_path,
-                        hash_prefix,
-                        datastore_id,
-                        existing.id,
-                    )
-                    return
-                else:
-                    # File was modified - trigger re-ingestion
-                    logger.info(
-                        "[WATCHER] file_modified path=%s old_hash=%s new_hash=%s datastore_id=%s doc_id=%s",
-                        event_path,
-                        existing.file_hash[:8],
-                        hash_prefix,
-                        datastore_id,
-                        existing.id,
-                    )
-                    # Update existing document
-                    return self._update_document(
-                        existing.id, event_path, file_hash, datastore_id, scan_id=0
-                    )
-
-            # File is new — trigger ingestion in-place
-            return self._ingest_file(
-                event_path, datastore_id, scan_id=0, file_hash=file_hash
-            )
-        finally:
-            db.close()
-
-    def _update_document_inplace(
-        self,
-        document_id: int,
-        event_path: str,
-        fname: str,
-        file_hash: str,
-        file_size: int,
-        ext: str,
-        datastore_id: int,
-    ) -> None:
-        """Update an existing document when file content changes.
-
-        DEPRECATED: Use _update_document instead. This method is kept for
-        backward compatibility but delegates to _update_document.
-        """
-        logger.info(
-            "[WATCHER] update_start doc_id=%s path=%s",
-            document_id,
-            event_path,
-        )
-
-        # Trigger background re-processing
-        try:
-            self._update_document(
-                document_id, event_path, file_hash, datastore_id, scan_id=0
-            )
-        except Exception as e:
-            logger.error(
-                "[WATCHER] update_error doc_id=%s path=%s: %s",
-                document_id,
-                event_path,
-                e,
-                exc_info=True,
-            )
-
-    def _trigger_ingestion(
-        self,
-        event_path: str,
-        file_name: str,
-        datastore_id: int,
-        file_hash: str,
-    ) -> None:
-        """Create Document + ProcessingTask records and enqueue background processing.
-
-        Files are processed in-place - NOT copied to uploads folder.
-
-        DEPRECATED: Use _ingest_file instead. This method is kept for
-        backward compatibility but delegates to _ingest_file.
-        """
-        # Delegate to _ingest_file
-        self._ingest_file(event_path, datastore_id, scan_id=0, file_hash=file_hash)
 
     def _run_ingestion(
         self,
@@ -1598,30 +2003,25 @@ class DataStoreWatcher:
     ) -> None:
         """Run the async ingestion pipeline in a dedicated event loop (threaded).
 
-        Files are processed in-place - NOT copied to uploads folder.
-
-        For DataStore files: kb_id is None, data_store_id is set.
-        For KB files: kb_id is set, data_store_id is None.
-
         IMPORTANT: After ingestion completes, this updates the ProcessingTask
         status to 'completed' or 'failed' and updates the datastore progress.
         """
         try:
             async def _do() -> None:
                 await process_document_background(
-                    temp_path=file_path,  # Original path, not temp
+                    temp_path=file_path,
                     file_name=file_name,
                     kb_id=kb_id,
                     task_id=task_id,
                     document_id=document_id,
                     data_store_id=data_store_id,
-                    db=None,  # process_document_background creates its own session
+                    db=None,
                 )
 
             asyncio.set_event_loop(loop)
             loop.run_until_complete(_do())
 
-            # Mark task as completed (use a fresh session since the old one may be closed)
+            # Mark task as completed
             try:
                 fresh_db = SessionLocal()
                 try:
@@ -1648,7 +2048,6 @@ class DataStoreWatcher:
                 e,
                 exc_info=True,
             )
-            # Mark task as failed (use a fresh session)
             try:
                 fresh_db = SessionLocal()
                 try:
@@ -1662,17 +2061,12 @@ class DataStoreWatcher:
                     fresh_db.close()
             except Exception:
                 pass
-            # Re-raise so future.result() will surface the failure to the scan waiter
             raise
         finally:
             loop.close()
 
     def _on_ingestion_done(self, future, task_id: int, event_path: str) -> None:
-        """Callback after ingestion completes (success or failure).
-
-        DEPRECATED: The _run_ingestion method now handles task status updates
-        directly. This method is kept for backward compatibility.
-        """
+        """Callback after ingestion completes (success or failure)."""
         exc = future.exception()
         if exc:
             logger.error(
@@ -1686,15 +2080,3 @@ class DataStoreWatcher:
                 task_id,
                 event_path,
             )
-
-    @staticmethod
-    def _compute_hash(path: str) -> str:
-        """Compute SHA-256 hash of a file."""
-        h = hashlib.sha256()
-        try:
-            with open(path, "rb") as f:
-                for chunk in iter(lambda: f.read(8192), b""):
-                    h.update(chunk)
-            return h.hexdigest()
-        except OSError:
-            return ""
