@@ -57,6 +57,8 @@ interface DataStore {
     error_files: number;
   };
   pending_changes: number;
+  // Whether changes are currently being processed (event-driven ingestion)
+  processing: boolean;
 }
 
 interface ScanResult {
@@ -101,6 +103,7 @@ export default function DataSourcesPage() {
   const [orgs, setOrgs] = useState<Org[]>([]);
   const [loading, setLoading] = useState(true);
   const [triggering, setTriggering] = useState<Set<number>>(new Set());
+  const [flushing, setFlushing] = useState<Set<number>>(new Set());
   const pollingRef = useRef<NodeJS.Timeout | null>(null);
 
   // Create/Edit dialog
@@ -124,8 +127,11 @@ export default function DataSourcesPage() {
   const [assigningId, setAssigningId] = useState<number | null>(null);
   const [selectedOrgIds, setSelectedOrgIds] = useState<number[]>([]);
 
-  // Poll for scan progress when ANY datastore is scanning
+  // Poll for scan progress when ANY datastore is processing or scanning
   useEffect(() => {
+    const hasProcessing = datastores.some(
+      (ds) => ds.processing
+    );
     const hasRunningScan = datastores.some(
       (ds) => ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running'
     );
@@ -133,6 +139,11 @@ export default function DataSourcesPage() {
 
     if (hasManualTrigger) {
       // Poll every 2 seconds for manually triggered scans
+      pollingRef.current = setInterval(() => {
+        fetchData();
+      }, 2000);
+    } else if (hasProcessing) {
+      // Poll every 2 seconds when event-driven processing is active
       pollingRef.current = setInterval(() => {
         fetchData();
       }, 2000);
@@ -284,6 +295,32 @@ export default function DataSourcesPage() {
     });
   }
 
+  async function handleFlushChanges(dsId: number) {
+    setFlushing((prev) => new Set(prev).add(dsId));
+    try {
+      const result = (await api.post(
+        `/api/admin/datastores/${dsId}/flush`,
+      )) as { pending_processed: number; processing: boolean };
+      toast({
+        title: 'Changes flushed',
+        description: `Processed: ${result.pending_processed} pending change(s)`,
+      });
+      await fetchData();
+    } catch (err) {
+      toast({
+        title: 'Error',
+        description: (err as ApiError).message ?? 'Failed to flush changes',
+        variant: 'destructive',
+      });
+    }
+    // Clear flushing so button re-enables
+    setFlushing((prev) => {
+      const next = new Set(prev);
+      next.delete(dsId);
+      return next;
+    });
+  }
+
   async function handleStopScan(dsId: number) {
     try {
       const resp = (await api.post(
@@ -397,18 +434,24 @@ export default function DataSourcesPage() {
                   <TableCell>
                     {ds.auto_scan_enabled ? (
                       <Badge variant="secondary" className="bg-green-100 text-green-700">
-                        {ds.auto_scan_interval_minutes} minute(s)
+                        Immediate + auto-scan
                       </Badge>
                     ) : (
                       <Badge variant="secondary" className="bg-gray-100 text-gray-500">
-                        Manual
+                        Manual only
                       </Badge>
                     )}
                   </TableCell>
                   <TableCell className="text-xs text-muted-foreground">
                     <div className="flex items-center gap-1">
                       <StatusBadge status={ds.last_scan_status} isRunning={ds.last_scan_status === 'running'} />
-                      {ds.pending_changes > 0 && ds.last_scan_status !== 'running' && (
+                      {ds.processing && (
+                        <span className="inline-flex items-center gap-1 text-[10px] text-orange-600">
+                          <span className="w-1.5 h-1.5 rounded-full bg-orange-500 animate-pulse"></span>
+                          Processing
+                        </span>
+                      )}
+                      {ds.pending_changes > 0 && ds.last_scan_status !== 'running' && ds.last_scan_status !== 'idle' && (
                         <span className="inline-flex items-center gap-1 text-[10px] text-yellow-600">
                           <span className="w-1.5 h-1.5 rounded-full bg-yellow-500 animate-pulse"></span>
                           {ds.pending_changes}
@@ -451,6 +494,12 @@ export default function DataSourcesPage() {
                         {ds.last_scan_total_files} files
                         <br />
                         {ds.last_scan_processed} processed
+                        {ds.processing && (
+                          <div className="mt-1 flex items-center gap-1">
+                            <div className="w-2 h-2 rounded-full bg-orange-500 animate-pulse"></div>
+                            <span className="text-orange-600">Processing changes...</span>
+                          </div>
+                        )}
                         {ds.pending_changes > 0 && (
                           <div className="mt-1 flex items-center gap-1">
                             <div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse"></div>
@@ -476,6 +525,17 @@ export default function DataSourcesPage() {
                     >
                       {ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' ? 'Stop' : 'Scan'}
                     </Button>
+                    {ds.pending_changes > 0 && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleFlushChanges(ds.id)}
+                        disabled={flushing.has(ds.id)}
+                        title="Flush pending changes"
+                      >
+                        {flushing.has(ds.id) ? '⏳' : '⟳'}
+                      </Button>
+                    )}
                     <Button
                       variant="outline"
                       size="sm"

@@ -94,10 +94,10 @@ class _SyntheticEvent:
     Watchdog's observer fires events immediately, but we want to delay processing
     by ~1 second to let the file write complete (especially for editors like VS Code
     that write via temp files and renames). This class provides a minimal event-like
-    object with the attributes needed by the handler (src_path, is_directory, etc.).
+    object with the attributes needed by the handler (src_path, is_directory, event_type, etc.).
     """
 
-    def __init__(self, src_path: str, is_directory: bool = False) -> None:
+    def __init__(self, src_path: str, is_directory: bool = False, event_type: str = "modified") -> None:
         self.src_path = src_path
         self.is_directory = is_directory
         self.src_dir = os.path.dirname(src_path)
@@ -106,6 +106,7 @@ class _SyntheticEvent:
         self.cookie = 0
         self.name = os.path.basename(src_path)
         self.dir = is_directory
+        self.event_type = event_type
 
 
 class DatastoreFileEventHandler(FileSystemEventHandler):
@@ -125,11 +126,13 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
     def __init__(
         self,
         callback,
+        executor,
         debounce_ms: int = 1000,
         default_min_interval_seconds: int = 300,  # 5 minutes
         debouncer: Optional[_Debouncer] = None,
     ) -> None:
         self.callback = callback
+        self._executor = executor
         self.debounce_ms = debounce_ms / 1000.0
         self.default_min_interval_seconds = default_min_interval_seconds
         self.debouncer = debouncer
@@ -145,6 +148,11 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
 
         # Per-file debouncing: file_path -> last call timestamp (monotonic)
         self._last_call: Dict[str, float] = {}
+
+        # Processing state flag — per-datastore set to allow independent
+        # processing across different datastores (a slow ingestion for one
+        # datastore doesn't block others).
+        self._processing: set[int] = set()
 
         self._lock = threading.Lock()
 
@@ -269,23 +277,53 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
     # ------------------------------------------------------------------
 
     def _queue_change(self, datastore_id: int, event, event_type: str) -> None:
-        """Queue a change for batch processing.
+        """Queue a change for immediate processing.
 
-        If the datastore's batch timer is not running, start it.
-        If it's already running, the change will be processed when it fires.
+        For event-driven processing: process immediately after the change is queued.
+        For flush (manual): process immediately — no batch timer.
+        The batch timer was removed to avoid 5-minute delays in event-driven processing.
         """
         change = {
             "datastore_id": datastore_id,
             "org_id": self.folder_paths.get(datastore_id, (None,))[0],
             "path": event.src_path,
-            "event_type": event_type,
+            "event_type": event.event_type,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
         with self._lock:
             self.pending_changes.setdefault(datastore_id, []).append(change)
-            if datastore_id not in self._batch_timers:
-                self._start_batch_timer(datastore_id)
+
+    def _process_pending_changes(self, datastore_id: int) -> None:
+        """Process all pending changes for a datastore immediately.
+
+        Used by: event-driven processing (after _queue_change) and flush endpoint.
+        Sets _processing flag and processes all pending changes.
+        """
+        with self._lock:
+            if datastore_id not in self.pending_changes or not self.pending_changes[datastore_id]:
+                return
+            if datastore_id in self._processing:
+                return  # Already processing for this datastore
+            self._processing.add(datastore_id)
+            changes = self.pending_changes.pop(datastore_id)
+            org_id = self.folder_paths.get(datastore_id, (None,))[0]
+            logger.info(
+                "[WATCHER] processing_pending datastore_id=%d changes=%d",
+                datastore_id, len(changes),
+            )
+
+        # Process outside the lock to avoid holding it during ingestion
+        try:
+            self._on_changes(datastore_id, org_id, changes)
+        except Exception as e:
+            logger.error(
+                "[WATCHER] process_pending_error datastore_id=%d: %s",
+                datastore_id, e, exc_info=True,
+            )
+        finally:
+            with self._lock:
+                self._processing.discard(datastore_id)
 
     def _flush_batch(self, datastore_id: int) -> None:
         """Process all pending changes for a datastore and stop its timer."""
@@ -383,6 +421,7 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
                 event.src_path, datastore_id,
             )
             return
+        self._after_process(event.src_path)
         logger.info(
             "[WATCHER] event_detected path=%s datastore_id=%d event=deleted",
             event.src_path, datastore_id,
@@ -454,9 +493,12 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
 
         def _delayed_dispatch(p, et):
             _time.sleep(1.0)
-            # Create a synthetic event with is_directory attribute
-            event = _SyntheticEvent(src_path=p, is_directory=False)
-            self._queue_change(self._resolve_datastore(p) or 0, event, et)
+            # Create a synthetic event with is_directory and event_type attributes
+            event = _SyntheticEvent(src_path=p, is_directory=False, event_type=et)
+            ds_id = self._resolve_datastore(p)
+            if ds_id is not None:
+                self._queue_change(ds_id, event, et)
+                self._process_pending_changes(ds_id)
 
         _threading.Thread(target=_delayed_dispatch, args=(path, event_type), daemon=True).start()
 
@@ -734,9 +776,23 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
                 task.id,
             )
 
-            # Enqueue background processing — executor passed via self.callback
-            # The callback is DataStoreWatcher._on_changes which queues via _executor
-            return None  # Future returned later by watcher's ingestion method
+            # Enqueue background processing
+            loop = asyncio.new_event_loop()
+            future = self._executor.submit(
+                self._run_ingestion,
+                event_path,
+                fname,
+                None,  # kb_id (DataStore files have no KB)
+                task.id,
+                doc.id,
+                datastore_id,
+                None,
+                loop,
+            )
+            future.add_done_callback(
+                lambda f: self._on_ingestion_done(f, task.id, event_path)
+            )
+            return future
         except Exception as e:
             logger.error(
                 "[WATCHER] failed_to_create_ingestion_records: %s",
@@ -828,8 +884,23 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
                 event_path,
             )
 
-            # Enqueue background re-processing — executor passed via self.callback
-            return None  # Future returned later by watcher's ingestion method
+            # Enqueue background re-processing
+            loop = asyncio.new_event_loop()
+            future = self._executor.submit(
+                self._run_ingestion,
+                event_path,
+                fname,
+                None,  # kb_id (DataStore files have no KB)
+                task.id,
+                document_id,
+                datastore_id,
+                None,
+                loop,
+            )
+            future.add_done_callback(
+                lambda f: self._on_ingestion_done(f, task.id, event_path)
+            )
+            return future
         except Exception as e:
             logger.error(
                 "[WATCHER] update_error doc_id=%s path=%s: %s",
@@ -1032,6 +1103,100 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
             return 0
 
     # ------------------------------------------------------------------
+    # Async ingestion runner
+    # ------------------------------------------------------------------
+
+    def _run_ingestion(
+        self,
+        file_path: str,
+        file_name: str,
+        kb_id: Optional[int],
+        task_id: int,
+        document_id: int,
+        data_store_id: Optional[int],
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        """Run the async ingestion pipeline in a dedicated event loop (threaded).
+
+        IMPORTANT: After ingestion completes, this updates the ProcessingTask
+        status to 'completed' or 'failed' and updates the datastore progress.
+        """
+        try:
+            async def _do() -> None:
+                await process_document_background(
+                    temp_path=file_path,
+                    file_name=file_name,
+                    kb_id=kb_id,
+                    task_id=task_id,
+                    document_id=document_id,
+                    data_store_id=data_store_id,
+                    db=None,
+                )
+
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(_do())
+
+            # Mark task as completed
+            try:
+                fresh_db = SessionLocal()
+                try:
+                    db_task = fresh_db.query(ProcessingTask).filter(ProcessingTask.id == task_id).first()
+                    if db_task:
+                        db_task.status = "completed"
+                        db_task.progress = 100
+                        db_task.progress_message = "Ingestion completed"
+                        fresh_db.commit()
+                finally:
+                    fresh_db.close()
+            except Exception:
+                pass
+
+            logger.info(
+                "[WATCHER] ingestion_completed task_id=%s path=%s",
+                task_id,
+                file_path,
+            )
+        except Exception as e:
+            logger.error(
+                "[WATCHER] ingestion_failed task_id=%s error=%s",
+                task_id,
+                e,
+                exc_info=True,
+            )
+            try:
+                fresh_db = SessionLocal()
+                try:
+                    db_task = fresh_db.query(ProcessingTask).filter(ProcessingTask.id == task_id).first()
+                    if db_task:
+                        db_task.status = "failed"
+                        db_task.progress = 0
+                        db_task.progress_message = f"Ingestion failed: {str(e)}"
+                        fresh_db.commit()
+                finally:
+                    fresh_db.close()
+            except Exception:
+                pass
+            raise
+        finally:
+            loop.close()
+
+    def _on_ingestion_done(self, future, task_id: int, event_path: str) -> None:
+        """Callback after ingestion completes (success or failure)."""
+        exc = future.exception()
+        if exc:
+            logger.error(
+                "[WATCHER] ingestion_future_error task_id=%s: %s",
+                task_id,
+                exc,
+            )
+        else:
+            logger.info(
+                "[WATCHER] ingestion_completed task_id=%s path=%s",
+                task_id,
+                event_path,
+            )
+
+    # ------------------------------------------------------------------
     # Batch callback handler
     # ------------------------------------------------------------------
 
@@ -1094,6 +1259,7 @@ class DataStoreWatcher:
         self._debouncer = _Debouncer(delay=1.0)
         self._handler = DatastoreFileEventHandler(
             callback=self._on_changes,
+            executor=self._executor,
             debounce_ms=1000,
             default_min_interval_seconds=300,  # 5 minutes
             debouncer=self._debouncer,
@@ -1868,6 +2034,8 @@ class DataStoreWatcher:
 
     def get_status(self) -> Dict[str, Any]:
         """Return current watcher state for the admin status endpoint."""
+        with self._handler._lock:
+            processing = self._handler._processing
         return {
             "running": self._running,
             "last_scan_at": self._last_scan_at,
@@ -1879,6 +2047,7 @@ class DataStoreWatcher:
                     "path": self._datastore_paths.get(ds_id, "unknown"),
                     "pending_changes": len(self._handler.pending_changes.get(ds_id, [])),
                     "min_interval_seconds": self._handler.folder_paths.get(ds_id, (None, None, 300))[2],
+                    "processing": ds_id in self._handler._processing if ds_id in self._datastore_paths else False,
                 }
                 for ds_id in self._handler.folder_paths
             ],

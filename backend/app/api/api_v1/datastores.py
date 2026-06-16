@@ -100,10 +100,12 @@ class DataStoreResponse(BaseModel):
     assigned_orgs: List[dict] = []
     created_at: datetime
     updated_at: datetime
-    # Real-time scan progress (populated when a scan is running)
+    # Real-time scan progress (populated when a manual scan is running)
     scan_progress: Optional[dict] = None
-    # Pending changes detected but not yet processed (batch deferral)
+    # Pending changes detected but not yet processed (event-driven queue)
     pending_changes: int = 0
+    # Whether changes are currently being processed (event-driven ingestion)
+    processing: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -121,9 +123,11 @@ class DataStoreStatusResponse(BaseModel):
     last_scan_error: Optional[str] = None
     last_scan_total_files: int
     last_scan_processed: int
-    # Pending changes detected but not yet processed (batch deferral)
+    # Pending changes detected but not yet processed (event-driven queue)
     pending_changes: int = 0
-    # Real-time scan progress (populated when a scan is running)
+    # Whether changes are currently being processed (event-driven ingestion)
+    processing: bool = False
+    # Real-time scan progress (populated when a manual scan is running)
     scan_progress: Optional[dict] = None
 
 
@@ -238,9 +242,11 @@ def list_datastores(
             watcher = _get_watcher()
             status = watcher.get_status()
             resp["pending_changes"] = 0
+            resp["processing"] = False
             for ds_status in status.get("datastores", []):
                 if ds_status.get("datastore_id") == ds.id:
                     resp["pending_changes"] = ds_status.get("pending_changes", 0)
+                    resp["processing"] = ds_status.get("processing", False)
                     break
             for scan in status.get("active_scans", []):
                 if scan.get("datastore_id") == ds.id:
@@ -559,6 +565,7 @@ def get_datastore_status(
     ds = _get_datastore_or_404(db, datastore_id)
     resp = _serialize_ds(ds)
     resp["pending_changes"] = 0
+    resp["processing"] = False
 
     # Check if watcher has pending changes for this datastore
     try:
@@ -567,6 +574,7 @@ def get_datastore_status(
         for ds_status in status.get("datastores", []):
             if ds_status.get("datastore_id") == datastore_id:
                 resp["pending_changes"] = ds_status.get("pending_changes", 0)
+                resp["processing"] = ds_status.get("processing", False)
                 break
 
         # Include real-time scan progress
@@ -761,3 +769,73 @@ def trigger_datastore_scan(
         skipped=result.get("skipped", 0),
         errors=result.get("errors", 0),
     )
+
+
+class FlushResultResponse(BaseModel):
+    """Response for flush endpoint — process pending changes for a datastore."""
+    datastore_id: int
+    pending_processed: int
+    processing: bool = False
+
+
+@router.post("/datastores/{datastore_id}/flush", response_model=FlushResultResponse)
+def flush_datastore_changes(
+    datastore_id: int,
+    db: Session = Depends(get_db),
+    _: object = Depends(require_admin),
+):
+    """Flush and process pending changes for a specific datastore.
+
+    Processes all queued file changes (from event-driven detection or manual
+    flush triggers) immediately. Returns the number of changes processed
+    and whether the datastore is still processing.
+    """
+    ds = _get_datastore_or_404(db, datastore_id)
+
+    if not ds.folder_path or not os.path.isdir(ds.folder_path):
+        raise HTTPException(
+            status_code=400,
+            detail=f"DataStore folder does not exist: {ds.folder_path}",
+        )
+
+    # Check if there are pending changes
+    try:
+        watcher = _get_watcher()
+        status = watcher.get_status()
+        ds_status = None
+        for ds_s in status.get("datastores", []):
+            if ds_s.get("datastore_id") == datastore_id:
+                ds_status = ds_s
+                break
+
+        if not ds_status:
+            return FlushResultResponse(
+                datastore_id=datastore_id,
+                pending_processed=0,
+                processing=False,
+            )
+
+        pending_count = ds_status.get("pending_changes", 0)
+        was_processing = ds_status.get("processing", False)
+
+        # Process pending changes if any
+        if pending_count > 0:
+            watcher._handler._process_pending_changes(datastore_id)
+
+        # Get updated status after processing
+        updated_status = watcher.get_status()
+        updated_ds_status = None
+        for ds_s in updated_status.get("datastores", []):
+            if ds_s.get("datastore_id") == datastore_id:
+                updated_ds_status = ds_s
+                break
+
+        return FlushResultResponse(
+            datastore_id=datastore_id,
+            pending_processed=pending_count,
+            processing=updated_ds_status.get("processing", False) if updated_ds_status else was_processing,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to flush changes: {str(e)}")

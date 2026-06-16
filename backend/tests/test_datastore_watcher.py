@@ -117,6 +117,7 @@ class TestDebouncing:
 
         handler = DatastoreFileEventHandler(
             callback=MagicMock(),
+            executor=MagicMock(),
             debounce_ms=1000,  # 1 second
         )
         path = "/app/data/store1/test.txt"
@@ -136,6 +137,7 @@ class TestDebouncing:
 
         handler = DatastoreFileEventHandler(
             callback=MagicMock(),
+            executor=MagicMock(),
             debounce_ms=100,  # 100ms
         )
         path = "/app/data/store1/test.txt"
@@ -158,6 +160,7 @@ class TestDebouncing:
 
         handler = DatastoreFileEventHandler(
             callback=MagicMock(),
+            executor=MagicMock(),
             debounce_ms=1000,  # 1 second
         )
         path = "/app/data/store1/test.txt"
@@ -214,6 +217,7 @@ class TestFileMove:
 
         handler = DatastoreFileEventHandler(
             callback=MagicMock(),
+            executor=MagicMock(),
             debounce_ms=100,
         )
         # Mock _resolve_datastore to return the datastore ID.
@@ -247,6 +251,7 @@ class TestFileMove:
 
         handler = DatastoreFileEventHandler(
             callback=MagicMock(),
+            executor=MagicMock(),
             debounce_ms=100,
         )
         # Mock _resolve_datastore to return None for the destination.
@@ -275,6 +280,7 @@ class TestFileMove:
 
         handler = DatastoreFileEventHandler(
             callback=MagicMock(),
+            executor=MagicMock(),
             debounce_ms=100,
         )
         # Mock _resolve_datastore to return different datastore IDs.
