@@ -317,7 +317,7 @@ async def fast_stream(
                 }
     except Exception as exc:
         logger.error("[FAST] generation failed: %s", exc)
-        err_msg = "I encountered an error generating the response. Please try again."
+        err_msg = "I encountered an error in synthesizing the response. Please try again."
         yield {"event": "token", "content": err_msg}
         streamed_parts.append(err_msg)
 

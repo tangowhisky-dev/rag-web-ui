@@ -4,7 +4,18 @@
       "Bash(od *)",
       "Bash(xxd)",
       "Bash(python3 *)",
-      "Bash(python *)"
+      "Bash(python *)",
+      "Agent(Explore)",
+      "Bash(true)",
+      "Bash(which *)",
+      "Bash(mysql *)",
+      "Bash(ls *)",
+      "Bash(docker ps *)",
+      "Bash(docker exec *)",
+      "Bash(brew *)",
+      "Bash(/opt/homebrew/opt/mysql-client/bin/mysql *)",
+      "Bash(git add *)",
+      "Bash(git commit *)"
     ]
   },
   "$version": 4

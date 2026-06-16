@@ -86,3 +86,4 @@ coverage/
 tmp/
 /backend/assets
 /data
+/.qwen

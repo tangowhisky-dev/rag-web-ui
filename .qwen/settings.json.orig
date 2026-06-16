@@ -3,7 +3,18 @@
     "allow": [
       "Bash(od *)",
       "Bash(xxd)",
-      "Bash(python3 *)"
+      "Bash(python3 *)",
+      "Bash(python *)",
+      "Agent(Explore)",
+      "Bash(true)",
+      "Bash(which *)",
+      "Bash(mysql *)",
+      "Bash(ls *)",
+      "Bash(docker ps *)",
+      "Bash(docker exec *)",
+      "Bash(brew *)",
+      "Bash(/opt/homebrew/opt/mysql-client/bin/mysql *)",
+      "Bash(git add *)"
     ]
   },
   "$version": 4

@@ -1282,7 +1282,7 @@ async def generate_answer_node(state: RAGGraphState) -> dict:
             usage = llm._last_usage  # type: ignore[attr-defined]
     except Exception as exc:
         logger.error("[GENERATE] failed: %s", exc)
-        streamed_parts = ["I encountered an error generating the response. Please try again."]
+        streamed_parts = ["I encountered an error in synthesizing the response. Please try again."]
 
     answer = re.sub(
         r'\[KB-(\d+)\]',
