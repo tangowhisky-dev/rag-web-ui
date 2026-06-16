@@ -564,6 +564,7 @@ def get_datastore_status(
     """Get datastore scan status."""
     ds = _get_datastore_or_404(db, datastore_id)
     resp = _serialize_ds(ds)
+    resp["datastore_id"] = resp.pop("id")
     resp["pending_changes"] = 0
     resp["processing"] = False
 

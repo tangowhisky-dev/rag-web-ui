@@ -305,3 +305,65 @@ class TestFileMove:
         handler._dispatch.assert_any_call(
             "/app/data/store2/new.txt", "created"
         )
+
+
+class TestSyncWatchersWithoutOrgAssignment:
+    """Verify that unassigned datastores are still registered for watching.
+
+    Datastores should be watched for changes irrespective of whether they are
+    assigned to any organization. The org_id is only used for logging and
+    KB-deletion cleanup (which guards on org_id is not None).
+    """
+
+    def test_sync_includes_unassigned_datastores(self, tmp_path):
+        """A datastore without OrganizationDataStore rows is still registered."""
+        from app.services.datastore_watcher import DataStoreWatcher
+
+        # Ensure the directory exists
+        ds_path = tmp_path / "unassigned"
+        ds_path.mkdir(exist_ok=True)
+
+        watcher = DataStoreWatcher()
+        # Start the observer (required to avoid OSError on some platforms)
+        from watchdog.observers.polling import PollingObserver
+        watcher._observer = PollingObserver(timeout=2)
+        watcher._observer.start()
+        watcher._observer.schedule(watcher._handler, str(tmp_path), recursive=True)
+
+        # Patch the database session to return an unassigned datastore
+        from unittest.mock import MagicMock, patch
+        mock_ds = MagicMock()
+        mock_ds.id = 42
+        mock_ds.folder_path = str(ds_path)
+        mock_ds.auto_scan_interval_minutes = 60
+        mock_ds.is_active = True
+        mock_ds.auto_scan_enabled = True
+
+        mock_assignment = MagicMock()
+        # No assignment for datastore_id=42
+
+        with patch("app.services.datastore_watcher.SessionLocal") as mock_session:
+            mock_session.return_value.__enter__ = MagicMock(return_value=MagicMock())
+            mock_session.return_value.__exit__ = MagicMock(return_value=None)
+            mock_query = MagicMock()
+            mock_assignment_query = MagicMock()
+            # Unassigned datastore returns the datastore itself
+            mock_query.filter.return_value.all.return_value = [mock_ds]
+            # No assignments for this datastore
+            mock_assignment_query.filter.return_value.all.return_value = []
+            mock_session.return_value.query.side_effect = (
+                lambda model: mock_assignment_query if model.__name__ == "OrganizationDataStore" else mock_query
+            )
+            mock_session.return_value.query.return_value = mock_assignment_query
+
+            watcher._sync_watchers_with_database()
+
+        try:
+            # Verify the datastore was registered (not filtered out)
+            assert 42 in watcher._datastore_paths
+            assert 42 in watcher._handler.folder_paths
+            # org_id should be None for unassigned datastores
+            assert watcher._handler.folder_paths[42][0] is None
+        finally:
+            watcher._observer.stop()
+            watcher._observer.join(timeout=5)

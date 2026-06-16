@@ -208,12 +208,13 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
         """
         sorted_ids = sorted(
             self.folder_paths.keys(),
-            key=lambda ds_id: len(self.folder_paths[ds_id][1]),
+            key=lambda ds_id: len(str(self.folder_paths[ds_id][1])),
             reverse=True,
         )
         for ds_id in sorted_ids:
             _, folder_path, _ = self.folder_paths[ds_id]
-            if event_path.startswith(folder_path + '/') or event_path == folder_path:
+            folder_path_str = str(folder_path)
+            if event_path.startswith(folder_path_str + '/') or event_path == folder_path_str:
                 return ds_id
         return None
 
@@ -1114,6 +1115,7 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
         task_id: int,
         document_id: int,
         data_store_id: Optional[int],
+        db,  # Session — kept for API compatibility with DataStoreWatcher
         loop: asyncio.AbstractEventLoop,
     ) -> None:
         """Run the async ingestion pipeline in a dedicated event loop (threaded).
@@ -1311,13 +1313,29 @@ class DataStoreWatcher:
         try:
             from watchdog.observers import Observer
 
-            self._observer = Observer(timeout=settings.WATCH_POLL_INTERVAL)
-            self._observer.start()
-            logger.info(
-                "[WATCHER] observer started (Observer with recursive=True, "
-                "WATCHER_USE_INOTIFY=%s)",
-                settings.WATCHER_USE_INOTIFY,
-            )
+            # Force PollingObserver when inotify is disabled (e.g., Docker Desktop
+            # on macOS where inotify doesn't properly propagate events from
+            # host bind mounts into the container).
+            if not settings.WATCHER_USE_INOTIFY:
+                from watchdog.observers.polling import PollingObserver
+
+                self._observer = PollingObserver(timeout=settings.WATCH_POLL_INTERVAL)
+                self._observer.start()
+                logger.info(
+                    "[WATCHER] observer started (PollingObserver with "
+                    "recursive=True, WATCH_POLL_INTERVAL=%ds, "
+                    "WATCHER_USE_INOTIFY=%s)",
+                    settings.WATCH_POLL_INTERVAL,
+                    settings.WATCHER_USE_INOTIFY,
+                )
+            else:
+                self._observer = Observer(timeout=settings.WATCH_POLL_INTERVAL)
+                self._observer.start()
+                logger.info(
+                    "[WATCHER] observer started (Observer with recursive=True, "
+                    "WATCHER_USE_INOTIFY=%s)",
+                    settings.WATCHER_USE_INOTIFY,
+                )
         except (ImportError, OSError) as e:
             # Fallback to PollingObserver if native observer is unavailable
             from watchdog.observers.polling import PollingObserver
@@ -2058,14 +2076,28 @@ class DataStoreWatcher:
     # ------------------------------------------------------------------
 
     def _sync_watchers_with_database(self) -> None:
-        """Sync watchers with database configuration."""
+        """Sync watchers with database configuration.
+
+        Registers all active, auto_scan_enabled datastores — regardless of
+        whether they have org assignments. Unassigned datastores are watched
+        with org_id=None; file processing works identically since org_id is
+        only used for logging and KB-deletion cleanup (which already guards
+        on org_id is not None)."""
         db: Session = SessionLocal()
         try:
-            assignments = (
+            # Build org_id lookup from assignments (unassigned → None)
+            assignment_map: Dict[int, int] = {}
+            for a in (
                 db.query(OrganizationDataStore)
-                .join(DataStore)
+                .filter(OrganizationDataStore.is_active == True)
+                .all()
+            ):
+                assignment_map[a.data_store_id] = a.org_id
+
+            # Query all active datastores with auto-scan enabled
+            datastores = (
+                db.query(DataStore)
                 .filter(
-                    OrganizationDataStore.is_active == True,
                     DataStore.is_active == True,
                     DataStore.auto_scan_enabled == True,
                 )
@@ -2073,12 +2105,10 @@ class DataStoreWatcher:
             )
 
             datastore_ids = set()
-            for assignment in assignments:
-                ds_id = assignment.data_store_id
-                org_id = assignment.org_id
+            for ds in datastores:
+                ds_id = ds.id
                 datastore_ids.add(ds_id)
-
-                ds = assignment.data_store
+                org_id = assignment_map.get(ds_id)  # None for unassigned
                 interval = ds.auto_scan_interval_minutes or 60
                 self.add_datastore(
                     ds_id,
