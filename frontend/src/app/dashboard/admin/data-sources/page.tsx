@@ -106,18 +106,21 @@ export default function DataSourcesPage() {
   const [flushing, setFlushing] = useState<Set<number>>(new Set());
   const pollingRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Create/Edit dialog
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [editingId, setEditingId] = useState<number | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [form, setForm] = useState({
+  // Default form values — source of truth for the create/edit dialog
+  const formDefaults = {
     name: '',
     description: '',
     folder_path: '',
     scan_pattern: '*',
     auto_scan_enabled: false,
-    auto_scan_interval_minutes: 60,
-  });
+    auto_scan_interval_minutes: 30,
+  };
+
+  // Create/Edit dialog
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [form, setForm] = useState(formDefaults);
 
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -191,27 +194,13 @@ export default function DataSourcesPage() {
 
   function openCreate() {
     setEditingId(null);
-    setForm({
-      name: '',
-      description: '',
-      folder_path: '',
-      scan_pattern: '*',
-      auto_scan_enabled: false,
-      auto_scan_interval_minutes: 60,
-    });
+    setForm(formDefaults);
     setDialogOpen(true);
   }
 
   function openEdit(ds: DataStore) {
     setEditingId(ds.id);
-    setForm({
-      name: ds.name,
-      description: ds.description ?? '',
-      folder_path: ds.folder_path,
-      scan_pattern: ds.scan_pattern,
-      auto_scan_enabled: ds.auto_scan_enabled,
-      auto_scan_interval_minutes: ds.auto_scan_interval_minutes,
-    });
+    setForm({ ...formDefaults, name: ds.name, description: ds.description, folder_path: ds.folder_path, scan_pattern: ds.scan_pattern, auto_scan_enabled: ds.auto_scan_enabled, auto_scan_interval_minutes: ds.auto_scan_interval_minutes });
     setDialogOpen(true);
   }
 
@@ -670,7 +659,9 @@ export default function DataSourcesPage() {
                   onChange={(e) =>
                     setForm({
                       ...form,
-                      auto_scan_interval_minutes: parseInt(e.target.value, 10) || 60,
+                      auto_scan_interval_minutes: e.target.value
+                        ? parseInt(e.target.value, 10) || formDefaults.auto_scan_interval_minutes
+                        : form.auto_scan_interval_minutes,
                     })
                   }
                 />
