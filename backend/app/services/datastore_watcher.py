@@ -1082,6 +1082,23 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
         finally:
             db.close()
 
+    def _update_scan_progress(self, datastore_id: int, processed: int) -> None:
+        """Increment last_scan_processed so UI reflects ingestion progress.
+
+        Called after event-driven ingestion completes. Uses += to avoid
+        overwriting the count when the periodic scan also updates it.
+        """
+        db: Session = SessionLocal()
+        try:
+            ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
+            if not ds:
+                return
+
+            ds.last_scan_processed += processed
+            db.commit()
+        finally:
+            db.close()
+
     def _count_files_in_folder(self, folder_path: str, scan_pattern: str = "*") -> int:
         """Count files matching pattern in folder."""
         try:
@@ -1214,23 +1231,28 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
             return
 
         logger.info(
-            "[WATCHER] batch_ready datastore_id=%d org_id=%d changes=%d",
+            "[WATCHER] batch_ready datastore_id=%d org_id=%s changes=%d",
             datastore_id,
             org_id,
             len(changes),
         )
 
-        # Process each change
+        # Process each change and update last_scan_processed so UI
+        # reflects ingestion progress, not just total file count.
+        changes_processed = 0
         for change in changes:
             fpath = change["path"]
             event_type = change.get("event_type", "modified")
             try:
                 self._handle_file(fpath, datastore_id, event_type)
+                changes_processed += 1
             except Exception as e:
                 logger.error(
                     "[WATCHER] handle_file_error path=%s event=%s: %s", fpath, event_type, e, exc_info=True
                 )
 
+        # Update last_scan_processed so UI doesn't show stale 0
+        self._update_scan_progress(datastore_id, changes_processed)
         # Refresh file count so UI reflects latest state
         self._refresh_file_count(datastore_id)
 
@@ -1759,8 +1781,8 @@ class DataStoreWatcher:
         """
         db: Session = SessionLocal()
         try:
-            # Compute hash
-            file_hash = self._compute_hash(event_path)
+            # Compute hash (delegate to handler which has the method)
+            file_hash = self._handler._compute_hash(event_path)
             if not file_hash:
                 return
 
@@ -1841,7 +1863,7 @@ class DataStoreWatcher:
         content_type = CONTENT_TYPE_MAP.get(ext, "application/octet-stream")
 
         if file_hash is None:
-            file_hash = self._compute_hash(event_path)
+            file_hash = self._handler._compute_hash(event_path)
         if not file_hash:
             return
 
@@ -2137,23 +2159,37 @@ class DataStoreWatcher:
             return
 
         logger.info(
-            "[WATCHER] batch_ready datastore_id=%d org_id=%d changes=%d",
+            "[WATCHER] batch_ready datastore_id=%d org_id=%s changes=%d",
             datastore_id,
             org_id,
             len(changes),
         )
 
-        # Process each change
+        # Process each change and update last_scan_processed so UI
+        # reflects ingestion progress, not just total file count.
+        changes_processed = 0
         for change in changes:
             fpath = change["path"]
             event_type = change.get("event_type", "modified")
             try:
                 self._handle_file(fpath, datastore_id, event_type)
+                changes_processed += 1
             except Exception as e:
                 logger.error(
                     "[WATCHER] handle_file_error path=%s event=%s: %s", fpath, event_type, e, exc_info=True
                 )
 
+        # Update last_scan_processed so UI doesn't show stale 0.
+        # Use += to accumulate the batch count — the scan uses _update_scan_progress
+        # which sets the cumulative count with = (see line ~2201).
+        db2: Session = SessionLocal()
+        try:
+            ds2 = db2.query(DataStore).filter(DataStore.id == datastore_id).first()
+            if ds2:
+                ds2.last_scan_processed += changes_processed
+                db2.commit()
+        finally:
+            db2.close()
         # Refresh file count so UI reflects latest state
         self._refresh_file_count(datastore_id)
 
@@ -2170,6 +2206,24 @@ class DataStoreWatcher:
         """
         # Delegate to handler's _handle_file which handles all the logic
         return self._handler._handle_file(event_path, datastore_id, event_type)
+
+    def _update_scan_progress(self, datastore_id: int, processed: int) -> None:
+        """Set last_scan_processed to the current processed count.
+
+        Called during a scan after each file is processed. The `processed`
+        parameter is the cumulative count (summary["scanned"]), so we set
+        it directly with = instead of += to avoid double-counting.
+        """
+        db: Session = SessionLocal()
+        try:
+            ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
+            if not ds:
+                return
+
+            ds.last_scan_processed = processed
+            db.commit()
+        finally:
+            db.close()
 
     def _refresh_file_count(self, datastore_id: int) -> None:
         """Refresh last_scan_total_files from the filesystem.

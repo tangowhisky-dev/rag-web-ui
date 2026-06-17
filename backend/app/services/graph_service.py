@@ -76,12 +76,6 @@ logger = logging.getLogger(__name__)
 _neo4j_driver: Optional[neo4j.Driver] = None
 _llm_pipeline = None   # neo4j_graphrag Pipeline — only built when GRAPHRAG_LLM is set
 
-# Cap concurrent graph extraction jobs. Each job fires N sequential LLM calls
-# per chunk. Running too many simultaneously starves the local model and blocks
-# the event loop via the synchronous Neo4j driver calls.
-_graph_semaphore = asyncio.Semaphore(1)
-
-
 def _get_driver() -> neo4j.Driver:
     global _neo4j_driver
     if _neo4j_driver is None:
@@ -491,7 +485,11 @@ async def build_graph_for_document(
 
     # Extract entities and relationships — throttled by semaphore so we don't
     # run all 20 documents' extraction simultaneously on one local LLM.
-    async with _graph_semaphore:
+    # Lazily create semaphore inside the function so it is bound to the
+    # *current* event loop (the module-level one is created at import time
+    # and may be on a different loop from the running task).
+    sem = asyncio.Semaphore(1)
+    async with sem:
         total_entities, total_relations = await _extract_with_llm(
             document_id=document_id,
             file_name=file_name,
