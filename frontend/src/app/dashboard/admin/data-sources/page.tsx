@@ -44,6 +44,10 @@ interface DataStore {
   last_scan_error: string | null;
   last_scan_total_files: number;
   last_scan_processed: number;
+  last_scan_new: number;
+  last_scan_modified: number;
+  last_scan_skipped: number;
+  last_scan_errors: number;
   assigned_orgs: Array<{ id: number; name: string }>;
   created_at: string;
   updated_at: string;
@@ -67,6 +71,18 @@ interface ScanResult {
   modified: number;
   skipped: number;
   errors: number;
+}
+
+interface ScanProgress {
+  total_files: number;
+  processed_files: number;
+  status: string;
+  scanned?: number;
+  new_files?: number;
+  modified_files?: number;
+  skipped_files?: number;
+  error_files?: number;
+  error_message?: string;
 }
 
 const STATUS_CONFIG: Record<string, { cls: string; label: string }> = {
@@ -104,7 +120,9 @@ export default function DataSourcesPage() {
   const [loading, setLoading] = useState(true);
   const [triggering, setTriggering] = useState<Set<number>>(new Set());
   const [flushing, setFlushing] = useState<Set<number>>(new Set());
+  const [scanProgress, setScanProgress] = useState<Record<number, ScanProgress | undefined>>({});
   const pollingRef = useRef<NodeJS.Timeout | null>(null);
+  const scanPollRef = useRef<{ active: boolean; dsId: number | null }>({ active: false, dsId: null });
 
   // Default form values — source of truth for the create/edit dialog
   const formDefaults = {
@@ -131,6 +149,8 @@ export default function DataSourcesPage() {
   const [selectedOrgIds, setSelectedOrgIds] = useState<number[]>([]);
 
   // Poll for scan progress when ANY datastore is processing or scanning
+  // Note: SSE is used for real-time progress during manual scans, but we
+  // still poll for event-driven processing and background scans.
   useEffect(() => {
     const hasProcessing = datastores.some(
       (ds) => ds.processing
@@ -140,21 +160,11 @@ export default function DataSourcesPage() {
     );
     const hasManualTrigger = triggering.size > 0;
 
-    if (hasManualTrigger) {
-      // Poll every 2 seconds for manually triggered scans
+    if (hasProcessing || hasRunningScan) {
+      // Poll every 2-5 seconds for event-driven processing and background scans
       pollingRef.current = setInterval(() => {
         fetchData();
-      }, 2000);
-    } else if (hasProcessing) {
-      // Poll every 2 seconds when event-driven processing is active
-      pollingRef.current = setInterval(() => {
-        fetchData();
-      }, 2000);
-    } else if (hasRunningScan) {
-      // Poll every 5 seconds for background file event scans
-      pollingRef.current = setInterval(() => {
-        fetchData();
-      }, 5000);
+      }, hasProcessing ? 2000 : 5000);
     } else {
       if (pollingRef.current) {
         clearInterval(pollingRef.current);
@@ -260,28 +270,107 @@ export default function DataSourcesPage() {
 
   async function handleTriggerScan(dsId: number) {
     setTriggering((prev) => new Set(prev).add(dsId));
+    setScanProgress((prev) => ({ ...prev, [dsId]: { total_files: 0, processed_files: 0, status: 'running' } }));
+    scanPollRef.current = { active: true, dsId };
+
     try {
-      const result = (await api.post(
-        `/api/admin/datastores/${dsId}/scan`,
-      )) as ScanResult;
-      toast({
-        title: 'Scan completed',
-        description: `Scanned: ${result.scanned} | New: ${result.new} | Modified: ${result.modified} | Skipped: ${result.skipped} | Errors: ${result.errors}`,
+      // Start the scan
+      const token = typeof window !== 'undefined' ? localStorage.getItem('token') || '' : '';
+      const scanResp = await fetch(`/api/admin/datastores/${dsId}/scan`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
       });
-      await fetchData();
+      if (!scanResp.ok) {
+        throw new Error(`Scan start failed with status ${scanResp.status}: ${scanResp.statusText}`);
+      }
+
+      // Poll for scan progress instead of using SSE (SSE doesn't work through
+      // Next.js rewrites which buffer streaming responses).
+      const pollInterval = 500;
+      const timeout = 120_000; // 2 minutes max
+      const startTime = Date.now();
+
+      while (scanPollRef.current.active && scanPollRef.current.dsId === dsId && Date.now() - startTime < timeout) {
+        await new Promise((resolve) => setTimeout(resolve, pollInterval));
+
+        const progressResp = await fetch(`/api/admin/datastores/${dsId}/scan-progress`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+
+        if (!progressResp.ok) {
+          continue;
+        }
+
+        const data = (await progressResp.json()) as ScanProgress;
+
+        setScanProgress((prev) => ({
+          ...prev,
+          [dsId]: {
+            total_files: data.total_files || 0,
+            processed_files: data.processed_files || 0,
+            status: data.status || 'running',
+            new_files: data.new_files || 0,
+            modified_files: data.modified_files || 0,
+            skipped_files: data.skipped_files || 0,
+            error_files: data.error_files || 0,
+            error_message: data.error_message,
+          },
+        }));
+
+        if (data.status === 'completed') {
+          const parts = [
+            `Scanned: ${data.processed_files || 0}`,
+            `New: ${data.new_files || 0}`,
+            `Modified: ${data.modified_files || 0}`,
+            `Skipped: ${data.skipped_files || 0}`,
+          ];
+          if (data.error_files && data.error_files > 0) {
+            parts.push(`Errors: ${data.error_files}`);
+          }
+          toast({
+            title: 'Scan completed',
+            description: parts.join(' | '),
+          });
+          setScanProgress((prev) => ({ ...prev, [dsId]: undefined }));
+          await fetchData();
+          break;
+        } else if (data.status === 'error') {
+          const errorMsg = data.error_message || `Errors: ${data.error_files || 1}`;
+          toast({
+            title: 'Scan failed',
+            description: errorMsg,
+            variant: 'destructive',
+          });
+          setScanProgress((prev) => ({ ...prev, [dsId]: undefined }));
+          await fetchData();
+          break;
+        } else if (data.status === 'cancelled') {
+          setScanProgress((prev) => ({ ...prev, [dsId]: undefined }));
+          await fetchData();
+          break;
+        }
+      }
+
+      // Timeout — clean up and refresh
+      if (Date.now() - startTime >= timeout) {
+        setScanProgress((prev) => ({ ...prev, [dsId]: undefined }));
+        await fetchData();
+      }
     } catch (err) {
       toast({
         title: 'Error',
-        description: (err as ApiError).message ?? 'Failed to trigger scan',
+        description: (err as ApiError).message ?? 'Failed to start scan',
         variant: 'destructive',
       });
+      setScanProgress((prev) => ({ ...prev, [dsId]: undefined }));
+    } finally {
+      scanPollRef.current = { active: false, dsId: null };
+      setTriggering((prev) => {
+        const next = new Set(prev);
+        next.delete(dsId);
+        return next;
+      });
     }
-    // Clear triggering so polling stops and button re-enables
-    setTriggering((prev) => {
-      const next = new Set(prev);
-      next.delete(dsId);
-      return next;
-    });
   }
 
   async function handleFlushChanges(dsId: number) {
@@ -319,6 +408,9 @@ export default function DataSourcesPage() {
         title: 'Scan stopped',
         description: resp.message,
       });
+      // Interrupt the polling loop and clear progress state
+      scanPollRef.current = { active: false, dsId: null };
+      setScanProgress((prev) => ({ ...prev, [dsId]: undefined }));
       await fetchData();
     } catch (err) {
       toast({
@@ -455,64 +547,106 @@ export default function DataSourcesPage() {
                     )}
                   </TableCell>
                   <TableCell>
-                    {ds.last_scan_status === 'running' ? (
-                      <div className="space-y-2">
-                        <div className="flex items-center gap-2">
-                          <div className="w-3 h-3 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
-                          <span className="text-xs text-blue-600">Processing...</span>
-                        </div>
-                        <div className="w-full bg-gray-200 rounded-full h-2">
-                          <div 
-                            className="bg-blue-500 h-2 rounded-full transition-all duration-300"
-                            style={{ width: `${Math.min((ds.last_scan_processed / Math.max(ds.last_scan_total_files, 1)) * 100, 100)}%` }}
-                          ></div>
-                        </div>
-                        <div className="flex justify-between text-xs text-muted-foreground">
-                          <span>{ds.last_scan_processed} / {ds.last_scan_total_files}</span>
-                        </div>
-                      </div>
-                    ) : ds.last_scan_status === 'error' ? (
-                      <div className="space-y-1">
-                        <div className="text-xs text-red-600">Error</div>
-                        <div className="text-xs text-muted-foreground truncate max-w-[180px]" title={ds.last_scan_error || ''}>
-                          {ds.last_scan_error}
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="text-xs">
-                        {ds.last_scan_total_files} files
-                        <br />
-                        {ds.last_scan_processed} processed
-                        {ds.processing && (
-                          <div className="mt-1 flex items-center gap-1">
-                            <div className="w-2 h-2 rounded-full bg-orange-500 animate-pulse"></div>
-                            <span className="text-orange-600">Processing changes...</span>
+                    {(() => {
+                      const progress = scanProgress[ds.id];
+                      if (progress && progress.status !== 'completed') {
+                        const pct = progress.total_files > 0
+                          ? Math.min((progress.processed_files / Math.max(progress.total_files, 1)) * 100, 100)
+                          : 0;
+                        return (
+                          <div className="space-y-2">
+                            <div className="flex items-center gap-2">
+                              <div className="w-3 h-3 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+                              <span className="text-xs text-blue-600">Processing...</span>
+                            </div>
+                            <div className="w-full bg-gray-200 rounded-full h-2">
+                              <div 
+                                className="bg-blue-500 h-2 rounded-full transition-all duration-300"
+                                style={{ width: `${pct}%` }}
+                              ></div>
+                            </div>
+                            <div className="flex justify-between text-xs text-muted-foreground">
+                              <span>{progress.processed_files} / {progress.total_files}</span>
+                              <span>{pct.toFixed(0)}%</span>
+                            </div>
+                            <div className="flex flex-wrap gap-2 text-[10px] text-muted-foreground">
+                              {progress.new_files != null && progress.new_files > 0 && <span>New: {progress.new_files}</span>}
+                              {progress.modified_files != null && progress.modified_files > 0 && <span>Modified: {progress.modified_files}</span>}
+                              {progress.skipped_files != null && progress.skipped_files > 0 && <span>Skipped: {progress.skipped_files}</span>}
+                              {progress.error_files != null && progress.error_files > 0 && <span className="text-red-500">Errors: {progress.error_files}</span>}
+                            </div>
                           </div>
-                        )}
-                        {ds.pending_changes > 0 && (
-                          <div className="mt-1 flex items-center gap-1">
-                            <div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse"></div>
-                            <span className="text-yellow-600">{ds.pending_changes} pending</span>
+                        );
+                      }
+                      if (ds.last_scan_status === 'running') {
+                        const pct = ds.last_scan_total_files > 0
+                          ? Math.min((ds.last_scan_processed / Math.max(ds.last_scan_total_files, 1)) * 100, 100)
+                          : 0;
+                        return (
+                          <div className="space-y-2">
+                            <div className="flex items-center gap-2">
+                              <div className="w-3 h-3 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+                              <span className="text-xs text-blue-600">Processing...</span>
+                            </div>
+                            <div className="w-full bg-gray-200 rounded-full h-2">
+                              <div 
+                                className="bg-blue-500 h-2 rounded-full transition-all duration-300"
+                                style={{ width: `${pct}%` }}
+                              ></div>
+                            </div>
+                            <div className="flex justify-between text-xs text-muted-foreground">
+                              <span>{ds.last_scan_processed} / {ds.last_scan_total_files}</span>
+                              <span>{pct.toFixed(0)}%</span>
+                            </div>
                           </div>
-                        )}
-                      </div>
-                    )}
+                        );
+                      }
+                      if (ds.last_scan_status === 'error') {
+                        return (
+                          <div className="space-y-1">
+                            <div className="text-xs text-red-600">Error</div>
+                            <div className="text-xs text-muted-foreground truncate max-w-[180px]" title={ds.last_scan_error || ''}>
+                              {ds.last_scan_error}
+                            </div>
+                          </div>
+                        );
+                      }
+                      return (
+                        <div className="text-xs">
+                          {ds.last_scan_total_files} files
+                          <br />
+                          {ds.last_scan_processed} processed
+                          {ds.processing && (
+                            <div className="mt-1 flex items-center gap-1">
+                              <div className="w-2 h-2 rounded-full bg-orange-500 animate-pulse"></div>
+                              <span className="text-orange-600">Processing changes...</span>
+                            </div>
+                          )}
+                          {ds.pending_changes > 0 && (
+                            <div className="mt-1 flex items-center gap-1">
+                              <div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse"></div>
+                              <span className="text-yellow-600">{ds.pending_changes} pending</span>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </TableCell>
                   <TableCell className="space-x-1">
                     <Button
-                      variant={ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' ? 'destructive' : 'outline'}
+                      variant={ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' || (scanProgress[ds.id]?.status !== 'completed' && scanProgress[ds.id]) ? 'destructive' : 'outline'}
                       size="sm"
                       onClick={() => {
-                        if (ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running') {
+                        if (ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' || (scanProgress[ds.id]?.status !== 'completed' && scanProgress[ds.id])) {
                           handleStopScan(ds.id);
                         } else {
                           handleTriggerScan(ds.id);
                         }
                       }}
                       disabled={triggering.has(ds.id)}
-                      title={ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' ? 'Stop scan' : 'Trigger manual scan'}
+                      title={ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' || (scanProgress[ds.id]?.status !== 'completed' && scanProgress[ds.id]) ? 'Stop scan' : 'Trigger manual scan'}
                     >
-                      {ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' ? 'Stop' : 'Scan'}
+                      {ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' || (scanProgress[ds.id]?.status !== 'completed' && scanProgress[ds.id]) ? 'Stop' : 'Scan'}
                     </Button>
                     {ds.pending_changes > 0 && (
                       <Button

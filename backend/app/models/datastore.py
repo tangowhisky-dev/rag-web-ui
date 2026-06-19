@@ -50,6 +50,10 @@ class DataStore(Base):
     last_scan_error = Column(Text, nullable=True)
     last_scan_total_files = Column(Integer, default=0)
     last_scan_processed = Column(Integer, default=0)
+    last_scan_new = Column(Integer, default=0)
+    last_scan_modified = Column(Integer, default=0)
+    last_scan_skipped = Column(Integer, default=0)
+    last_scan_errors = Column(Integer, default=0)
 
     # Timestamps
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)

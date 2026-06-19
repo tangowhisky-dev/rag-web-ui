@@ -1474,6 +1474,71 @@ class DataStoreWatcher:
 
             scan_id = self._next_scan_id()
 
+            # Check if this scan was already initialized from the POST
+            # handler (which calls _init_scan before starting the thread
+            # to ensure the SSE endpoint can always find it). If so, skip
+            # re-initialization to avoid creating a duplicate scan entry.
+            existing_scan = None
+            for sid, info in self._active_scans.items():
+                if info["datastore_id"] == datastore_id:
+                    existing_scan = (sid, info)
+                    break
+
+            if existing_scan:
+                # Scan already initialized from POST handler — return the
+                # existing scan_id without re-adding it. This avoids the race
+                # condition where the scan thread re-init creates a new entry
+                # and the old entry (which SSE might be reading from) is lost.
+                logger.info(
+                    "[WATCHER] scan_already_initialized from POST handler scan_id=%d datastore_id=%d",
+                    existing_scan[0], datastore_id,
+                )
+                return existing_scan[0]  # Return existing scan_id
+
+            # Check if another thread (e.g., POST handler or scan thread) has
+            # already initialized this scan. This can happen when both the
+            # POST handler and the scan thread call _init_scan concurrently.
+            # If a scan exists for this datastore, return the existing scan_id
+            # without re-adding it. This prevents duplicate scan entries in
+            # _active_scans and avoids losing progress state that the SSE
+            # endpoint may be reading.
+            existing_scan_id = None
+            for sid, info in self._active_scans.items():
+                if info["datastore_id"] == datastore_id:
+                    existing_scan_id = sid
+                    break
+
+            if existing_scan_id is not None:
+                # Another thread already initialized this scan — return the
+                # existing scan_id so the caller doesn't try to re-init.
+                logger.info(
+                    "[WATCHER] scan_already_initialized by other thread scan_id=%d datastore_id=%d",
+                    existing_scan_id, datastore_id,
+                )
+                return existing_scan_id
+
+            # Clean up any stale scans from previous runs — the SSE
+            # endpoint finds the most recent scan for a datastore by
+            # iterating _active_scans in reverse insertion order. If the
+            # SSE endpoint connects before the new scan has been added,
+            # it would find the old scan and emit stale data.
+            stale_scan_id = None
+            for sid, info in self._active_scans.items():
+                if info["datastore_id"] == datastore_id:
+                    stale_scan_id = sid
+                    break
+            if stale_scan_id is not None:
+                self._active_scans.pop(stale_scan_id, None)
+                logger.info(
+                    "[WATCHER] cleanup_stale_scan_in_init scan_id=%d datastore_id=%d",
+                    stale_scan_id, datastore_id,
+                )
+            else:
+                logger.debug(
+                    "[WATCHER] no_stale_scan_in_init datastore_id=%d active_scans=%s",
+                    datastore_id, list(self._active_scans.keys()),
+                )
+
             # Record scan status
             ds.last_scan_status = "running"
             ds.last_scan_at = datetime.now(timezone.utc)
@@ -1486,23 +1551,31 @@ class DataStoreWatcher:
 
             db.commit()
 
-            # Track in memory
+            # Track in memory — the SSE endpoint always finds the most
+            # recently added scan for a given datastore by iterating
+            # _active_scans in reverse insertion order (Python 3.7+).
             self._active_scans[scan_id] = {
                 "datastore_id": datastore_id,
                 "total": total_files,
                 "processed": 0,
                 "status": "running",
-                "error": None,
+                "error_count": 0,
+                "new": 0,
+                "modified": 0,
+                "skipped": 0,
+                "error_message": None,  # string error message from _complete_scan
             }
+            logger.info(
+                "[WATCHER] scan_init scan_id=%d datastore_id=%d total_files=%d status=running",
+                scan_id, datastore_id, total_files,
+            )
             # Initialize futures list for this scan
             with self._scan_futures_lock:
                 self._scan_futures[scan_id] = []
 
             logger.info(
-                "[WATCHER] scan_init scan_id=%d datastore_id=%d total_files=%d",
-                scan_id,
-                datastore_id,
-                total_files,
+                "[WATCHER] added_scan_to_active_scans scan_id=%d datastore_id=%d",
+                scan_id, datastore_id,
             )
             return scan_id
         finally:
@@ -1522,7 +1595,8 @@ class DataStoreWatcher:
                     info["processed"] = processed
                     if error:
                         info["status"] = "error"
-                        info["error"] = error
+                        info["error_count"] = info.get("error_count", 0)
+                        info["error_message"] = error
                     break
 
             # Update DB
@@ -1547,11 +1621,14 @@ class DataStoreWatcher:
             if not ds:
                 return
 
-            # Find this datastore in active scans
+            # Find this datastore in active scans and update its status
+            # so the SSE endpoint can detect completion. Do NOT remove the
+            # entry — the SSE endpoint may still be reading from it.
             for sid, info in self._active_scans.items():
                 if info["datastore_id"] == datastore_id:
                     info["status"] = "completed" if success else "error"
-                    info["error"] = error
+                    info["error_count"] = info.get("error_count", 0)
+                    info["error_message"] = error
                     break
 
             # Update DB
@@ -1596,10 +1673,14 @@ class DataStoreWatcher:
             ds.last_scan_error = "Scan cancelled by admin"
             db.commit()
 
-            # Remove from active scans
+            # Find this datastore in active scans — do NOT remove it. The
+            # SSE endpoint may still be reading from _active_scans and needs
+            # to find the cancelled entry to emit the final status event.
+            # Stale scans are cleaned up in _init_scan before adding a new scan.
             for sid, info in self._active_scans.items():
                 if info["datastore_id"] == datastore_id:
                     info["status"] = "cancelled"
+                    info["error_message"] = "Scan cancelled by admin"
                     break
 
             logger.info("[WATCHER] scan_cancelled datastore_id=%d", datastore_id)
@@ -1691,23 +1772,64 @@ class DataStoreWatcher:
                         # Check if file matches scan_pattern
                         if not self._matches_pattern(fpath, ds.scan_pattern):
                             summary["skipped"] += 1
+                            # Update _active_scans for SSE
+                            for sid, scan_info in self._active_scans.items():
+                                if scan_info["datastore_id"] == datastore_id:
+                                    scan_info["skipped"] = summary["skipped"]
+                                    scan_info["modified"] = summary["modified"]
+                                    break
                             continue
 
                         summary["scanned"] += 1
+
+                        # Check if file is new or modified (without re-doing the hash)
+                        file_is_modified = False
+                        db2 = SessionLocal()
+                        try:
+                            existing = (
+                                db2.query(Document)
+                                .filter(
+                                    Document.file_path == fpath,
+                                    Document.data_store_id == datastore_id,
+                                )
+                                .first()
+                            )
+                            if existing:
+                                file_is_modified = True
+                        finally:
+                            db2.close()
+
+                        if file_is_modified:
+                            summary["modified"] += 1
+                        else:
+                            summary["new"] += 1
 
                         # Process file for this datastore (no KB knowledge needed)
                         future = self._handle_file_in_scan(fpath, datastore_id, scan_id)
                         if future is not None:
                             ingestion_futures.append(future)
 
-                        # Update progress
+                        # Update progress in memory for SSE
                         self._update_scan_progress(datastore_id, summary["scanned"])
+                        # Update new/modified/skipped/error counts in _active_scans for SSE
+                        for sid, scan_info in self._active_scans.items():
+                            if scan_info["datastore_id"] == datastore_id:
+                                scan_info["new"] = summary["new"]
+                                scan_info["modified"] = summary["modified"]
+                                scan_info["skipped"] = summary["skipped"]
+                                scan_info["error_count"] = summary["errors"]
+                                break
 
                     except Exception as e:
                         logger.error(
                             "[WATCHER] scan error for %s: %s", fpath, e
                         )
                         summary["errors"] += 1
+                        # Update _active_scans for SSE
+                        for sid, scan_info in self._active_scans.items():
+                            if scan_info["datastore_id"] == datastore_id:
+                                scan_info["error_count"] = summary["errors"]
+                                break
 
             # Wait for all ingestion tasks to complete before marking scan done
             if ingestion_futures:

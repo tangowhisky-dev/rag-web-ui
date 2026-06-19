@@ -243,11 +243,32 @@ Admins create organisations and assign users, data sources, and LLM settings to 
 
 Folder-based document ingestion sources:
 
-- **Create:** Point to a local folder, set scan pattern (e.g., `*.pdf,*.docx`)
-- **Auto-scan:** Periodic scanning with configurable interval
+- **Create:** Point to a local folder, set scan pattern (e.g., `*.pdf,*.docx`), enable auto-scan with a debouncing interval
+- **Auto-scan:** Event-driven file watching — new/modified files are detected via watchdog and ingested immediately after a 1-second write-completion delay; the interval only controls the minimum debounce window per datastore (prevents duplicate processing of rapid repeated events)
 - **Assign to orgs:** Link data sources to specific organisations
-- **Scan status:** Progress bar showing last scan with processed/total counts
-- **Manual trigger:** Force a scan from the admin panel
+- **Scan status:** Progress bar showing total/processed counts plus a breakdown of new/modified/skipped/error files; polling every 500ms when a scan is active
+- **Manual trigger:** Force a full re-scan from the admin panel
+- **Flush button:** When pending changes are queued (e.g., many files dropped rapidly), flush them immediately instead of waiting for the debounce window
+
+#### Scan result fields
+
+When a scan completes, the datastore record includes:
+
+| Field | Description |
+|-------|-------------|
+| `last_scan_total_files` | Total files matched by the scan pattern on disk |
+| `last_scan_processed` | Number of files successfully ingested |
+| `last_scan_new` | Number of previously unseen files |
+| `last_scan_modified` | Number of existing files with changed content (re-ingested) |
+| `last_scan_skipped` | Number of files skipped (e.g., unsupported extension, pattern mismatch, hidden file) |
+| `last_scan_errors` | Number of files that failed ingestion |
+| `last_scan_error` | Error message if any files failed |
+
+#### How auto-scan works
+
+Auto-scan is **event-driven**, not periodic. When a file is added or modified in the folder, the watchdog observer detects the filesystem event and begins ingestion after a 1-second delay (to let the file write complete). The `auto_scan_interval_minutes` configures the **minimum processing interval** for the same datastore — rapid repeated events (e.g., VS Code temp-file write-and-rename) within this window are coalesced into a single processing run. This prevents duplicate ingestion of the same file.
+
+If a manual scan is triggered while auto-scan is running, both operate independently: the manual scan walks all files, while event-driven ingestion continues to pick up new changes as they occur.
 
 ## API Reference
 
@@ -372,8 +393,37 @@ The OpenAPI reference is available at http://localhost:8000/redoc. Below are the
 | DELETE | `/datastores/{id}` | admin | Delete datastore |
 | POST | `/datastores/{id}/assign` | admin | Assign datastore to orgs |
 | DELETE | `/datastores/{id}/assign` | admin | Unassign datastore from orgs |
-| GET | `/datastores/{id}/status` | admin | Get scan status |
+| GET | `/datastores/{id}/status` | admin | Get scan status (includes new/modified/skipped/errors) |
 | POST | `/datastores/{id}/scan` | admin | Trigger manual scan |
+| GET | `/datastores/{id}/scan-progress` | admin | Get scan progress (polling; real-time during scan, DB after completion) |
+| GET | `/datastores/{id}/scan-progress-stream` | admin | SSE endpoint for real-time scan progress (rarely used — frontend uses polling) |
+| POST | `/datastores/{id}/stop-scan` | admin | Cancel a running scan |
+| POST | `/datastores/{id}/flush` | admin | Process pending changes immediately |
+
+#### Scan progress response fields
+
+| Field | Description |
+|-------|-------------|
+| `datastore_id` | Datastore identifier |
+| `datastore_name` | Datastore name |
+| `scan_id` | Integer scan ID (null when no scan is running) |
+| `total_files` | Total files matched by the scan pattern |
+| `processed_files` | Files processed so far during the scan |
+| `new_files` | Files ingested as new documents |
+| `modified_files` | Existing files with changed content that were re-ingested |
+| `skipped_files` | Files skipped during the scan |
+| `error_files` | Files that failed ingestion |
+| `status` | `running`, `completed`, `error`, `idle`, or `cancelled` |
+| `last_scan_at` | Timestamp of the last scan |
+| `error_message` | Error message if the scan failed |
+
+#### Flush response fields
+
+| Field | Description |
+|-------|-------------|
+| `datastore_id` | Datastore identifier |
+| `pending_processed` | Number of changes processed in the flush |
+| `processing` | Whether the datastore is still processing | |
 
 ### Admin — Counts
 

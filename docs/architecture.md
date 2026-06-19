@@ -61,7 +61,9 @@ rewrite_query
 
 ### 1. Document Ingestion Pipeline
 
-**Supported formats:** PDF, DOCX, PPTX, XLSX, TXT, MD, HTML, CSV, JSON, XML, MSG, EML, EPUB, images (JPG/PNG/GIF/BMP/TIFF), ZIP
+**Direct uploads:** PDF, DOCX, PPTX, XLSX, TXT, MD, HTML, CSV, JSON, XML, MSG, EML, EPUB, images (JPG/PNG/GIF/BMP/TIFF), ZIP
+
+**Event-driven ingestion (DataStores):** same formats, detected via watchdog filesystem events.
 
 **Parsing:** MarkItDown (Microsoft) — single library for all formats, producing consistent Markdown output. OCR via `markitdown-ocr` when `VISION_MODEL` is set.
 
@@ -163,16 +165,16 @@ Admin creates org
     ├── Assign users (role: user/admin/super_admin, org_id)
     ├── Assign data sources (DataStore → OrganisationDataStore)
     ├── Configure LLM settings (org LLM config, ingestion status)
-    └── Configure file watchers (local dir + SMB share)
+    └── Configure file watchers (per-datastore local dir, SMB share)
 
 User creates chat (user_id, org_id)
     ├── Chats are user-scoped (Chat.user_id == current_user.id)
     └── Knowledge bases are filtered by org_id
 
 Admin creates data store (folder_path, scan_pattern)
-    ├── Auto-scan with configurable interval
+    ├── Auto-scan (event-driven, not periodic) with debouncing interval
     ├── Assign to orgs (OrganisationDataStore junction)
-    └── Per-org file watcher picks up new files from the folder
+    └── Per-datastore file watcher picks up new files from the folder
 ```
 
 ---
@@ -303,8 +305,48 @@ The frontend holds an `AbortController` in a ref. The Stop button calls `abortCo
 ### 11. Multi-Tenancy with Org-Scoped Chats
 Chats are user-scoped (`Chat.user_id == current_user.id`), not org-scoped. Users can only see their own chats regardless of org membership. Knowledge bases are org-scoped, so users only see KBs in their org. Admins and super admins see across all orgs.
 
-### 12. Rate Limiting with Exponential Backoff
+### 12. DataStore Event-Driven Ingestion
+
+DataStores are separate from KnowledgeBases — they have no KB relationship. File ingestion happens via two independent paths:
+
+**Event-driven (watchdog):**
+```
+File added/modified/deleted in datastore folder
+    │
+    ▼
+DatastoreFileEventHandler
+    ├── Watchdog observer (PollingObserver on macOS Docker, InotifyObserver on Linux)
+    ├── _resolve_datastore() — finds which datastore's folder_path contains the event
+    ├── _should_process() — per-file debounce (1s window)
+    ├── _dispatch() — 1s write-completion delay via _SyntheticEvent, then debouncer
+    └── _queue_change() → _process_pending_changes() → _on_changes()
+            │
+            ├── _handle_file() — the real entry point
+            │     ├── Event = "deleted" → _handle_deletion()
+            │     ├── Document exists + hash changed → _update_document()
+            │     └── Document doesn't exist → _ingest_file()
+            └── _refresh_file_count() — updates last_scan_total_files
+
+**Manual scan (user clicks "Scan"):**
+```
+POST /datastores/{id}/scan
+    │
+    ▼
+DataStoreWatcher.scan_single_datastore(datastore_id)
+    ├── _init_scan() — assigns scan_id, counts files, sets status=running
+    ├── Walk all files in datastore folder
+    │     For each file:
+    │       _handle_file_in_scan() — compute hash, check Document existence
+    │         ├── Hash unchanged + chunks exist → skip
+    │         ├── Hash unchanged + no chunks → re-ingest (ingestion likely failed)
+    │         ├── Hash changed → re-ingest
+    │         └── New file → ingest
+    ├── Wait for all ingestion Futures (up to 1 hour each)
+    └── _complete_scan() — sets status=completed or error, persists new/modified/skipped/errors
+```
+
+### 13. Rate Limiting with Exponential Backoff
 The login endpoint tracks failed attempts per IP address with exponential backoff: 3 attempts trigger escalating delays (15s → 30s → 60s → 120s → 240s → 480s → 900s). Successful login resets the counter. Rate-limited responses return 429 with `Retry-After` header.
 
-### 13. Message Pagination with Infinite Scroll
+### 14. Message Pagination with Infinite Scroll
 The chat page loads messages in pages of 20, using cursor-based pagination (`before_id`). An `IntersectionObserver` watches a sentinel element at the top of the message list and loads older messages when the sentinel enters the viewport. Scroll position is preserved across page loads using `useLayoutEffect`.
