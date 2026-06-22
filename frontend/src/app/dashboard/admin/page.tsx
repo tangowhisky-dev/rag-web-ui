@@ -25,7 +25,7 @@ const ROUTE_MAP: Record<AdminCountsKey, string> = {
 const STAT_CARDS = [
   { label: 'Organisations', key: 'organizations' as const, icon: Building2 },
   { label: 'Users', key: 'users' as const, icon: Users },
-  { label: 'Data Sources', key: 'data_sources' as const, icon: Database },
+  { label: 'Data Stores', key: 'data_sources' as const, icon: Database },
 ];
 
 export default function AdminPage() {

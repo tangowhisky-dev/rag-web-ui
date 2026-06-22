@@ -66,13 +66,13 @@ export default function KnowledgeBasePage() {
   const fetchAvailableSources = async () => {
     try {
       const data = await api.get("/api/admin/datastores");
-      // Filter to only show data sources assigned to user's org
+      // Filter to only show data stores assigned to user's org
       const filtered = (data as AvailableDataSource[]).filter(ds => 
         ds.assigned_orgs && ds.assigned_orgs.length > 0
       );
       setAvailableSources(filtered);
     } catch (err) {
-      console.error("Failed to fetch data sources:", err);
+      console.error("Failed to fetch data stores:", err);
     }
   };
 
@@ -80,7 +80,7 @@ export default function KnowledgeBasePage() {
     if (!selectedSourceId) {
       toast({
         title: "Error",
-        description: "Please select a data source",
+        description: "Please select a data store",
         variant: "destructive",
       });
       return;
@@ -93,17 +93,17 @@ export default function KnowledgeBasePage() {
       });
       toast({
         title: "Success",
-        description: "Data source linked to knowledge base",
+        description: "Data store linked to knowledge base",
       });
       setLinkDialogOpen(false);
       setSelectedSourceId("");
-      // Refresh data sources
+      // Refresh data stores
       const data = await api.get(`/api/knowledge-base/${knowledgeBaseId}`);
       setDataSources(data.data_sources || []);
     } catch (err) {
       toast({
         title: "Error",
-        description: (err as ApiError).message ?? "Failed to link data source",
+        description: (err as ApiError).message ?? "Failed to link data store",
         variant: "destructive",
       });
     } finally {
@@ -116,15 +116,15 @@ export default function KnowledgeBasePage() {
       await api.delete(`/api/knowledge-base/${knowledgeBaseId}/unlink-datastore/${sourceId}`);
       toast({
         title: "Success",
-        description: "Data source unlinked from knowledge base",
+        description: "Data store unlinked from knowledge base",
       });
-      // Refresh data sources
+      // Refresh data stores
       const data = await api.get(`/api/knowledge-base/${knowledgeBaseId}`);
       setDataSources(data.data_sources || []);
     } catch (err) {
       toast({
         title: "Error",
-        description: (err as ApiError).message ?? "Failed to unlink data source",
+        description: (err as ApiError).message ?? "Failed to unlink data store",
         variant: "destructive",
       });
     }
@@ -185,17 +185,17 @@ export default function KnowledgeBasePage() {
               </DialogContent>
             </Dialog>
 
-            {/* Data Sources Section */}
+            {/* Data Stores Section */}
             <div className="border rounded-lg p-4 bg-card">
               <div className="flex items-center justify-between mb-3">
-                <h2 className="text-lg font-semibold">Linked Data Sources</h2>
+                <h2 className="text-lg font-semibold">Linked Data Stores</h2>
                 <Button variant="outline" size="sm" onClick={() => handleLinkDialogOpenChange(true)}>
                   <LinkIcon className="w-4 h-4 mr-2" />
-                  Link Data Source
+                  Link Data Store
                 </Button>
               </div>
               {dataSources.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No data sources linked. Link a data source to automatically ingest documents.</p>
+                <p className="text-sm text-muted-foreground">No data stores linked. Link a data store to automatically ingest documents.</p>
               ) : (
                 <div className="space-y-2">
                   {dataSources.map((ds) => (
@@ -213,7 +213,7 @@ export default function KnowledgeBasePage() {
                         variant="ghost"
                         size="sm"
                         onClick={() => handleUnlinkSource(ds.id)}
-                        title="Unlink data source"
+                        title="Unlink data store"
                       >
                         <XIcon className="w-4 h-4" />
                       </Button>
@@ -223,19 +223,19 @@ export default function KnowledgeBasePage() {
               )}
             </div>
 
-            {/* Link Data Source Dialog */}
+            {/* Link Data Store Dialog */}
             <Dialog open={linkDialogOpen} onOpenChange={handleLinkDialogOpenChange}>
               <DialogContent>
                 <DialogHeader>
-                  <DialogTitle>Link Data Source</DialogTitle>
+                  <DialogTitle>Link Data Store</DialogTitle>
                   <DialogDescription>
-                    Select a data source to link to this knowledge base. Documents from the linked data source will be automatically available.
+                    Select a data store to link to this knowledge base. Documents from the linked data store will be automatically available.
                   </DialogDescription>
                 </DialogHeader>
                 <div className="space-y-4">
                   <Select value={selectedSourceId} onValueChange={setSelectedSourceId}>
                     <SelectTrigger>
-                      <SelectValue placeholder="Select a data source" />
+                      <SelectValue placeholder="Select a data store" />
                     </SelectTrigger>
                     <SelectContent>
                       {availableSources.map((ds) => (
@@ -250,7 +250,7 @@ export default function KnowledgeBasePage() {
                       ))}
                       {availableSources.length === 0 && (
                         <div className="p-4 text-center text-muted-foreground">
-                          No data sources available. Ask an admin to configure data sources for your organization.
+                          No data stores available. Ask an admin to configure data stores for your organization.
                         </div>
                       )}
                     </SelectContent>
@@ -260,7 +260,7 @@ export default function KnowledgeBasePage() {
                     disabled={!selectedSourceId || linking}
                     className="w-full"
                   >
-                    {linking ? "Linking..." : "Link Data Source"}
+                    {linking ? "Linking..." : "Link Data Store"}
                   </Button>
                 </div>
               </DialogContent>

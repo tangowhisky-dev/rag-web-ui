@@ -16,7 +16,7 @@ interface AdminSidebarProps {
 const NAV_ITEMS = [
   { label: 'Orgs', href: '/dashboard/admin/orgs', icon: Building2 },
   { label: 'Users', href: '/dashboard/admin/users', icon: Users },
-  { label: 'Data Sources', href: '/dashboard/admin/data-sources', icon: Database },
+  { label: 'Data Stores', href: '/dashboard/admin/data-sources', icon: Database },
 ];
 
 // LLM config is managed per-organisation on the Orgs page (LLM Config button).

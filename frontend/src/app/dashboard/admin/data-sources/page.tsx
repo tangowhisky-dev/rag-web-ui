@@ -194,7 +194,7 @@ export default function DataSourcesPage() {
     } catch (err) {
       toast({
         title: 'Error',
-        description: (err as { message?: string }).message ?? 'Failed to load data sources',
+        description: (err as { message?: string }).message ?? 'Failed to load data stores',
         variant: 'destructive',
       });
     } finally {
@@ -220,13 +220,13 @@ export default function DataSourcesPage() {
     try {
       if (editingId) {
         await api.patch(`/api/admin/datastores/${editingId}`, form);
-        toast({ title: 'Data source updated' });
+        toast({ title: 'Data store updated' });
       } else {
         const result = await api.post('/api/admin/datastores', form);
         // Show file count after creation
         const fileCount = (result as DataStore).last_scan_total_files || 0;
         toast({ 
-          title: 'Data source created',
+          title: 'Data store created',
           description: `Found ${fileCount} files in folder`,
         });
       }
@@ -235,7 +235,7 @@ export default function DataSourcesPage() {
     } catch (err) {
       toast({
         title: 'Error',
-        description: (err as ApiError).message ?? 'Failed to save data source',
+        description: (err as ApiError).message ?? 'Failed to save data store',
         variant: 'destructive',
       });
     } finally {
@@ -252,14 +252,14 @@ export default function DataSourcesPage() {
     setDeleting(true);
     try {
       await api.delete(`/api/admin/datastores/${deletingId}`);
-      toast({ title: 'Data source deleted' });
+      toast({ title: 'Data store deleted' });
       setDeletingId(null);
       await fetchData();
     } catch (err) {
       const apiErr = err as ApiError;
       toast({
         title: 'Error',
-        description: apiErr.message ?? 'Failed to delete data source',
+        description: apiErr.message ?? 'Failed to delete data store',
         variant: 'destructive',
       });
     } finally {
@@ -462,12 +462,12 @@ export default function DataSourcesPage() {
     <div className="px-4 sm:px-6 lg:px-8 py-6 pt-16 space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight">Data Sources</h1>
+          <h1 className="text-3xl font-bold tracking-tight">Data Stores</h1>
           <p className="text-muted-foreground">
             Manage local folders for automatic document ingestion
           </p>
         </div>
-        <Button onClick={openCreate}>+ New Data Source</Button>
+        <Button onClick={openCreate}>+ New Data Store</Button>
       </div>
 
       {loading ? (
@@ -489,7 +489,7 @@ export default function DataSourcesPage() {
             {datastores.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={7} className="text-center text-muted-foreground">
-                  No data sources configured. Click &ldquo;+ New Data Source&rdquo; to add one.
+                  No data stores configured. Click &ldquo;+ New Data Store&rdquo; to add one.
                 </TableCell>
               </TableRow>
             ) : (
@@ -671,7 +671,7 @@ export default function DataSourcesPage() {
                       variant="outline"
                       size="sm"
                       onClick={() => openEdit(ds)}
-                      title="Edit data source"
+                      title="Edit data store"
                     >
                       Edit
                     </Button>
@@ -679,7 +679,7 @@ export default function DataSourcesPage() {
                       variant="destructive"
                       size="sm"
                       onClick={() => openDelete(ds)}
-                      title="Delete data source"
+                      title="Delete data store"
                     >
                       Delete
                     </Button>
@@ -695,16 +695,16 @@ export default function DataSourcesPage() {
       <Dialog open={deletingId !== null} onOpenChange={(open) => !open && setDeletingId(null)}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle className="text-destructive">Permanently Delete Data Source</DialogTitle>
+            <DialogTitle className="text-destructive">Permanently Delete Data Store</DialogTitle>
           </DialogHeader>
           <div className="space-y-3 py-2">
             <p className="text-sm">
-              Are you sure you want to permanently delete this data source? This action:
+              Are you sure you want to permanently delete this data store? This action:
             </p>
             <ul className="list-disc pl-5 text-sm text-muted-foreground space-y-1">
-              <li>Removes the data source permanently (cannot be undone)</li>
+              <li>Removes the data store permanently (cannot be undone)</li>
               <li>Does NOT delete files from the folder</li>
-              <li>Unassigns the data source from all organizations</li>
+              <li>Unassigns the data store from all organizations</li>
             </ul>
           </div>
           <DialogFooter>
@@ -723,7 +723,7 @@ export default function DataSourcesPage() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>
-              {editingId ? 'Edit Data Source' : 'New Data Source'}
+              {editingId ? 'Edit Data Store' : 'New Data Store'}
             </DialogTitle>
           </DialogHeader>
           <div className="space-y-3 py-2">

@@ -297,7 +297,7 @@ export default function Home() {
             <div className="relative pl-12">
               <span className="absolute left-0 top-0 text-4xl font-black text-muted/100 leading-none select-none">02</span>
               <h3 className="font-semibold mb-2 mt-1">Add Your Data</h3>
-              <p className="text-sm text-muted-foreground leading-relaxed">Upload documents or link data sources — PDFs, docs, images, or SMB shares.</p>
+              <p className="text-sm text-muted-foreground leading-relaxed">Upload documents or link data stores — PDFs, docs, images, or SMB shares.</p>
             </div>
             <div className="relative pl-12">
               <span className="absolute left-0 top-0 text-4xl font-black text-muted/100 leading-none select-none">03</span>
