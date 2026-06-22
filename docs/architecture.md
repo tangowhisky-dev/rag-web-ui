@@ -18,7 +18,7 @@ Linear pipeline, low latency:
 
 ```
 rewrite_query
-  → hybrid_search_with_legs (dense + sparse + exact + graph in parallel)
+  → hybrid_search_with_legs (dense + sparse + exact in parallel; graph enrichment post-RRF)
   → stream LLM answer
 ```
 

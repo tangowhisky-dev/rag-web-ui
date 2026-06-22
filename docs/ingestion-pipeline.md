@@ -254,16 +254,16 @@ are unset, this step is silently skipped.
 **Batch concurrency and LM Studio / llama.cpp context sizing:**
 
 The LLM backend runs up to `_batch_sem` batches concurrently (currently
-`Semaphore(2)`). Each batch consumes roughly `NEO4J_LLM_CONTEXT × 0.33 ÷ 3`
-tokens of input (~2640 tokens at default settings). llama.cpp (used by LM
+`Semaphore(4)`). Each batch consumes roughly `NEO4J_LLM_CONTEXT × 0.33 ÷ 3`
+tokens of input (~1320 tokens at default settings). llama.cpp (used by LM
 Studio) allocates KV cache from a **single shared context pool** split across
 all parallel slots — it does not give each request its own isolated context
 window. This means:
 
 ```
 required context = concurrent_batches × tokens_per_batch
-                 = 2 × ~2983 = ~5966 tokens  → fits in 8K
-                 = 4 × ~2983 = ~11932 tokens → exceeds 8K, triggers:
+                 = 4 × ~1320 = ~5280 tokens  → fits in 8K
+                 = 8 × ~1320 = ~10560 tokens → exceeds 8K, triggers:
                    "Context size has been exceeded"
 ```
 
@@ -277,11 +277,11 @@ Rule of thumb: `model_context_length ≥ concurrent_batches × (NEO4J_LLM_CONTEX
 
 | `_batch_sem` | Min context in LM Studio |
 |---|---|
-| 2 (default) | 8K |
-| 4 | 16K |
+| 4 (default) | 8K |
+| 8 | 16K |
 
-To use `Semaphore(4)`: set Context Length to 16384 in LM Studio for the
-GraphRAG model, then change `_batch_sem = asyncio.Semaphore(4)` in
+To use `Semaphore(4)` (the default): set Context Length to 8192 in LM Studio for the
+GraphRAG model. To use `Semaphore(8)`: change `_batch_sem = asyncio.Semaphore(8)` in
 `graph_service.py`. No change to `NEO4J_LLM_CONTEXT` needed.
 
 **Neo4j graph schema after extraction:**

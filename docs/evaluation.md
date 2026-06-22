@@ -157,7 +157,7 @@ rrf_score = Σ  weight_leg / (60 + rank_leg)
 HYBRID_DENSE_WEIGHT          0.5   (dense vectors)
 HYBRID_QDRANT_SPARSE_WEIGHT  0.3   (SPLADE sparse vectors)
 HYBRID_EXACT_WEIGHT          0.2   (MySQL keyword / FTS)
-HYBRID_GRAPH_WEIGHT          0.3   (Neo4j GraphRAG)
+HYBRID_GRAPH_WEIGHT          0.3   (Neo4j GraphRAG, legacy — not currently used)
 ```
 
 A chunk absent from a disabled leg contributes 0 from that leg but can still

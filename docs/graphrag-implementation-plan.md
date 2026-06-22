@@ -62,12 +62,11 @@ GRAPHRAG_LLM=qwen/qwen3.5-4b
 
 # Context window budget for the graph extraction LLM (characters).
 # Consecutive chunks are merged and fed as a single batch up to this limit
-# (80% used for text; 20% headroom for system prompt + JSON schema output).
-# Rule of thumb: 1 token ≈ 3–4 chars.
-#   2K token model  → NEO4J_LLM_CONTEXT=6000   (default)
-#   4K token model  → NEO4J_LLM_CONTEXT=12000
-#   8K token model  → NEO4J_LLM_CONTEXT=24000
-NEO4J_LLM_CONTEXT=6000
+|# (33% used for text; 67% headroom for system prompt + JSON schema output).
+|# Rule of thumb: 1 token ≈ 3–4 chars.
+|#   4K token model  → NEO4J_LLM_CONTEXT=12000  (default)
+|#   8K token model  → NEO4J_LLM_CONTEXT=24000
+|NEO4J_LLM_CONTEXT=12000
 
 # Maximum chunks per document to run graph extraction on.
 # Chunks beyond this are still indexed in Qdrant/MySQL. Set to 0 for no limit.
@@ -112,7 +111,7 @@ One node per Qdrant point. `qdrant_point_id` is the primary cross-reference key.
 ### Step 2: Build extraction batches
 `_build_extraction_batches()` groups consecutive chunks into batches:
 
-- Budget = `NEO4J_LLM_CONTEXT × 0.8` chars (80% — headroom for prompt + schema)
+- Budget = `NEO4J_LLM_CONTEXT × 0.33` chars (33% — headroom for prompt + schema)
 - Within each batch, chunk overlap is stripped: the longest suffix of chunk[i] that
   matches a prefix of chunk[i+1] is removed before concatenation
 - Result: clean, non-redundant prose that fits the LLM context window

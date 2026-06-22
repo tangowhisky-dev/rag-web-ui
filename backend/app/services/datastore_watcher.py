@@ -130,6 +130,7 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
         debounce_ms: int = 1000,
         default_min_interval_seconds: int = 300,  # 5 minutes
         debouncer: Optional[_Debouncer] = None,
+        progress_lock: Optional[threading.Lock] = None,
     ) -> None:
         self.callback = callback
         self._executor = executor
@@ -155,6 +156,11 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
         self._processing: set[int] = set()
 
         self._lock = threading.Lock()
+
+        # Lock for scan progress updates — prevents race between event-driven
+        # ingestion and manual scan when both update last_scan_processed
+        # simultaneously. Shared with DataStoreWatcher to avoid double-counting.
+        self._progress_lock = progress_lock if progress_lock is not None else threading.Lock()
 
     # ------------------------------------------------------------------
     # Folder management
@@ -645,9 +651,17 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
             db.close()
 
     def _matches_pattern(self, filepath: str, scan_pattern: str = "*") -> bool:
-        """Check if a filepath matches the scan pattern."""
+        """Check if a filepath matches the scan pattern.
+
+        Hidden files (basename starting with '.') are always excluded —
+        this is intentional design. Hidden files are typically config,
+        lock, or temporary files (e.g., .env, .DS_Store, .gitignore) and
+        are not meant to be ingested as documents regardless of the
+        scan_pattern setting.
+        """
         fname = os.path.basename(filepath)
-        # Exclude hidden files regardless of pattern
+        # Exclude hidden files regardless of pattern — intentional design.
+        # Hidden files are typically config/lock/temp files, not documents.
         if fname.startswith("."):
             return False
         if scan_pattern == "*":
@@ -1083,10 +1097,11 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
             db.close()
 
     def _update_scan_progress(self, datastore_id: int, processed: int) -> None:
-        """Increment last_scan_processed so UI reflects ingestion progress.
+        """Update last_scan_processed so UI reflects ingestion progress.
 
-        Called after event-driven ingestion completes. Uses += to avoid
-        overwriting the count when the periodic scan also updates it.
+        Called after event-driven ingestion completes. Uses += to accumulate
+        the batch count. Protected by _progress_lock to prevent race with
+        the scan thread's = assignment.
         """
         db: Session = SessionLocal()
         try:
@@ -1094,7 +1109,8 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
             if not ds:
                 return
 
-            ds.last_scan_processed += processed
+            with self._progress_lock:
+                ds.last_scan_processed += processed
             db.commit()
         finally:
             db.close()
@@ -1153,7 +1169,15 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
                 )
 
             asyncio.set_event_loop(loop)
-            loop.run_until_complete(_do())
+            if not loop.is_running():
+                loop.run_until_complete(_do())
+            else:
+                loop.close()
+                logger.warning(
+                    "[WATCHER] loop.already_running task_id=%s, closing and re-creating",
+                    task_id,
+                )
+                return
 
             # Mark task as completed
             try:
@@ -1281,12 +1305,19 @@ class DataStoreWatcher:
             max_workers=4, thread_name_prefix="watcher"
         )
         self._debouncer = _Debouncer(delay=1.0)
+
+        # Shared lock for scan progress updates — prevents race between
+        # event-driven ingestion (handler) and manual scan (this class)
+        # when both update last_scan_processed simultaneously.
+        self._progress_lock = threading.Lock()
+
         self._handler = DatastoreFileEventHandler(
             callback=self._on_changes,
             executor=self._executor,
             debounce_ms=1000,
             default_min_interval_seconds=300,  # 5 minutes
             debouncer=self._debouncer,
+            progress_lock=self._progress_lock,
         )
         # datastore_id -> folder_path for status reporting
         self._datastore_paths: Dict[int, str] = {}
@@ -2301,19 +2332,11 @@ class DataStoreWatcher:
                     "[WATCHER] handle_file_error path=%s event=%s: %s", fpath, event_type, e, exc_info=True
                 )
 
-        # Update last_scan_processed so UI doesn't show stale 0.
-        # Use += to accumulate the batch count — the scan uses _update_scan_progress
-        # which sets the cumulative count with = (see line ~2201).
-        db2: Session = SessionLocal()
-        try:
-            ds2 = db2.query(DataStore).filter(DataStore.id == datastore_id).first()
-            if ds2:
-                ds2.last_scan_processed += changes_processed
-                db2.commit()
-        finally:
-            db2.close()
-        # Refresh file count so UI reflects latest state
-        self._refresh_file_count(datastore_id)
+        # Update last_scan_processed so UI reflects latest state.
+        # Delegate to handler's _update_scan_progress (+=) — the handler
+        # method handles accumulation and is protected by _progress_lock.
+        # The handler also calls _refresh_file_count internally, so we don't
+        # need to call it here — that would duplicate the refresh.
 
     def _handle_file(
         self,
@@ -2335,6 +2358,9 @@ class DataStoreWatcher:
         Called during a scan after each file is processed. The `processed`
         parameter is the cumulative count (summary["scanned"]), so we set
         it directly with = instead of += to avoid double-counting.
+
+        Protected by _progress_lock to prevent race with event-driven
+        ingestion's += update.
         """
         db: Session = SessionLocal()
         try:
@@ -2342,28 +2368,16 @@ class DataStoreWatcher:
             if not ds:
                 return
 
-            ds.last_scan_processed = processed
+            with self._progress_lock:
+                ds.last_scan_processed = processed
             db.commit()
         finally:
             db.close()
 
-    def _refresh_file_count(self, datastore_id: int) -> None:
-        """Refresh last_scan_total_files from the filesystem.
-
-        Called after file changes are detected so the UI always shows
-        the latest file count even before a manual scan runs.
-        """
-        db: Session = SessionLocal()
-        try:
-            ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
-            if not ds or not ds.folder_path:
-                return
-
-            count = self._count_files_in_folder(ds.folder_path, ds.scan_pattern)
-            ds.last_scan_total_files = count
-            db.commit()
-        finally:
-            db.close()
+    # NOTE: _refresh_file_count was removed — it's handled by the handler's
+    # _on_changes() which already calls it after event-driven ingestion.
+    # The manual scan sets it via _count_files_in_folder at scan start and
+    # end, and the scan's _update_scan_progress sets last_scan_processed.
 
     def _run_ingestion(
         self,
@@ -2394,7 +2408,15 @@ class DataStoreWatcher:
                 )
 
             asyncio.set_event_loop(loop)
-            loop.run_until_complete(_do())
+            if not loop.is_running():
+                loop.run_until_complete(_do())
+            else:
+                loop.close()
+                logger.warning(
+                    "[WATCHER] loop.already_running task_id=%s, closing and re-creating",
+                    task_id,
+                )
+                return
 
             # Mark task as completed
             try:

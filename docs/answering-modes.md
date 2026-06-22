@@ -14,7 +14,7 @@ RAG Web UI supports three answering modes, selectable via the pill bar in the ch
 
 ```
 rewrite_query
-  → hybrid_search_with_legs (all legs in parallel: dense + sparse + exact + graph)
+  → hybrid_search_with_legs (all legs in parallel: dense + sparse + exact)
   → stream LLM answer
 ```
 

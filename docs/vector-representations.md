@@ -66,7 +66,7 @@ storage optimisation.
 
 | Property | Dense | Sparse |
 |----------|-------|--------|
-| Model | Qwen3-embedding-0.6b (or any configured model) | SPLADE PP en v1 (FastEmbed) |
+| Model | Configurable (default: `local-embedding-model`) | SPLADE PP en v1 (FastEmbed) |
 | Vector space | 1024-dim continuous | ~30,000-dim discrete (BERT vocab) |
 | Stored shape | 1024 floats, always | N non-zero (index, value) pairs |
 | Typical N | — | 100–300 per chunk |

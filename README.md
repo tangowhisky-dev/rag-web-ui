@@ -190,7 +190,7 @@ MATCH (c:Chunk)-[:FROM_CHUNK]-(e:__Entity__ {name: "Apple"}) RETURN c, e
 
 | Variable | Description | Default |
 |---|---|---|
-| `RETRIEVAL_TOP_K` | Chunks returned per query | `6` |
+| `RETRIEVAL_TOP_K` | Chunks returned per query | `10` |
 | `HYBRID_DENSE_WEIGHT` | Weight for dense vector leg | `0.5` |
 | `HYBRID_QDRANT_SPARSE_WEIGHT` | Weight for SPLADE sparse leg | `0.3` |
 | `HYBRID_EXACT_WEIGHT` | Weight for MySQL FULLTEXT leg | `0.2` |
@@ -198,7 +198,7 @@ MATCH (c:Chunk)-[:FROM_CHUNK]-(e:__Entity__ {name: "Apple"}) RETURN c, e
 | `RETRIEVAL_QDRANT_SPARSE_ENABLED` | Enable/disable sparse leg | `true` |
 | `RETRIEVAL_EXACT_ENABLED` | Enable/disable MySQL FTS leg | `true` |
 | `RERANKER_ENABLED` | Enable cross-encoder reranker | `true` |
-| `RERANKER_MODEL` | HuggingFace cross-encoder model | `cross-encoder/ms-marco-MiniLM-L-6-v2` |
+| `RERANKER_MODEL` | HuggingFace cross-encoder model | `Xenova/ms-marco-MiniLM-L-12-v2` |
 | `RERANKER_SCORE_THRESHOLD` | Minimum logit to pass reranker (default retrieval) | `-2.0` |
 
 ### Vector DB (Qdrant)
@@ -390,15 +390,15 @@ The OpenAPI reference is available at http://localhost:8000/redoc. Below are the
 | POST | `/datastores` | admin | Create datastore |
 | GET | `/datastores/{id}` | admin | Get datastore details |
 | PATCH | `/datastores/{id}` | admin | Update datastore |
-| DELETE | `/datastores/{id}` | admin | Delete datastore |
-| POST | `/datastores/{id}/assign` | admin | Assign datastore to orgs |
-| DELETE | `/datastores/{id}/assign` | admin | Unassign datastore from orgs |
-| GET | `/datastores/{id}/status` | admin | Get scan status (includes new/modified/skipped/errors) |
+| DELETE | `/datastores/{id}` | admin | Delete datastore (204 on success) |
+| POST | `/datastores/{id}/assign` | admin | Assign datastore to orgs (body: `{"org_ids": []}`) |
+| DELETE | `/datastores/{id}/assign` | admin | Unassign datastore from orgs (body: `{"org_ids": []}`) |
+| GET | `/datastores/{id}/status` | admin | Get datastore scan status |
 | POST | `/datastores/{id}/scan` | admin | Trigger manual scan |
 | GET | `/datastores/{id}/scan-progress` | admin | Get scan progress (polling; real-time during scan, DB after completion) |
 | GET | `/datastores/{id}/scan-progress-stream` | admin | SSE endpoint for real-time scan progress (rarely used — frontend uses polling) |
-| POST | `/datastores/{id}/stop-scan` | admin | Cancel a running scan |
 | POST | `/datastores/{id}/flush` | admin | Process pending changes immediately |
+| POST | `/datastores/{id}/stop-scan` | admin | Cancel a running scan |
 
 #### Scan progress response fields
 
