@@ -6,6 +6,7 @@ DataStore via the ``OrganizationDataStore`` junction table.
 """
 
 from sqlalchemy import (
+    BigInteger,
     Column,
     Integer,
     String,
@@ -77,6 +78,9 @@ class DataStore(Base):
         "ProcessingTask", back_populates="data_store", cascade="all, delete-orphan",
         primaryjoin="DataStore.id == ProcessingTask.data_store_id",
     )
+    manifest_entries = relationship(
+        "DataStoreFileManifest", back_populates="data_store", cascade="all, delete-orphan"
+    )
 
 
 class OrganizationDataStore(Base):
@@ -104,3 +108,35 @@ class OrganizationDataStore(Base):
     # Relationships
     organisation = relationship("Organisation", back_populates="data_store_links")
     data_store = relationship("DataStore", back_populates="organization_links")
+
+
+class DataStoreFileManifest(Base):
+    """Manifest entry tracking every file known to a datastore.
+
+    Provides the source of truth for discovery — each row records the
+    datastore, the file's path relative to the datastore root, its SHA-256
+    hash, and its file size.  The unique constraint on (datastore_id,
+    file_path) ensures no duplicate entries per datastore.
+    """
+
+    __tablename__ = "data_store_file_manifests"
+
+    id = Column(Integer, primary_key=True, index=True)
+    datastore_id = Column(Integer, ForeignKey("data_stores.id", ondelete="CASCADE"), nullable=False, index=True)
+    file_path = Column(String(512), nullable=False)
+    file_hash = Column(String(64), nullable=False)  # SHA-256 hex digest
+    file_size = Column(BigInteger, nullable=False)
+    discovered_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint("datastore_id", "file_path", name="uq_datastore_file_path"),
+    )
+
+    # Relationships
+    data_store = relationship("DataStore", back_populates="manifest_entries", cascade="all, delete-orphan")
