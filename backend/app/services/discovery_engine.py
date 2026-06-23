@@ -1,0 +1,439 @@
+"""Discovery engine — walks datastore folders, hashes files, compares against manifest.
+
+Walks all registered datastore folders, computes SHA-256 hashes concurrently,
+compares against the DataStoreFileManifest table, and returns structured
+results (new, modified, deleted file lists).
+
+All log messages use the ``[DISCOVERY]`` prefix for diagnostic inspection.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import fnmatch
+import logging
+import os
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from multiprocessing import cpu_count
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session, selectinload
+
+from app.models.datastore import DataStore, DataStoreFileManifest
+
+logger = logging.getLogger(__name__)
+
+# ── File hashing ──────────────────────────────────────────────────────────────
+
+
+def hash_file(file_path: str) -> str:
+    """Compute SHA-256 hash of a file using 8192-byte chunks.
+
+    Returns the hex digest string, or empty string on I/O error.
+    """
+    h = hashlib.sha256()
+    try:
+        with open(file_path, "rb") as f:
+            for chunk in iter(lambda: f.read(8192), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        logger.warning("[DISCOVERY] failed_to_compute_hash path=%s", file_path)
+        return ""
+
+
+# ── Configuration ─────────────────────────────────────────────────────────────
+
+
+@dataclass
+class DiscoveryConfig:
+    """Configuration for discovery scans.
+
+    Attributes:
+        max_workers:  Maximum concurrent hash workers.  Defaults to
+                      ``min(cpu_count(), 32)`` so resource usage stays
+                      bounded even on large servers.
+        scan_pattern: File name pattern passed to ``fnmatch`` (default
+                      ``"*"`` to match everything).
+        skip_hidden:  When ``True`` files whose basename starts with
+                      ``"."`` are excluded.
+    """
+
+    max_workers: int = field(default=None)  # type: ignore[assignment]
+    scan_pattern: str = "*"
+    skip_hidden: bool = True
+
+    def __post_init__(self) -> None:
+        if self.max_workers is None:
+            self.max_workers = min(cpu_count(), 32)
+
+
+# ── Pattern matching ──────────────────────────────────────────────────────────
+
+
+def _matches_pattern(file_path: str, pattern: str, skip_hidden: bool = True) -> bool:
+    """Return ``True`` when *file_path* should be scanned.
+
+    Checks *fnmatch* against the file name and, when *skip_hidden* is
+    ``True``, excludes files whose basename starts with ``"."``.
+    """
+    base = os.path.basename(file_path)
+
+    if skip_hidden and base.startswith("."):
+        return False
+
+    return fnmatch.fnmatch(base, pattern)
+
+
+# ── Single-file collection ────────────────────────────────────────────────────
+
+
+def hash_and_collect(file_path: str, config: DiscoveryConfig) -> dict[str, Any] | None:
+    """Hash a single file and return metadata, or ``None`` if skipped.
+
+    Returns a dict with keys:
+        ``file_path``, ``file_hash``, ``file_size``
+
+    Returns ``None`` when the file is skipped by pattern or hidden filters.
+    """
+    if not _matches_pattern(file_path, config.scan_pattern, config.skip_hidden):
+        return None
+
+    file_hash = hash_file(file_path)
+    if not file_hash:
+        return None
+
+    try:
+        file_size = os.path.getsize(file_path)
+    except OSError:
+        logger.warning("[DISCOVERY] failed_to_get_size path=%s", file_path)
+        return None
+
+    return {
+        "file_path": file_path,
+        "file_hash": file_hash,
+        "file_size": file_size,
+    }
+
+
+# ── Worker ────────────────────────────────────────────────────────────────────
+
+
+def _hash_worker(args: tuple[str, "DiscoveryConfig"]) -> dict[str, Any] | None:
+    """Worker function for :class:`concurrent.futures.ThreadPoolExecutor`.
+
+    Accepts a ``(file_path, config)`` tuple and delegates to
+    :func:`hash_and_collect`.
+    """
+    file_path, config = args
+    return hash_and_collect(file_path, config)
+
+
+# ── DataStore discovery ──────────────────────────────────────────────────────
+
+
+@dataclass
+class DiscoveryResult:
+    """Result of scanning a single datastore.
+
+    Attributes:
+        datastore_id:            DataStore database ID.
+        datastore_name:          Human-readable DataStore name.
+        folder_path:             Absolute folder path that was scanned.
+        new_files:               List of dicts for files not in manifest.
+        modified_files:          List of dicts for files whose hash changed.
+        deleted_files:           List of dicts for manifest entries missing
+                                 from the filesystem.
+        skipped_files:           Count of files skipped by pattern/hidden.
+        total_files_discovered:  Total number of files actually scanned.
+        elapsed_ms:              Wall-clock time in milliseconds.
+
+    ``to_dict()`` returns a serialisable ``dict`` for SSE / API responses.
+    """
+
+    datastore_id: int
+    datastore_name: str
+    folder_path: str
+    new_files: list[dict[str, Any]] = field(default_factory=list)
+    modified_files: list[dict[str, Any]] = field(default_factory=list)
+    deleted_files: list[dict[str, Any]] = field(default_factory=list)
+    skipped_files: int = 0
+    total_files_discovered: int = 0
+    elapsed_ms: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a serialisable dict for SSE / API consumers."""
+        return {
+            "datastore_id": self.datastore_id,
+            "datastore_name": self.datastore_name,
+            "folder_path": self.folder_path,
+            "new_files": self.new_files,
+            "modified_files": self.modified_files,
+            "deleted_files": self.deleted_files,
+            "skipped_files": self.skipped_files,
+            "total_files_discovered": self.total_files_discovered,
+            "elapsed_ms": round(self.elapsed_ms, 2),
+        }
+
+
+def _walk_files(folder_path: str) -> list[str]:
+    """Walk *folder_path* and return absolute file paths (no symlinks)."""
+    paths: list[str] = []
+    for dirpath, _dirnames, filenames in os.walk(folder_path, follow_symlinks=False):
+        for fname in filenames:
+            paths.append(os.path.join(dirpath, fname))
+    return paths
+
+
+def _classify_files(
+    manifest_map: dict[str, DataStoreFileManifest],
+    collected: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Compare collected metadata against the manifest.
+
+    Returns ``(new_files, modified_files, deleted_files)``.
+    """
+    collected_map: dict[str, dict[str, Any]] = {}
+    for entry in collected:
+        rel = entry["file_path"]
+        collected_map[rel] = entry
+
+    new_files: list[dict[str, Any]] = []
+    modified_files: list[dict[str, Any]] = []
+
+    for rel, meta in collected_map.items():
+        existing = manifest_map.get(rel)
+        if existing is None:
+            new_files.append(meta)
+        elif existing.file_hash != meta["file_hash"]:
+            modified_files.append(meta)
+
+    deleted: list[dict[str, Any]] = []
+    for rel, manifest_entry in manifest_map.items():
+        if rel not in collected_map:
+            deleted.append({
+                "file_path": rel,
+                "old_hash": manifest_entry.file_hash,
+                "old_size": manifest_entry.file_size,
+            })
+
+    return new_files, modified_files, deleted
+
+
+def _upsert_manifest(
+    db: Session,
+    datastore_id: int,
+    new_files: list[dict[str, Any]],
+    modified_files: list[dict[str, Any]],
+) -> None:
+    """Persist new and updated manifest entries in bulk.
+
+    Uses ``bulk_save_objects`` with ``merge_existing=True`` so
+    existing rows are updated when the unique ``(datastore_id, file_path)``
+    key already exists.
+    """
+    now = datetime.now(timezone.utc)
+    objects: list[DataStoreFileManifest] = []
+
+    for entry in new_files + modified_files:
+        objects.append(
+            DataStoreFileManifest(
+                datastore_id=datastore_id,
+                file_path=entry["file_path"],
+                file_hash=entry["file_hash"],
+                file_size=entry["file_size"],
+                discovered_at=now,
+                updated_at=now,
+            )
+        )
+
+    if objects:
+        db.bulk_save_objects(objects, merge_existing=True)
+
+
+def discover_datastore(datastore_id: int, db: Session) -> DiscoveryResult:
+    """Walk a datastore's folder, hash files, and compare against the manifest.
+
+    Returns a :class:`DiscoveryResult` classifying files as *new*,
+    *modified*, or *deleted*.  New and updated entries are persisted
+    back to the ``data_store_file_manifests`` table via batch upsert.
+    """
+    start = time.monotonic()
+
+    # Load the DataStore and its manifest entries in a single query.
+    ds_stmt = (
+        select(DataStore)
+        .options(selectinload(DataStore.manifest_entries))
+        .where(DataStore.id == datastore_id)
+    )
+    ds = db.scalars(ds_stmt).first()
+
+    if ds is None:
+        logger.warning("[DISCOVERY] datastore_not_found id=%d", datastore_id)
+        return DiscoveryResult(
+            datastore_id=datastore_id,
+            datastore_name="unknown",
+            folder_path="",
+        )
+
+    if not ds.is_active:
+        logger.info("[DISCOVERY] datastore_inactive id=%d", datastore_id)
+        return DiscoveryResult(
+            datastore_id=datastore_id,
+            datastore_name=ds.name,
+            folder_path=ds.folder_path,
+        )
+
+    if not ds.folder_path or not os.path.isdir(ds.folder_path):
+        logger.warning(
+            "[DISCOVERY] datastore_folder_missing id=%d path=%s",
+            datastore_id,
+            ds.folder_path,
+        )
+        return DiscoveryResult(
+            datastore_id=datastore_id,
+            datastore_name=ds.name,
+            folder_path=ds.folder_path or "",
+        )
+
+    # Build manifest lookup keyed by file_path.
+    manifest_map: dict[str, DataStoreFileManifest] = {
+        m.file_path: m for m in ds.manifest_entries
+    }
+
+    logger.info(
+        "[DISCOVERY] scanning_start datastore_id=%d folder=%s",
+        datastore_id,
+        ds.folder_path,
+    )
+
+    # Walk the folder.
+    file_paths = _walk_files(ds.folder_path)
+    logger.info(
+        "[DISCOVERY] files_walking datastore_id=%d count=%d",
+        datastore_id,
+        len(file_paths),
+    )
+
+    # Hash concurrently.
+    config = DiscoveryConfig()
+    skipped = 0
+    collected: list[dict[str, Any]] = []
+
+    with ThreadPoolExecutor(max_workers=config.max_workers) as executor:
+        futures = {
+            executor.submit(_hash_worker, (fp, config)): fp for fp in file_paths
+        }
+        for future in as_completed(futures):
+            fp = futures[future]
+            try:
+                result = future.result()
+            except Exception:
+                logger.exception(
+                    "[DISCOVERY] worker_exception path=%s", fp
+                )
+                skipped += 1
+                continue
+            if result is None:
+                skipped += 1
+            else:
+                collected.append(result)
+
+    logger.info(
+        "[DISCOVERY] hashing_done datastore_id=%d collected=%d skipped=%d",
+        datastore_id,
+        len(collected),
+        skipped,
+    )
+
+    # Classify.
+    new_files, modified_files, deleted_files = _classify_files(
+        manifest_map, collected
+    )
+
+    logger.info(
+        "[DISCOVERY] classification_done datastore_id=%d new=%d modified=%d deleted=%d",
+        datastore_id,
+        len(new_files),
+        len(modified_files),
+        len(deleted_files),
+    )
+
+    # Persist new/updated entries.
+    _upsert_manifest(db, datastore_id, new_files, modified_files)
+
+    elapsed = (time.monotonic() - start) * 1000
+
+    result = DiscoveryResult(
+        datastore_id=ds.id,
+        datastore_name=ds.name,
+        folder_path=ds.folder_path,
+        new_files=new_files,
+        modified_files=modified_files,
+        deleted_files=deleted_files,
+        skipped_files=skipped,
+        total_files_discovered=len(collected),
+        elapsed_ms=elapsed,
+    )
+
+    logger.info(
+        "[DISCOVERY] scan_complete datastore_id=%d elapsed_ms=%.1f new=%d modified=%d deleted=%d",
+        result.datastore_id,
+        result.elapsed_ms,
+        len(result.new_files),
+        len(result.modified_files),
+        len(result.deleted_files),
+    )
+
+    return result
+
+
+# ── All datastores ────────────────────────────────────────────────────────────
+
+
+def discover_all(db: Session) -> list[DiscoveryResult]:
+    """Run :func:`discover_datastore` for every active DataStore concurrently.
+
+    Returns a list of :class:`DiscoveryResult` — one per active datastore.
+    Inactive datastores are skipped silently.
+    """
+    ids_stmt = select(DataStore.id).where(DataStore.is_active == True)  # noqa: E712
+    active_ids = db.scalars(ids_stmt).all()
+
+    if not active_ids:
+        logger.info("[DISCOVERY] no_active_datastores")
+        return []
+
+    logger.info("[DISCOVERY] discovering_all count=%d", len(active_ids))
+
+    # Discover each datastore concurrently.
+    results: list[DiscoveryResult] = []
+    with ThreadPoolExecutor(max_workers=min(len(active_ids), 8)) as executor:
+        futures = {
+            executor.submit(discover_datastore, did, db): did
+            for did in active_ids
+        }
+        for future in as_completed(futures):
+            did = futures[future]
+            try:
+                result = future.result()
+                results.append(result)
+            except Exception:
+                logger.exception("[DISCOVERY] datastore_exception id=%d", did)
+                results.append(
+                    DiscoveryResult(
+                        datastore_id=did,
+                        datastore_name="error",
+                        folder_path="",
+                        elapsed_ms=0.0,
+                    )
+                )
+
+    logger.info(
+        "[DISCOVERY] all_done total=%d", len(results)
+    )
+    return results
