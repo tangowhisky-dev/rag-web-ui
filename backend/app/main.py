@@ -10,6 +10,7 @@ from app.models.knowledge import ProcessingTask
 from app.models.organisation import Organisation
 from app.models.user import User, UserRole
 from app.services.datastore_watcher import DataStoreWatcher
+from app.services.startup_recovery_service import StartupRecoveryService
 from fastapi import FastAPI
 
 logging.basicConfig(
@@ -121,6 +122,9 @@ app = FastAPI(
 # DataStoreWatcher — started on demand during startup
 watcher_service: DataStoreWatcher | None = None
 
+# StartupRecoveryService — background ingestion on app start
+startup_recovery: StartupRecoveryService | None = None
+
 # Include routers
 app.include_router(api_router, prefix=settings.API_V1_STR)
 
@@ -150,6 +154,13 @@ async def startup_event():
         except Exception as e:
             logging.getLogger(__name__).error("Failed to start DataStoreWatcher: %s", e)
 
+        # Start the startup recovery service (background ingestion)
+        try:
+            startup_recovery = StartupRecoveryService()
+            startup_recovery.start()
+        except Exception as e:
+            logging.getLogger(__name__).error("Failed to start recovery service: %s", e)
+
     # Reset any tasks left in "processing" state from a previous worker crash.
     # With --reload, a file-write event kills the worker mid-flight leaving tasks
     # permanently stuck. On restart we mark them failed so clients don't hang.
@@ -176,9 +187,11 @@ def root():
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    global watcher_service
+    global watcher_service, startup_recovery
     if watcher_service is not None:
         watcher_service.stop()
+    if startup_recovery is not None:
+        startup_recovery.stop()
 
 
 @app.get("/api/health")
