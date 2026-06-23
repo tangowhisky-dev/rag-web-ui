@@ -13,6 +13,7 @@ from app.models.organisation import Organisation, OrgAbbreviation
 from app.models.user import User
 from app.models.knowledge import KnowledgeBase, Document
 from app.models.chat import Chat, Message
+from app.models.datastore import DataStore, DataStoreFileManifest
 from app.core.config import settings
 
 # this is the Alembic Config object, which provides
