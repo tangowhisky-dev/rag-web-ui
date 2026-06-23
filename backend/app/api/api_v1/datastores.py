@@ -111,6 +111,8 @@ class DataStoreResponse(BaseModel):
     scan_progress: Optional[dict] = None
     # Pending changes detected but not yet processed (event-driven queue)
     pending_changes: int = 0
+    # Timestamp of the last successful recovery scan
+    last_recovered_at: Optional[str] = None
     # Whether changes are currently being processed (event-driven ingestion)
     processing: bool = False
 
@@ -184,6 +186,7 @@ class RecoveryStatusResponse(BaseModel):
     deleted_files: int = 0
     started_at: Optional[str] = None
     error_message: Optional[str] = None
+    last_recovered_at: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +236,7 @@ def _map_recovery_status(scan: Dict[str, Any]) -> RecoveryStatusResponse:
         deleted_files=scan.get("deleted_files", 0),
         started_at=scan.get("started_at"),
         error_message=scan.get("error_message"),
+        last_recovered_at=scan.get("last_recovered_at"),
     )
 
 
@@ -258,6 +262,7 @@ def _serialize_ds(ds: DataStore) -> dict:
         "last_scan_errors": ds.last_scan_errors or 0,
         "created_at": ds.created_at.isoformat() if ds.created_at else None,
         "updated_at": ds.updated_at.isoformat() if ds.updated_at else None,
+        "last_recovered_at": ds.last_recovered_at.isoformat() if ds.last_recovered_at else None,
     }
 
 
