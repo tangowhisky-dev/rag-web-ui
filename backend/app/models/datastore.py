@@ -56,6 +56,9 @@ class DataStore(Base):
     last_scan_skipped = Column(Integer, default=0)
     last_scan_errors = Column(Integer, default=0)
 
+    # Recovery tracking
+    last_recovered_at = Column(DateTime, nullable=True)
+
     # Timestamps
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at = Column(
