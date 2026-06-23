@@ -14,6 +14,7 @@ import fnmatch
 import logging
 import os
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -24,6 +25,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.datastore import DataStore, DataStoreFileManifest
+
+_FLUSH_LOCK = threading.Lock()
 
 logger = logging.getLogger(__name__)
 
@@ -183,7 +186,7 @@ class DiscoveryResult:
 def _walk_files(folder_path: str) -> list[str]:
     """Walk *folder_path* and return absolute file paths (no symlinks)."""
     paths: list[str] = []
-    for dirpath, _dirnames, filenames in os.walk(folder_path, follow_symlinks=False):
+    for dirpath, _dirnames, filenames in os.walk(folder_path):
         for fname in filenames:
             paths.append(os.path.join(dirpath, fname))
     return paths
@@ -229,18 +232,27 @@ def _upsert_manifest(
     datastore_id: int,
     new_files: list[dict[str, Any]],
     modified_files: list[dict[str, Any]],
+    manifest_map: dict[str, DataStoreFileManifest],
 ) -> None:
-    """Persist new and updated manifest entries in bulk.
+    """Persist new and updated manifest entries.
 
-    Uses ``bulk_save_objects`` with ``merge_existing=True`` so
-    existing rows are updated when the unique ``(datastore_id, file_path)``
-    key already exists.
+    Updates existing entries in-place (for modified files) and
+    inserts new entries via :meth:`Session.add`.  A lock serialises
+    the flush so :func:`discover_all` can safely call this from
+    multiple threads.
     """
     now = datetime.now(timezone.utc)
-    objects: list[DataStoreFileManifest] = []
 
-    for entry in new_files + modified_files:
-        objects.append(
+    # Update modified entries in place
+    for entry in modified_files:
+        existing = manifest_map.get(entry["file_path"])
+        if existing:
+            existing.file_hash = entry["file_hash"]
+            existing.file_size = entry["file_size"]
+
+    # Add new entries
+    for entry in new_files:
+        db.add(
             DataStoreFileManifest(
                 datastore_id=datastore_id,
                 file_path=entry["file_path"],
@@ -251,8 +263,10 @@ def _upsert_manifest(
             )
         )
 
-    if objects:
-        db.bulk_save_objects(objects, merge_existing=True)
+    if modified_files or new_files:
+        with _FLUSH_LOCK:
+            db.flush()
+        db.commit()
 
 
 def discover_datastore(datastore_id: int, db: Session) -> DiscoveryResult:
@@ -364,7 +378,7 @@ def discover_datastore(datastore_id: int, db: Session) -> DiscoveryResult:
     )
 
     # Persist new/updated entries.
-    _upsert_manifest(db, datastore_id, new_files, modified_files)
+    _upsert_manifest(db, datastore_id, new_files, modified_files, manifest_map)
 
     elapsed = (time.monotonic() - start) * 1000
 

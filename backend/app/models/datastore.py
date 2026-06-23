@@ -139,4 +139,4 @@ class DataStoreFileManifest(Base):
     )
 
     # Relationships
-    data_store = relationship("DataStore", back_populates="manifest_entries", cascade="all, delete-orphan")
+    data_store = relationship("DataStore", back_populates="manifest_entries")
