@@ -15,7 +15,7 @@ import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy import select
 
@@ -101,10 +101,28 @@ class StartupRecoveryService:
 
         Returns ``{"status": "idle"}`` when no scan is in progress.
         """
+        return self.get_status(datastore_id)
+
+    def get_status(self, datastore_id: int) -> Dict[str, Any]:
+        """Return the current recovery status for a DataStore.
+
+        Returns ``{"status": "idle"}`` when no scan is in progress.
+        """
         for scan in self._active_scans.values():
             if scan.get("datastore_id") == datastore_id:
                 return scan
         return {"status": "idle"}
+
+    def get_all_status(self) -> List[Dict[str, Any]]:
+        """Return recovery status for all active datastores.
+
+        Returns a list of status dicts (sorted by scan_id) plus
+        idle entries for datastores that have no scan in progress.
+        """
+        results: List[Dict[str, Any]] = []
+        for scan in sorted(self._active_scans.values(), key=lambda s: s.get("scan_id", 0)):
+            results.append(dict(scan))
+        return results
 
     # ------------------------------------------------------------------
     # Internal helpers
