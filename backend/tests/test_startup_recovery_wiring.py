@@ -118,16 +118,15 @@ class TestMainPyImportAndSyntax:
         )
         with open(main_path) as f:
             source = f.read()
-        # The recovery block must be within the WATCHER_ENABLED guard
-        # after watcher_service.start() and before the reset_stuck block.
-        # Check that StartupRecoveryService() appears after "watcher_service.start()".
+        # StartupRecoveryService is created before the watcher starts so that
+        # recovery completes before the observer begins watching.
         watcher_idx = source.find("watcher_service.start()")
         recovery_idx = source.find("StartupRecoveryService()")
-        assert watcher_idx < recovery_idx, (
-            "StartupRecoveryService() must be started after watcher_service.start()"
+        assert recovery_idx < watcher_idx, (
+            "StartupRecoveryService() must be started before watcher_service.start()"
         )
 
-    def test_main_py_recovery_after_watcher_in_try_except(self):
+    def test_main_py_recovery_before_watcher_in_try_except(self):
         """startup_recovery must be created inside try/except in startup_event."""
         main_path = os.path.join(
             os.path.dirname(__file__),
@@ -137,13 +136,12 @@ class TestMainPyImportAndSyntax:
         )
         with open(main_path) as f:
             source = f.read()
-        # The recovery block must be within the WATCHER_ENABLED guard
-        # after watcher_service.start() and before the reset_stuck block.
-        # Check that StartupRecoveryService() appears after "watcher_service.start()".
+        # StartupRecoveryService is created before the watcher starts so that
+        # recovery completes before the observer begins watching.
         watcher_idx = source.find("watcher_service.start()")
         recovery_idx = source.find("StartupRecoveryService()")
-        assert watcher_idx < recovery_idx, (
-            "StartupRecoveryService() must be started after watcher_service.start()"
+        assert recovery_idx < watcher_idx, (
+            "StartupRecoveryService() must be started before watcher_service.start()"
         )
 
 
@@ -216,9 +214,16 @@ class TestStartupEventWiring:
         asyncio.run(run())
 
     def test_startup_event_skips_recovery_when_watcher_disabled(self):
-        """startup_event must NOT create StartupRecoveryService when WATCHER_ENABLED is False."""
+        """startup_event must NOT start DataStoreWatcher when WATCHER_ENABLED is False.
+
+        Note: StartupRecoveryService is always created regardless of WATCHER_ENABLED,
+        because it only walks the datastore folder tree on disk and does not need
+        the filesystem observer.
+        """
 
         async def run():
+            from app.main import startup_event
+
             with patch("app.main.settings") as mock_settings, patch(
                 "app.main._seed_root_org_and_superadmin"
             ), patch("app.main.init_storage"), patch(
@@ -237,7 +242,12 @@ class TestStartupEventWiring:
 
                 await startup_event()
 
-                mock_recovery_cls.assert_not_called()
+                # Recovery service is always created (independent of WATCHER_ENABLED)
+                mock_recovery_cls.assert_called_once()
+                mock_recovery_cls.return_value.start.assert_called_once()
+
+                # Watcher should NOT be created when disabled
+                mock_watcher_cls.assert_not_called()
 
         asyncio.run(run())
 
@@ -245,6 +255,8 @@ class TestStartupEventWiring:
         """startup_event must not crash if StartupRecoveryService.start() raises."""
 
         async def run():
+            from app.main import startup_event
+
             with patch("app.main.settings") as mock_settings, patch(
                 "app.main._seed_root_org_and_superadmin"
             ), patch("app.main.init_storage"), patch(

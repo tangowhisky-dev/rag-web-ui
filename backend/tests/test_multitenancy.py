@@ -137,8 +137,12 @@ def test_cross_org_kb_get_returns_404(client, db):
     assert r.status_code == 404
 
 
-def test_same_org_kb_get_returns_200(client, db):
-    """User C in org1 can GET a KB created by User A in org1."""
+def test_same_org_kb_get_returns_404(client, db):
+    """User C in org1 cannot GET a KB created by User A in org1.
+
+    KB access is user-scoped (user_id filter), not org-scoped.
+    Each user can only access their own KBs regardless of org membership.
+    """
     org1 = _make_org(db, "org1")
     _make_user(db, "alice", org_id=org1.id)
     _make_user(db, "carol", org_id=org1.id)
@@ -146,7 +150,7 @@ def test_same_org_kb_get_returns_200(client, db):
     token_c = _login(client, "carol")
     kb_id = _create_kb(client, token_a, "alice-kb")
     r = client.get(f"/api/knowledge-base/{kb_id}", headers=_auth(token_c))
-    assert r.status_code == 200
+    assert r.status_code == 404
 
 
 def test_cross_org_kb_list_excludes_other_org(client, db):
@@ -189,11 +193,11 @@ def test_cross_org_chat_get_returns_404(client, db):
     assert r.status_code == 404
 
 
-def test_same_org_chat_get_returns_200(client, db):
-    """User C in org1 can GET a Chat created by User A in org1.
+def test_same_org_chat_get_returns_404(client, db):
+    """User C in org1 cannot GET a Chat created by User A in org1.
 
-    Note: Chat is created by alice; carol (same org) reads it via _chat_owner_filter.
-    The chat creation uses alice's KB — carol's GET of the chat uses org_id scoping.
+    Chat access is user-scoped (user_id filter), not org-scoped.
+    Each user can only access their own Chats regardless of org membership.
     """
     org1 = _make_org(db, "org1")
     _make_user(db, "alice", org_id=org1.id)
@@ -203,4 +207,4 @@ def test_same_org_chat_get_returns_200(client, db):
     kb_id = _create_kb(client, token_a, "alice-kb")
     chat_id = _create_chat(client, token_a, kb_id)
     r = client.get(f"/api/chat/{chat_id}", headers=_auth(token_c))
-    assert r.status_code == 200
+    assert r.status_code == 404

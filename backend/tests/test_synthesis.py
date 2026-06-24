@@ -59,12 +59,16 @@ class TestSynthesizeDocumentsTool:
         mock_result_1 = {"docs": [dup_doc]}
         mock_result_2 = {"docs": [dup_doc, unique_doc]}  # dup_doc appears again
 
-        async def _mock_search(query, kb_ids, top_k):
+        async def _mock_search(query, kb_ids, **kwargs):
             if "Apple" in query:
                 return mock_result_1
             return mock_result_2
 
-        with patch("app.services.retrieval.hybrid_search_with_legs", side_effect=_mock_search):
+        mock_session = MagicMock()
+        mock_session.query.return_value.filter.return_value.distinct.return_value.all.return_value = []
+
+        with patch("app.db.session.SessionLocal", return_value=mock_session), \
+             patch("app.services.retrieval.hybrid_search_with_legs", side_effect=_mock_search):
             result = execute_tool("synthesize_documents", {
                 "topic": "Q4 earnings",
                 "sub_queries": ["Apple Q4 revenue", "Google Q4 products"],
@@ -86,13 +90,17 @@ class TestSynthesizeDocumentsTool:
 
         call_count = [0]
 
-        async def _mock_search(query, kb_ids, top_k):
+        async def _mock_search(query, kb_ids, **kwargs):
             call_count[0] += 1
             if call_count[0] == 1:
                 raise RuntimeError("connection error")
             return {"docs": [good_doc]}
 
-        with patch("app.services.retrieval.hybrid_search_with_legs", side_effect=_mock_search):
+        mock_session = MagicMock()
+        mock_session.query.return_value.filter.return_value.distinct.return_value.all.return_value = []
+
+        with patch("app.db.session.SessionLocal", return_value=mock_session), \
+             patch("app.services.retrieval.hybrid_search_with_legs", side_effect=_mock_search):
             result = execute_tool("synthesize_documents", {
                 "topic": "Q4 earnings",
                 "sub_queries": ["failed query", "good query"],
@@ -110,10 +118,14 @@ class TestSynthesizeDocumentsTool:
             for i in range(5)
         ]
 
-        async def _mock_search(query, kb_ids, top_k):
+        async def _mock_search(query, kb_ids, **kwargs):
             return {"docs": docs}
 
-        with patch("app.services.retrieval.hybrid_search_with_legs", side_effect=_mock_search):
+        mock_session = MagicMock()
+        mock_session.query.return_value.filter.return_value.distinct.return_value.all.return_value = []
+
+        with patch("app.db.session.SessionLocal", return_value=mock_session), \
+             patch("app.services.retrieval.hybrid_search_with_legs", side_effect=_mock_search):
             result = execute_tool("synthesize_documents", {
                 "topic": "test",
                 "sub_queries": ["q1", "q2"],
@@ -131,10 +143,14 @@ class TestSynthesizeDocumentsTool:
             Document(page_content="High score content", metadata={"score": 0.9, "source": "b.pdf"}),
         ]
 
-        async def _mock_search(query, kb_ids, top_k):
+        async def _mock_search(query, kb_ids, **kwargs):
             return {"docs": docs}
 
-        with patch("app.services.retrieval.hybrid_search_with_legs", side_effect=_mock_search):
+        mock_session = MagicMock()
+        mock_session.query.return_value.filter.return_value.distinct.return_value.all.return_value = []
+
+        with patch("app.db.session.SessionLocal", return_value=mock_session), \
+             patch("app.services.retrieval.hybrid_search_with_legs", side_effect=_mock_search):
             result = execute_tool("synthesize_documents", {
                 "topic": "test",
                 "sub_queries": ["q1"],

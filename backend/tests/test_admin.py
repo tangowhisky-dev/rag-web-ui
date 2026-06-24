@@ -435,12 +435,12 @@ def test_admin_create_user_duplicate_email_returns_400(client, db):
     root_org = db.query(Organisation).filter(Organisation.parent_id.is_(None)).first()
     client.post("/api/admin/users",
                 json={"username": "user_a", "email": "dup@example.com",
-                      "password": "pass123", "role": "user", "org_id": root_org.id},
+                      "password": "pass1234", "role": "user", "org_id": root_org.id},
                 headers={"Authorization": f"Bearer {token}"})
 
     resp = client.post("/api/admin/users",
                        json={"username": "user_b", "email": "dup@example.com",
-                             "password": "pass123", "role": "user", "org_id": root_org.id},
+                             "password": "pass1234", "role": "user", "org_id": root_org.id},
                        headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 400, resp.text
     assert "email" in resp.json()["detail"].lower()
@@ -452,12 +452,12 @@ def test_admin_create_user_duplicate_username_returns_400(client, db):
     root_org = db.query(Organisation).filter(Organisation.parent_id.is_(None)).first()
     client.post("/api/admin/users",
                 json={"username": "dupuser", "email": "a@example.com",
-                      "password": "pass123", "role": "user", "org_id": root_org.id},
+                      "password": "pass1234", "role": "user", "org_id": root_org.id},
                 headers={"Authorization": f"Bearer {token}"})
 
     resp = client.post("/api/admin/users",
                        json={"username": "dupuser", "email": "b@example.com",
-                             "password": "pass123", "role": "user", "org_id": root_org.id},
+                             "password": "pass1234", "role": "user", "org_id": root_org.id},
                        headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 400, resp.text
     assert "username" in resp.json()["detail"].lower()
@@ -470,7 +470,7 @@ def test_admin_create_user_duplicate_username_returns_400(client, db):
 def test_admin_cannot_delete_user(client, db):
     """An admin user should NOT be able to permanently delete a user (only super admin)."""
     token = get_admin_token(client, db)
-    user = create_user(db, "deleteblocktest", "pass123", UserRole.user)
+    user = create_user(db, "deleteblocktest", "pass1234", UserRole.user)
 
     resp = client.delete(
         f"/api/admin/users/{user.id}",

@@ -178,6 +178,7 @@ async def test_no_cancel_normal_flow():
     bot_msg.role = "assistant"
     bot_msg.chat_id = chat_id
     bot_msg.rewritten_query = None
+    bot_msg.id = 2  # must be serializable for json.dumps in chat_service
 
     with patch("app.services.chat_service.Message") as MockMsg:
         MockMsg.side_effect = [
@@ -530,10 +531,11 @@ async def test_cancel_then_chat_reusable():
     bot_msg2.role = "assistant"
     bot_msg2.chat_id = chat_id
     bot_msg2.rewritten_query = None
+    bot_msg2.id = 3  # must be serializable for json.dumps in chat_service
 
     with patch("app.services.chat_service.Message") as MockMsg:
         MockMsg.side_effect = [
-            MagicMock(id=2, content="second", role="user", chat_id=chat_id),
+            MagicMock(id=4, content="second", role="user", chat_id=chat_id),
             bot_msg2,
         ]
 

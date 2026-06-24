@@ -1,48 +1,23 @@
-"""add SMB fields to organisations
+"""add SMB fields to organisations — DELETED: SMB share ingestion is not in the project roadmap.
+Data ingestion is handled via mounted folders (/app/data/) monitored by the DataStore watcher.
 
-Revision ID: 0002_add_smb_fields
-Revises: 0001_add_watch_dir
-Create Date: 2026-06-03 06:00:00.000000
-
+This migration file is kept but does nothing to preserve the migration chain.
 """
 from typing import Sequence, Union
 
 from alembic import op
-import sqlalchemy as sa
 
-# revision identifiers, used by Alembic.
 revision: str = '0002_add_smb_fields'
-down_revision: Union[str, None] = '0001_add_watch_dir'
+down_revision: Union[str, None] = '0001_add_watch_dir_to_organisations'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        'organisations',
-        sa.Column('smb_host', sa.String(length=255), nullable=True),
-    )
-    op.add_column(
-        'organisations',
-        sa.Column('smb_share', sa.String(length=255), nullable=True),
-    )
-    op.add_column(
-        'organisations',
-        sa.Column('smb_username', sa.String(length=255), nullable=True),
-    )
-    op.add_column(
-        'organisations',
-        sa.Column('smb_password_encrypted', sa.Text(), nullable=True),
-    )
-    op.add_column(
-        'organisations',
-        sa.Column('smb_domain', sa.String(length=255), nullable=True),
-    )
+    # No-op: SMB fields were never added to the database.
+    pass
 
 
 def downgrade() -> None:
-    op.drop_column('organisations', 'smb_domain')
-    op.drop_column('organisations', 'smb_password_encrypted')
-    op.drop_column('organisations', 'smb_username')
-    op.drop_column('organisations', 'smb_share')
-    op.drop_column('organisations', 'smb_host')
+    # No-op.
+    pass

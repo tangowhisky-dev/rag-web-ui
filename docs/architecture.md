@@ -165,7 +165,7 @@ Admin creates org
     ├── Assign users (role: user/admin/super_admin, org_id)
     ├── Assign data sources (DataStore → OrganisationDataStore)
     ├── Configure LLM settings (org LLM config, ingestion status)
-    └── Configure file watchers (per-datastore local dir, SMB share)
+    └── Configure file watchers (per-datastore local dir)
 
 User creates chat (user_id, org_id)
     ├── Chats are user-scoped (Chat.user_id == current_user.id)
@@ -189,10 +189,9 @@ backend/app/
 │   ├── chat_files.py       # Ephemeral file upload, status poll, download, delete
 │   ├── folders.py          # Chat folder management
 │   ├── knowledge_base.py   # KB + document CRUD, upload, processing
-│   ├── admin.py            # Org CRUD, LLM config, ingestion status, users, watchers, SMB
+│   ├── admin.py            # Org CRUD, LLM config, ingestion status, users, watchers
 │   ├── datastores.py       # DataStore CRUD, assign/unassign, scan status
 │   ├── watcher.py          # Per-org file watcher endpoints
-│   ├── smb.py              # SMB share config, test connection, scan
 │   ├── query.py            # Stateless RAG query, KB ingest status
 │   └── api.py              # Router aggregation, /config endpoint
 ├── core/

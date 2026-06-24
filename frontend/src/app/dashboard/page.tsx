@@ -147,7 +147,7 @@ export default function DashboardPage() {
             </div>
             <h3 className="text-base font-medium mb-1">Upload Documents or Link Data Stores</h3>
             <p className="text-sm text-muted-foreground text-center">
-              Upload PDFs, docs, images, or connect SMB shares — auto-synced
+              Upload PDFs, docs, images, or link data stores — auto-synced from monitored folders
             </p>
           </a>
 
