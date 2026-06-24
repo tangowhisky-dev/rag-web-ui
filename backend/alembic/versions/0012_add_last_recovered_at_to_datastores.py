@@ -4,7 +4,7 @@ Adds last_recovered_at column to the data_stores table so that the
 admin dashboard can display when the last recovery scan completed.
 
 Revision ID: 0012_add_last_recovered_at_to_datastores
-Revises: add_scan_result_cols
+Revises: 0011_add_datastore_file_manifest
 Create Date: 2026-06-23
 
 """
@@ -16,7 +16,7 @@ import sqlalchemy as sa
 
 
 revision: str = "0012_add_last_recovered_at_to_datastores"
-down_revision: Union[str, None] = "add_scan_result_cols"
+down_revision: Union[str, None] = "0011_add_datastore_file_manifest"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
