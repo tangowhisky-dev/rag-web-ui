@@ -63,34 +63,19 @@ backend/.env
 /uploads
 /samples
 .webui_secret_key
+/backend/assets
+/data
 
 # Hermes specific
 .hermes/
 
-# ── GSD baseline (auto-generated) ──
-.gsd
-.gsd-id
-.mcp.json
-.bg-shell/
-Thumbs.db
-*.code-workspace
-.env.*
-!.env.example
-*.pyc
-.venv/
-target/
-vendor/
-*.log
-coverage/
-.cache/
-tmp/
-/backend/assets
-/data
-/.qwen
+# Qwen specific
+.qwen/
 
 # ── GSD baseline (auto-generated) ──
 .gsd
 .gsd-id
+.gsd-worktrees/
 .mcp.json
 .bg-shell/
 Thumbs.db
@@ -105,7 +90,6 @@ vendor/
 coverage/
 .cache/
 tmp/
-.gsd-worktrees/
 nul
 nul.*
 con
@@ -120,3 +104,4 @@ lpt[1-9]
 lpt[1-9].*
 /.agents
 /.hermes
+/data
