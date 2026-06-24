@@ -24,6 +24,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from app.db.session import SessionLocal
 from app.models.datastore import DataStore, DataStoreFileManifest
 
 _FLUSH_LOCK = threading.Lock()
@@ -269,141 +270,147 @@ def _upsert_manifest(
         db.commit()
 
 
-def discover_datastore(datastore_id: int, db: Session) -> DiscoveryResult:
+def discover_datastore(datastore_id: int) -> DiscoveryResult:
     """Walk a datastore's folder, hash files, and compare against the manifest.
 
     Returns a :class:`DiscoveryResult` classifying files as *new*,
     *modified*, or *deleted*.  New and updated entries are persisted
     back to the ``data_store_file_manifests`` table via batch upsert.
+
+    Creates its own session — safe to call from multiple threads concurrently.
     """
     start = time.monotonic()
 
-    # Load the DataStore and its manifest entries in a single query.
-    ds_stmt = (
-        select(DataStore)
-        .options(selectinload(DataStore.manifest_entries))
-        .where(DataStore.id == datastore_id)
-    )
-    ds = db.scalars(ds_stmt).first()
-
-    if ds is None:
-        logger.warning("[DISCOVERY] datastore_not_found id=%d", datastore_id)
-        return DiscoveryResult(
-            datastore_id=datastore_id,
-            datastore_name="unknown",
-            folder_path="",
+    db = SessionLocal()
+    try:
+        # Load the DataStore and its manifest entries in a single query.
+        ds_stmt = (
+            select(DataStore)
+            .options(selectinload(DataStore.manifest_entries))
+            .where(DataStore.id == datastore_id)
         )
+        ds = db.scalars(ds_stmt).first()
 
-    if not ds.is_active:
-        logger.info("[DISCOVERY] datastore_inactive id=%d", datastore_id)
-        return DiscoveryResult(
-            datastore_id=datastore_id,
-            datastore_name=ds.name,
-            folder_path=ds.folder_path,
-        )
+        if ds is None:
+            logger.warning("[DISCOVERY] datastore_not_found id=%d", datastore_id)
+            return DiscoveryResult(
+                datastore_id=datastore_id,
+                datastore_name="unknown",
+                folder_path="",
+            )
 
-    if not ds.folder_path or not os.path.isdir(ds.folder_path):
-        logger.warning(
-            "[DISCOVERY] datastore_folder_missing id=%d path=%s",
+        if not ds.is_active:
+            logger.info("[DISCOVERY] datastore_inactive id=%d", datastore_id)
+            return DiscoveryResult(
+                datastore_id=datastore_id,
+                datastore_name=ds.name,
+                folder_path=ds.folder_path,
+            )
+
+        if not ds.folder_path or not os.path.isdir(ds.folder_path):
+            logger.warning(
+                "[DISCOVERY] datastore_folder_missing id=%d path=%s",
+                datastore_id,
+                ds.folder_path,
+            )
+            return DiscoveryResult(
+                datastore_id=datastore_id,
+                datastore_name=ds.name,
+                folder_path=ds.folder_path or "",
+            )
+
+        # Build manifest lookup keyed by file_path.
+        manifest_map: dict[str, DataStoreFileManifest] = {
+            m.file_path: m for m in ds.manifest_entries
+        }
+
+        logger.info(
+            "[DISCOVERY] scanning_start datastore_id=%d folder=%s",
             datastore_id,
             ds.folder_path,
         )
-        return DiscoveryResult(
-            datastore_id=datastore_id,
-            datastore_name=ds.name,
-            folder_path=ds.folder_path or "",
+
+        # Walk the folder.
+        file_paths = _walk_files(ds.folder_path)
+        logger.info(
+            "[DISCOVERY] files_walking datastore_id=%d count=%d",
+            datastore_id,
+            len(file_paths),
         )
 
-    # Build manifest lookup keyed by file_path.
-    manifest_map: dict[str, DataStoreFileManifest] = {
-        m.file_path: m for m in ds.manifest_entries
-    }
+        # Hash concurrently.
+        config = DiscoveryConfig()
+        skipped = 0
+        collected: list[dict[str, Any]] = []
 
-    logger.info(
-        "[DISCOVERY] scanning_start datastore_id=%d folder=%s",
-        datastore_id,
-        ds.folder_path,
-    )
+        with ThreadPoolExecutor(max_workers=config.max_workers) as executor:
+            futures = {
+                executor.submit(_hash_worker, (fp, config)): fp for fp in file_paths
+            }
+            for future in as_completed(futures):
+                fp = futures[future]
+                try:
+                    result = future.result()
+                except Exception:
+                    logger.exception(
+                        "[DISCOVERY] worker_exception path=%s", fp
+                    )
+                    skipped += 1
+                    continue
+                if result is None:
+                    skipped += 1
+                else:
+                    collected.append(result)
 
-    # Walk the folder.
-    file_paths = _walk_files(ds.folder_path)
-    logger.info(
-        "[DISCOVERY] files_walking datastore_id=%d count=%d",
-        datastore_id,
-        len(file_paths),
-    )
+        logger.info(
+            "[DISCOVERY] hashing_done datastore_id=%d collected=%d skipped=%d",
+            datastore_id,
+            len(collected),
+            skipped,
+        )
 
-    # Hash concurrently.
-    config = DiscoveryConfig()
-    skipped = 0
-    collected: list[dict[str, Any]] = []
+        # Classify.
+        new_files, modified_files, deleted_files = _classify_files(
+            manifest_map, collected
+        )
 
-    with ThreadPoolExecutor(max_workers=config.max_workers) as executor:
-        futures = {
-            executor.submit(_hash_worker, (fp, config)): fp for fp in file_paths
-        }
-        for future in as_completed(futures):
-            fp = futures[future]
-            try:
-                result = future.result()
-            except Exception:
-                logger.exception(
-                    "[DISCOVERY] worker_exception path=%s", fp
-                )
-                skipped += 1
-                continue
-            if result is None:
-                skipped += 1
-            else:
-                collected.append(result)
+        logger.info(
+            "[DISCOVERY] classification_done datastore_id=%d new=%d modified=%d deleted=%d",
+            datastore_id,
+            len(new_files),
+            len(modified_files),
+            len(deleted_files),
+        )
 
-    logger.info(
-        "[DISCOVERY] hashing_done datastore_id=%d collected=%d skipped=%d",
-        datastore_id,
-        len(collected),
-        skipped,
-    )
+        # Persist new/updated entries.
+        _upsert_manifest(db, datastore_id, new_files, modified_files, manifest_map)
 
-    # Classify.
-    new_files, modified_files, deleted_files = _classify_files(
-        manifest_map, collected
-    )
+        elapsed = (time.monotonic() - start) * 1000
 
-    logger.info(
-        "[DISCOVERY] classification_done datastore_id=%d new=%d modified=%d deleted=%d",
-        datastore_id,
-        len(new_files),
-        len(modified_files),
-        len(deleted_files),
-    )
+        result = DiscoveryResult(
+            datastore_id=ds.id,
+            datastore_name=ds.name,
+            folder_path=ds.folder_path,
+            new_files=new_files,
+            modified_files=modified_files,
+            deleted_files=deleted_files,
+            skipped_files=skipped,
+            total_files_discovered=len(collected),
+            elapsed_ms=elapsed,
+        )
 
-    # Persist new/updated entries.
-    _upsert_manifest(db, datastore_id, new_files, modified_files, manifest_map)
+        logger.info(
+            "[DISCOVERY] scan_complete datastore_id=%d elapsed_ms=%.1f new=%d modified=%d deleted=%d",
+            result.datastore_id,
+            result.elapsed_ms,
+            len(result.new_files),
+            len(result.modified_files),
+            len(result.deleted_files),
+        )
 
-    elapsed = (time.monotonic() - start) * 1000
-
-    result = DiscoveryResult(
-        datastore_id=ds.id,
-        datastore_name=ds.name,
-        folder_path=ds.folder_path,
-        new_files=new_files,
-        modified_files=modified_files,
-        deleted_files=deleted_files,
-        skipped_files=skipped,
-        total_files_discovered=len(collected),
-        elapsed_ms=elapsed,
-    )
-
-    logger.info(
-        "[DISCOVERY] scan_complete datastore_id=%d elapsed_ms=%.1f new=%d modified=%d deleted=%d",
-        result.datastore_id,
-        result.elapsed_ms,
-        len(result.new_files),
-        len(result.modified_files),
-        len(result.deleted_files),
-    )
-
-    return result
+        return result
+    finally:
+        db.close()
 
 
 # ── All datastores ────────────────────────────────────────────────────────────
@@ -424,11 +431,11 @@ def discover_all(db: Session) -> list[DiscoveryResult]:
 
     logger.info("[DISCOVERY] discovering_all count=%d", len(active_ids))
 
-    # Discover each datastore concurrently.
+    # Discover each datastore concurrently (each gets its own session).
     results: list[DiscoveryResult] = []
     with ThreadPoolExecutor(max_workers=min(len(active_ids), 8)) as executor:
         futures = {
-            executor.submit(discover_datastore, did, db): did
+            executor.submit(discover_datastore, did): did
             for did in active_ids
         }
         for future in as_completed(futures):

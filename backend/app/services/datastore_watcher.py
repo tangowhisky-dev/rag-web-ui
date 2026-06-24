@@ -1099,18 +1099,19 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
     def _update_scan_progress(self, datastore_id: int, processed: int) -> None:
         """Update last_scan_processed so UI reflects ingestion progress.
 
-        Called after event-driven ingestion completes. Uses += to accumulate
-        the batch count. Protected by _progress_lock to prevent race with
-        the scan thread's = assignment.
+        Called after event-driven ingestion completes. Uses SQL-level atomic
+        increment (UPDATE ... SET col = col + :val) so concurrent threads
+        cannot lose a counter increment due to a read-modify-write race.
         """
         db: Session = SessionLocal()
         try:
-            ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
-            if not ds:
-                return
+            from sqlalchemy import update
 
-            with self._progress_lock:
-                ds.last_scan_processed += processed
+            db.execute(
+                update(DataStore)
+                .where(DataStore.id == datastore_id)
+                .values(last_scan_processed=DataStore.last_scan_processed + processed)
+            )
             db.commit()
         finally:
             db.close()
@@ -1246,6 +1247,10 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
     def _on_changes(self, datastore_id: int, org_id: int, changes: List[Dict[str, Any]]) -> None:
         """Callback when batch of changes is ready to process.
 
+        Processes all changes and waits for ingestion Futures before
+        updating scan progress, so the UI reflects actual completed
+        ingestion rather than queued work.
+
         Args:
             datastore_id: ID of the datastore with changes
             org_id: Organization ID this datastore belongs to
@@ -1261,8 +1266,7 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
             len(changes),
         )
 
-        # Process each change and update last_scan_processed so UI
-        # reflects ingestion progress, not just total file count.
+        # Process each change
         changes_processed = 0
         for change in changes:
             fpath = change["path"]
@@ -2178,52 +2182,6 @@ class DataStoreWatcher:
                 pass
         finally:
             db.close()
-
-    def scan(self) -> Dict[str, Any]:
-        """Manually scan all watched datastores for new/modified files."""
-        summary: Dict[str, int] = {"scanned": 0, "new": 0, "modified": 0, "skipped": 0, "errors": 0}
-
-        if not self._running or self._observer is None:
-            logger.warning("[WATCHER] scan attempted but service is not running")
-            return summary
-
-        db: Session = SessionLocal()
-        try:
-            datastores = (
-                db.query(DataStore)
-                .filter(DataStore.is_active == True)
-                .all()
-            )
-            for ds in datastores:
-                if not ds.folder_path or not os.path.isdir(ds.folder_path):
-                    continue
-
-                for root, _dirs, files in os.walk(ds.folder_path):
-                    for fname in files:
-                        fpath = os.path.join(root, fname)
-                        try:
-                            if not self._matches_pattern(fpath, ds.scan_pattern):
-                                summary["skipped"] += 1
-                                continue
-                            summary["scanned"] += 1
-                            self._handle_file(fpath, ds.id, "created")
-                        except Exception as e:
-                            logger.error(
-                                "[WATCHER] scan error for %s: %s", fpath, e
-                            )
-                            summary["errors"] += 1
-        finally:
-            db.close()
-
-        self._last_scan_at = time_module.time()
-        logger.info(
-            "[WATCHER] scan_complete scanned=%d new=%d skipped=%d errors=%d",
-            summary["scanned"],
-            summary["new"],
-            summary["skipped"],
-            summary["errors"],
-        )
-        return summary
 
     def get_status(self) -> Dict[str, Any]:
         """Return current watcher state for the admin status endpoint."""

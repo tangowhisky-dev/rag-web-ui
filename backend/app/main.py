@@ -23,21 +23,30 @@ def _seed_root_org_and_superadmin() -> None:
     """Create ROOT_ORG and a superadmin user if none exists.
 
     Reads from env:
-        ROOT_ORG       – org name (default: "Root Organization")
-        SUPERADMIN_USERNAME – admin username (default: "admin")
-        SUPERADMIN_PASSWORD – admin password (default: "admin123")
-    Only creates the org/user if they don't already exist.
-    """
-    org_name = os.environ.get("ROOT_ORG", "Root Organization").strip()
-    admin_username = os.environ.get("SUPERADMIN_USERNAME", "admin").strip()
-    admin_password = os.environ.get("SUPERADMIN_PASSWORD", "admin123").strip()
+        ROOT_ORG            – org name (required)
+        SUPERADMIN_USERNAME  – admin username (required)
+        SUPERADMIN_PASSWORD  – admin password (required)
 
-    if not org_name or not admin_username or not admin_password:
-        logging.getLogger(__name__).warning(
-            "[SEED] Skipping root org/superadmin seed: ROOT_ORG, SUPERADMIN_USERNAME "
-            "and SUPERADMIN_PASSWORD must all be set and non-empty."
+    Raises ``RuntimeError`` if any required variable is missing, preventing
+    the application from starting with default credentials.
+    """
+    org_name = os.environ.get("ROOT_ORG", "").strip()
+    admin_username = os.environ.get("SUPERADMIN_USERNAME", "").strip()
+    admin_password = os.environ.get("SUPERADMIN_PASSWORD", "").strip()
+
+    if not org_name:
+        raise RuntimeError(
+            "Environment variable ROOT_ORG must be set and non-empty. "
+            "No superadmin can be created without a root organisation."
         )
-        return
+    if not admin_username:
+        raise RuntimeError(
+            "Environment variable SUPERADMIN_USERNAME must be set and non-empty."
+        )
+    if not admin_password:
+        raise RuntimeError(
+            "Environment variable SUPERADMIN_PASSWORD must be set and non-empty."
+        )
 
     db = SessionLocal()
     try:
@@ -131,7 +140,7 @@ app.include_router(api_router, prefix=settings.API_V1_STR)
 
 @app.on_event("startup")
 async def startup_event():
-    global watcher_service
+    global watcher_service, startup_recovery
 
     # Seed root organisation and superadmin (runs before other startup tasks)
     _seed_root_org_and_superadmin()
@@ -146,20 +155,24 @@ async def startup_event():
     except Exception as e:
         logging.getLogger(__name__).warning("Failed to load best tuning config: %s", e)
 
-    # Start the DataStore watcher service if enabled
+    # Start the startup recovery service FIRST — walks all datastore folders,
+    # discovers existing/new/modified files, and ingests them. After recovery
+    # completes, start the DataStore watcher so it only needs to detect NEW
+    # filesystem events (recovery already handled everything on disk).
+    try:
+        startup_recovery = StartupRecoveryService()
+        startup_recovery.start()
+    except Exception as e:
+        logging.getLogger(__name__).error("Failed to start recovery service: %s", e)
+
+    # Start the DataStore watcher service after recovery — it will only
+    # detect new/changed files that arrive after the observer starts.
     if settings.WATCHER_ENABLED:
         try:
             watcher_service = DataStoreWatcher()
             watcher_service.start()
         except Exception as e:
             logging.getLogger(__name__).error("Failed to start DataStoreWatcher: %s", e)
-
-        # Start the startup recovery service (background ingestion)
-        try:
-            startup_recovery = StartupRecoveryService()
-            startup_recovery.start()
-        except Exception as e:
-            logging.getLogger(__name__).error("Failed to start recovery service: %s", e)
 
     # Reset any tasks left in "processing" state from a previous worker crash.
     # With --reload, a file-write event kills the worker mid-flight leaving tasks
