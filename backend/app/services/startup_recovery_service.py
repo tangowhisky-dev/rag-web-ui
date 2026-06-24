@@ -271,8 +271,8 @@ class StartupRecoveryService:
                 doc.file_size = file_size
                 doc.updated_at = datetime.now(timezone.utc)
                 logger.info(
-                    "[RECOVERY] ingestion_queued datastore_id=%s scan_id=%d file_path=%s doc_id=%s (modified)",
-                    datastore_id, self._active_scans.get(0, {}).get("scan_id"), file_path, doc.id,
+                    "[RECOVERY] ingestion_queued datastore_id=%s scan_id=%s file_path=%s doc_id=%s (modified)",
+                    datastore_id, self._active_scans.get(0, {}).get("scan_id") or "N/A", file_path, doc.id,
                 )
             else:
                 # Create new Document record

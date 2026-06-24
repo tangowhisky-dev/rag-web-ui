@@ -16,7 +16,7 @@ import sqlalchemy as sa
 
 
 revision: str = "0012_add_last_recovered_at_to_datastores"
-down_revision: Union[str, None] = "0011_add_datastore_file_manifest"
+down_revision: Union[str, None] = ("0011_add_datastore_file_manifest", "e3f4a5b6c7d8")
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
