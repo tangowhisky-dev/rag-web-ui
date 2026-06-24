@@ -189,6 +189,17 @@ class RecoveryStatusResponse(BaseModel):
     last_recovered_at: Optional[str] = None
 
 
+class RecoverResponse(BaseModel):
+    """Response for manual recovery trigger."""
+    status: str
+    scan_id: int
+
+
+class ManualRecoverRequest(BaseModel):
+    """Request body for manual recovery (placeholder — no body params yet)."""
+    pass
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -1401,3 +1412,81 @@ def flush_datastore_changes(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to flush changes: {str(e)}")
+
+
+@router.post("/datastores/{datastore_id}/recover", status_code=202)
+def trigger_datastore_recovery(
+    datastore_id: int,
+    db: Session = Depends(get_db),
+    _: object = Depends(require_admin),
+):
+    """Asynchronously trigger a recovery scan of a specific datastore.
+
+    Returns 202 Accepted immediately with a scan_id. Progress is tracked
+    via the recovery-status-stream SSE endpoint or the polling endpoint
+    (recovery-status). The recovery runs in the background and sets
+    last_recovered_at when complete.
+    """
+    ds = _get_datastore_or_404(db, datastore_id)
+
+    if not ds.folder_path or not os.path.isdir(ds.folder_path):
+        raise HTTPException(
+            status_code=400,
+            detail=f"DataStore folder does not exist: {ds.folder_path}",
+        )
+
+    recovery = _get_startup_recovery()
+    if recovery is None:
+        raise HTTPException(
+            status_code=503,
+            detail="StartupRecoveryService is not initialized",
+        )
+
+    # Check if a recovery scan is already running for this datastore
+    for scan in recovery._active_scans.values():
+        if scan.get("datastore_id") == datastore_id and scan.get("status") == "running":
+            raise HTTPException(
+                status_code=409,
+                detail="A recovery scan is already running for this datastore",
+            )
+
+    # Clean up any stale recovery entries from previous runs
+    stale_scan_id = None
+    for sid, info in recovery._active_scans.items():
+        if info.get("datastore_id") == datastore_id:
+            stale_scan_id = sid
+            break
+    if stale_scan_id is not None:
+        recovery._active_scans.pop(stale_scan_id, None)
+        logger.info(
+            "[RECOVERY] cleanup_stale_recovery scan_id=%d datastore_id=%d",
+            stale_scan_id, datastore_id,
+        )
+
+    # Generate a new scan_id and register the scan in active_scans
+    scan_id = recovery._next_scan_id()
+    recovery._active_scans[scan_id] = {
+        "datastore_id": datastore_id,
+        "datastore_name": ds.name,
+        "status": "running",
+        "scan_id": scan_id,
+        "total_files": 0,
+        "processed_files": 0,
+        "new_files": 0,
+        "modified_files": 0,
+        "deleted_files": 0,
+        "error_message": None,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+    }
+    logger.info(
+        "[RECOVERY] recover_triggered datastore_id=%d scan_id=%d",
+        datastore_id, scan_id,
+    )
+
+    # Submit the discovery pipeline worker for this datastore
+    recovery.executor.submit(recovery._discovery_pipeline_worker, ds.id, scan_id)
+
+    return JSONResponse(
+        status_code=202,
+        content={"status": "accepted", "scan_id": scan_id},
+    )

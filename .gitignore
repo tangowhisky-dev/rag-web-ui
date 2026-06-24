@@ -89,6 +89,22 @@ tmp/
 /.qwen
 
 # ── GSD baseline (auto-generated) ──
+.gsd
+.gsd-id
+.mcp.json
+.bg-shell/
+Thumbs.db
+*.code-workspace
+.env.*
+!.env.example
+*.pyc
+.venv/
+target/
+vendor/
+*.log
+coverage/
+.cache/
+tmp/
 .gsd-worktrees/
 nul
 nul.*
@@ -102,3 +118,5 @@ com[1-9]
 com[1-9].*
 lpt[1-9]
 lpt[1-9].*
+/.agents
+/.hermes

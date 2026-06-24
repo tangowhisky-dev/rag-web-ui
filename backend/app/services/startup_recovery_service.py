@@ -194,10 +194,48 @@ class StartupRecoveryService:
                 len(result.new_files) + len(result.modified_files) + len(result.deleted_files),
             )
 
+            # Set last_recovered_at timestamp on the DataStore
+            db2: Session = SessionLocal()
+            try:
+                ds_record = db2.query(DataStore).filter(DataStore.id == datastore_id).first()
+                if ds_record:
+                    ds_record.last_recovered_at = datetime.now(timezone.utc)
+                    db2.commit()
+                    logger.info(
+                        "[RECOVERY] recovery_timestamp_set datastore_id=%s last_recovered_at=%s",
+                        datastore_id, ds_record.last_recovered_at.isoformat(),
+                    )
+            except Exception as e:
+                logger.warning(
+                    "[RECOVERY] Failed to set last_recovered_at datastore_id=%s: %s",
+                    datastore_id, e,
+                )
+            finally:
+                db2.close()
+
         except Exception as e:
             logger.error("[RECOVERY] recovery_error datastore_id=%s scan_id=%s: %s", datastore_id, scan_id, e, exc_info=True)
             self._active_scans[scan_id]["status"] = "error"
             self._active_scans[scan_id]["error_message"] = str(e)
+            # Set last_recovered_at even on error so the UI shows the recovery
+            # attempt timestamp rather than being indefinitely empty.
+            try:
+                db3: Session = SessionLocal()
+                try:
+                    ds_record = db3.query(DataStore).filter(DataStore.id == datastore_id).first()
+                    if ds_record:
+                        ds_record.last_recovered_at = datetime.now(timezone.utc)
+                        db3.commit()
+                        logger.info(
+                            "[RECOVERY] recovery_timestamp_set datastore_id=%s last_recovered_at=%s reason=error",
+                            datastore_id, ds_record.last_recovered_at.isoformat(),
+                        )
+                except Exception:
+                    db3.rollback()
+                finally:
+                    db3.close()
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # New / Modified file ingestion
