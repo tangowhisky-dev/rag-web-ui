@@ -51,6 +51,7 @@ interface DataStore {
   assigned_orgs: Array<{ id: number; name: string }>;
   created_at: string;
   updated_at: string;
+  last_recovered_at: string | null;
   // Real-time scan progress (populated when a scan is running)
   scan_progress?: {
     total_files: number;
@@ -85,6 +86,21 @@ interface ScanProgress {
   error_message?: string;
 }
 
+interface RecoveryProgress {
+  status: string;
+  new_files?: number;
+  modified?: number;
+  deleted?: number;
+}
+
+interface RecoveryStatus {
+  datastore_id: number;
+  scan_id: string;
+  recovery_status: string;
+  file_counts: Record<string, number>;
+  last_recovered_at: string | null;
+}
+
 const STATUS_CONFIG: Record<string, { cls: string; label: string }> = {
   never: { cls: 'bg-gray-100 text-gray-600', label: '—' },
   running: { cls: 'bg-blue-100 text-blue-700', label: 'Running' },
@@ -92,6 +108,13 @@ const STATUS_CONFIG: Record<string, { cls: string; label: string }> = {
   error: { cls: 'bg-red-100 text-red-700', label: 'Error' },
   idle: { cls: 'bg-gray-100 text-gray-600', label: '—' },
   cancelled: { cls: 'bg-yellow-100 text-yellow-700', label: 'Cancelled' },
+};
+
+const RECOVERY_STATUS_CONFIG: Record<string, { cls: string; label: string }> = {
+  idle: { cls: 'bg-gray-100 text-gray-600', label: 'Idle' },
+  running: { cls: 'bg-blue-100 text-blue-700', label: 'Recovering' },
+  complete: { cls: 'bg-green-100 text-green-700', label: 'Complete' },
+  error: { cls: 'bg-red-100 text-red-700', label: 'Error' },
 };
 
 function StatusBadge({ status, isRunning }: { status: string; isRunning?: boolean }) {
@@ -121,6 +144,9 @@ export default function DataSourcesPage() {
   const [triggering, setTriggering] = useState<Set<number>>(new Set());
   const [flushing, setFlushing] = useState<Set<number>>(new Set());
   const [scanProgress, setScanProgress] = useState<Record<number, ScanProgress | undefined>>({});
+  const [recoveryProgress, setRecoveryProgress] = useState<Record<number, RecoveryProgress | undefined>>({});
+  const [recoveryStatuses, setRecoveryStatuses] = useState<Record<number, RecoveryStatus>>({});
+  const [recovering, setRecovering] = useState<Set<number>>(new Set());
   const pollingRef = useRef<NodeJS.Timeout | null>(null);
   const scanPollRef = useRef<{ active: boolean; dsId: number | null }>({ active: false, dsId: null });
 
@@ -178,6 +204,60 @@ export default function DataSourcesPage() {
       }
     };
   }, [triggering, datastores]);
+
+  // Poll recovery status for all datastores
+  useEffect(() => {
+    if (datastores.length === 0) return;
+
+    const fetchRecoveryStatuses = async () => {
+      try {
+        const token = typeof window !== 'undefined' ? (localStorage.getItem('token') || '') : '';
+        const response = await fetch('/api/admin/datastores/recovery-status', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (response.ok) {
+          const statuses: RecoveryStatus[] = await response.json();
+          const statusMap: Record<number, RecoveryStatus> = {};
+          const progressMap: Record<number, RecoveryProgress | undefined> = {};
+          for (const s of statuses) {
+            statusMap[s.datastore_id] = s;
+            const st = s.recovery_status;
+            if (st === 'running' || st === 'complete' || st === 'error') {
+              progressMap[s.datastore_id] = {
+                status: st,
+                new_files: s.file_counts.new_files ?? 0,
+                modified: s.file_counts.modified ?? 0,
+                deleted: s.file_counts.deleted ?? 0,
+              };
+            }
+          }
+          setRecoveryStatuses(statusMap);
+          setRecoveryProgress(progressMap);
+        }
+      } catch {
+        // Recovery service may not be ready yet
+      }
+    };
+
+    fetchRecoveryStatuses();
+    const id = setInterval(fetchRecoveryStatuses, 5000);
+    return () => clearInterval(id);
+  }, [datastores.length]);
+
+  // Refresh datastores list when recovery completes or fails
+  useEffect(() => {
+    const interval = setInterval(() => {
+      for (const ds of datastores) {
+        const st = recoveryStatuses[ds.id];
+        if (!st) continue;
+        if (st.recovery_status === 'complete' || st.recovery_status === 'error') {
+          fetchData();
+          break;
+        }
+      }
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [recoveryStatuses, datastores.length]);
 
   useEffect(() => {
     fetchData();
@@ -399,6 +479,38 @@ export default function DataSourcesPage() {
     });
   }
 
+  async function handleRecover(dsId: number) {
+    setRecovering((prev) => new Set(prev).add(dsId));
+    setRecoveryProgress((prev) => ({
+      ...prev,
+      [dsId]: { status: 'running', new_files: 0, modified: 0, deleted: 0 },
+    }));
+    try {
+      const token = typeof window !== 'undefined' ? (localStorage.getItem('token') || '') : '';
+      const res = await fetch(`/api/admin/datastores/${dsId}/recover`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail ?? `Recovery failed with status ${res.status}`);
+      }
+    } catch (err) {
+      toast({
+        title: 'Error',
+        description: (err as ApiError).message ?? 'Failed to start recovery',
+        variant: 'destructive',
+      });
+      setRecoveryProgress((prev) => ({ ...prev, [dsId]: undefined }));
+    } finally {
+      setRecovering((prev) => {
+        const next = new Set(prev);
+        next.delete(dsId);
+        return next;
+      });
+    }
+  }
+
   async function handleStopScan(dsId: number) {
     try {
       const resp = (await api.post(
@@ -482,13 +594,14 @@ export default function DataSourcesPage() {
               <TableHead>Background Processing</TableHead>
               <TableHead>Status</TableHead>
               <TableHead>Files</TableHead>
+              <TableHead>Recovery Status</TableHead>
               <TableHead>Actions</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {datastores.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={7} className="text-center text-muted-foreground">
+                <TableCell colSpan={8} className="text-center text-muted-foreground">
                   No data stores configured. Click &ldquo;+ New Data Store&rdquo; to add one.
                 </TableCell>
               </TableRow>
@@ -632,6 +745,52 @@ export default function DataSourcesPage() {
                       );
                     })()}
                   </TableCell>
+                  <TableCell>
+                    {(() => {
+                      const rp = recoveryProgress[ds.id];
+                      const rs = recoveryStatuses[ds.id];
+                      if (!rp) {
+                        return (
+                          <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                            <span className="text-gray-400">⏸</span> Idle
+                          </div>
+                        );
+                      }
+                      const rc = RECOVERY_STATUS_CONFIG[rp.status] ?? RECOVERY_STATUS_CONFIG.idle;
+                      return (
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2">
+                            {rp.status === 'running' && (
+                              <div className="w-3 h-3 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+                            )}
+                            <Badge variant="secondary" className={`${rc.cls} text-[10px]`}>{rc.label}</Badge>
+                          </div>
+                          {rp.status === 'running' && (
+                            <div className="text-[10px] text-muted-foreground">
+                              {rp.new_files! > 0 && <span className="text-green-600">{rp.new_files} new </span>}
+                              {rp.modified! > 0 && <span className="text-yellow-600">{rp.modified} modified </span>}
+                              {rp.deleted! > 0 && <span className="text-red-600">{rp.deleted} deleted</span>}
+                            </div>
+                          )}
+                          {rp.status === 'complete' && (
+                            <div className="text-[10px] text-muted-foreground">
+                              {rs?.last_recovered_at ? (
+                                <>Last recover: {new Date(rs.last_recovered_at).toLocaleString()}</>
+                              ) : (
+                                'No recovery yet'
+                              )}
+                              {rp.new_files! > 0 && <span className="text-green-600"> {rp.new_files} new </span>}
+                              {rp.modified! > 0 && <span className="text-yellow-600">{rp.modified} modified </span>}
+                              {rp.deleted! > 0 && <span className="text-red-600">{rp.deleted} deleted</span>}
+                            </div>
+                          )}
+                          {rp.status === 'error' && (
+                            <div className="text-[10px] text-red-500">Recovery failed</div>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </TableCell>
                   <TableCell className="space-x-1">
                     <Button
                       variant={ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' || (scanProgress[ds.id]?.status !== 'completed' && scanProgress[ds.id]) ? 'destructive' : 'outline'}
@@ -675,6 +834,17 @@ export default function DataSourcesPage() {
                     >
                       Edit
                     </Button>
+                    {ds.is_active && !recovering.has(ds.id) && recoveryStatuses[ds.id]?.recovery_status !== 'running' && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleRecover(ds.id)}
+                        disabled={recovering.has(ds.id)}
+                        title="Run recovery scan"
+                      >
+                        {recovering.has(ds.id) ? '⏳' : '♻'}
+                      </Button>
+                    )}
                     <Button
                       variant="destructive"
                       size="sm"
