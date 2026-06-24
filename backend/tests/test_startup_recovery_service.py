@@ -228,7 +228,7 @@ class TestRecoveryStartsOnStartup:
 
             # Patch discover_datastore so discovery completes quickly
             discovery_result = make_discovery_result(new_count=0, modified_count=0, deleted_count=0)
-            with patch("app.services.startup_recovery_service.SessionLocal", return_value=TestingSessionLocal()):
+            with patch("app.services.startup_recovery_service.SessionLocal", side_effect=TestingSessionLocal):
                 with patch(
                     "app.services.discovery_engine.discover_datastore",
                     return_value=discovery_result,
@@ -281,7 +281,7 @@ class TestRecoveryNewFileQueued:
             discovery_result = make_discovery_result(new_count=1)
             discovery_result.new_files[0]["file_path"] = str(test_file)
 
-            with patch("app.services.startup_recovery_service.SessionLocal", return_value=TestingSessionLocal()):
+            with patch("app.services.startup_recovery_service.SessionLocal", side_effect=TestingSessionLocal):
                 with patch(
                     "app.services.discovery_engine.discover_datastore",
                     return_value=discovery_result,
@@ -368,7 +368,7 @@ class TestRecoveryModifiedFileIngested:
             discovery_result = make_discovery_result(modified_count=1)
             discovery_result.modified_files[0]["file_path"] = str(test_file)
 
-            with patch("app.services.startup_recovery_service.SessionLocal", return_value=TestingSessionLocal()):
+            with patch("app.services.startup_recovery_service.SessionLocal", side_effect=TestingSessionLocal):
                 with patch(
                     "app.services.discovery_engine.discover_datastore",
                     return_value=discovery_result,
@@ -469,7 +469,7 @@ class TestRecoveryDeletedFileCleanedUp:
         discovery_result = make_discovery_result(deleted_count=1)
         discovery_result.deleted_files[0]["file_path"] = "/fake/deleted_file.txt"
 
-        with patch("app.services.startup_recovery_service.SessionLocal", return_value=TestingSessionLocal()):
+        with patch("app.services.startup_recovery_service.SessionLocal", side_effect=TestingSessionLocal):
             with patch(
                 "app.services.discovery_engine.discover_datastore",
                 return_value=discovery_result,
@@ -534,7 +534,7 @@ class TestRecoveryDeletedFileCleanedUp:
         discovery_result = make_discovery_result(deleted_count=1)
         discovery_result.deleted_files[0]["file_path"] = "/fake/ghost_file.txt"
 
-        with patch("app.services.startup_recovery_service.SessionLocal", return_value=TestingSessionLocal()):
+        with patch("app.services.startup_recovery_service.SessionLocal", side_effect=TestingSessionLocal):
             with patch(
                 "app.services.discovery_engine.discover_datastore",
                 return_value=discovery_result,
@@ -699,7 +699,7 @@ class TestRecoverySkipInactiveDatastore:
             service = StartupRecoveryService()
 
             discovery_result = make_discovery_result(new_count=0)
-            with patch("app.services.startup_recovery_service.SessionLocal", return_value=TestingSessionLocal()):
+            with patch("app.services.startup_recovery_service.SessionLocal", side_effect=TestingSessionLocal):
                 with patch(
                     "app.services.discovery_engine.discover_datastore",
                     return_value=discovery_result,
@@ -747,7 +747,7 @@ class TestRecoveryParallelDatastores:
             service = StartupRecoveryService()
 
             discovery_result = make_discovery_result(new_count=0)
-            with patch("app.services.startup_recovery_service.SessionLocal", return_value=TestingSessionLocal()):
+            with patch("app.services.startup_recovery_service.SessionLocal", side_effect=TestingSessionLocal):
                 with patch(
                     "app.services.discovery_engine.discover_datastore",
                     return_value=discovery_result,
@@ -821,7 +821,7 @@ class TestRecoveryNonBlocking:
                 return make_discovery_result(new_count=0)
 
             start_time = time.time()
-            with patch("app.services.startup_recovery_service.SessionLocal", return_value=TestingSessionLocal()):
+            with patch("app.services.startup_recovery_service.SessionLocal", side_effect=TestingSessionLocal):
                 with patch(
                     "app.services.discovery_engine.discover_datastore",
                     slow_discover,
@@ -1059,7 +1059,7 @@ class TestUtils:
 
         service = StartupRecoveryService()
 
-        with patch("app.services.startup_recovery_service.SessionLocal", return_value=TestingSessionLocal()):
+        with patch("app.services.startup_recovery_service.SessionLocal", side_effect=TestingSessionLocal):
             with patch.object(StartupRecoveryService, '_submit_ingestion'):
                 # File doesn't exist — should log warning and return without error
                 service.process_new_file("/nonexistent/file.txt", datastore_id=1)
@@ -1116,7 +1116,7 @@ class TestRecoveryStatusIncludesLastRecoveredAt:
             service = StartupRecoveryService()
 
             discovery_result = make_discovery_result(new_count=0, modified_count=0, deleted_count=0)
-            with patch("app.services.startup_recovery_service.SessionLocal", return_value=TestingSessionLocal()):
+            with patch("app.services.startup_recovery_service.SessionLocal", side_effect=TestingSessionLocal):
                 with patch(
                     "app.services.discovery_engine.discover_datastore",
                     return_value=discovery_result,

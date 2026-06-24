@@ -244,8 +244,9 @@ class StartupRecoveryService:
     def process_new_file(self, file_path: str, datastore_id: int) -> None:
         """Queue a file for ingestion via the background processor.
 
-        Creates (or reuses) a Document record, creates a ProcessingTask,
-        and submits the file to ``process_document_background``.
+        Checks if a Document already exists. If it does and a non-failed
+        ProcessingTask is already present, recovery skips this file to
+        avoid duplicating work the watcher already handled.
         """
         file_name = os.path.basename(file_path)
         db: Session = SessionLocal()
@@ -265,17 +266,57 @@ class StartupRecoveryService:
                 logger.warning("[RECOVERY] Cannot read file during ingestion queue: %s", e)
                 return
 
+            task_id: int | None = None  # set by one of the branches below
+
             if doc:
-                # File exists — update metadata and re-queue for ingestion
-                doc.file_hash = file_hash
-                doc.file_size = file_size
-                doc.updated_at = datetime.now(timezone.utc)
-                logger.info(
-                    "[RECOVERY] ingestion_queued datastore_id=%s scan_id=%s file_path=%s doc_id=%s (modified)",
-                    datastore_id, self._active_scans.get(0, {}).get("scan_id") or "N/A", file_path, doc.id,
+                # Look for ANY non-completed task (including failed ones).
+                # If a failed task exists, reuse it by resetting its state
+                # rather than creating a duplicate.
+                existing_task = (
+                    db.query(ProcessingTask)
+                    .filter(
+                        ProcessingTask.document_id == doc.id,
+                        ProcessingTask.status != "completed",
+                    )
+                    .first()
                 )
+                if existing_task:
+                    if existing_task.status == "failed":
+                        # Reuse the failed task — reset for re-ingestion
+                        # Also update document metadata to current values.
+                        doc.file_hash = file_hash
+                        doc.file_size = file_size
+                        doc.updated_at = datetime.now(timezone.utc)
+                        existing_task.status = "pending"
+                        existing_task.progress = 0
+                        existing_task.progress_message = None
+                        existing_task.error_message = None
+                        existing_task.updated_at = datetime.now(timezone.utc)
+                        task_id = int(existing_task.id)
+                        logger.info(
+                            "[RECOVERY] reused_task task_id=%s doc_id=%s",
+                            existing_task.id, doc.id,
+                        )
+                    else:
+                        # Has an active task (pending/processing) — skip
+                        logger.info(
+                            "[RECOVERY] skip_file_already_handled datastore_id=%s file_path=%s doc_id=%s task_id=%s",
+                            datastore_id, file_path, doc.id, existing_task.id,
+                        )
+                        return
+                else:
+                    # No existing task — update document metadata and create task
+                    doc.file_hash = file_hash
+                    doc.file_size = file_size
+                    doc.updated_at = datetime.now(timezone.utc)
+                    db.flush()
+                    task_id = None  # signal below to create new task
+                    logger.info(
+                        "[RECOVERY] ingestion_queued datastore_id=%s file_path=%s doc_id=%s (new)",
+                        datastore_id, file_path, doc.id,
+                    )
             else:
-                # Create new Document record
+                # Brand-new file — no Document record at all
                 doc = Document(
                     file_path=file_path,
                     file_name=file_name,
@@ -288,25 +329,29 @@ class StartupRecoveryService:
                 )
                 db.add(doc)
                 db.flush()
+                task_id = None
                 logger.info(
                     "[RECOVERY] ingestion_queued datastore_id=%s file_path=%s doc_id=%s (new)",
                     datastore_id, file_path, doc.id,
                 )
 
-            # Create ProcessingTask
-            task = ProcessingTask(
-                document_id=doc.id,
-                data_store_id=datastore_id,
-                status="pending",
-                progress=0,
-                created_at=datetime.now(timezone.utc),
-                updated_at=datetime.now(timezone.utc),
-            )
-            db.add(task)
-            db.commit()
+            # Create ProcessingTask (only if task_id not already set from a
+            # reused failed task).
+            if task_id is None:
+                task = ProcessingTask(
+                    document_id=doc.id,
+                    data_store_id=datastore_id,
+                    status="pending",
+                    progress=0,
+                    created_at=datetime.now(timezone.utc),
+                    updated_at=datetime.now(timezone.utc),
+                )
+                db.add(task)
+                db.commit()
+                task_id = task.id
 
             # Submit to background processor (async)
-            self._submit_ingestion(file_path, file_name, datastore_id, doc, file_hash, file_size, task.id)
+            self._submit_ingestion(file_path, file_name, datastore_id, doc, file_hash, file_size, task_id)
 
         except Exception as e:
             logger.warning("[RECOVERY] Failed to queue file for ingestion: %s", e, exc_info=True)
@@ -327,27 +372,108 @@ class StartupRecoveryService:
         file_size: int,
         task_id: int,
     ) -> None:
-        """Submit a file to the async background processor."""
-        loop = asyncio.new_event_loop()
-        try:
-            from app.services.document_processor import process_document_background  # noqa: T100
+        """Submit a file to the async background processor (non-blocking)."""
+        future = self.executor.submit(
+            self._run_ingestion,
+            file_path,
+            file_name,
+            datastore_id,
+            doc.id,
+            task_id,
+        )
+        future.add_done_callback(
+            lambda f: self._on_ingestion_done(f, task_id, file_path)
+        )
 
-            coro = process_document_background(
-                temp_path=file_path,
-                file_name=file_name,
-                data_store_id=datastore_id,
-                file_path=file_path,
-                file_hash=file_hash,
-                file_size=file_size,
-                document_id=doc.id,
-                task_id=task_id,
-                kb_id=None,  # DataStore file, not KB
-            )
-            loop.run_until_complete(coro)
+    def _run_ingestion(
+        self,
+        file_path: str,
+        file_name: str,
+        datastore_id: int,
+        document_id: int,
+        task_id: int,
+    ) -> None:
+        """Run the async ingestion pipeline in a threadpool worker."""
+        try:
+            loop = asyncio.new_event_loop()
+            try:
+                asyncio.set_event_loop(loop)
+
+                from app.services.document_processor import process_document_background
+
+                async def _do() -> None:
+                    await process_document_background(
+                        temp_path=file_path,
+                        file_name=file_name,
+                        data_store_id=datastore_id,
+                        file_path=file_path,
+                        document_id=document_id,
+                        task_id=task_id,
+                        kb_id=None,
+                        db=None,
+                    )
+
+                loop.run_until_complete(_do())
+
+                # Mark task as completed
+                try:
+                    fresh_db = SessionLocal()
+                    try:
+                        db_task = fresh_db.query(ProcessingTask).filter(ProcessingTask.id == task_id).first()
+                        if db_task:
+                            db_task.status = "completed"
+                            db_task.progress = 100
+                            db_task.progress_message = "Recovery ingestion completed"
+                            fresh_db.commit()
+                    finally:
+                        fresh_db.close()
+                except Exception:
+                    pass
+
+                logger.info(
+                    "[RECOVERY] ingestion_completed task_id=%s path=%s",
+                    task_id,
+                    file_path,
+                )
+            finally:
+                loop.close()
         except Exception as e:
-            logger.warning("[RECOVERY] Background ingestion submit failed: %s", e)
-        finally:
-            loop.close()
+            logger.error(
+                "[RECOVERY] ingestion_failed task_id=%s error=%s",
+                task_id,
+                e,
+                exc_info=True,
+            )
+            try:
+                fresh_db = SessionLocal()
+                try:
+                    db_task = fresh_db.query(ProcessingTask).filter(ProcessingTask.id == task_id).first()
+                    if db_task:
+                        db_task.status = "failed"
+                        db_task.progress = 0
+                        db_task.progress_message = f"Recovery ingestion failed: {str(e)}"
+                        fresh_db.commit()
+                finally:
+                    fresh_db.close()
+            except Exception:
+                pass
+            raise
+
+    def _on_ingestion_done(self, future, task_id: int, file_path: str) -> None:
+        """Callback after recovery ingestion completes (success or failure)."""
+        exc = future.exception()
+        if exc:
+            logger.error(
+                "[RECOVERY] ingestion_future_error task_id=%s: %s",
+                task_id,
+                exc,
+            )
+        else:
+            logger.info(
+                "[RECOVERY] ingestion_completed task_id=%s path=%s",
+                task_id,
+                file_path,
+            )
 
     # ------------------------------------------------------------------
     # Deleted file cleanup

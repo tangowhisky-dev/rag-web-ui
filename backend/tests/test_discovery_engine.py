@@ -205,12 +205,7 @@ class TestDiscoverDatastore:
 
         folder_path, ds = tmp_datastore_dir
 
-        db_session = TestingSessionLocal()
-        try:
-            result = discover_datastore(ds.id, db_session)
-        finally:
-            db_session.close()
-
+        result = discover_datastore(ds.id)
         assert result.datastore_id == ds.id
         assert result.datastore_name == "Test Store"
         assert result.total_files_discovered == 0
@@ -232,12 +227,7 @@ class TestDiscoverDatastore:
         with open(f2, "wb") as fh:
             fh.write(b"beta")
 
-        db_session = TestingSessionLocal()
-        try:
-            result = discover_datastore(ds.id, db_session)
-        finally:
-            db_session.close()
-
+        result = discover_datastore(ds.id)
         assert len(result.new_files) == 2
         assert result.total_files_discovered == 2
         assert len(result.modified_files) == 0
@@ -261,18 +251,16 @@ class TestDiscoverDatastore:
             fh.write(b"version one")
 
         # First discovery: file is new
-        r1 = discover_datastore(ds.id, db)
+        r1 = discover_datastore(ds.id)
         assert len(r1.new_files) == 1
         assert len(r1.modified_files) == 0
-        db.commit()
-        db.expire_all()
 
         # Modify the file content
         with open(f, "wb") as fh:
             fh.write(b"version two modified")
 
         # Second discovery: file is modified
-        r2 = discover_datastore(ds.id, db)
+        r2 = discover_datastore(ds.id)
 
         assert len(r2.new_files) == 0
         assert len(r2.modified_files) == 1
@@ -292,16 +280,14 @@ class TestDiscoverDatastore:
             fh.write(b"to be deleted")
 
         # First discovery: both files are new
-        r1 = discover_datastore(ds.id, db)
+        r1 = discover_datastore(ds.id)
         assert len(r1.new_files) == 2
-        db.commit()
-        db.expire_all()
 
         # Delete one file
         os.remove(g)
 
         # Second discovery: one deleted
-        r2 = discover_datastore(ds.id, db)
+        r2 = discover_datastore(ds.id)
 
         assert len(r2.deleted_files) == 1
         assert len(r2.new_files) == 0
@@ -322,10 +308,8 @@ class TestDiscoverDatastore:
             fh.write(b"bye")
 
         # First discovery: both files are new
-        r1 = discover_datastore(ds.id, db)
+        r1 = discover_datastore(ds.id)
         assert len(r1.new_files) == 2
-        db.commit()
-        db.expire_all()
 
         # Now: modify existing, delete one, add new
         with open(f_existing, "wb") as fh:
@@ -336,7 +320,7 @@ class TestDiscoverDatastore:
             fh.write(b"brand new content")
 
         # Second discovery
-        r2 = discover_datastore(ds.id, db)
+        r2 = discover_datastore(ds.id)
 
         assert len(r2.modified_files) == 1
         assert len(r2.deleted_files) == 1
@@ -360,11 +344,7 @@ class TestDiscoverDatastore:
         finally:
             db_session.close()
 
-        db_session = TestingSessionLocal()
-        try:
-            result = discover_datastore(ds.id, db_session)
-        finally:
-            db_session.close()
+        result = discover_datastore(ds.id)
 
         assert result.total_files_discovered == 0
         assert len(result.new_files) == 0
@@ -373,11 +353,7 @@ class TestDiscoverDatastore:
         """Discovering a non-existent datastore_id must return zero results."""
         from app.services.discovery_engine import discover_datastore
 
-        db_session = TestingSessionLocal()
-        try:
-            result = discover_datastore(999999, db_session)
-        finally:
-            db_session.close()
+        result = discover_datastore(999999)
 
         assert result.datastore_id == 999999
         assert result.datastore_name == "unknown"
@@ -399,15 +375,11 @@ class TestDiscoverDatastore:
             fh.write(b"docx content")
 
         # Patch DiscoveryConfig to use pdf-only pattern
-        db_session = TestingSessionLocal()
-        try:
-            with patch(
-                "app.services.discovery_engine.DiscoveryConfig",
-                **{"return_value.scan_pattern": "*.pdf", "return_value.max_workers": 2},
-            ):
-                result = discover_datastore(ds.id, db_session)
-        finally:
-            db_session.close()
+        with patch(
+            "app.services.discovery_engine.DiscoveryConfig",
+            **{"return_value.scan_pattern": "*.pdf", "return_value.max_workers": 2},
+        ):
+            result = discover_datastore(ds.id)
 
         assert len(result.new_files) == 1
         assert result.new_files[0]["file_path"].endswith("a.pdf")
@@ -432,7 +404,7 @@ class TestDiscoverAll:
         ds_a_id, ds_a_path, ds_b_id, ds_b_path = active_datastores
 
         # Mock discover_datastore to return deterministic results
-        def mock_discover(datastore_id, db):
+        def mock_discover(datastore_id):
             name = "DS A" if datastore_id == ds_a_id else "DS B"
             return DiscoveryResult(
                 datastore_id=datastore_id,
@@ -491,7 +463,7 @@ class TestDiscoverAll:
             db_session.close()
 
         # Mock discover_datastore so DB threading isn't an issue
-        def mock_discover(datastore_id, db):
+        def mock_discover(datastore_id):
             return DiscoveryResult(
                 datastore_id=datastore_id,
                 datastore_name=f"DS_{datastore_id}",
