@@ -425,13 +425,13 @@ async def fast_stream(
     }
 
     # ── 2d. Adaptive expansion for low-confidence queries ─────────────────────
-    ADAPTIVE_THRESHOLD = -5.0
     expanded_docs = standard_docs  # default for high confidence
     expanded_from = len(standard_docs)
     expanded_to = len(standard_docs)
 
-    if conf_score < 55:
-        expanded_docs = _filter_by_score(raw_docs, ADAPTIVE_THRESHOLD)
+    if settings.ADAPTIVE_RETRIEVAL_ENABLED and conf_score < settings.ADAPTIVE_RETRIEVAL_THRESHOLD:
+        adaptive_threshold = settings.ADAPTIVE_RETRIEVAL_RERANKER_THRESHOLD
+        expanded_docs = _filter_by_score(raw_docs, adaptive_threshold)
         expanded_from = len(standard_docs)
         expanded_to = len(expanded_docs)
         exp_kb, exp_graph = _count_graph(expanded_docs)
@@ -449,7 +449,7 @@ async def fast_stream(
                 "kb_docs": exp_kb,
                 "graph_docs": exp_graph,
                 "adaptive": True,
-                "threshold_used": ADAPTIVE_THRESHOLD,
+                "threshold_used": adaptive_threshold,
                 "expanded_from": expanded_from,
                 "expanded_to": expanded_to,
                 "file_chars": len(file_markdown or ""),

@@ -172,6 +172,20 @@ class Settings(BaseSettings):
     # Reducing this keeps only the most relevant chunks, further limiting noise.
     RERANKER_SCORE_THRESHOLD: float = float(os.getenv("RERANKER_SCORE_THRESHOLD", "-2.0"))
 
+    # ── Adaptive Retrieval ───────────────────────────────────────────────────
+    # Enable/disable adaptive two-pass retrieval (low-confidence expansion).
+    # When enabled and retrieval confidence < 55, a second context event is
+    # emitted with a wider document set at the adaptive threshold.
+    ADAPTIVE_RETRIEVAL_ENABLED: bool = os.getenv("ADAPTIVE_RETRIEVAL_ENABLED", "true").lower() == "true"
+    # Confidence score below which adaptive expansion is triggered (0–100).
+    ADAPTIVE_RETRIEVAL_THRESHOLD: float = float(os.getenv("ADAPTIVE_RETRIEVAL_THRESHOLD", "55"))
+    # Expanded document set threshold — reranker score cutoff for the
+    # second-pass adaptive context event. Must be lower (more inclusive)
+    # than RERANKER_SCORE_THRESHOLD so that more documents are returned.
+    ADAPTIVE_RETRIEVAL_RERANKER_THRESHOLD: float = float(
+        os.getenv("ADAPTIVE_RETRIEVAL_RERANKER_THRESHOLD", "-5.0")
+    )
+
     # ── Historical Memory Retrieval ────────────────────────────────────────────
     # Enable/disable historical memory retrieval (querying past assistant
     # messages from MySQL, reranking, and returning top-K as context blocks).
