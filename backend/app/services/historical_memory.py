@@ -1,0 +1,169 @@
+"""
+Historical memory retrieval service.
+
+Queries past assistant messages from MySQL (the messages table), builds
+LangchainDocument objects for each, reranks them against the retrieval
+query, and returns the top-K most relevant as serialised context blocks
+with _source_type="historical_memory".
+
+This is distinct from chat_history_retrieval (rag_graph.py) which works
+on in-memory LangChain message objects.  historical_memory reaches into
+MySQL to surface assistant responses that have been pushed beyond the
+sliding window and are no longer in recent_lc_history.
+
+Integration point: called from rag_graph.py context_router before or
+alongside chat_history_retrieval, when the user's query indicates
+"forgetting" — e.g. "what did you say about X earlier?", "summarise
+your previous answer on Y".
+
+Configuration (Settings):
+  HISTORICAL_MEMORY_ENABLED   — enable/disable (default True)
+  HISTORICAL_MEMORY_TOP_K     — number of docs returned (default 5)
+  HISTORICAL_MEMORY_SCORE_THRESHOLD — cross-encoder threshold (default 2.0)
+"""
+
+import logging
+from typing import List, Optional
+
+from langchain_core.documents import Document as LangchainDocument
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+
+from app.core.config import settings
+
+logger = logging.getLogger(__name__)
+
+# Maximum number of past assistant messages to fetch in one query.
+# The reranker can handle more, but 50 is a practical cap to keep
+# query latency bounded even for very long conversations.
+_HISTORICAL_FETCH_LIMIT = 50
+
+
+def _serialise_doc(doc: LangchainDocument) -> dict:
+    """Convert a LangchainDocument to a serialised dict (same as rag_graph._serialise_doc)."""
+    return {"page_content": doc.page_content, "metadata": dict(doc.metadata)}
+
+
+def retrieve_historical_memory(
+    chat_id: int,
+    query: str,
+    db: Session,
+    top_k: int = 5,
+    score_threshold: float = 2.0,
+) -> List[dict]:
+    """
+    Query past assistant messages from MySQL, rerank against query,
+    and return the top-K most relevant as serialised context blocks.
+
+    Args:
+        chat_id:            The chat session to search.
+        query:              The retrieval query (usually the original user query).
+        db:                 SQLAlchemy Session bound to MySQL.
+        top_k:              Maximum number of docs to return (default 5).
+        score_threshold:    Minimum reranker score to pass (default 2.0).
+
+    Returns:
+        List of serialised dicts, each with:
+          - page_content: The assistant message text.
+          - metadata: Dict with _source_type="historical_memory", id, and content_length.
+        Returns [] when:
+          - No assistant messages found in the database.
+          - All messages score below threshold.
+          - The reranker is disabled (returns last `top_k` raw docs without scores).
+          - Any query failure occurs.
+
+    Edge cases handled:
+        - No messages in database → returns []
+        - Reranker disabled → returns last K raw docs (most recent) with score=0
+        - Query fails (MySQL error) → returns []
+        - All scores below threshold → returns []
+    """
+    t0 = logger.isEnabledFor(logging.DEBUG) and __import__("time").monotonic()
+
+    # ── 1. Query past assistant messages from MySQL ──────────────────────
+    sql = text(
+        """
+        SELECT id, content, LENGTH(content) AS content_length
+        FROM   messages
+        WHERE  chat_id = :chat_id
+          AND  role = 'assistant'
+        ORDER  BY id ASC
+        LIMIT  :limit
+        """
+    ).bindparams(
+        bindparam("chat_id", value=chat_id),
+        bindparam("limit", value=_HISTORICAL_FETCH_LIMIT),
+    )
+
+    try:
+        rows = db.execute(sql).fetchall()
+    except Exception as exc:
+        logger.warning(
+            "historical_memory: MySQL query failed for chat_id=%d: %s",
+            chat_id, exc,
+        )
+        return []
+
+    if not rows:
+        logger.debug(
+            "historical_memory: no assistant messages for chat_id=%d", chat_id,
+        )
+        return []
+
+    # ── 2. Build LangchainDocument for each message ──────────────────────
+    docs: List[LangchainDocument] = []
+    for row in rows:
+        msg_id = row.id
+        content = row.content or ""
+        content_length = row.content_length or len(content)
+        doc = LangchainDocument(
+            page_content=content,
+            metadata={
+                "_source_type": "historical_memory",
+                "message_id": msg_id,
+                "content_length": content_length,
+            },
+        )
+        docs.append(doc)
+
+    logger.info(
+        "historical_memory: chat_id=%d | fetched=%d | query=%r",
+        chat_id, len(docs), query[:80],
+    )
+
+    # ── 3. Rerank — disabled path: return last K raw ────────────────────
+    if not settings.HISTORICAL_MEMORY_ENABLED or not settings.RERANKER_ENABLED:
+        # No reranker available: return the last `top_k` (most recent) docs raw.
+        result = docs[-top_k:] if top_k > 0 else []
+        for d in result:
+            d.metadata["_reranker_score"] = 0.0
+        return [_serialise_doc(d) for d in result]
+
+    # ── 4. Rerank — enabled path ────────────────────────────────────────
+    try:
+        from app.services.reranker import rerank
+        ranked = rerank(
+            query=query,
+            docs=docs,
+            score_threshold=score_threshold,
+        )
+    except Exception as exc:
+        logger.warning(
+            "historical_memory: reranker failed for chat_id=%d: %s — returning []",
+            chat_id, exc,
+        )
+        return []
+
+    # ── 5. Return top-K serialised dicts ────────────────────────────────
+    result = ranked[:top_k]
+
+    latency_ms = 0
+    if t0:
+        latency_ms = round((__import__("time").monotonic() - t0) * 1000, 1)
+
+    logger.info(
+        "historical_memory: chat_id=%d | candidates=%d | passed_threshold=%d | returned=%d | latency_ms=%.1f",
+        chat_id, len(docs), len(ranked), len(result), latency_ms,
+    )
+
+    return [_serialise_doc(d) for d in result]
