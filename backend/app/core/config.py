@@ -172,6 +172,15 @@ class Settings(BaseSettings):
     # Reducing this keeps only the most relevant chunks, further limiting noise.
     RERANKER_SCORE_THRESHOLD: float = float(os.getenv("RERANKER_SCORE_THRESHOLD", "-2.0"))
 
+    # ── Historical Memory Retrieval ────────────────────────────────────────────
+    # Enable/disable historical memory retrieval (querying past assistant
+    # messages from MySQL, reranking, and returning top-K as context blocks).
+    HISTORICAL_MEMORY_ENABLED: bool = os.getenv("HISTORICAL_MEMORY_ENABLED", "true").lower() == "true"
+    # Number of historical memory docs to return (default 5).
+    HISTORICAL_MEMORY_TOP_K: int = int(os.getenv("HISTORICAL_MEMORY_TOP_K", "5"))
+    # Minimum cross-encoder reranker score to include a historical memory doc.
+    HISTORICAL_MEMORY_SCORE_THRESHOLD: float = float(os.getenv("HISTORICAL_MEMORY_SCORE_THRESHOLD", "2.0"))
+
     # ── Chunking ────────────────────────────────────────────────────────────────
     # WARNING: changing these values after documents have been ingested creates
     # inconsistent chunk sizes across the knowledge base. If you change them,

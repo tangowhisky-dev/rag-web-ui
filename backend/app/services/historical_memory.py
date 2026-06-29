@@ -26,7 +26,7 @@ import logging
 from typing import List, Optional
 
 from langchain_core.documents import Document as LangchainDocument
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
