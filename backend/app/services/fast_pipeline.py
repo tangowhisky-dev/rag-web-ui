@@ -86,6 +86,7 @@ async def fast_stream(
     api_base: Optional[str] = None,
     query_model: Optional[str] = None,
     org_id: Optional[int] = None,
+    chat_id: Optional[int] = None,
 ) -> AsyncGenerator[dict, None]:
     """
     Lean RAG pipeline: rewrite → hybrid_search → stream answer.
@@ -124,6 +125,24 @@ async def fast_stream(
         "event": "rewritten_query",
         "query": rewritten,
     }
+
+    # ── 1.5. Historical memory retrieval (before hybrid search) ──────────
+    historical_docs: list = []
+    if chat_id is not None and settings.HISTORICAL_MEMORY_ENABLED:
+        try:
+            from app.services.historical_memory import retrieve_historical_memory
+            historical_docs = retrieve_historical_memory(
+                chat_id=chat_id,
+                query=rewritten,
+                db=db,
+                top_k=settings.HISTORICAL_MEMORY_TOP_K,
+                score_threshold=settings.HISTORICAL_MEMORY_SCORE_THRESHOLD,
+            )
+        except Exception as exc:
+            logger.warning("[HIST] retrieval failed (non-fatal): %s", exc)
+            historical_docs = []
+    if historical_docs:
+        logger.info("[HIST] chat_id=%d | retrieved=%d", chat_id, len(historical_docs))
 
     # ── 2. Hybrid retrieval ───────────────────────────────────────────────────
     yield {"event": "agent_step", "node": "kb_retrieval", "status": "active", "latency_ms": None}
@@ -269,6 +288,12 @@ async def fast_stream(
 
     # ── 3. Build context string ────────────────────────────────────────────────
     context_parts: list[str] = []
+    # Prepend historical memory blocks BEFORE KB docs
+    if historical_docs:
+        for i, doc in enumerate(historical_docs, 1):
+            content = doc.get("page_content", "").strip()
+            if content:
+                context_parts.append(f"[HIST-{i}]\n{content}")
     for i, doc in enumerate(serialised_docs, 1):
         content = doc.get("page_content", "").strip()
         source = doc.get("metadata", {}).get("source", "")
