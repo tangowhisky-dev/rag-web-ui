@@ -549,4 +549,72 @@ async def fast_stream(
     if normalised != raw_answer:
         yield {"event": "answer_rewrite", "content": normalised}
 
-    yield {"event": "done", "full_response": normalised or raw_answer, "usage": usage}
+    # ── 6. Quality grading (post-stream, only for low-confidence retrieval) ──
+    final_answer = normalised or raw_answer
+    if conf_score < 55 and settings.ANSWER_QUALITY_GRADING_ENABLED:
+        # Build chunk previews for the grading prompt
+        grading_chunks = [
+            _preview(d.get("page_content", ""), _PREVIEW_CHARS) + (" [" + d.get("metadata", {}).get("source", "") + "]" if d.get("metadata", {}).get("source") else "")
+            for d in expanded_docs
+        ]
+        try:
+            grading_scores = await _grade_answer_quality(
+                query=rewritten,
+                answer=final_answer,
+                context_chunks=grading_chunks,
+                model_name=effective_model,
+                api_base=api_base,
+            )
+            logger.info(
+                "[QUALITY] conf=%d | verdict=%s | faith=%.2f complete=%.2f coherent=%.2f",
+                conf_score, grading_scores["verdict"],
+                grading_scores["faithfulness"], grading_scores["completeness"],
+                grading_scores["coherence"],
+            )
+
+            if grading_scores["verdict"] == "needs_improvement":
+                # Regenerate with feedback appended to user message
+                t3 = time.monotonic()
+                feedback_msg = (
+                    f"\n\n[Quality feedback — please improve: "
+                    f"faithfulness={grading_scores['faithfulness']:.2f}, "
+                    f"completeness={grading_scores['completeness']:.2f}, "
+                    f"coherence={grading_scores['coherence']:.2f}.]"
+                )
+                feedback_messages = list(messages)  # shallow copy
+                feedback_messages[-1] = {
+                    "role": feedback_messages[-1]["role"],
+                    "content": feedback_messages[-1]["content"] + feedback_msg,
+                }
+                yield {"event": "agent_step", "node": "regenerate_answer", "status": "active", "latency_ms": None}
+                regenerate_llm = _get_llm(effective_model, temperature, api_base=api_base)
+                regen_parts: list[str] = []
+                async for chunk in regenerate_llm.astream(feedback_messages):
+                    token: str = chunk.content or ""
+                    if token:
+                        regen_parts.append(token)
+                        yield {"event": "token", "content": token}
+                regen_ms = round((time.monotonic() - t3) * 1000, 1)
+                final_answer = "".join(regen_parts)
+                yield {
+                    "event": "agent_step",
+                    "node": "regenerate_answer",
+                    "status": "done",
+                    "latency_ms": regen_ms,
+                }
+                logger.info("[QUALITY] regenerated after feedback in %.1fms", regen_ms)
+
+            elif grading_scores["verdict"] == "unsatisfactory":
+                # Append disclaimer to the answer
+                disclaimer = (
+                    "\n\n[Disclaimer: This answer could not meet quality standards. "
+                    "The information may be incomplete or inaccurate. "
+                    "Please verify with the source documents.]"
+                )
+                final_answer = final_answer + disclaimer
+                logger.info("[QUALITY] unsatisfactory — disclaimer appended")
+
+        except Exception as exc:
+            logger.warning("[QUALITY] grading failed (non-fatal): %s", exc)
+
+    yield {"event": "done", "full_response": final_answer, "usage": usage}

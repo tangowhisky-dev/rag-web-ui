@@ -272,6 +272,15 @@ class Settings(BaseSettings):
 
     PROCESSING_TIMEOUT_SILENCE_S: int = int(os.getenv('PROCESSING_TIMEOUT_SILENCE_S', '300'))
 
+    # ── Answer Quality Grading ────────────────────────────────────────────────
+    # Enable/disable automatic quality grading of generated answers. When
+    # enabled and retrieval confidence is below 55, the pipeline runs
+    # _grade_answer_quality() to check faithfulness/completeness/coherence
+    # and may regenerate or add a disclaimer.
+    ANSWER_QUALITY_GRADING_ENABLED: bool = os.getenv(
+        "ANSWER_QUALITY_GRADING_ENABLED", "true"
+    ).lower() == "true"
+
     @property
     def graphrag_model(self) -> str:
         """Model to use for entity/relationship extraction. Falls back to OPENAI_MODEL."""
