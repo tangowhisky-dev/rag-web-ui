@@ -49,6 +49,19 @@ def _preview(text: str, n: int = _PREVIEW_CHARS) -> str:
     return text[:n] + "…" if len(text) > n else text
 
 
+def _filter_by_score(docs: list, threshold: float) -> list:
+    """Filter docs by _reranker_score >= threshold, sorted descending by score."""
+    filtered = [
+        d for d in docs
+        if d.metadata.get("_reranker_score", -float("inf")) >= threshold
+    ]
+    filtered.sort(
+        key=lambda d: d.metadata.get("_reranker_score", -float("inf")),
+        reverse=True,
+    )
+    return filtered
+
+
 def _get_llm(model_name: str, temperature: float = 0.0, api_base: Optional[str] = None):
     from langchain_openai import ChatOpenAI
     from app.core.config import settings
@@ -187,6 +200,7 @@ async def fast_stream(
             use_exact=use_exact,
             use_graph_rag=use_graph_rag,
             datastore_ids=datastore_ids,
+            return_full_pool=True,
         )
         raw_docs = retrieval_result.get("docs", [])
     except Exception as exc:
@@ -256,24 +270,42 @@ async def fast_stream(
         }
 
 
+    # ── 2c. Adaptive retrieval with confidence-based context events ─────────────
     # Use the same reranker-aware confidence scorer as rag_graph.
     # raw_docs already have _reranker_score in metadata (set by rerank()).
     from app.services.confidence import score_retrieval
-    serialised_docs = [_serialise_doc(d) for d in raw_docs]
-    conf_result = score_retrieval(raw_docs, retrieval_info)
-    conf_score_01 = round(conf_result.score / 100, 2)  # normalise 0-100 → 0-1 for frontend
 
+    # Filter raw_docs by standard threshold → standard_docs
+    standard_docs = _filter_by_score(raw_docs, settings.RERANKER_SCORE_THRESHOLD)
+
+    # Score confidence on standard docs only (not on all raw_docs)
+    conf_result = score_retrieval(standard_docs, retrieval_info)
+    conf_score = conf_result.score  # 0-100 scale
+    conf_score_01 = round(conf_score / 100, 2)  # normalise 0-100 → 0-1 for frontend
+
+    # Count graph vs KB docs for breakdown
+    def _count_graph(docs_list):
+        g = sum(
+            1 for d in docs_list
+            if isinstance(d.metadata.get("_legs", []), list) and "graph" in d.metadata.get("_legs", [])
+        )
+        return len(docs_list) - g, g  # (kb, graph)
+
+    std_kb, std_graph = _count_graph(standard_docs)
+
+    # Standard context event (always emitted)
+    standard_serialised = [_serialise_doc(d) for d in standard_docs]
     yield {
         "event": "context",
-        "docs": serialised_docs,
+        "docs": standard_serialised,
         "confidence": conf_result.level,
         "score": conf_score_01,
         "suggestion": conf_result.suggestion or "",
         "failed_legs": failed_legs,
         "breakdown": {
             **conf_result.breakdown,
-            "kb_docs": len(kb_docs),
-            "graph_docs": len(graph_expanded),
+            "kb_docs": std_kb,
+            "graph_docs": std_graph,
             "file_chars": len(file_markdown or ""),
         },
         "query_classification": {
@@ -285,6 +317,53 @@ async def fast_stream(
         "tool_trace": ["rewrite_query", "kb_retrieval", "generate_answer"],
         "synthesis_mode": False,
     }
+
+    # ── 2d. Adaptive expansion for low-confidence queries ─────────────────────
+    ADAPTIVE_THRESHOLD = -5.0
+    expanded_docs = standard_docs  # default for high confidence
+    expanded_from = len(standard_docs)
+    expanded_to = len(standard_docs)
+
+    if conf_score < 55:
+        expanded_docs = _filter_by_score(raw_docs, ADAPTIVE_THRESHOLD)
+        expanded_from = len(standard_docs)
+        expanded_to = len(expanded_docs)
+        exp_kb, exp_graph = _count_graph(expanded_docs)
+
+        adaptive_serialised = [_serialise_doc(d) for d in expanded_docs]
+        yield {
+            "event": "context",
+            "docs": adaptive_serialised,
+            "confidence": conf_result.level,
+            "score": conf_score_01,
+            "suggestion": conf_result.suggestion or "",
+            "failed_legs": failed_legs,
+            "breakdown": {
+                **conf_result.breakdown,
+                "kb_docs": exp_kb,
+                "graph_docs": exp_graph,
+                "adaptive": True,
+                "threshold_used": ADAPTIVE_THRESHOLD,
+                "expanded_from": expanded_from,
+                "expanded_to": expanded_to,
+                "file_chars": len(file_markdown or ""),
+            },
+            "query_classification": {
+                "type": "FACTUAL",
+                "confidence": conf_score_01,
+                "latency_ms": 0,
+                "fallback": False,
+            },
+            "tool_trace": ["rewrite_query", "kb_retrieval", "generate_answer"],
+            "synthesis_mode": False,
+        }
+        logger.info(
+            "[ADAPTIVE] standard_count=%d expanded_count=%d conf_score=%d",
+            expanded_from, expanded_to, conf_score,
+        )
+
+    # Serialise expanded_docs for LLM context (standard docs when high conf)
+    serialised_docs = [_serialise_doc(d) for d in expanded_docs]
 
     # ── 3. Build context string ────────────────────────────────────────────────
     context_parts: list[str] = []
