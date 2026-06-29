@@ -140,7 +140,7 @@ class StartupRecoveryService:
 
             db: Session = SessionLocal()
             try:
-                result: DiscoveryResult = discover_datastore(datastore_id, db)
+                result: DiscoveryResult = discover_datastore(datastore_id)
             except Exception as e:
                 logger.error("[RECOVERY] discovery_pipeline error for datastore_id=%s scan_id=%s: %s", datastore_id, scan_id, e, exc_info=True)
                 self._active_scans[scan_id]["status"] = "error"

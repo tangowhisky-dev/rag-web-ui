@@ -154,7 +154,7 @@ class Settings(BaseSettings):
     FASTEMBED_CACHE_DIR: str = os.getenv("FASTEMBED_CACHE_DIR", "/app/assets/fastembed")
 
     # ── Retrieval ──────────────────────────────────────────────────────────────
-    RETRIEVAL_TOP_K: int = int(os.getenv("RETRIEVAL_TOP_K", "10"))
+    RETRIEVAL_TOP_K: int = int(os.getenv("RETRIEVAL_TOP_K", "20"))
     # Minimum RRF score to include a chunk in the context passed to the LLM.
     # RRF scores range roughly 0.003–0.02 for a 3-leg setup with K=60.
     # Chunks below this threshold are dropped before the LLM sees them.
