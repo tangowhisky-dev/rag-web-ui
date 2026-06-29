@@ -553,9 +553,10 @@ async def fast_stream(
     final_answer = normalised or raw_answer
     if conf_score < 55 and settings.ANSWER_QUALITY_GRADING_ENABLED:
         # Build chunk previews for the grading prompt
+        grading_serialised = [_serialise_doc(d) for d in expanded_docs]
         grading_chunks = [
             _preview(d.get("page_content", ""), _PREVIEW_CHARS) + (" [" + d.get("metadata", {}).get("source", "") + "]" if d.get("metadata", {}).get("source") else "")
-            for d in expanded_docs
+            for d in grading_serialised
         ]
         try:
             grading_scores = await _grade_answer_quality(

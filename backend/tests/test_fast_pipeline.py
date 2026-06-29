@@ -71,6 +71,16 @@ def _make_settings(**overrides):
         "OPENAI_API_BASE": "http://localhost:11434/v1",
         "OPENAI_API_KEY": "test-key",
         "OPENAI_MODEL": "llama3",
+        "ADAPTIVE_RETRIEVAL_ENABLED": True,
+        "ADAPTIVE_RETRIEVAL_THRESHOLD": -5.0,
+        "ADAPTIVE_RETRIEVAL_RERANKER_THRESHOLD": -5.0,
+        "ADAPTIVE_RETRIEVAL_EXPAND_TO": 8,
+        "ADAPTIVE_RETRIEVAL_QUERY_REWRITE": True,
+        "ADAPTIVE_RETRIEVAL_GRAPH_EXPANSION": True,
+        "ADAPTIVE_RETRIEVAL_RERANKER_ENABLED": True,
+        "GRADING_MODEL": "gpt-4o-mini",
+        "QUALITY_GRADE_CONFIDENCE_THRESHOLD": 55,
+        "ANSWER_QUALITY_GRADING_ENABLED": True,
     }
     defaults.update(overrides)
     return MagicMock(**defaults)
@@ -208,15 +218,20 @@ async def test_adaptive_retrieval_double_context_event():
     conf_result = _make_confidence_result(40, level="medium")
     mock_db = MagicMock()
 
-    with patch("app.core.config.settings", _make_settings()):
+    async def _mock_astream(*a, **k):
+        for chunk in [_make_mock_chunk("Adaptive answer")]:
+            yield chunk
+
+    with patch("app.core.config.settings", _make_settings(
+        ANSWER_QUALITY_GRADING_ENABLED=False,
+        ADAPTIVE_RETRIEVAL_THRESHOLD=45,
+    )):
         with patch("app.services.chat_service._rewrite_query", return_value="rewritten query"):
             with patch("app.services.retrieval.hybrid_search_with_legs", return_value=retrieval_result):
                 with patch("app.services.confidence.score_retrieval", return_value=conf_result):
                     with patch("app.services.fast_pipeline._get_llm") as mock_llm_factory:
-                        mock_llm = AsyncMock()
-                        mock_llm.astream = AsyncMock(
-                            return_value=iter([_make_mock_chunk("Adaptive answer")])
-                        )
+                        mock_llm = MagicMock()
+                        mock_llm.astream = _mock_astream
                         mock_llm_factory.return_value = mock_llm
 
                         with patch("app.models.knowledge.KnowledgeBaseDataStore"):
@@ -450,15 +465,20 @@ async def test_adaptive_no_expansion_when_few_docs():
     conf_result = _make_confidence_result(35, level="medium")
     mock_db = MagicMock()
 
-    with patch("app.core.config.settings", _make_settings()):
+    async def _mock_astream_few(*a, **k):
+        for chunk in [_make_mock_chunk("Same-count answer")]:
+            yield chunk
+
+    with patch("app.core.config.settings", _make_settings(
+        ANSWER_QUALITY_GRADING_ENABLED=False,
+        ADAPTIVE_RETRIEVAL_THRESHOLD=45,
+    )):
         with patch("app.services.chat_service._rewrite_query", return_value="rewritten"):
             with patch("app.services.retrieval.hybrid_search_with_legs", return_value=retrieval_result):
                 with patch("app.services.confidence.score_retrieval", return_value=conf_result):
                     with patch("app.services.fast_pipeline._get_llm") as mock_llm_factory:
-                        mock_llm = AsyncMock()
-                        mock_llm.astream = AsyncMock(
-                            return_value=iter([_make_mock_chunk("Same-count answer")])
-                        )
+                        mock_llm = MagicMock()
+                        mock_llm.astream = _mock_astream_few
                         mock_llm_factory.return_value = mock_llm
 
                         with patch("app.models.knowledge.KnowledgeBaseDataStore"):
@@ -544,7 +564,11 @@ async def test_retrieval_failure_continues_with_empty_docs():
     conf_result = _make_confidence_result(0, level="none")
     mock_db = MagicMock()
 
-    with patch("app.core.config.settings", _make_settings()):
+    async def _mock_astream_empty(*a, **k):
+        for chunk in [_make_mock_chunk("Empty context answer")]:
+            yield chunk
+
+    with patch("app.core.config.settings", _make_settings(ANSWER_QUALITY_GRADING_ENABLED=False)):
         with patch("app.services.chat_service._rewrite_query", return_value="rewritten"):
             with patch(
                 "app.services.retrieval.hybrid_search_with_legs",
