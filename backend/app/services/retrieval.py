@@ -451,6 +451,7 @@ async def hybrid_search_with_legs(
     use_graph_rag: bool = False,
     query_type: Optional[QueryType] = None,
     datastore_ids: Optional[List[int]] = None,
+    return_full_pool: bool = False,
 ) -> dict:
     """
     Like hybrid_search but returns a richer dict:
@@ -613,8 +614,17 @@ async def hybrid_search_with_legs(
     if settings.RERANKER_ENABLED and docs:
         try:
             from app.services.reranker import rerank
-            docs = rerank(query=query, docs=docs)
-            logger.info("hybrid_search_with_legs: reranker reduced to %d docs", len(docs))
+            if return_full_pool:
+                # score_threshold=float('-inf') ensures ALL docs pass, each with
+                # metadata["_reranker_score"] set — no threshold filtering applied.
+                docs = rerank(query=query, docs=docs, score_threshold=float('-inf'))
+                logger.info(
+                    "hybrid_search_with_legs: reranker returned %d docs (full pool)",
+                    len(docs),
+                )
+            else:
+                docs = rerank(query=query, docs=docs)
+                logger.info("hybrid_search_with_legs: reranker reduced to %d docs", len(docs))
         except Exception as exc:
             logger.warning("hybrid_search_with_legs: reranker failed (using RRF order): %s", exc)
 
