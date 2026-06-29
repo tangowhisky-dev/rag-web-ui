@@ -16,6 +16,7 @@ Step data schema emitted per node:
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -80,6 +81,111 @@ def _serialise_doc(doc: Any) -> dict:
     if isinstance(doc, dict):
         return doc
     return {"page_content": str(doc), "metadata": {}}
+
+
+async def _grade_answer_quality(
+    query: str,
+    answer: str,
+    context_chunks: list[str],
+    model_name: str,
+    api_base: Optional[str] = None,
+) -> dict:
+    """
+    Grade answer quality using the query model.
+
+    Returns dict with keys:
+        faithfulness  : float 0.00-1.00 (all claims backed by context?)
+        completeness  : float 0.00-1.00 (does it answer the question?)
+        coherence     : float 0.00-1.00 (well-structured?)
+        verdict       : str "pass", "needs_improvement", or "unsatisfactory"
+    """
+    from langchain_core.messages import HumanMessage, SystemMessage
+    from langchain_openai import ChatOpenAI
+    from app.core.config import settings
+
+    grading_prompt = f"""You are grading an AI assistant's answer to a knowledge-base query.
+
+Question: {query}
+
+Answer:
+{answer}
+
+Context chunks used:
+{chr(10).join(context_chunks[:10]) if context_chunks else '(none)'}
+
+Rate on a scale of 0.00 to 1.00:
+- faithfulness: are ALL factual claims in the answer directly supported by the context chunks? Penalize any claim not grounded in the provided context.
+- completeness: does the answer address all parts of the question? Penalize for missing key information.
+- coherence: is the answer well-structured and easy to understand? Penalize for rambling, repetition, or poor formatting.
+
+Return ONLY valid JSON with no markdown code fences:
+{{"faithfulness": <float>, "completeness": <float>, "coherence": <float>}}"""
+
+    system_msg = SystemMessage(content="You are a precise grader. Return ONLY valid JSON with three float keys.")
+    user_msg = HumanMessage(content=grading_prompt)
+
+    try:
+        # Non-streaming call for structured JSON output
+        strict_llm = ChatOpenAI(
+            model=model_name,
+            temperature=0.0,
+            openai_api_base=api_base or settings.OPENAI_API_BASE,
+            openai_api_key=settings.OPENAI_API_KEY,
+            streaming=False,
+        )
+        response = await strict_llm.ainvoke([system_msg, user_msg])
+        content = response.content.strip()
+
+        # Strip markdown code fences if present
+        if content.startswith("```"):
+            content = re.sub(r'^```(?:json)?\s*|\s*```$', '', content, flags=re.MULTILINE).strip()
+
+        scores = _parse_grading_json(content)
+    except Exception as exc:
+        logger.warning("[QUALITY] grading failed (non-fatal): %s", exc)
+        scores = {"faithfulness": 0.0, "completeness": 0.0, "coherence": 0.0}
+
+    scores["verdict"] = _compute_verdict(scores)
+    return scores
+
+
+def _parse_grading_json(raw: str) -> dict:
+    """Parse grading JSON from LLM response, extracting first JSON object found."""
+    # Try direct parse first
+    try:
+        result = json.loads(raw)
+        return {
+            "faithfulness": max(0.0, min(1.0, float(result.get("faithfulness", 0.5)))),
+            "completeness": max(0.0, min(1.0, float(result.get("completeness", 0.5)))),
+            "coherence": max(0.0, min(1.0, float(result.get("coherence", 0.5)))),
+        }
+    except (json.JSONDecodeError, ValueError, TypeError):
+        pass
+
+    # Try to extract JSON from markdown-fenced block
+    match = re.search(r'\{[^}]+\}', raw, re.DOTALL)
+    if match:
+        try:
+            result = json.loads(match.group())
+            return {
+                "faithfulness": max(0.0, min(1.0, float(result.get("faithfulness", 0.5)))),
+                "completeness": max(0.0, min(1.0, float(result.get("completeness", 0.5)))),
+                "coherence": max(0.0, min(1.0, float(result.get("coherence", 0.5)))),
+            }
+        except (json.JSONDecodeError, ValueError, TypeError):
+            pass
+
+    logger.warning("[QUALITY] could not parse grading JSON, returning defaults")
+    return {"faithfulness": 0.5, "completeness": 0.5, "coherence": 0.5}
+
+
+def _compute_verdict(scores: dict) -> str:
+    """Determine pass/needs_improvement/unsatisfactory from scores."""
+    if any(scores.get(k, 0) < 0.50 for k in ("faithfulness", "completeness", "coherence")):
+        return "unsatisfactory"
+    if any(scores.get(k, 0) < 0.70 for k in ("faithfulness", "completeness", "coherence")):
+        return "needs_improvement"
+    return "pass"
 
 
 async def fast_stream(
