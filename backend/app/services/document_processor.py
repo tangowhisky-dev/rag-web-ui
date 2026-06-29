@@ -3,7 +3,6 @@ import logging
 import os
 import re
 import uuid
-import hashlib
 import traceback
 from app.db.session import SessionLocal
 from typing import Optional, List, Dict, Set, Tuple
@@ -26,18 +25,14 @@ from qdrant_client.models import (
     SparseVectorParams,
     VectorParams,
 )
-from fastembed import SparseTextEmbedding
 from app.core.config import settings
 from app.core.storage import get_abs_path, save_file, move_file, delete_file
 from app.services.progress_timeout import ProgressTimeout
 from app.services.markdown_cleaner import clean_markdown
+from app.services.utils import content_hash, get_qdrant_client, get_sparse_embedder
 from app.models.knowledge import ProcessingTask, Document, DocumentChunk
 from app.services.chunk_record import ChunkRecord
 from app.services.datastore_chunk_record import DataStoreChunkRecord
-
-# ── Module-level singletons (lazy) ────────────────────────────────────────────
-_qdrant_client: Optional[QdrantClient] = None
-_sparse_embedder: Optional[SparseTextEmbedding] = None
 
 _markitdown: Optional[MarkItDown] = None
 _EMBED_BATCH_SIZE = 32
@@ -90,23 +85,6 @@ CONTENT_TYPE_MAP = {
     ".tiff":  "image/tiff",
     ".zip":   "application/zip",
 }
-
-
-def _get_qdrant_client() -> QdrantClient:
-    global _qdrant_client
-    if _qdrant_client is None:
-        _qdrant_client = QdrantClient(host=settings.QDRANT_HOST, port=settings.QDRANT_PORT)
-    return _qdrant_client
-
-
-def _get_sparse_embedder() -> SparseTextEmbedding:
-    global _sparse_embedder
-    if _sparse_embedder is None:
-        _sparse_embedder = SparseTextEmbedding(
-            model_name=settings.SPLADE_MODEL,
-            cache_dir=settings.FASTEMBED_CACHE_DIR,
-        )
-    return _sparse_embedder
 
 
 def _get_qdrant_collection_name(data_store_id: Optional[int], kb_id: Optional[int]) -> str:
@@ -195,13 +173,13 @@ def _get_markitdown() -> MarkItDown:
                     "- Output only the extracted text, no explanations or commentary"
                 ),
             )
-            logging.getLogger(__name__).info(
+            logger.info(
                 "[markitdown] OCR enabled — vision_model=%s base=%s",
                 vision_model, settings.effective_vision_api_base,
             )
         else:
             _markitdown = MarkItDown()
-            logging.getLogger(__name__).info(
+            logger.info(
                 "[markitdown] OCR disabled — VISION_MODEL not set"
             )
     return _markitdown
@@ -219,7 +197,6 @@ def _convert_to_markdown(abs_path: str, file_name: str, enable_ocr: Optional[boo
     Think traces (reasoning tags configured in REASONING_TAGS) are stripped
     before returning. Falls back gracefully to raw UTF-8 if conversion fails.
     """
-    logger = logging.getLogger(__name__)
     try:
         if enable_ocr is False:
             # Per-document OCR override: use a plain MarkItDown with no vision client.
@@ -372,7 +349,7 @@ async def _upsert_to_qdrant(
     # batches so poll requests get served.
     loop = asyncio.get_event_loop()
     sparse_embs: list = []
-    embedder = _get_sparse_embedder()
+    embedder = get_sparse_embedder()
     for batch_start in range(0, len(texts), _EMBED_BATCH_SIZE):
         batch = texts[batch_start : batch_start + _EMBED_BATCH_SIZE]
         batch_sparse = await loop.run_in_executor(
@@ -386,7 +363,7 @@ async def _upsert_to_qdrant(
     # GIL even inside run_in_executor, so we must yield explicitly to let poll
     # requests through — otherwise the event loop is blocked for 10-30 seconds
     # while 2795 PointStruct objects are built, causing ECONNRESET on the frontend.
-    client = _get_qdrant_client()
+    client = get_qdrant_client()
     collection_name = _get_qdrant_collection_name(data_store_id, kb_id)
     _ensure_qdrant_collection(client, collection_name)
     n = len(chunk_payloads)
@@ -433,7 +410,6 @@ async def process_document(
     data_store_id: If set, vectors stored in ds_{data_store_id} collection.
                    Otherwise, stored in kb_{kb_id} collection.
     """
-    logger = logging.getLogger(__name__)
     # Use env-configured defaults when callers do not supply explicit values.
     # WARNING: chunk_size and chunk_overlap must stay consistent across all
     # documents in a knowledge base. Do not change CHUNK_SIZE / OVERLAP_PERCENTAGE
@@ -502,7 +478,7 @@ async def process_document(
             chunk_manager.delete_chunks(chunks_to_delete)
             point_ids = [_chunk_id_to_point_id(cid) for cid in chunks_to_delete]
             collection_name = f"ds_{data_store_id}" if data_store_id else f"kb_{kb_id}"
-            _get_qdrant_client().delete(
+            get_qdrant_client().delete(
                 collection_name=collection_name,
                 points_selector=PointIdsList(points=point_ids),
             )
@@ -572,12 +548,12 @@ async def preview_document(file_path: str, chunk_size: int = None, chunk_overlap
         _chars_before = len(markdown_text)
         try:
             markdown_text = clean_markdown(markdown_text)
-            logging.getLogger(__name__).info(
+            logger.info(
                 "[CLEANUP] chars_before=%d chars_after=%d file=%s",
                 _chars_before, len(markdown_text), _fname,
             )
         except Exception as _ce:
-            logging.getLogger(__name__).warning(
+            logger.warning(
                 "[CLEANUP] fallback to raw markdown. reason=%s file=%s",
                 str(_ce)[:200], _fname,
             )
@@ -612,7 +588,7 @@ async def process_document_background(
     temp_path: str,
     file_name: str,
     kb_id: Optional[int] = None,  # None for DataStore files
-    task_id: int = None,
+    task_id: Optional[int] = None,
     db: Session = None,
     user_id: int = None,
     chunk_size: int = None,
@@ -761,7 +737,7 @@ async def process_document_background(
             else:
                 logger.error(f"Task {task_id}: No collection — neither data_store_id nor kb_id provided")
                 return
-            _ensure_qdrant_collection(_get_qdrant_client(), collection_name)
+            _ensure_qdrant_collection(get_qdrant_client(), collection_name)
     
             # ── Step 4: Move to permanent storage (DataStore files stay in place) ───
             if data_store_id is not None:
@@ -838,7 +814,7 @@ async def process_document_background(
                 # Delete from Qdrant first (so DB rollback doesn't orphan Qdrant points)
                 point_ids = [_chunk_id_to_point_id(cid) for cid in old_chunk_ids]
                 collection_name = f"ds_{data_store_id}" if data_store_id else f"kb_{kb_id}"
-                _get_qdrant_client().delete(
+                get_qdrant_client().delete(
                     collection_name=collection_name,
                     points_selector=PointIdsList(points=point_ids),
                 )

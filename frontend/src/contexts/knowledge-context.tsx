@@ -1,6 +1,6 @@
 "use client";
 
-import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
+import { createContext, useContext, useEffect, useState, useCallback, useRef } from "react";
 import { api } from "@/lib/api";
 
 export interface KnowledgeBase {
@@ -42,12 +42,18 @@ export function KnowledgeProvider({ children }: { children: React.ReactNode }) {
     refreshKbList();
   }, [refreshKbList]);
 
+  // Keep a ref to kbList so renameKb always reads the freshest data
+  // without being re-created on every kbList change (which would break
+  // any closures that hold a reference to an older renameKb).
+  const kbListRef = useRef(kbList);
+  kbListRef.current = kbList;
+
   const renameKb = useCallback(async (id: number, name: string) => {
-    const current = kbList.find((k) => k.id === id);
+    const current = kbListRef.current.find((k) => k.id === id);
     if (!current) return;
     await api.put(`/api/knowledge-base/${id}`, { name, description: current.description });
     setKbList((prev) => prev.map((k) => (k.id === id ? { ...k, name } : k)));
-  }, [kbList]);
+  }, []);
 
   const deleteKb = useCallback(async (id: number) => {
     await api.delete(`/api/knowledge-base/${id}`);

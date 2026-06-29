@@ -33,12 +33,20 @@ describe("InputBar", () => {
       expect(screen.getByTestId("chat-input-textarea")).toBeInTheDocument();
     });
 
-    it("textarea has initial height set", () => {
+    it("textarea starts with rows=1 and uses auto-resize for height", () => {
       render(<InputBar {...defaultProps} />);
       const textarea = screen.getByTestId("chat-input-textarea") as HTMLTextAreaElement;
-      // Initial height should be set (1 line * LINE_HEIGHT_PX = 24px)
-      expect(textarea.style.height).toBe("24px");
       expect(textarea.rows).toBe(1);
+      // useAutoResize sets height to MIN_HEIGHT_PX (48px) on mount
+      expect(parseInt(textarea.style.height)).toBeGreaterThanOrEqual(48);
+    });
+
+    it("textarea min-height is 48px (2 lines) via useAutoResize", async () => {
+      render(<InputBar {...defaultProps} />);
+      const textarea = screen.getByTestId("chat-input-textarea") as HTMLTextAreaElement;
+      await new Promise((r) => setTimeout(r, 10));
+      // useAutoResize sets MIN_HEIGHT_PX = 2 * LINE_HEIGHT_PX = 48px
+      expect(parseInt(textarea.style.height)).toBeGreaterThanOrEqual(48);
     });
 
     it("textarea responds to content changes via onChange", () => {
@@ -98,10 +106,10 @@ describe("InputBar", () => {
       expect(screen.getByTestId("chat-input-send-button")).toBeInTheDocument();
     });
 
-    it("send button is disabled when disabled prop is true", () => {
+    it("renders stop button when disabled prop is true", () => {
       render(<InputBar {...defaultProps} disabled={true} />);
-      const button = screen.getByTestId("chat-input-send-button");
-      expect(button).toBeDisabled();
+      const button = screen.getByTestId("chat-input-stop-button");
+      expect(button).toBeInTheDocument();
     });
 
     it("send button is disabled when value is empty", () => {
@@ -125,12 +133,12 @@ describe("InputBar", () => {
       expect(onSubmit).toHaveBeenCalledTimes(1);
     });
 
-    it("shows spinner when disabled (isLoading)", () => {
-      render(<InputBar {...defaultProps} value="hello" disabled={true} />);
-      const button = screen.getByTestId("chat-input-send-button");
-      // Loader2 spinner should be present
-      const spinner = button.querySelector("[class*='animate-spin']");
-      expect(spinner).toBeInTheDocument();
+    it("stop button calls onStop when clicked", () => {
+      const onStop = jest.fn();
+      render(<InputBar {...defaultProps} value="hello" disabled={true} onStop={onStop} />);
+      const button = screen.getByTestId("chat-input-stop-button");
+      fireEvent.click(button);
+      expect(onStop).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -173,8 +181,10 @@ describe("InputBar", () => {
 
     it("file button is disabled when disabled prop is true", () => {
       render(<InputBar {...defaultProps} disabled={true} />);
-      const button = screen.getByTestId("chat-input-file-button");
-      expect(button).toBeDisabled();
+      // label elements don't support disabled attribute; check the inner input
+      const label = screen.getByTestId("chat-input-file-button");
+      const input = label.querySelector("input");
+      expect(input).toBeDisabled();
     });
   });
 
@@ -214,18 +224,17 @@ describe("InputBar", () => {
   });
 
   describe("data-testid attributes", () => {
-    it("all required data-testid attributes are present", () => {
+    it("all required data-testid attributes are present", async () => {
       mockedApi.get.mockResolvedValue([
         { id: 1, name: "Test KB" },
       ]);
       render(<InputBar {...defaultProps} />);
 
       // Wait for KB fetch
-      return new Promise((r) => setTimeout(r, 10)).then(() => {
-        expect(screen.getByTestId("chat-input-textarea")).toBeInTheDocument();
-        expect(screen.getByTestId("chat-input-send-button")).toBeInTheDocument();
-        expect(screen.getByTestId("chat-input-file-button")).toBeInTheDocument();
-      });
+      await new Promise((r) => setTimeout(r, 10));
+      expect(screen.getByTestId("chat-input-textarea")).toBeInTheDocument();
+      expect(screen.getByTestId("chat-input-send-button")).toBeInTheDocument();
+      expect(screen.getByTestId("chat-input-file-button")).toBeInTheDocument();
     });
   });
 

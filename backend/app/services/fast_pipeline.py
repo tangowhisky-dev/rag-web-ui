@@ -191,7 +191,7 @@ def _compute_verdict(scores: dict) -> str:
 async def fast_stream(
     query: str,
     knowledge_base_ids: List[int],
-    db: Any,
+    db: "Session",
     recent_lc_history: list,
     existing_summary: Optional[str],
     use_dense: bool = True,

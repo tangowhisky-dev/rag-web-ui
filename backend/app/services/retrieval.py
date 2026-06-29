@@ -31,7 +31,6 @@ this is the correct behaviour: a paraphrase match with no exact keyword
 overlap should be returned by the dense/sparse legs, not suppressed.
 """
 
-import hashlib
 import json
 import asyncio
 import logging
@@ -48,6 +47,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.schemas.chat import QueryType
+from app.services.utils import content_hash, get_qdrant_client, get_openai_client, get_sparse_embedder
 
 logger = logging.getLogger(__name__)
 
@@ -77,38 +77,6 @@ def get_retrieval_config(query_type: QueryType) -> dict:
 # RRF smoothing constant — standard value from the original paper (k=60).
 _RRF_K = 60
 
-# ── Module-level singletons (lazy-initialised) ────────────────────────────────
-_qdrant_client: Optional[QdrantClient] = None
-_openai_client: Optional[SyncOpenAI] = None
-_sparse_embedder: Optional[SparseTextEmbedding] = None
-
-
-def _get_qdrant_client() -> QdrantClient:
-    global _qdrant_client
-    if _qdrant_client is None:
-        _qdrant_client = QdrantClient(host=settings.QDRANT_HOST, port=settings.QDRANT_PORT)
-    return _qdrant_client
-
-
-def _get_openai_client() -> SyncOpenAI:
-    global _openai_client
-    if _openai_client is None:
-        _openai_client = SyncOpenAI(
-            api_key=settings.OPENAI_API_KEY,
-            base_url=settings.OPENAI_API_BASE,
-        )
-    return _openai_client
-
-
-def _get_sparse_embedder() -> SparseTextEmbedding:
-    global _sparse_embedder
-    if _sparse_embedder is None:
-        _sparse_embedder = SparseTextEmbedding(
-            model_name=settings.SPLADE_MODEL,
-            cache_dir=settings.FASTEMBED_CACHE_DIR,
-        )
-    return _sparse_embedder
-
 
 # ── Data model ────────────────────────────────────────────────────────────────
 
@@ -136,8 +104,7 @@ class _Candidate:
         return score
 
 
-def _content_hash(text: str) -> str:
-    return hashlib.sha256(text.encode()).hexdigest()
+
 
 
 def _qdrant_payload_to_doc(payload: dict) -> LangchainDocument:
@@ -169,7 +136,7 @@ def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], candi
     for kb_id in kb_ids:
         logger.info("[DENSE] qdrant query | collection=kb_%d | using=dense | limit=%d", kb_id, candidates)
         try:
-            hits = _get_qdrant_client().query_points(
+            hits = get_qdrant_client().query_points(
                 collection_name=f"kb_{kb_id}",
                 query=query_vector,
                 using="dense",
@@ -182,7 +149,7 @@ def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], candi
         logger.info("[DENSE] qdrant response | kb_%d | hits=%d", kb_id, len(hits))
         for hit in hits:
             text = (hit.payload or {}).get("chunk_text", "")
-            h = _content_hash(text)
+            h = content_hash(text)
             if h not in result:
                 result[h] = _Candidate(
                     doc=_qdrant_payload_to_doc(hit.payload or {}),
@@ -196,7 +163,7 @@ def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], candi
     for ds_id in datastore_ids:
         logger.info("[DENSE] qdrant query | collection=ds_%d | using=dense | limit=%d", ds_id, candidates)
         try:
-            hits = _get_qdrant_client().query_points(
+            hits = get_qdrant_client().query_points(
                 collection_name=f"ds_{ds_id}",
                 query=query_vector,
                 using="dense",
@@ -209,7 +176,7 @@ def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], candi
         logger.info("[DENSE] qdrant response | ds_%d | hits=%d", ds_id, len(hits))
         for hit in hits:
             text = (hit.payload or {}).get("chunk_text", "")
-            h = _content_hash(text)
+            h = content_hash(text)
             if h not in result:
                 result[h] = _Candidate(
                     doc=_qdrant_payload_to_doc(hit.payload or {}),
@@ -245,7 +212,7 @@ def _qdrant_sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int
     for kb_id in kb_ids:
         logger.info("[SPARSE] qdrant query | collection=kb_%d | using=sparse | limit=%d", kb_id, candidates)
         try:
-            hits = _get_qdrant_client().query_points(
+            hits = get_qdrant_client().query_points(
                 collection_name=f"kb_{kb_id}",
                 query=query_sparse,
                 using="sparse",
@@ -258,7 +225,7 @@ def _qdrant_sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int
         logger.info("[SPARSE] qdrant response | kb_%d | hits=%d", kb_id, len(hits))
         for hit in hits:
             text = (hit.payload or {}).get("chunk_text", "")
-            h = _content_hash(text)
+            h = content_hash(text)
             if h not in result:
                 result[h] = _Candidate(
                     doc=_qdrant_payload_to_doc(hit.payload or {}),
@@ -272,7 +239,7 @@ def _qdrant_sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int
     for ds_id in datastore_ids:
         logger.info("[SPARSE] qdrant query | collection=ds_%d | using=sparse | limit=%d", ds_id, candidates)
         try:
-            hits = _get_qdrant_client().query_points(
+            hits = get_qdrant_client().query_points(
                 collection_name=f"ds_{ds_id}",
                 query=query_sparse,
                 using="sparse",
@@ -285,7 +252,7 @@ def _qdrant_sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int
         logger.info("[SPARSE] qdrant response | ds_%d | hits=%d", ds_id, len(hits))
         for hit in hits:
             text = (hit.payload or {}).get("chunk_text", "")
-            h = _content_hash(text)
+            h = content_hash(text)
             if h not in result:
                 result[h] = _Candidate(
                     doc=_qdrant_payload_to_doc(hit.payload or {}),
@@ -361,7 +328,7 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
     result: Dict[str, _Candidate] = {}
     for rank, row in enumerate(all_rows):
         chunk_text = row.chunk_text or ""
-        h = _content_hash(chunk_text)
+        h = content_hash(chunk_text)
         if h not in result:
             raw_meta = row.chunk_metadata
             if isinstance(raw_meta, str):
@@ -575,8 +542,8 @@ async def hybrid_search_with_legs(
             loop = asyncio.get_running_loop()
             expanded = await loop.run_in_executor(None, lambda: expand_docs_via_graph(docs, kb_ids))
             if expanded:
-                existing_hashes = {_content_hash(d.page_content) for d in docs}
-                new_docs = [d for d in expanded if _content_hash(d.page_content) not in existing_hashes]
+                existing_hashes = {content_hash(d.page_content) for d in docs}
+                new_docs = [d for d in expanded if content_hash(d.page_content) not in existing_hashes]
                 for d in new_docs:
                     d.metadata["_legs"] = ["graph"]
                 docs = docs + new_docs

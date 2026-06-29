@@ -1,14 +1,11 @@
 "use client";
 
 import { useState } from "react";
-import { Menu, LogOut } from "lucide-react";
-import { ThemeToggle } from "@/components/ui/theme-toggle";
-import { useRouter } from "next/navigation";
+import { Menu } from "lucide-react";
 import KnowledgeSidebar from "@/components/knowledge/knowledge-sidebar";
 import { KnowledgeProvider } from "@/contexts/knowledge-context";
 import Breadcrumb from "@/components/ui/breadcrumb";
-import { ChangePasswordDialog } from "@/components/ui/change-password-dialog";
-import { UserName } from "./user-name";
+import { NavActions } from "./nav-actions";
 
 interface KnowledgeLayoutProps {
   children: React.ReactNode;
@@ -17,14 +14,6 @@ interface KnowledgeLayoutProps {
 
 export default function KnowledgeLayout({ children, pageTitle }: KnowledgeLayoutProps) {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const router = useRouter();
-
-  const handleLogout = () => {
-    localStorage.removeItem("token");
-    document.cookie = "token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT";
-    router.push("/");
-  };
-  const [passwordDialogOpen, setPasswordDialogOpen] = useState(false);
 
   return (
     <KnowledgeProvider>
@@ -43,31 +32,10 @@ export default function KnowledgeLayout({ children, pageTitle }: KnowledgeLayout
             <Breadcrumb overrideLastLabel={pageTitle} />
 
             <div className="ml-auto flex items-center gap-1">
-              <button
-                onClick={() => setPasswordDialogOpen(true)}
-                className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm text-muted-foreground hover:text-primary hover:bg-primary/10 transition-colors"
-              >
-                <span className="hidden sm:inline">Change Password</span>
-                <span className="sm:hidden">Password</span>
-              </button>
-              <ThemeToggle />
-              <button
-                onClick={handleLogout}
-                className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
-              >
-                <LogOut className="h-4 w-4" />
-                <span className="hidden sm:inline">Sign out</span>
-              </button>
-              <UserName />
+              <NavActions />
             </div>
           </div>
         </header>
-
-        {/* Change Password Dialog */}
-        <ChangePasswordDialog
-          open={passwordDialogOpen}
-          onOpenChange={setPasswordDialogOpen}
-        />
 
         {/* Sidebar + content */}
         <div className="absolute inset-0 flex">

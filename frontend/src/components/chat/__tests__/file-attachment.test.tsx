@@ -50,11 +50,10 @@ describe("FileChip", () => {
     const longName = "a".repeat(40) + ".pdf";
     const file = makeFile(longName, "application/pdf");
     render(<FileChip uploadedFile={{ id: 1, file_name: file.name, file_size: file.size, status: "ready" }} onRemove={jest.fn()} />);
-    // Full name should not appear verbatim (it gets truncated)
+    // Full name is on the chip's title attribute; display text is truncated
     const chip = screen.getByTestId("file-chip");
-    const nameSpan = chip.querySelector("span[title]") as HTMLElement;
-    expect(nameSpan.title).toBe(longName);
-    // Display text should be shorter
+    expect(chip.title).toBe(longName);
+    const nameSpan = chip.querySelector("span.truncate") as HTMLElement;
     expect(nameSpan.textContent!.length).toBeLessThan(longName.length);
   });
 });

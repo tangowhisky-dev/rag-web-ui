@@ -192,7 +192,7 @@ export function InputBar({
             "focus:outline-none focus:ring-0 disabled:cursor-not-allowed disabled:opacity-50",
             "placeholder:text-muted-foreground overflow-y-auto"
           )}
-          style={{ lineHeight: `${LINE_HEIGHT_PX}px`, height: `${LINE_HEIGHT_PX * 2}px` }}
+          style={{ lineHeight: `${LINE_HEIGHT_PX}px`, height: `${LINE_HEIGHT_PX}px` }}
           data-testid="chat-input-textarea"
         />
         {/* Send / Stop button — right-center of input */}

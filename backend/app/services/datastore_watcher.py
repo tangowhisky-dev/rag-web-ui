@@ -53,9 +53,9 @@ from app.models.knowledge import KnowledgeBase
 from app.services.document_processor import (
     SUPPORTED_EXTENSIONS,
     process_document_background,
-    _get_qdrant_client,
     _chunk_id_to_point_id,
 )
+from app.services.utils import get_qdrant_client
 
 from watchdog.events import FileSystemEventHandler
 
@@ -973,7 +973,7 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
                         ]
                         if chunk_ids:
                             point_ids = [_chunk_id_to_point_id(cid) for cid in chunk_ids]
-                            _get_qdrant_client().delete(
+                            get_qdrant_client().delete(
                                 collection_name=f"ds_{datastore_id}",
                                 points_selector=PointIdsList(points=point_ids),
                             )
@@ -1039,7 +1039,7 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
                             ]
                             if chunk_ids:
                                 point_ids = [_chunk_id_to_point_id(cid) for cid in chunk_ids]
-                                _get_qdrant_client().delete(
+                                get_qdrant_client().delete(
                                     collection_name=f"kb_{kb_id}",
                                     points_selector=PointIdsList(points=point_ids),
                                 )

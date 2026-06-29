@@ -2,12 +2,10 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { LogOut } from 'lucide-react';
-import { ThemeToggle } from '@/components/ui/theme-toggle';
 import Breadcrumb from '@/components/ui/breadcrumb';
 import AdminSidebar from '@/components/admin/admin-sidebar';
 import { isAdmin } from '@/lib/auth';
-import { UserName } from '@/components/layout/user-name';
+import { NavActions } from '@/components/layout/nav-actions';
 
 // LLM config is managed per-organisation on the Orgs page (LLM Config button).
 // The standalone /dashboard/admin/llm-config page does not exist.
@@ -36,12 +34,6 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
     );
   }
 
-  const handleLogout = () => {
-    localStorage.removeItem('token');
-    document.cookie = 'token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT';
-    router.push('/');
-  };
-
   return (
     <div className="relative h-screen bg-background overflow-hidden">
       {/* Header bar */}
@@ -59,15 +51,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
           </button>
           <Breadcrumb overrideLastLabel="Admin" />
           <div className="ml-auto flex items-center gap-1">
-            <ThemeToggle />
-            <button
-              onClick={handleLogout}
-              className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
-            >
-              <LogOut className="h-4 w-4" />
-              <span className="hidden sm:inline">Sign out</span>
-            </button>
-            <UserName />
+            <NavActions showPasswordButton={false} />
           </div>
         </div>
       </header>

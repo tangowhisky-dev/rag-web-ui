@@ -678,7 +678,7 @@ async def generate_response(
 
     except Exception as e:
         error_message = f"Error generating response: {str(e)}"
-        print(error_message)
+        logger.error(error_message)
         yield f'3:{json.dumps(error_message)}\n'
         yield f'd:{{"finishReason":"error","messageId":{bot_message.id}}}\n'
         if 'bot_message' in locals():

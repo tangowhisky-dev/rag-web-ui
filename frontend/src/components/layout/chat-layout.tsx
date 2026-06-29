@@ -1,14 +1,11 @@
 "use client";
 
 import { useState } from "react";
-import { Menu, LogOut, Share2 } from "lucide-react";
-import { ThemeToggle } from "@/components/ui/theme-toggle";
-import { useRouter } from "next/navigation";
+import { Menu, Share2 } from "lucide-react";
 import ChatSidebar from "@/components/chat/chat-sidebar";
 import { ChatProvider, useChatContext } from "@/contexts/chat-context";
 import Breadcrumb from "@/components/ui/breadcrumb";
-import { ChangePasswordDialog } from "@/components/ui/change-password-dialog";
-import { UserName } from "./user-name";
+import { NavActions } from "./nav-actions";
 
 interface ChatLayoutProps {
   children: React.ReactNode;
@@ -16,19 +13,11 @@ interface ChatLayoutProps {
 
 function ChatLayoutInner({ children }: ChatLayoutProps) {
   const [isChatSidebarOpen, setIsChatSidebarOpen] = useState(false);
-  const router = useRouter();
   const { chatList, activeChat, graphRagActive } = useChatContext();
 
   const chatTitle = activeChat
     ? (chatList.find((c) => c.id === activeChat)?.title ?? undefined)
     : undefined;
-
-  const handleLogout = () => {
-    localStorage.removeItem("token");
-    document.cookie = "token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT";
-    router.push("/");
-  };
-  const [passwordDialogOpen, setPasswordDialogOpen] = useState(false);
 
   return (
     <div className="relative h-screen bg-background overflow-hidden">
@@ -51,31 +40,10 @@ function ChatLayoutInner({ children }: ChatLayoutProps) {
           )}
 
           <div className="ml-auto flex items-center gap-1">
-            <button
-              onClick={() => setPasswordDialogOpen(true)}
-              className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm text-muted-foreground hover:text-primary hover:bg-primary/10 transition-colors"
-            >
-              <span className="hidden sm:inline">Change Password</span>
-              <span className="sm:hidden">Password</span>
-            </button>
-            <ThemeToggle />
-            <button
-              onClick={handleLogout}
-              className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
-            >
-              <LogOut className="h-4 w-4" />
-              <span className="hidden sm:inline">Sign out</span>
-            </button>
-            <UserName />
+            <NavActions />
           </div>
         </div>
       </header>
-
-      {/* Change Password Dialog */}
-      <ChangePasswordDialog
-        open={passwordDialogOpen}
-        onOpenChange={setPasswordDialogOpen}
-      />
 
       <div className="absolute inset-0 flex">
         <div className="pt-12 flex-shrink-0 h-full">

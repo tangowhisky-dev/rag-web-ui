@@ -19,7 +19,6 @@ Pipeline flow:
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import re
@@ -30,6 +29,7 @@ from pydantic import BaseModel
 from typing_extensions import TypedDict
 
 from app.core.config import settings
+from app.services.utils import content_hash
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +85,7 @@ class RAGGraphState(TypedDict):
     api_base: Optional[str]
     query_model: Optional[str]
     org_id: Optional[int]
-    _db: Any
+    _db: Session | None
 
 
 # ---------------------------------------------------------------------------
@@ -166,10 +166,6 @@ async def _invoke_structured(llm, messages: list, schema: type) -> str:
     return resp.content
 
 
-def _content_hash(text: str) -> str:
-    return hashlib.md5(text.encode("utf-8", errors="replace")).hexdigest()
-
-
 def _serialise_doc(doc: Any) -> dict:
     if isinstance(doc, dict):
         return doc
@@ -188,7 +184,7 @@ def _dedup_and_reinforce(doc_lists: List[List[dict]]) -> List[dict]:
     for docs in doc_lists:
         for doc in docs:
             text = doc.get("page_content", "")
-            h = _content_hash(text)
+            h = content_hash(text)
             meta = doc.get("metadata", {})
             score = float(meta.get("_rrf_score", meta.get("score", 0.001)))
             if h in seen:
@@ -1382,7 +1378,7 @@ _rag_graph = _build_rag_graph()
 async def run_stream(
     query: str,
     file_markdown: Optional[str],
-    db: Any,
+    db: Session,
     chat_id: int,
     knowledge_base_ids: List[int],
     recent_lc_history: list,
