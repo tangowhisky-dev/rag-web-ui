@@ -202,21 +202,10 @@ async def process_document_background(
 
         def _on_timeout() -> None:
             logger.warning(
-                "[PROGRESS_TIMEOUT] task_id=%s silence_s=%s",
+                "[PROGRESS_TIMEOUT] task_id=%s silence_s=%s — "
+                "task may still be processing (graph build is non-fatal)",
                 task_id, settings.PROCESSING_TIMEOUT_SILENCE_S,
             )
-            try:
-                task.status = "failed"
-                task.progress_message = (
-                    f"Processing timed out: no progress for "
-                    f"{settings.PROCESSING_TIMEOUT_SILENCE_S}s"
-                )
-                db.commit()
-            except Exception:
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
 
         async with ProgressTimeout(settings.PROCESSING_TIMEOUT_SILENCE_S, _on_timeout) as pt:
 
@@ -421,6 +410,7 @@ async def process_document_background(
                 progress_cb=_set_progress,
                 progress_start=40,
                 progress_end=80,
+                pt=pt,
             )
             logger.info(f"Task {task_id}: Chunks added to Qdrant")
     
@@ -472,6 +462,7 @@ async def process_document_background(
                             chunks=_chunks,
                             chunk_ids=_chunk_ids,
                             data_store_id=data_store_id,
+                            pt=pt,
                         )
                         _db2 = _SessionLocal()
                         try:

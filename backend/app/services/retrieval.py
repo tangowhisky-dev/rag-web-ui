@@ -121,7 +121,7 @@ def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], candi
     Searches both KB collections (kb_{kb_id}) and DataStore collections (ds_{datastore_id}).
     """
     logger.info("[DENSE] embedding request | model=%s | query=%r", settings.DENSE_EMBEDDINGS_MODEL, query[:120])
-    response = _get_openai_client().embeddings.create(
+    response = get_openai_client().embeddings.create(
         input=query,
         model=settings.DENSE_EMBEDDINGS_MODEL,
     )
@@ -195,7 +195,7 @@ def _qdrant_sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int
     Searches both KB collections (kb_{kb_id}) and DataStore collections (ds_{datastore_id}).
     """
     logger.info("[SPARSE] SPLADE embed | model=%s | query=%r", settings.SPLADE_MODEL, query[:120])
-    sparse_emb = next(iter(_get_sparse_embedder().embed([query])))
+    sparse_emb = next(iter(get_sparse_embedder().embed([query])))
     query_sparse = SparseVector(
         indices=sparse_emb.indices.tolist(),
         values=sparse_emb.values.tolist(),

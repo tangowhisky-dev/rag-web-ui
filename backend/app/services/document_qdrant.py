@@ -170,6 +170,7 @@ async def _upsert_to_qdrant(
     progress_cb=None,   # optional callable(pct: int, msg: str)
     progress_start: int = 40,
     progress_end: int = 80,
+    pt=None,            # optional ProgressTimeout for periodic pings
 ) -> None:
     """Compute both vector types and upsert all points to Qdrant.
 
@@ -185,6 +186,8 @@ async def _upsert_to_qdrant(
         progress_start=progress_start,
         progress_end=progress_end,
     )
+    if pt:
+        pt.ping()  # signal progress after dense embeddings complete
     # fastembed BM25 tokenization is Python/numpy — does NOT release the GIL.
     # Running the full 2795-text corpus in one executor call still blocks the
     # event loop for 10-30s. Batch it with asyncio.sleep(0) yields between
@@ -198,6 +201,8 @@ async def _upsert_to_qdrant(
             None, lambda b=batch: list(embedder.embed(b))
         )
         sparse_embs.extend(batch_sparse)
+        if pt:
+            pt.ping()  # signal progress after sparse embeddings complete
         await asyncio.sleep(0)  # yield — let poll requests through
 
     # Build point structs and upsert in batches, yielding the event loop between
@@ -220,6 +225,8 @@ async def _upsert_to_qdrant(
             client.upsert(collection_name=collection_name, points=pts)
 
         await loop.run_in_executor(None, _build_upsert_batch)
+        if pt:
+            pt.ping()  # signal progress after each upsert batch
         # Yield the event loop so poll requests can be served between batches
         await asyncio.sleep(0)
 

@@ -276,6 +276,7 @@ async def _extract_with_llm(
     file_name: str,
     chunks: list[str],
     qdrant_point_ids: list[str],
+    pt=None,            # optional ProgressTimeout for periodic pings
 ) -> tuple[int, int]:
     """Run neo4j-graphrag LLM pipeline on context-sized batches of chunks.
 
@@ -368,6 +369,8 @@ async def _extract_with_llm(
                         return linked_total
 
                     linked = await loop.run_in_executor(None, _link_batch_chunks)
+                    if pt:
+                        pt.ping()  # signal progress after LLM extraction batch
                     return linked, 0
 
                 except Exception as exc:
@@ -420,6 +423,7 @@ async def build_graph_for_document(
     chunks: list[str],
     chunk_ids: list[str],
     data_store_id: Optional[int] = None,
+    pt=None,            # optional ProgressTimeout for periodic pings
 ) -> None:
     """
     Extract entity/relationship graph from document chunks and store in Neo4j.
@@ -495,6 +499,7 @@ async def build_graph_for_document(
             file_name=file_name,
             chunks=chunks,
             qdrant_point_ids=qdrant_point_ids,
+            pt=pt,
         )
 
     logger.info(

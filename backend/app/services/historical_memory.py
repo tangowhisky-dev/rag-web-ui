@@ -31,7 +31,28 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 
+def _strip_base64_prefix(content: str) -> str:
+    """Strip the base64-encoded context prefix from assistant messages.
+
+    Assistant messages stored in the DB have the format:
+        <base64_json>{"context": [...], "rewritten_query": "..."}
+    __LLM_RESPONSE__<actual_response_text>
+
+    This function extracts only the actual response text for meaningful
+    comparison in the reranker.
+    """
+    if "__LLM_RESPONSE__" in content:
+        return content.split("__LLM_RESPONSE__")[-1]
+    return content
+
+
+def _is_empty_message(content: str) -> bool:
+    """Check if a message has no meaningful content."""
+    return not content or not content.strip()
+
+
 logger = logging.getLogger(__name__)
+
 
 # Maximum number of past assistant messages to fetch in one query.
 # The reranker can handle more, but 50 is a practical cap to keep
@@ -114,8 +135,16 @@ def retrieve_historical_memory(
     docs: List[LangchainDocument] = []
     for row in rows:
         msg_id = row.id
-        content = row.content or ""
-        content_length = row.content_length or len(content)
+        raw_content = row.content or ""
+        content = _strip_base64_prefix(raw_content)
+        # Skip messages with no actual text (e.g., cancelled generations
+        # where only the base64 context prefix was stored with no response).
+        if _is_empty_message(content):
+            logger.debug(
+                "historical_memory: skipping empty message id=%d", msg_id,
+            )
+            continue
+        content_length = row.content_length or len(raw_content)
         doc = LangchainDocument(
             page_content=content,
             metadata={
