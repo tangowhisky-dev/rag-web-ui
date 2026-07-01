@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Menu, Share2 } from "lucide-react";
+import { Menu, CircuitBoard } from "lucide-react";
 import ChatSidebar from "@/components/chat/chat-sidebar";
 import { ChatProvider, useChatContext } from "@/contexts/chat-context";
 import Breadcrumb from "@/components/ui/breadcrumb";
@@ -34,8 +34,9 @@ function ChatLayoutInner({ children }: ChatLayoutProps) {
           <Breadcrumb overrideLastLabel={chatTitle} />
 
           {graphRagActive && (
-            <span className="inline-flex items-center rounded-full border border-violet-400/50 bg-violet-500/10 p-1 text-violet-400 shrink-0" title="GraphRAG active">
-              <Share2 className="h-3 w-3" />
+            <span className="inline-flex items-center gap-1 rounded-full border border-primary/20 bg-primary/5 px-2 py-0.5 text-xs font-medium text-muted-foreground shrink-0" title="GraphRAG active">
+              <CircuitBoard className="h-3 w-3" />
+              GraphRAG
             </span>
           )}
 

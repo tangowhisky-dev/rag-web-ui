@@ -29,6 +29,20 @@
     --chart-3: 197 37% 24%;
     --chart-4: 43 74% 66%;
     --chart-5: 27 87% 67%;
+    /* Semantic colors for confidence/query classification */
+    --confidence-very-high: 152 68% 40%;
+    --confidence-high: 142 55% 45%;
+    --confidence-medium: 42 85% 50%;
+    --confidence-low: 24 85% 55%;
+    --confidence-none: 0 75% 55%;
+    --query-factual: 215 60% 50%;
+    --query-entity: 270 55% 55%;
+    --query-multi: 24 85% 55%;
+    --query-ambiguous: 215 16% 47%;
+    --query-factual-foreground: 215 60% 25%;
+    --query-entity-foreground: 270 55% 30%;
+    --query-multi-foreground: 24 85% 30%;
+    --query-ambiguous-foreground: 215 16% 35%;
   }
 
   .dark {
@@ -57,6 +71,20 @@
     --chart-3: 30 70% 55%;
     --chart-4: 280 55% 60%;
     --chart-5: 340 65% 55%;
+    /* Semantic colors for confidence/query classification */
+    --confidence-very-high: 152 55% 45%;
+    --confidence-high: 142 45% 40%;
+    --confidence-medium: 42 70% 45%;
+    --confidence-low: 24 70% 50%;
+    --confidence-none: 0 65% 50%;
+    --query-factual: 215 60% 55%;
+    --query-entity: 270 55% 60%;
+    --query-multi: 24 70% 55%;
+    --query-ambiguous: 215 16% 55%;
+    --query-factual-foreground: 215 60% 65%;
+    --query-entity-foreground: 270 55% 65%;
+    --query-multi-foreground: 24 70% 65%;
+    --query-ambiguous-foreground: 215 16% 60%;
   }
 }
 
@@ -69,13 +97,32 @@
   }
 }
 
+/* ── Motion & typography ─────────────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Tabular-nums on numeric data */
+[data-tabular-nums],
+.tabular-nums,
+h3[data-stat] {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Custom components ──────────────────────────────────────────── */
+
 .language-think {
-  @apply text-[#8b8b8b] whitespace-pre-wrap m-0 relative border-l-2 border-l-[#e5e5e5] bg-transparent rounded-none py-0 my-2 !important;
+  @apply text-muted-foreground whitespace-pre-wrap m-0 relative border-l-2 border-l-border/30 bg-transparent rounded-none py-0 my-2 !important;
 }
 
 .hljs {
   @apply rounded-lg;
   @apply my-2;
   @apply leading-[26px];
-  @apply text-[#404040];
+  @apply text-foreground;
 }

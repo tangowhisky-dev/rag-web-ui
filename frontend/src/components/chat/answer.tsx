@@ -274,10 +274,10 @@ interface QueryClassification {
 }
 
 const QUERY_TYPE_COLORS: Record<string, { bg: string; text: string; border: string }> = {
-  FACTUAL:        { bg: "bg-blue-50 dark:bg-blue-900/20",   text: "text-blue-700 dark:text-blue-300",   border: "border-blue-200 dark:border-blue-800"   },
-  ENTITY_CENTRIC: { bg: "bg-purple-50 dark:bg-purple-900/20", text: "text-purple-700 dark:text-purple-300", border: "border-purple-200 dark:border-purple-800" },
-  MULTI_PART:     { bg: "bg-orange-50 dark:bg-orange-900/20", text: "text-orange-700 dark:text-orange-300", border: "border-orange-200 dark:border-orange-800" },
-  AMBIGUOUS:      { bg: "bg-zinc-50 dark:bg-zinc-800/40",   text: "text-zinc-600 dark:text-zinc-300",    border: "border-zinc-200 dark:border-zinc-700"    },
+  FACTUAL:        { bg: "bg-[hsl(var(--query-factual)/10%)]", text: "text-[hsl(var(--query-factual-foreground))]", border: "border-[hsl(var(--query-factual)/30%)]" },
+  ENTITY_CENTRIC: { bg: "bg-[hsl(var(--query-entity)/10%)]",  text: "text-[hsl(var(--query-entity-foreground))]",  border: "border-[hsl(var(--query-entity)/30%)]"  },
+  MULTI_PART:     { bg: "bg-[hsl(var(--query-multi)/10%)]",   text: "text-[hsl(var(--query-multi-foreground))]",   border: "border-[hsl(var(--query-multi)/30%)]"   },
+  AMBIGUOUS:      { bg: "bg-muted/50",                       text: "text-muted-foreground",                      border: "border-border"                          },
 };
 
 const QueryClassificationBlock: FC<{ classification: QueryClassification; synthesisMode?: boolean }> = ({
@@ -412,21 +412,21 @@ const CONFIDENCE_CONFIG: Record<ConfidenceLevel, {
   bgColor: string;
   borderColor: string;
 }> = {
-  very_high: { steps: 4, label: "Very High",  stepColor: "bg-emerald-500", textColor: "text-emerald-700", bgColor: "bg-emerald-50",  borderColor: "border-emerald-200" },
-  high:      { steps: 3, label: "High",       stepColor: "bg-green-500",   textColor: "text-green-700",   bgColor: "bg-green-50",    borderColor: "border-green-200"   },
-  medium:    { steps: 2, label: "Medium",     stepColor: "bg-yellow-500",  textColor: "text-yellow-700",  bgColor: "bg-yellow-50",   borderColor: "border-yellow-200"  },
-  low:       { steps: 1, label: "Low",        stepColor: "bg-orange-500",  textColor: "text-orange-700",  bgColor: "bg-orange-50",   borderColor: "border-orange-200"  },
-  none:      { steps: 0, label: "None",       stepColor: "bg-red-400",     textColor: "text-red-700",     bgColor: "bg-red-50",      borderColor: "border-red-200"     },
+  very_high: { steps: 4, label: "Very High",  stepColor: "bg-[hsl(var(--confidence-very-high))]", textColor: "text-[hsl(var(--confidence-very-high))]", bgColor: "bg-[hsl(var(--confidence-very-high)/10%)]",  borderColor: "border-[hsl(var(--confidence-very-high)/30%)]" },
+  high:      { steps: 3, label: "High",       stepColor: "bg-[hsl(var(--confidence-high))]",      textColor: "text-[hsl(var(--confidence-high))]",      bgColor: "bg-[hsl(var(--confidence-high)/10%)]",      borderColor: "border-[hsl(var(--confidence-high)/30%)]"     },
+  medium:    { steps: 2, label: "Medium",     stepColor: "bg-[hsl(var(--confidence-medium))]",    textColor: "text-[hsl(var(--confidence-medium))]",    bgColor: "bg-[hsl(var(--confidence-medium)/10%)]",    borderColor: "border-[hsl(var(--confidence-medium)/30%)]"   },
+  low:       { steps: 1, label: "Low",        stepColor: "bg-[hsl(var(--confidence-low))]",       textColor: "text-[hsl(var(--confidence-low))]",       bgColor: "bg-[hsl(var(--confidence-low)/10%)]",       borderColor: "border-[hsl(var(--confidence-low)/30%)]"      },
+  none:      { steps: 0, label: "None",       stepColor: "bg-[hsl(var(--confidence-none))]",      textColor: "text-[hsl(var(--confidence-none))]",      bgColor: "bg-[hsl(var(--confidence-none)/10%)]",      borderColor: "border-[hsl(var(--confidence-none)/30%)]"      },
 };
 
 // ── Confidence collapsible (bottom-right of each answer) ────────────────────
 
 const CONFIDENCE_COLORS: Record<ConfidenceLevel, { bar: string; text: string; bg: string; border: string }> = {
-  very_high: { bar: "bg-emerald-500", text: "text-emerald-700 dark:text-emerald-400", bg: "bg-emerald-50 dark:bg-emerald-900/20", border: "border-emerald-200 dark:border-emerald-800" },
-  high:      { bar: "bg-green-500",   text: "text-green-700 dark:text-green-400",     bg: "bg-green-50 dark:bg-green-900/20",     border: "border-green-200 dark:border-green-800"   },
-  medium:    { bar: "bg-yellow-500",  text: "text-yellow-700 dark:text-yellow-400",   bg: "bg-yellow-50 dark:bg-yellow-900/20",   border: "border-yellow-200 dark:border-yellow-800" },
-  low:       { bar: "bg-orange-500",  text: "text-orange-700 dark:text-orange-400",   bg: "bg-orange-50 dark:bg-orange-900/20",   border: "border-orange-200 dark:border-orange-800" },
-  none:      { bar: "bg-red-400",     text: "text-red-700 dark:text-red-400",         bg: "bg-red-50 dark:bg-red-900/20",         border: "border-red-200 dark:border-red-800"       },
+  very_high: { bar: "bg-[hsl(var(--confidence-very-high))]", text: "text-[hsl(var(--confidence-very-high))]", bg: "bg-[hsl(var(--confidence-very-high)/10%)]", border: "border-[hsl(var(--confidence-very-high)/30%)]" },
+  high:      { bar: "bg-[hsl(var(--confidence-high))]",      text: "text-[hsl(var(--confidence-high))]",      bg: "bg-[hsl(var(--confidence-high)/10%)]",      border: "border-[hsl(var(--confidence-high)/30%)]"     },
+  medium:    { bar: "bg-[hsl(var(--confidence-medium))]",    text: "text-[hsl(var(--confidence-medium))]",    bg: "bg-[hsl(var(--confidence-medium)/10%)]",    border: "border-[hsl(var(--confidence-medium)/30%)]"   },
+  low:       { bar: "bg-[hsl(var(--confidence-low))]",       text: "text-[hsl(var(--confidence-low))]",       bg: "bg-[hsl(var(--confidence-low)/10%)]",       border: "border-[hsl(var(--confidence-low)/30%)]"      },
+  none:      { bar: "bg-[hsl(var(--confidence-none))]",      text: "text-[hsl(var(--confidence-none))]",      bg: "bg-[hsl(var(--confidence-none)/10%)]",       border: "border-[hsl(var(--confidence-none)/30%)]"      },
 };
 
 const ConfidenceCollapsible: FC<{

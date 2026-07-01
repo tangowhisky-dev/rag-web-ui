@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { CircuitBoard } from "lucide-react";
 import Breadcrumb from "@/components/ui/breadcrumb";
 import { NavActions } from "./nav-actions";
 
@@ -44,8 +45,9 @@ export default function DashboardLayout({
         <div className="flex h-12 items-center gap-4 px-4 sm:px-6">
           <Breadcrumb overrideLastLabel={pageTitle} />
           {graphRagActive && (
-            <span className="inline-flex items-center rounded-full border border-violet-400/50 bg-violet-500/10 px-2 py-0.5 text-xs font-medium text-violet-400">
-              ⬡ GraphRAG
+            <span className="inline-flex items-center gap-1 rounded-full border border-primary/20 bg-primary/5 px-2 py-0.5 text-xs font-medium text-muted-foreground">
+              <CircuitBoard className="h-3 w-3" />
+              GraphRAG
             </span>
           )}
           <div className="ml-auto flex items-center gap-1">

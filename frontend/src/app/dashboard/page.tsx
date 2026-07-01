@@ -56,7 +56,7 @@ export default function DashboardPage() {
             <div className="flex items-center gap-3">
               <a
                 href="/dashboard/knowledge/new"
-                className="inline-flex items-center justify-center rounded-full bg-primary text-primary-foreground w-64 px-6 py-3 text-sm font-medium hover:bg-primary/90 transition-colors"
+                className="inline-flex items-center justify-center rounded-md bg-primary px-5 py-2.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
               >
                 <Plus className="mr-2 h-4 w-4" />
                 New Knowledge Base
@@ -64,7 +64,7 @@ export default function DashboardPage() {
               {hydrated && isAdmin() && (
                 <a
                   href="/dashboard/admin"
-                  className="inline-flex items-center justify-center rounded-full border border-input bg-background w-64 px-6 py-3 text-sm font-medium hover:bg-accent transition-colors"
+                  className="inline-flex items-center justify-center rounded-md border border-input bg-background px-5 py-2.5 text-sm font-medium hover:bg-accent transition-colors"
                 >
                   <Shield className="mr-2 h-4 w-4" />
                   Admin Panel
@@ -76,13 +76,14 @@ export default function DashboardPage() {
 
         {/* Stats */}
         <div className="grid gap-6 md:grid-cols-2 mb-12">
-          <div className="rounded-2xl border bg-card text-card-foreground p-8 hover:shadow-md transition-shadow">
+          {/* Primary stat: accent-tinted */}
+          <div className="rounded-lg border bg-gradient-to-b from-primary/5 to-transparent p-8">
             <div className="flex items-center gap-6">
-              <div className="rounded-full bg-muted p-4">
-                <Book className="h-8 w-8 text-foreground" />
+              <div className="rounded-md bg-primary/10 p-3">
+                <Book className="h-6 w-6 text-primary" />
               </div>
               <div>
-                <h3 className="text-4xl font-bold">{stats.knowledgeBases}</h3>
+                <h3 className="text-4xl font-bold tabular-nums" data-stat>{stats.knowledgeBases}</h3>
                 <p className="text-muted-foreground mt-1">Knowledge Bases</p>
               </div>
             </div>
@@ -95,13 +96,14 @@ export default function DashboardPage() {
             </a>
           </div>
 
-          <div className="rounded-2xl border bg-card text-card-foreground p-8 hover:shadow-md transition-shadow">
+          {/* Secondary stat: neutral */}
+          <div className="rounded-md border bg-card p-8">
             <div className="flex items-center gap-6">
-              <div className="rounded-full bg-muted p-4">
-                <MessageSquare className="h-8 w-8 text-foreground" />
+              <div className="rounded-md bg-muted p-3">
+                <MessageSquare className="h-6 w-6 text-muted-foreground" />
               </div>
               <div>
-                <h3 className="text-4xl font-bold">{stats.chats}</h3>
+                <h3 className="text-4xl font-bold tabular-nums" data-stat>{stats.chats}</h3>
                 <p className="text-muted-foreground mt-1">Chat Sessions</p>
               </div>
             </div>
@@ -115,57 +117,64 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* How It Works */}
-        <h2 className="text-2xl font-semibold mb-2">How It Works</h2>
-        <div className="grid gap-4 md:grid-cols-3 mb-12">
-          <a
-            href="/dashboard/knowledge/new"
-            className="relative flex flex-col items-center justify-center rounded-2xl border bg-card text-card-foreground p-5 hover:shadow-md hover:border-foreground/30 transition-all"
-          >
-            <span className="absolute top-2 left-2 flex h-7 w-7 items-center justify-center rounded-full bg-muted text-xs font-bold">
-              1
-            </span>
-            <div className="rounded-full bg-muted p-3 mb-3">
-              <Brain className="h-6 w-6 text-foreground" />
-            </div>
-            <h3 className="text-base font-medium mb-1">Create Knowledge Base</h3>
-            <p className="text-sm text-muted-foreground text-center">
-              Build a new AI-powered knowledge repository
-            </p>
-          </a>
+        {/* How It Works — asymmetric layout */}
+        <div className="mb-12">
+          <h2 className="text-2xl font-semibold mb-6">How It Works</h2>
+          <div className="grid gap-6 md:grid-cols-3">
+            {/* Step 1 — wider, primary accent */}
+            <a
+              href="/dashboard/knowledge/new"
+              className="group rounded-lg border bg-card p-6 hover:border-primary/30 transition-colors"
+            >
+              <div className="flex items-center gap-3 mb-4">
+                <span className="flex h-8 w-8 items-center justify-center rounded-md bg-primary text-xs font-semibold text-primary-foreground">1</span>
+                <Brain className="h-5 w-5 text-muted-foreground group-hover:text-foreground transition-colors" />
+              </div>
+              <h3 className="text-base font-medium mb-1">Create Knowledge Base</h3>
+              <p className="text-sm text-muted-foreground leading-relaxed">
+                Build a new AI-powered knowledge repository
+              </p>
+            </a>
 
-          <a
-            href="/dashboard/knowledge"
-            className="relative flex flex-col items-center justify-center rounded-2xl border bg-card text-card-foreground p-5 hover:shadow-md hover:border-foreground/30 transition-all"
-          >
-            <span className="absolute top-2 left-2 flex h-7 w-7 items-center justify-center rounded-full bg-muted text-xs font-bold">
-              2
-            </span>
-            <div className="rounded-full bg-muted p-3 mb-3 flex gap-2">
-              <Upload className="h-6 w-6 text-foreground" />
-              <Link2 className="h-6 w-6 text-foreground" />
-            </div>
-            <h3 className="text-base font-medium mb-1">Upload Documents or Link Data Stores</h3>
-            <p className="text-sm text-muted-foreground text-center">
-              Upload PDFs, docs, images, or link data stores — auto-synced from monitored folders
-            </p>
-          </a>
+            {/* Step 2 — wider, accent tint */}
+            <a
+              href="/dashboard/knowledge"
+              className="group rounded-md border bg-gradient-to-b from-primary/3 to-transparent p-6 md:col-span-2 hover:border-primary/30 transition-colors"
+            >
+              <div className="flex items-start gap-4">
+                <div className="flex items-center gap-3">
+                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-primary text-xs font-semibold text-primary-foreground">2</span>
+                  <div className="flex gap-2">
+                    <Upload className="h-5 w-5 text-muted-foreground group-hover:text-foreground transition-colors" />
+                    <Link2 className="h-5 w-5 text-muted-foreground group-hover:text-foreground transition-colors" />
+                  </div>
+                </div>
+                <div>
+                  <h3 className="text-base font-medium mb-1">Upload Documents or Link Data Stores</h3>
+                  <p className="text-sm text-muted-foreground leading-relaxed">
+                    Upload PDFs, docs, images, or link data stores — auto-synced from monitored folders
+                  </p>
+                </div>
+              </div>
+            </a>
 
-          <a
-            href="/dashboard/chat/new"
-            className="relative flex flex-col items-center justify-center rounded-2xl border bg-card text-card-foreground p-5 hover:shadow-md hover:border-foreground/30 transition-all"
-          >
-            <span className="absolute top-2 left-2 flex h-7 w-7 items-center justify-center rounded-full bg-muted text-xs font-bold">
-              3
-            </span>
-            <div className="rounded-full bg-muted p-3 mb-3">
-              <Sparkles className="h-6 w-6 text-foreground" />
-            </div>
-            <h3 className="text-base font-medium mb-1">Start Chatting</h3>
-            <p className="text-sm text-muted-foreground text-center">
-              Get instant answers from your knowledge with AI
-            </p>
-          </a>
+            {/* Step 3 — full width, accent tint */}
+            <a
+              href="/dashboard/chat/new"
+              className="group rounded-md border bg-gradient-to-b from-primary/3 to-transparent p-6 md:col-span-3 hover:border-primary/30 transition-colors"
+            >
+              <div className="flex items-center gap-3">
+                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-primary text-xs font-semibold text-primary-foreground">3</span>
+                <Sparkles className="h-5 w-5 text-muted-foreground group-hover:text-foreground transition-colors" />
+                <div className="ml-2">
+                  <h3 className="text-base font-medium mb-1">Start Chatting</h3>
+                  <p className="text-sm text-muted-foreground leading-relaxed">
+                    Get instant answers from your knowledge with AI
+                  </p>
+                </div>
+              </div>
+            </a>
+          </div>
         </div>
       </div>
     </DashboardLayout>

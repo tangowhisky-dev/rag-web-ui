@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
 import { FileIcon, defaultStyles } from "react-file-icon";
-import { ArrowRight, Plus, Settings, Trash2, Search } from "lucide-react";
+import { ArrowRight, Plus, Settings, Trash2, Search, AlertTriangle } from "lucide-react";
 import KnowledgeLayout from "@/components/layout/knowledge-layout";
 import { useKnowledgeContext } from "@/contexts/knowledge-context";
 import { ApiError } from "@/lib/api";
@@ -16,16 +16,16 @@ interface KbDocument {
 }
 
 function KnowledgeBaseList() {
-  const { kbList, deleteKb, refreshKbList } = useKnowledgeContext();
+  const [deleteTarget, setDeleteTarget] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const { toast } = useToast();
+  const { kbList, deleteKb, refreshKbList } = useKnowledgeContext();
 
   useEffect(() => {
     refreshKbList().finally(() => setLoading(false));
   }, [refreshKbList]);
 
-  const handleDelete = async (id: number) => {
-    if (!confirm("Are you sure you want to delete this knowledge base?")) return;
+  const handleDelete = useCallback(async (id: number) => {
     try {
       await deleteKb(id);
       toast({ title: "Success", description: "Knowledge base deleted successfully" });
@@ -33,8 +33,12 @@ function KnowledgeBaseList() {
       if (error instanceof ApiError) {
         toast({ title: "Error", description: error.message, variant: "destructive" });
       }
+    } finally {
+      setDeleteTarget(null);
     }
-  };
+  }, [deleteKb, toast]);
+
+  const handleDeleteCancel = useCallback(() => setDeleteTarget(null), []);
 
   return (
     <div className="h-full overflow-y-auto">
@@ -78,8 +82,9 @@ function KnowledgeBaseList() {
                     <Search className="h-4 w-4" />
                   </Link>
                   <button
-                    onClick={() => handleDelete(kb.id)}
+                    onClick={() => setDeleteTarget(kb.id)}
                     className="inline-flex items-center justify-center rounded-md bg-destructive/10 hover:bg-destructive/20 w-8 h-8"
+                    aria-label="Delete knowledge base"
                   >
                     <Trash2 className="h-4 w-4 text-destructive" />
                   </button>
@@ -146,6 +151,37 @@ function KnowledgeBaseList() {
           )}
         </div>
       </div>
+
+      {/* Delete confirmation dialog */}
+      {deleteTarget !== null && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" role="dialog" aria-modal="true">
+          <div className="w-full max-w-sm rounded-lg border bg-card p-6 shadow-lg mx-4">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-destructive/10">
+                <AlertTriangle className="h-5 w-5 text-destructive" />
+              </div>
+              <div>
+                <h3 className="text-base font-semibold">Delete Knowledge Base</h3>
+                <p className="text-sm text-muted-foreground">This action cannot be undone.</p>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={handleDeleteCancel}
+                className="px-4 py-2 text-sm font-medium rounded-md border border-input bg-background hover:bg-accent transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => handleDelete(deleteTarget)}
+                className="px-4 py-2 text-sm font-medium rounded-md bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

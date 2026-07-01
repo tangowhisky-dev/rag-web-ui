@@ -237,47 +237,57 @@ export default function Home() {
               From ingestion to insight — every layer is optimised for accuracy, speed, and trust.
             </p>
           </div>
-          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
-            {[
-              {
-                icon: Brain,
-                title: "Hybrid RAG Engine",
-                body: "Dense, sparse, and exact retrieval legs — fused with a reranker — so every answer is grounded in your most relevant content.",
-              },
-              {
-                icon: Network,
-                title: "GraphRAG",
-                body: "Entity extraction and knowledge-graph traversal surface cross-document relationships that keyword search simply misses.",
-              },
-              {
-                icon: Upload,
-                title: "Multi-format Ingestion",
-                body: "Upload PDF, DOCX, Markdown, and TXT. Chunking and vector indexing run automatically in the background.",
-              },
-              {
-                icon: MessageSquare,
-                title: "Cited Answers",
-                body: "Every response links back to the exact source passage with a relevance score, retrieval leg, and chunk rank.",
-              },
-              {
-                icon: Zap,
-                title: "Adaptive Retrieval",
-                body: "Query classification routes each question to the optimal retrieval strategy — factual, entity-centric, multi-part, or ambiguous.",
-              },
-              {
-                icon: Shield,
-                title: "Private by Default",
-                body: "Self-hosted. Your documents never leave your infrastructure. JWT auth with per-user isolation.",
-              },
-            ].map(({ icon: Icon, title, body }) => (
-              <div key={title} className="bg-card border rounded-xl p-6 space-y-3 hover:shadow-md transition-shadow">
-                <div className="h-10 w-10 rounded-lg bg-muted flex items-center justify-center">
-                  <Icon className="h-5 w-5 text-foreground" />
-                </div>
-                <h3 className="font-semibold">{title}</h3>
-                <p className="text-sm text-muted-foreground leading-relaxed">{body}</p>
+          <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-6">
+            {/* Hero feature — spans 2 cols */}
+            <div className="lg:col-span-2 rounded-xl border bg-card p-6 space-y-3 hover:shadow-md transition-shadow">
+              <div className="h-10 w-10 rounded-lg bg-primary/10 flex items-center justify-center">
+                <Brain className="h-5 w-5 text-primary" />
               </div>
-            ))}
+              <h3 className="font-semibold">Hybrid RAG Engine</h3>
+              <p className="text-sm text-muted-foreground leading-relaxed">
+                Dense, sparse, and exact retrieval legs — fused with a reranker — so every answer is grounded in your most relevant content.
+              </p>
+            </div>
+
+            <div className="rounded-lg border bg-card p-5 space-y-2 hover:shadow-md transition-shadow">
+              <div className="h-9 w-9 rounded-md bg-muted flex items-center justify-center">
+                <Network className="h-4 w-4 text-muted-foreground" />
+              </div>
+              <h3 className="font-medium text-sm">GraphRAG</h3>
+              <p className="text-xs text-muted-foreground leading-relaxed">Entity extraction and knowledge-graph traversal surface cross-document relationships.</p>
+            </div>
+
+            <div className="rounded-lg border bg-card p-5 space-y-2 hover:shadow-md transition-shadow">
+              <div className="h-9 w-9 rounded-md bg-muted flex items-center justify-center">
+                <Upload className="h-4 w-4 text-muted-foreground" />
+              </div>
+              <h3 className="font-medium text-sm">Multi-format Ingestion</h3>
+              <p className="text-xs text-muted-foreground leading-relaxed">Upload PDF, DOCX, Markdown, and TXT. Chunking and vector indexing run automatically.</p>
+            </div>
+
+            <div className="rounded-lg border bg-card p-5 space-y-2 hover:shadow-md transition-shadow">
+              <div className="h-9 w-9 rounded-md bg-muted flex items-center justify-center">
+                <MessageSquare className="h-4 w-4 text-muted-foreground" />
+              </div>
+              <h3 className="font-medium text-sm">Cited Answers</h3>
+              <p className="text-xs text-muted-foreground leading-relaxed">Every response links back to the exact source passage with a relevance score.</p>
+            </div>
+
+            <div className="rounded-lg border bg-card p-5 space-y-2 hover:shadow-md transition-shadow">
+              <div className="h-9 w-9 rounded-md bg-muted flex items-center justify-center">
+                <Zap className="h-4 w-4 text-muted-foreground" />
+              </div>
+              <h3 className="font-medium text-sm">Adaptive Retrieval</h3>
+              <p className="text-xs text-muted-foreground leading-relaxed">Query classification routes each question to the optimal retrieval strategy.</p>
+            </div>
+
+            <div className="rounded-lg border bg-card p-5 space-y-2 hover:shadow-md transition-shadow">
+              <div className="h-9 w-9 rounded-md bg-muted flex items-center justify-center">
+                <Shield className="h-4 w-4 text-muted-foreground" />
+              </div>
+              <h3 className="font-medium text-sm">Private by Default</h3>
+              <p className="text-xs text-muted-foreground leading-relaxed">Self-hosted. Your documents never leave your infrastructure. JWT auth with per-user isolation.</p>
+            </div>
           </div>
         </div>
       </section>
