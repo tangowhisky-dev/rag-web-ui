@@ -78,7 +78,7 @@ export default function Home() {
       });
       localStorage.setItem("token", data.access_token);
       document.cookie = `token=${data.access_token}; path=/; SameSite=Lax`;
-      router.push("/dashboard");
+      window.location.href = "/dashboard";
     } catch (err) {
       if (err instanceof ApiError) {
         // Handle rate limiting (429)

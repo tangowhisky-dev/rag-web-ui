@@ -342,7 +342,7 @@ class TestSyncWatchersWithoutOrgAssignment:
         mock_assignment = MagicMock()
         # No assignment for datastore_id=42
 
-        with patch("app.services.datastore_watcher.SessionLocal") as mock_session:
+        with patch("app.services.datastore_watcher.watcher.SessionLocal") as mock_session:
             mock_session.return_value.__enter__ = MagicMock(return_value=MagicMock())
             mock_session.return_value.__exit__ = MagicMock(return_value=None)
             mock_query = MagicMock()

@@ -505,7 +505,8 @@ class StartupRecoveryService:
             # Delete Qdrant vectors first (before DB, so DB rollback doesn't orphan vectors)
             try:
                 from qdrant_client import models
-                from app.services.document_processor import _chunk_id_to_point_id, _get_qdrant_client  # noqa: T100
+                from app.services.document_qdrant import _chunk_id_to_point_id  # noqa: T100
+                from app.services.utils import get_qdrant_client  # noqa: T100
 
                 chunk_ids = [
                     cid[0] for cid in db.query(DocumentChunk.id)
@@ -514,7 +515,7 @@ class StartupRecoveryService:
                 ]
                 if chunk_ids:
                     point_ids = [_chunk_id_to_point_id(cid) for cid in chunk_ids]
-                    _get_qdrant_client().delete(
+                    get_qdrant_client().delete(
                         collection_name=f"ds_{datastore_id}",
                         points_selector=models.PointIdsList(points=point_ids),
                     )

@@ -1,503 +1,51 @@
+"""Document ingestion pipeline — upload, preview, background processing.
+
+This is the main entry point for document processing. It imports helpers
+from document_converter.py (markitdown/OCR) and document_qdrant.py
+(Qdrant collections, embedding, upsert) to keep the monoliths split.
+"""
+
 import asyncio
+import hashlib
 import logging
 import os
-import re
-import uuid
 import traceback
-from app.db.session import SessionLocal
 from typing import Optional, List, Dict, Set, Tuple
+
 from fastapi import UploadFile
-from markitdown import MarkItDown
-from openai import OpenAI as SyncOpenAI
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document as LangchainDocument
-from pydantic import BaseModel
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from qdrant_client.models import PointIdsList
 from sqlalchemy.orm import Session
-from openai import AsyncOpenAI
-from qdrant_client import QdrantClient
-from qdrant_client.http.exceptions import UnexpectedResponse
-from qdrant_client.models import (
-    Distance,
-    PointIdsList,
-    PointStruct,
-    SparseIndexParams,
-    SparseVector,
-    SparseVectorParams,
-    VectorParams,
-)
+
 from app.core.config import settings
+from app.db.session import SessionLocal
 from app.core.storage import get_abs_path, save_file, move_file, delete_file
 from app.services.progress_timeout import ProgressTimeout
 from app.services.markdown_cleaner import clean_markdown
-from app.services.utils import content_hash, get_qdrant_client, get_sparse_embedder
-from app.models.knowledge import ProcessingTask, Document, DocumentChunk
+from app.services.document_converter import (
+    SUPPORTED_EXTENSIONS,
+    CONTENT_TYPE_MAP,
+    _convert_to_markdown,
+)
+from app.services.document_qdrant import (
+    _get_qdrant_collection_name,
+    _ensure_qdrant_collection,
+    _chunk_id_to_point_id,
+    _embed_texts_batch,
+    _build_qdrant_points,
+    _upsert_to_qdrant,
+    UploadResult,
+    TextChunk,
+    PreviewResult,
+)
+from app.services.utils import get_qdrant_client
 from app.services.chunk_record import ChunkRecord
 from app.services.datastore_chunk_record import DataStoreChunkRecord
-
-_markitdown: Optional[MarkItDown] = None
-_EMBED_BATCH_SIZE = 32
-_QDRANT_UPSERT_BATCH = 100
-
-# Supported file extensions (markitdown handles all of these)
-SUPPORTED_EXTENSIONS = {
-    # Documents
-    ".pdf", ".docx", ".doc", ".pptx", ".ppt", ".xlsx", ".xls",
-    # Text / Markup
-    ".txt", ".md", ".html", ".htm", ".mhtml",
-    # Data formats
-    ".csv", ".json", ".xml",
-    # Email
-    ".msg", ".eml",
-    # Books
-    ".epub",
-    # Images (OCR via markitdown-ocr)
-    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff",
-    # Archives (recursively processes contents)
-    ".zip",
-}
+from app.models.knowledge import ProcessingTask, Document, DocumentChunk
 
 logger = logging.getLogger(__name__)
 
-CONTENT_TYPE_MAP = {
-    ".pdf":   "application/pdf",
-    ".docx":  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    ".doc":   "application/msword",
-    ".pptx":  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    ".ppt":   "application/vnd.ms-powerpoint",
-    ".xlsx":  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    ".xls":   "application/vnd.ms-excel",
-    ".txt":   "text/plain",
-    ".md":    "text/markdown",
-    ".html":  "text/html",
-    ".htm":   "text/html",
-    ".mhtml": "message/rfc822",
-    ".csv":   "text/csv",
-    ".json":  "application/json",
-    ".xml":   "application/xml",
-    ".msg":   "application/vnd.ms-outlook",
-    ".eml":   "message/rfc822",
-    ".epub":  "application/epub+zip",
-    ".jpg":   "image/jpeg",
-    ".jpeg":  "image/jpeg",
-    ".png":   "image/png",
-    ".gif":   "image/gif",
-    ".bmp":   "image/bmp",
-    ".tiff":  "image/tiff",
-    ".zip":   "application/zip",
-}
-
-
-def _get_qdrant_collection_name(data_store_id: Optional[int], kb_id: Optional[int]) -> str:
-    """Determine Qdrant collection name based on document source.
-    
-    - DataStore documents: ds_{data_store_id}
-    - Direct KB uploads: kb_{kb_id}
-    """
-    if data_store_id:
-        return f"ds_{data_store_id}"
-    elif kb_id:
-        return f"kb_{kb_id}"
-    else:
-        raise ValueError("Either data_store_id or kb_id must be provided")
-
-
-def _ensure_qdrant_collection(client: QdrantClient, collection_name: str) -> None:
-    """Create a Qdrant collection if it does not exist.
-
-    Handles the race condition where two concurrent ingestion tasks both
-    try to create the same collection.  A 409 Conflict simply means
-    another thread already created it — that is fine.
-    """
-    existing = {c.name for c in client.get_collections().collections}
-    if collection_name not in existing:
-        try:
-            client.create_collection(
-                collection_name=collection_name,
-                vectors_config={
-                    "dense": VectorParams(
-                        size=settings.DENSE_EMBEDDING_DIM,
-                        distance=Distance.COSINE,
-                    )
-                },
-                sparse_vectors_config={
-                    "sparse": SparseVectorParams(
-                        index=SparseIndexParams(on_disk=False)
-                    )
-                },
-            )
-        except UnexpectedResponse as e:
-            # 409 means another thread created the collection first — harmless
-            if "409" in str(e) or "already exists" in str(e).lower():
-                logger.debug(
-                    "Qdrant collection %s already created by concurrent task", collection_name
-                )
-            else:
-                raise
-
-
-from app.services.reasoning_tags import strip_reasoning_tags
-
-def _get_markitdown() -> MarkItDown:
-    """
-    Lazy singleton for MarkItDown converter.
-
-    When VISION_MODEL is configured, the markitdown-ocr plugin is
-    activated with an llm_client so it can OCR embedded images in PDFs,
-    DOCX, PPTX, and XLSX files automatically.
-
-    When VISION_MODEL is unset, MarkItDown is initialised without a
-    client — markitdown-ocr still loads (if installed) but silently skips
-    OCR, which is identical to the previous behaviour.
-    """
-    global _markitdown
-    if _markitdown is None:
-        vision_model = settings.VISION_MODEL
-        if vision_model:
-            vision_client = SyncOpenAI(
-                api_key=settings.OPENAI_API_KEY,
-                base_url=settings.effective_vision_api_base,
-            )
-            _markitdown = MarkItDown(
-                enable_plugins=True,
-                llm_client=vision_client,
-                llm_model=vision_model,
-                llm_prompt=(
-                    "Extract all text from this image into clean, naturally flowing paragraphs, "
-                    "while preserving document structure and any table or sub-element layout.\n\n"
-                    "Rules:\n"
-                    "- Remove unnatural line breaks within sentences\n"
-                    "- Join split words and sentences caused by column layout or line wrapping\n"
-                    "- Keep proper paragraph breaks where the topic clearly changes\n"
-                    "- Preserve tables using Markdown table syntax\n"
-                    "- Preserve all original meaning and technical terms exactly\n"
-                    "- Output only the extracted text, no explanations or commentary"
-                ),
-            )
-            logger.info(
-                "[markitdown] OCR enabled — vision_model=%s base=%s",
-                vision_model, settings.effective_vision_api_base,
-            )
-        else:
-            _markitdown = MarkItDown()
-            logger.info(
-                "[markitdown] OCR disabled — VISION_MODEL not set"
-            )
-    return _markitdown
-
-
-def _convert_to_markdown(abs_path: str, file_name: str, enable_ocr: Optional[bool] = None) -> str:
-    """
-    Convert any supported file to clean Markdown text using markitdown.
-
-    enable_ocr: tri-state override.
-      None  → use global VISION_MODEL setting (default behaviour)
-      True  → force OCR on (requires VISION_MODEL to be configured)
-      False → force OCR off for this document regardless of global setting
-
-    Think traces (reasoning tags configured in REASONING_TAGS) are stripped
-    before returning. Falls back gracefully to raw UTF-8 if conversion fails.
-    """
-    try:
-        if enable_ocr is False:
-            # Per-document OCR override: use a plain MarkItDown with no vision client.
-            md_instance = MarkItDown()
-            logger.info("[markitdown] OCR disabled for this document (per-document override)")
-        elif enable_ocr is True:
-            # Explicit on: use the configured singleton (which has OCR if set up).
-            md_instance = _get_markitdown()
-            if settings.VISION_MODEL is None:
-                logger.warning("[markitdown] OCR requested but VISION_MODEL not set — falling back to text-only")
-        else:
-            # Default: respect global setting.
-            md_instance = _get_markitdown()
-        result = md_instance.convert(abs_path)
-        markdown_text = result.text_content or ""
-
-        # Strip reasoning tag blocks configured in settings.REASONING_TAGS.
-        cleaned = strip_reasoning_tags(markdown_text)
-
-        if len(cleaned) < len(markdown_text):
-            stripped_chars = len(markdown_text) - len(cleaned)
-            logger.info(
-                "[markitdown] stripped %d chars of reasoning tags from %s",
-                stripped_chars, file_name,
-            )
-
-        logger.info(
-            "[markitdown] converted %s → %d chars of markdown (ocr=%s)",
-            file_name, len(cleaned), bool(settings.VISION_MODEL),
-        )
-        return cleaned
-    except Exception as e:
-        logger.warning(
-            "[markitdown] conversion failed for %s (%s) — falling back to raw text",
-            file_name, e
-        )
-        try:
-            with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
-                return f.read()
-        except Exception:
-            return ""
-
-
-def _chunk_id_to_point_id(chunk_id: str) -> str:
-    """Convert a SHA-256 hex chunk ID to a deterministic UUID for Qdrant."""
-    return str(uuid.uuid5(uuid.NAMESPACE_OID, chunk_id))
-
-
-async def _embed_texts_batch(
-    texts: List[str],
-    progress_cb=None,
-    progress_start: int = 0,
-    progress_end: int = 100,
-) -> List[List[float]]:
-    """Compute dense embeddings via the OpenAI-compatible API, in batches.
-
-    progress_cb(pct, msg) is called after each batch, with pct mapped between
-    progress_start and progress_end so callers can slot this into a larger bar.
-    """
-    client = AsyncOpenAI(
-        api_key=settings.OPENAI_API_KEY,
-        base_url=settings.OPENAI_API_BASE,
-    )
-    all_embeddings: List[List[float]] = []
-    total_batches = max(1, (len(texts) + _EMBED_BATCH_SIZE - 1) // _EMBED_BATCH_SIZE)
-    for batch_idx, i in enumerate(range(0, len(texts), _EMBED_BATCH_SIZE)):
-        batch = texts[i : i + _EMBED_BATCH_SIZE]
-        response = await client.embeddings.create(
-            input=batch,
-            model=settings.DENSE_EMBEDDINGS_MODEL,
-        )
-        all_embeddings.extend(r.embedding for r in response.data)
-        if progress_cb is not None:
-            frac = (batch_idx + 1) / total_batches
-            pct = int(progress_start + frac * (progress_end - progress_start))
-            done = min(i + _EMBED_BATCH_SIZE, len(texts))
-            progress_cb(pct, f"Embedding chunks {done}/{len(texts)}…")
-    return all_embeddings
-
-
-def _build_qdrant_points(
-    chunk_payloads: List[Tuple[str, str, dict, int]],  # (chunk_id, text, metadata, index)
-    dense_embeddings: List[List[float]],
-    sparse_embeddings,
-    kb_id: Optional[int] = None,
-    document_id: int = None,
-    file_name: str = "",
-    data_store_id: Optional[int] = None,
-) -> List[PointStruct]:
-    """Build Qdrant PointStruct list from pre-computed embeddings.
-    
-    Payload includes both kb_id and data_store_id for proper source tracking.
-    """
-    points = []
-    for (chunk_id, chunk_text, source_meta, chunk_index), dense_emb, sparse_emb in zip(
-        chunk_payloads, dense_embeddings, sparse_embeddings
-    ):
-        points.append(
-            PointStruct(
-                id=_chunk_id_to_point_id(chunk_id),
-                vector={
-                    "dense": dense_emb,
-                    "sparse": SparseVector(
-                        indices=sparse_emb.indices.tolist(),
-                        values=sparse_emb.values.tolist(),
-                    ),
-                },
-                payload={
-                    "chunk_text": chunk_text,
-                    "kb_id": kb_id if kb_id else None,
-                    "data_store_id": data_store_id,
-                    "document_id": document_id,
-                    "file_name": file_name,
-                    "chunk_index": chunk_index,
-                    "qdrant_point_id": _chunk_id_to_point_id(chunk_id),  # explicit UUID for Neo4j cross-reference
-                    **source_meta,
-                },
-            )
-        )
-    return points
-
-
-async def _upsert_to_qdrant(
-    chunk_payloads: List[Tuple[str, str, dict, int]],
-    kb_id: Optional[int] = None,
-    document_id: int = None,
-    file_name: str = "",
-    data_store_id: Optional[int] = None,
-    progress_cb=None,   # optional callable(pct: int, msg: str)
-    progress_start: int = 40,
-    progress_end: int = 80,
-) -> None:
-    """Compute both vector types and upsert all points to Qdrant.
-
-    progress_cb is called after each embedding batch with the current progress
-    percentage (mapped from progress_start to progress_end) and a message.
-    """
-    if not chunk_payloads:
-        return
-    texts = [p[1] for p in chunk_payloads]
-    dense_embs = await _embed_texts_batch(
-        texts,
-        progress_cb=progress_cb,
-        progress_start=progress_start,
-        progress_end=progress_end,
-    )
-    # fastembed BM25 tokenization is Python/numpy — does NOT release the GIL.
-    # Running the full 2795-text corpus in one executor call still blocks the
-    # event loop for 10-30s. Batch it with asyncio.sleep(0) yields between
-    # batches so poll requests get served.
-    loop = asyncio.get_event_loop()
-    sparse_embs: list = []
-    embedder = get_sparse_embedder()
-    for batch_start in range(0, len(texts), _EMBED_BATCH_SIZE):
-        batch = texts[batch_start : batch_start + _EMBED_BATCH_SIZE]
-        batch_sparse = await loop.run_in_executor(
-            None, lambda b=batch: list(embedder.embed(b))
-        )
-        sparse_embs.extend(batch_sparse)
-        await asyncio.sleep(0)  # yield — let poll requests through
-
-    # Build point structs and upsert in batches, yielding the event loop between
-    # each batch via asyncio.sleep(0). Pure-Python object construction holds the
-    # GIL even inside run_in_executor, so we must yield explicitly to let poll
-    # requests through — otherwise the event loop is blocked for 10-30 seconds
-    # while 2795 PointStruct objects are built, causing ECONNRESET on the frontend.
-    client = get_qdrant_client()
-    collection_name = _get_qdrant_collection_name(data_store_id, kb_id)
-    _ensure_qdrant_collection(client, collection_name)
-    n = len(chunk_payloads)
-    for batch_start in range(0, n, _QDRANT_UPSERT_BATCH):
-        batch_end = min(batch_start + _QDRANT_UPSERT_BATCH, n)
-        batch_chunks = chunk_payloads[batch_start:batch_end]
-        batch_dense = dense_embs[batch_start:batch_end]
-        batch_sparse = sparse_embs[batch_start:batch_end]
-
-        def _build_upsert_batch(bc=batch_chunks, bd=batch_dense, bs=batch_sparse):
-            pts = _build_qdrant_points(bc, bd, bs, kb_id, document_id, file_name, data_store_id)
-            client.upsert(collection_name=collection_name, points=pts)
-
-        await loop.run_in_executor(None, _build_upsert_batch)
-        # Yield the event loop so poll requests can be served between batches
-        await asyncio.sleep(0)
-
-class UploadResult(BaseModel):
-    file_path: str
-    file_name: str
-    file_size: int
-    content_type: str
-    file_hash: str
-
-class TextChunk(BaseModel):
-    content: str
-    metadata: Optional[Dict] = None
-
-class PreviewResult(BaseModel):
-    chunks: List[TextChunk]
-    total_chunks: int
-
-async def process_document(
-    file_path: str, 
-    file_name: str, 
-    kb_id: int, 
-    document_id: int, 
-    data_store_id: Optional[int] = None,
-    chunk_size: int = None, 
-    chunk_overlap: int = None
-) -> None:
-    """Process document and store in vector database with incremental updates
-    
-    data_store_id: If set, vectors stored in ds_{data_store_id} collection.
-                   Otherwise, stored in kb_{kb_id} collection.
-    """
-    # Use env-configured defaults when callers do not supply explicit values.
-    # WARNING: chunk_size and chunk_overlap must stay consistent across all
-    # documents in a knowledge base. Do not change CHUNK_SIZE / OVERLAP_PERCENTAGE
-    # in .env after documents have been ingested — re-upload existing documents
-    # to re-index them with the new settings.
-    if chunk_size is None:
-        chunk_size = settings.CHUNK_SIZE
-    if chunk_overlap is None:
-        chunk_overlap = settings.chunk_overlap
-    
-    try:
-        preview_result = await preview_document(file_path, chunk_size, chunk_overlap)
-        
-        # Initialize chunk record manager (DataStore or KB)
-        if data_store_id is not None:
-            chunk_manager = DataStoreChunkRecord(data_store_id)
-        else:
-            chunk_manager = ChunkRecord(kb_id)
-        
-        # Get existing chunk hashes for this file
-        existing_hashes = chunk_manager.list_chunks(file_name)
-        
-        # Prepare new chunks
-        new_chunks = []
-        current_hashes = set()
-        
-        for chunk_index, chunk in enumerate(preview_result.chunks):
-            # Calculate chunk hash
-            chunk_hash = hashlib.sha256(
-                (chunk.content + str(chunk.metadata)).encode()
-            ).hexdigest()
-            current_hashes.add(chunk_hash)
-            
-            # Skip if chunk hasn't changed
-            if chunk_hash in existing_hashes:
-                continue
-            
-            # Create unique ID for the chunk
-            source_id = data_store_id if data_store_id else kb_id
-            chunk_id = hashlib.sha256(
-                f"{source_id}:{file_name}:{chunk_hash}".encode()
-            ).hexdigest()
-            
-            # chunk_metadata holds only variable source metadata (page number, source path)
-            # chunk_text and chunk_index are stored as proper columns
-            metadata = {k: v for k, v in chunk.metadata.items()
-                        if k not in ("kb_id", "document_id", "chunk_id", "file_name")}
-            
-            new_chunks.append({
-                "id": chunk_id,
-                "kb_id": kb_id if kb_id else None,
-                "data_store_id": data_store_id if data_store_id else None,
-                "document_id": document_id,
-                "file_name": file_name,
-                "chunk_text": chunk.content,
-                "chunk_index": chunk_index,
-                "metadata": metadata,
-                "hash": chunk_hash
-            })
-        
-        # Delete removed chunks from MySQL + Qdrant BEFORE adding new ones
-        # so that if the new chunk upsert fails, old chunks are still present.
-        chunks_to_delete = chunk_manager.get_deleted_chunks(current_hashes, file_name)
-        if chunks_to_delete:
-            logger.info(f"Removing {len(chunks_to_delete)} deleted chunks")
-            chunk_manager.delete_chunks(chunks_to_delete)
-            point_ids = [_chunk_id_to_point_id(cid) for cid in chunks_to_delete]
-            collection_name = f"ds_{data_store_id}" if data_store_id else f"kb_{kb_id}"
-            get_qdrant_client().delete(
-                collection_name=collection_name,
-                points_selector=PointIdsList(points=point_ids),
-            )
-        
-        # Add new chunks to MySQL + Qdrant
-        if new_chunks:
-            logger.info(f"Adding {len(new_chunks)} new/updated chunks")
-            chunk_manager.add_chunks(new_chunks)
-            chunk_payloads = [
-                (c["id"], c["chunk_text"], c.get("metadata") or {}, c["chunk_index"])
-                for c in new_chunks
-            ]
-            await _upsert_to_qdrant(chunk_payloads, kb_id, document_id, file_name, data_store_id)
-        
-        logger.info("Document processing completed successfully")
-        
-    except Exception as e:
-        logger.error(f"Error processing document: {str(e)}")
-        raise
 
 async def upload_document(file: UploadFile, kb_id: int, user_id: int) -> UploadResult:
     """Step 1: Upload document to local storage"""
@@ -527,6 +75,7 @@ async def upload_document(file: UploadFile, kb_id: int, user_id: int) -> UploadR
         content_type=content_type,
         file_hash=file_hash
     )
+
 
 async def preview_document(file_path: str, chunk_size: int = None, chunk_overlap: int = None) -> PreviewResult:
     """Step 2: Generate preview chunks"""
@@ -583,6 +132,7 @@ async def preview_document(file_path: str, chunk_size: int = None, chunk_overlap
     except Exception as e:
         logging.error(f"Failed to preview document {file_path}: {str(e)}")
         raise
+
 
 async def process_document_background(
     temp_path: str,
@@ -899,7 +449,7 @@ async def process_document_background(
                 _chunks = [p[1] for p in qdrant_payloads]
                 _chunk_ids = [p[0] for p in qdrant_payloads]
                 _task_id = task_id
-
+    
                 async def _build_graph() -> None:
                     # Mark graph extraction as in-progress in the DB
                     from app.db.session import SessionLocal as _SessionLocal
@@ -912,7 +462,7 @@ async def process_document_background(
                             _db.commit()
                     finally:
                         _db.close()
-
+    
                     try:
                         from app.services.graph_service import build_graph_for_document
                         await build_graph_for_document(
@@ -946,7 +496,7 @@ async def process_document_background(
                                 _db3.commit()
                         finally:
                             _db3.close()
-
+    
                 try:
                     await _build_graph()
                     logger.info(f"Task {task_id}: Knowledge graph built in Neo4j")

@@ -475,24 +475,21 @@ class TestRecoveryDeletedFileCleanedUp:
                 return_value=discovery_result,
             ):
                 # Qdrant client and Neo4j modules may fail to import (neo4j not installed)
-                # so we mock the entire graph_service and document_processor modules
+                # so we mock the entire graph_service and document_qdrant modules
                 mock_graph_service = MagicMock()
                 mock_qdrant_client = MagicMock()
                 mock_qdrant_client.delete = MagicMock()
-                mock_document_processor = MagicMock()
-                mock_document_processor._get_qdrant_client.return_value = mock_qdrant_client
-                mock_document_processor._chunk_id_to_point_id.return_value = "point-0"
 
                 with patch.dict(
                     "sys.modules",
                     {"app.services.graph_service": mock_graph_service},
                 ):
                     with patch(
-                        "app.services.document_processor._get_qdrant_client"
+                        "app.services.utils.get_qdrant_client"
                     ) as mock_qdrant_getter:
                         mock_qdrant_getter.return_value = mock_qdrant_client
                         with patch(
-                            "app.services.document_processor._chunk_id_to_point_id"
+                            "app.services.document_qdrant._chunk_id_to_point_id"
                         ) as mock_chunk_id:
                             mock_chunk_id.return_value = "point-0"
                             service.start()
@@ -568,7 +565,7 @@ class TestRecoverySSEStream:
         We work around this by mocking _get_startup_recovery at the module level
         and verifying the service's get_all_status returns correct data.
         """
-        import app.api.api_v1.datastores as ds_api
+        import app.api.api_v1.datastore_recovery as ds_api
 
         # Create a proper StartupRecoveryService mock that behaves like the real one
         mock_recovery = MagicMock()
@@ -602,7 +599,7 @@ class TestRecoverySSEStream:
 
     def test_recovery_get_status_endpoint_idle(self, client, db):
         """GET /datastores/{id}/recovery-status returns idle when no scan active."""
-        import app.api.api_v1.datastores as ds_api
+        import app.api.api_v1.datastore_recovery as ds_api
 
         ds_id = create_datastore(db, "/some/path", name="idle_ds")
         create_admin_user(db, prefix="idle")
@@ -622,7 +619,7 @@ class TestRecoverySSEStream:
 
     def test_recovery_get_status_endpoint_running(self, client, db):
         """GET /datastores/{id}/recovery-status returns scan data when running."""
-        import app.api.api_v1.datastores as ds_api
+        import app.api.api_v1.datastore_recovery as ds_api
 
         ds_id = create_datastore(db, "/some/path", name="run_ds")
         create_admin_user(db, prefix="run")
@@ -660,7 +657,7 @@ class TestRecoverySSEStream:
 
     def test_recovery_service_none_returns_503(self, client, db):
         """When recovery service is None, GET /recovery-status should return 503."""
-        import app.api.api_v1.datastores as ds_api
+        import app.api.api_v1.datastore_recovery as ds_api
 
         ds_id = create_datastore(db, "/some/path", name="svc_none")
         create_admin_user(db, prefix="svc_none")
@@ -1144,7 +1141,7 @@ class TestTriggerManualRecovery:
 
     def test_trigger_manual_recovery(self, client, db):
         """POST /recover starts recovery scan and returns 202."""
-        import app.api.api_v1.datastores as ds_api
+        import app.api.api_v1.datastore_recovery as ds_api
 
         with tempfile.TemporaryDirectory() as tmp_str:
             tmp_path = Path(tmp_str)
@@ -1256,7 +1253,7 @@ class TestManualRecoveryAlreadyRunning:
 
     def test_manual_recovery_already_running(self, client, db):
         """POST /recover returns 409 if recovery already in progress for the same datastore."""
-        import app.api.api_v1.datastores as ds_api
+        import app.api.api_v1.datastore_recovery as ds_api
 
         with tempfile.TemporaryDirectory() as tmp_str:
             tmp_path = Path(tmp_str)

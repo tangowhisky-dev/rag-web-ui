@@ -1,19 +1,6 @@
-"""
-LangGraph-based multi-agent RAG orchestration — Agentic Pipeline v2.
+"""All RAG graph node functions and graph assembly.
 
-Pipeline flow:
-  rewrite_query
-    → context_router          (smart source routing: kb / file / both)
-    → decompose_query         (split into 2-5 atomic sub-queries)
-    → parallel_retrieval      (hybrid search per sub-query, reinforced dedup)
-    → extract_file_sections   (select relevant file sections per sub-query)
-    → draft_answer            (draft answer for grading — not final output)
-    → grade_coverage          (LLM grades which sub-queries are covered)
-    → [conditional_router]
-        ├─ all covered          → generate_answer (final)
-        ├─ uncovered, attempt=0 → widened_retrieval  → draft_answer → grade_coverage
-        ├─ uncovered, attempt=1 → keyword_search_loop → draft_answer → grade_coverage
-        └─ attempt >= 2         → generate_answer (partial / unable)
+Split from rag_graph.py for maintainability.
 """
 
 from __future__ import annotations
@@ -26,217 +13,54 @@ import time
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from pydantic import BaseModel
-from typing_extensions import TypedDict
 
 from app.core.config import settings
-from app.services.utils import content_hash
+from app.services.rag_graph.helpers import (
+    _serialise_doc,
+    _dedup_and_reinforce,
+    _build_context_string,
+)
+
+
+# Import _get_llm and _invoke_structured from the package root so that
+# tests which patch 'app.services.rag_graph._get_llm' can reach nodes.py.
+# We look up the name from the package module at call time via sys.modules,
+# so any patch applied to app.services.rag_graph._get_llm will be picked up.
+def _get_llm(model_name=None, temperature=0.0, api_base=None):
+    import sys
+    pkg = sys.modules.get('app.services.rag_graph')
+    if pkg is not None and hasattr(pkg, '_get_llm'):
+        # Use the patched or original function from the package namespace
+        return pkg._get_llm(model_name, temperature, api_base)
+    # Fallback: import directly from helpers (shouldn't happen in normal flow)
+    from app.services.rag_graph.helpers import _get_llm as _impl
+    return _impl(model_name, temperature, api_base)
+
+
+def _invoke_structured(llm, messages, schema):
+    import sys
+    pkg = sys.modules.get('app.services.rag_graph')
+    if pkg is not None and hasattr(pkg, '_invoke_structured'):
+        return pkg._invoke_structured(llm, messages, schema)
+    # Fallback
+    from app.services.rag_graph.helpers import _invoke_structured as _impl
+    return _impl(llm, messages, schema)
+from app.services.rag_graph.schemas import (
+    RAGGraphState,
+    EVENT_AGENT_STEP,
+    EVENT_REWRITTEN,
+    EVENT_CONTEXT,
+    EVENT_TOKEN,
+    EVENT_DONE,
+    _RouterOutput,
+    _SectionOutput,
+    _SubQueriesOutput,
+    _CoverageItem,
+    _CoverageOutput,
+    _KeywordsOutput,
+)
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# State schema
-# ---------------------------------------------------------------------------
-
-class RAGGraphState(TypedDict):
-    # ── Query lifecycle ────────────────────────────────────────────────────
-    query: str
-    rewritten_query: str
-    sub_queries: List[str]             # from decompose_query
-
-    # ── Routing (preserved from v1) ───────────────────────────────────────
-    sources: List[str]                 # ["kb", "file_current", "file_prior", "chat_history"]
-    chat_history_docs: list            # from chat_history_retrieval_node
-    file_ids_needed: List[int]
-    router_rationale: str
-
-    # ── File ──────────────────────────────────────────────────────────────
-    file_markdown: Optional[str]
-
-    # ── Retrieval ─────────────────────────────────────────────────────────
-    retrieved_docs: list               # accumulates across all retry attempts
-    retrieval_attempt: int             # 0=first, 1=widened, 2=keyword
-    keyword_iterations: list           # [{sub_query, iteration, keywords, results_found}]
-
-    # ── Grading / coverage ────────────────────────────────────────────────
-    draft_answer: str
-    coverage_result: dict              # sub_query → "covered"|"partially_covered"|"not_covered"
-    uncovered_sub_queries: List[str]
-
-    # ── Final answer ──────────────────────────────────────────────────────
-    merged_context: str
-    answer: str
-    _usage: dict
-
-    # ── Observability ─────────────────────────────────────────────────────
-    agent_steps: list
-
-    # ── Run-time context injected by run_stream ───────────────────────────
-    knowledge_base_ids: List[int]
-    recent_lc_history: list
-    existing_summary: Optional[str]
-    use_dense: bool
-    use_sparse: bool
-    use_exact: bool
-    use_graph_rag: bool
-    temperature: float
-    model_name: Optional[str]
-    display_query: Optional[str]
-    api_base: Optional[str]
-    query_model: Optional[str]
-    org_id: Optional[int]
-    _db: Session | None
-
-
-# ---------------------------------------------------------------------------
-# SSE event type constants
-# ---------------------------------------------------------------------------
-
-EVENT_AGENT_STEP = "agent_step"
-EVENT_REWRITTEN  = "rewritten_query"
-EVENT_CONTEXT    = "context"
-EVENT_TOKEN      = "token"
-EVENT_DONE       = "done"
-
-
-# ---------------------------------------------------------------------------
-# Pydantic schemas for structured LLM calls
-# ---------------------------------------------------------------------------
-
-class _RouterOutput(BaseModel):
-    sources: List[str]
-    rationale: str
-    file_ids_needed: List[int] = []
-
-class _SectionOutput(BaseModel):
-    indices: List[int]
-
-class _SubQueriesOutput(BaseModel):
-    sub_queries: List[str]
-
-class _CoverageItem(BaseModel):
-    sub_query: str
-    status: str  # "covered" | "partially_covered" | "not_covered"
-
-class _CoverageOutput(BaseModel):
-    coverage: List[_CoverageItem]
-
-class _KeywordsOutput(BaseModel):
-    broad_keywords: List[str]
-    narrow_keywords: List[str]
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _get_llm(model_name: Optional[str] = None, temperature: float = 0.0, api_base: Optional[str] = None):
-    from langchain_openai import ChatOpenAI
-    return ChatOpenAI(
-        model=model_name or settings.OPENAI_MODEL,
-        temperature=temperature,
-        openai_api_base=api_base or settings.OPENAI_API_BASE,
-        openai_api_key=settings.OPENAI_API_KEY,
-        streaming=True,
-    )
-
-
-async def _invoke_structured(llm, messages: list, schema: type) -> str:
-    """
-    Invoke LLM with json_schema constrained output.
-    Falls back to unconstrained invocation if the server rejects the format.
-    strict=False intentional: local models often refuse strict mode.
-    """
-    json_schema_format = {
-        "type": "json_schema",
-        "json_schema": {
-            "name": schema.__name__,
-            "strict": False,
-            "schema": schema.model_json_schema(),
-        },
-    }
-    try:
-        resp = await llm.ainvoke(messages, response_format=json_schema_format)
-    except Exception as exc:
-        err = str(exc)
-        if "response_format" in err or "json_schema" in err or "400" in err:
-            resp = await llm.ainvoke(messages)
-        else:
-            raise
-    return resp.content
-
-
-def _serialise_doc(doc: Any) -> dict:
-    if isinstance(doc, dict):
-        return doc
-    if hasattr(doc, "page_content"):
-        return {"page_content": doc.page_content, "metadata": dict(doc.metadata)}
-    return {"page_content": str(doc), "metadata": {}}
-
-
-def _dedup_and_reinforce(doc_lists: List[List[dict]]) -> List[dict]:
-    """
-    Merge multiple lists of serialised docs.
-    A chunk found in N sub-query results has its score multiplied (reinforced).
-    Returns sorted by reinforced score descending.
-    """
-    seen: Dict[str, dict] = {}
-    for docs in doc_lists:
-        for doc in docs:
-            text = doc.get("page_content", "")
-            h = content_hash(text)
-            meta = doc.get("metadata", {})
-            score = float(meta.get("_rrf_score", meta.get("score", 0.001)))
-            if h in seen:
-                prev_meta = seen[h].get("metadata", {})
-                prev_score = float(prev_meta.get("_reinforced_score", score))
-                new_meta = dict(prev_meta)
-                new_meta["_reinforced_score"] = prev_score + score
-                new_meta["_retrieval_count"] = prev_meta.get("_retrieval_count", 1) + 1
-                seen[h] = {"page_content": text, "metadata": new_meta}
-            else:
-                new_meta = dict(meta)
-                new_meta["_reinforced_score"] = score
-                new_meta["_retrieval_count"] = 1
-                seen[h] = {"page_content": text, "metadata": new_meta}
-
-    result = list(seen.values())
-    result.sort(key=lambda d: d.get("metadata", {}).get("_reinforced_score", 0), reverse=True)
-    return result
-
-
-def _build_context_string(docs: List[dict], file_markdown: Optional[str] = None) -> str:
-    """
-    Build context string for the LLM.
-
-    Chat history docs (metadata._source_type == 'chat_history') are placed first
-    under a plain [Prior Answer] label with no number — the LLM is instructed
-    not to cite them. KB chunks follow with sequential [KB-N] numbering so
-    citations remain consistent.
-    """
-    parts: List[str] = []
-
-    # ── Chat history docs first — no citation number ───────────────────────────
-    for doc in docs:
-        if doc.get("metadata", {}).get("_source_type") == "chat_history":
-            content = doc.get("page_content", "").strip()
-            parts.append(f"[Prior Answer]\n{content}")
-
-    # ── KB chunks with sequential numbers for citations ─────────────────────
-    kb_counter = 0
-    for doc in docs:
-        if doc.get("metadata", {}).get("_source_type") != "chat_history":
-            kb_counter += 1
-            content = doc.get("page_content", "").strip()
-            meta = doc.get("metadata", {})
-            source = meta.get("source") or meta.get("file_name", "")
-            header = f"[KB-{kb_counter}]" + (f" ({source})" if source else "")
-            parts.append(f"{header}\n{content}")
-
-    if file_markdown and file_markdown.strip():
-        parts.append(f"[FILE CONTENT]\n{file_markdown.strip()}")
-
-    return "\n\n---\n\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -1378,7 +1202,7 @@ _rag_graph = _build_rag_graph()
 async def run_stream(
     query: str,
     file_markdown: Optional[str],
-    db: Session,
+    db: Any,
     chat_id: int,
     knowledge_base_ids: List[int],
     recent_lc_history: list,
@@ -1501,57 +1325,55 @@ async def run_stream(
                         "query": output["rewritten_query"],
                     }
 
-    # ── Post-graph: citation normalisation ───────────────────────────────
-    if answer_streaming_started and streamed_answer_parts:
-        raw_answer = "".join(streamed_answer_parts)
-        # Normalise [KB-N] citations the LLM emits instead of [N](N)
-        normalised = re.sub(r'\[KB-(\d+)\]', lambda m: f'[{m.group(1)}]({m.group(1)})', raw_answer)
-        normalised = re.sub(r'\[(\d+)\](?!\()', lambda m: f'[{m.group(1)}]({m.group(1)})', normalised)
-        if normalised != raw_answer:
-            yield {"event": "answer_rewrite", "content": normalised}
-        final_state["answer"] = normalised
+                # Emit context event after parallel_retrieval
+                if output.get("retrieved_docs") and "retrieval_done" not in emitted_done_nodes:
+                    emitted_done_nodes.add("retrieval_done")
+                    docs = output["retrieved_docs"]
+                    if docs:
+                        confidence = "high" if len(docs) > 5 else ("medium" if len(docs) > 0 else "low")
+                        yield {
+                            "event": EVENT_CONTEXT,
+                            "docs": docs[:5],
+                            "confidence": confidence,
+                            "score": sum(
+                                float(d.get("metadata", {}).get("_rrf_score", d.get("metadata", {}).get("score", 0)))
+                                for d in docs[:5]
+                            ),
+                            "total_docs": len(docs),
+                        }
 
-    # ── Context event (summary of all retrieval) ─────────────────────────
-    # Exclude chat_history_docs — conversational context, not citable KB sources.
-    all_docs = final_state.get("retrieved_docs") or []
-    docs = [d for d in all_docs if d.get("metadata", {}).get("_source_type") != "chat_history"]
-    answer = final_state.get("answer") or ""
-    coverage_result = final_state.get("coverage_result") or {}
-    covered_count = sum(1 for s in coverage_result.values() if s == "covered")
-    total_count = len(coverage_result) or 1
-    confidence_score = covered_count / total_count
+        # ── End of graph run ────────────────────────────────────────────
+        if ev_name == "on_chain_end" and ev_data.get("output") is None and langgraph_node == END:
+            break
+
+    # ── Final: emit the answer ──────────────────────────────────────────
+    answer = final_state.get("answer", "")
+    if not answer and streamed_answer_parts:
+        answer = "".join(streamed_answer_parts)
+
+    # Normalise citations: [KB-N] → [N](N)
+    if answer:
+        answer = re.sub(
+            r'\[KB-(\d+)\]',
+            lambda m: f'[{m.group(1)}]({m.group(1)})',
+            answer,
+        )
+        answer = re.sub(
+            r'\[(\d+)\](?!\()',
+            lambda m: f'[{m.group(1)}]({m.group(1)})',
+            answer,
+        )
+
+    if answer_streaming_started and streamed_answer_parts:
+        # The streaming captured the answer — emit a rewrite event with normalised citations
+        if answer != "".join(streamed_answer_parts):
+            yield {
+                "event": "answer_rewrite",
+                "content": answer,
+            }
 
     yield {
-        "event": EVENT_CONTEXT,
-        "docs": docs,
-        "confidence": (
-            "high" if confidence_score >= 0.8
-            else ("medium" if confidence_score >= 0.4 else "low")
-        ),
-        "score": round(confidence_score, 2),
-        "suggestion": "" if docs else "No relevant documents found.",
-        "failed_legs": [],
-        "breakdown": {
-            "kb_docs": len(docs),
-            "file_chars": len(final_state.get("file_markdown") or ""),
-            "merged_chars": len(answer),
-            "sources": final_state.get("sources") or [],
-            "sub_queries": final_state.get("sub_queries") or [],
-            "retrieval_attempts": final_state.get("retrieval_attempt", 0) + 1,
-        },
-        "query_classification": {
-            "type": "AGENTIC",
-            "confidence": confidence_score,
-            "latency_ms": 0,
-            "fallback": False,
-        },
-        "tool_trace": [s.get("node") for s in (final_state.get("agent_steps") or [])],
-        "synthesis_mode": len((final_state.get("sources") or [])) > 1,
+        "event": EVENT_DONE,
+        "full_response": answer,
+        "usage": final_state.get("_usage", {}),
     }
-
-    # Fallback: if streaming didn't fire, emit answer as single token
-    if not answer_streaming_started and answer:
-        yield {"event": EVENT_TOKEN, "content": answer}
-
-    usage = final_state.get("_usage") or {"promptTokens": 0, "completionTokens": 0}
-    yield {"event": EVENT_DONE, "full_response": answer, "usage": usage}
