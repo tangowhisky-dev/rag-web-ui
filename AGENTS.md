@@ -183,7 +183,19 @@ Prefer single-file or single-test runs during iteration. Full suites are for the
 
 ---
 
-## 11. Project Learnings
+## 11. UI Craft
+
+**For any UI work (components, pages, layouts, animations, design review), load `.agents/skills/ui-craft/SKILL.md` first.** It provides anti-slop rules, discovery phase, and craft guidance. The project's design memory lives at `.ui-craft/` (brief, tokens, decisions, patterns) — always load these before writing UI code.
+
+The skill auto-detects the project stack (Tailwind + shadcn/ui here) and routes by intent: build, animate, review, polish, audit. Run `/brief` or `/tokens` for pre-build setup; `/finalize` before ship. Style variants: `ui-craft-minimal` (Linear/Notion), `ui-craft-editorial` (Medium/Substack), `ui-craft-dense-dashboard` (Bloomberg/Retool).
+
+- Anti-slop: no identical card grids, ALL CAPS headings, purple/cyan gradients, emoji icons, bounce easing, glassmorphism, gradient blobs, uniform radii.
+- Craft: one accent, 3-5 placements, layered shadows, real content, tabular-nums on data, tracking-tight on headings, exit faster than enter.
+- Discovery: analyze project tokens first, never default to blue/Inter. Ask before assuming.
+
+---
+
+## 12. Project Learnings
 
 **Accumulated corrections. This section is for the agent to maintain, not just the human.**
 
@@ -193,7 +205,7 @@ When the user corrects your approach, append a one-line rule here before ending 
 
 ---
 
-## 12. How this file was built
+## 13. How this file was built
 
 This boilerplate synthesizes:
 - Sean Donahoe's IJFW ("It Just F*cking Works") principles: one install, working code, no ceremony.
@@ -203,4 +215,4 @@ This boilerplate synthesizes:
 - Community anti-sycophancy patterns (explicit banned phrases, direct-not-diplomatic).
 - The AGENTS.md open standard (cross-tool portability via symlinks).
 
-Read once. Edit sections 10 and 11 for your project. Prune the rest over time. This file gets better the more you use it.
+Read once. Edit sections 10, 11, and 12 for your project. Prune the rest over time. This file gets better the more you use it.
