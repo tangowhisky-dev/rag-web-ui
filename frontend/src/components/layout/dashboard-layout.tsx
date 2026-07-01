@@ -39,7 +39,7 @@ export default function DashboardLayout({
   }
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="bg-background">
       {/* Single top bar: breadcrumb left, sign out right */}
       <header className="sticky top-0 z-40 w-full border-b bg-card/80 backdrop-blur-sm">
         <div className="flex h-12 items-center gap-4 px-4 sm:px-6">

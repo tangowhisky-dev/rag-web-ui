@@ -94,6 +94,8 @@
   }
   body {
     @apply bg-background text-foreground;
+    overflow-y: auto;
+    overflow-x: hidden;
   }
 }
 

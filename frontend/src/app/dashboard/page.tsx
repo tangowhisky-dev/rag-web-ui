@@ -40,7 +40,7 @@ export default function DashboardPage() {
 
   return (
     <DashboardLayout>
-      <div className="p-6 max-w-7xl mx-auto">
+      <div className="p-6 max-w-7xl mx-auto pt-4">
         {/* Hero */}
         <div className="mb-12 rounded-2xl bg-muted border p-6">
           <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
@@ -75,7 +75,7 @@ export default function DashboardPage() {
         </div>
 
         {/* Stats */}
-        <div className="grid gap-6 md:grid-cols-2 mb-12">
+        <div className="grid gap-6 md:grid-cols-2 mb-8">
           {/* Primary stat: accent-tinted */}
           <div className="rounded-lg border bg-gradient-to-b from-primary/5 to-transparent p-8">
             <div className="flex items-center gap-6">
@@ -117,62 +117,56 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* How It Works — asymmetric layout */}
+        {/* How It Works — three horizontal steps */}
         <div className="mb-12">
           <h2 className="text-2xl font-semibold mb-6">How It Works</h2>
-          <div className="grid gap-6 md:grid-cols-3">
-            {/* Step 1 — wider, primary accent */}
+          <div className="grid gap-4 md:grid-cols-3">
+            {/* Step 1 */}
             <a
               href="/dashboard/knowledge/new"
-              className="group rounded-lg border bg-card p-6 hover:border-primary/30 transition-colors"
+              className="group rounded-lg border bg-card p-5 hover:border-primary/30 transition-colors"
             >
-              <div className="flex items-center gap-3 mb-4">
-                <span className="flex h-8 w-8 items-center justify-center rounded-md bg-primary text-xs font-semibold text-primary-foreground">1</span>
+              <div className="flex items-center gap-3 mb-3">
+                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-primary text-xs font-semibold text-primary-foreground">1</span>
                 <Brain className="h-5 w-5 text-muted-foreground group-hover:text-foreground transition-colors" />
               </div>
-              <h3 className="text-base font-medium mb-1">Create Knowledge Base</h3>
-              <p className="text-sm text-muted-foreground leading-relaxed">
+              <h3 className="text-sm font-medium mb-1">Create Knowledge Base</h3>
+              <p className="text-xs text-muted-foreground leading-relaxed">
                 Build a new AI-powered knowledge repository
               </p>
             </a>
 
-            {/* Step 2 — wider, accent tint */}
+            {/* Step 2 */}
             <a
               href="/dashboard/knowledge"
-              className="group rounded-md border bg-gradient-to-b from-primary/3 to-transparent p-6 md:col-span-2 hover:border-primary/30 transition-colors"
+              className="group rounded-lg border bg-card p-5 hover:border-primary/30 transition-colors"
             >
-              <div className="flex items-start gap-4">
-                <div className="flex items-center gap-3">
-                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-primary text-xs font-semibold text-primary-foreground">2</span>
-                  <div className="flex gap-2">
-                    <Upload className="h-5 w-5 text-muted-foreground group-hover:text-foreground transition-colors" />
-                    <Link2 className="h-5 w-5 text-muted-foreground group-hover:text-foreground transition-colors" />
-                  </div>
-                </div>
-                <div>
-                  <h3 className="text-base font-medium mb-1">Upload Documents or Link Data Stores</h3>
-                  <p className="text-sm text-muted-foreground leading-relaxed">
-                    Upload PDFs, docs, images, or link data stores — auto-synced from monitored folders
-                  </p>
+              <div className="flex items-center gap-3 mb-3">
+                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-primary text-xs font-semibold text-primary-foreground">2</span>
+                <div className="flex gap-2">
+                  <Upload className="h-5 w-5 text-muted-foreground group-hover:text-foreground transition-colors" />
+                  <Link2 className="h-5 w-5 text-muted-foreground group-hover:text-foreground transition-colors" />
                 </div>
               </div>
+              <h3 className="text-sm font-medium mb-1">Upload Documents or Link Data Stores</h3>
+              <p className="text-xs text-muted-foreground leading-relaxed">
+                Upload PDFs, docs, images, or link data stores
+              </p>
             </a>
 
-            {/* Step 3 — full width, accent tint */}
+            {/* Step 3 */}
             <a
               href="/dashboard/chat/new"
-              className="group rounded-md border bg-gradient-to-b from-primary/3 to-transparent p-6 md:col-span-3 hover:border-primary/30 transition-colors"
+              className="group rounded-lg border bg-card p-5 hover:border-primary/30 transition-colors"
             >
-              <div className="flex items-center gap-3">
-                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-primary text-xs font-semibold text-primary-foreground">3</span>
+              <div className="flex items-center gap-3 mb-3">
+                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-primary text-xs font-semibold text-primary-foreground">3</span>
                 <Sparkles className="h-5 w-5 text-muted-foreground group-hover:text-foreground transition-colors" />
-                <div className="ml-2">
-                  <h3 className="text-base font-medium mb-1">Start Chatting</h3>
-                  <p className="text-sm text-muted-foreground leading-relaxed">
-                    Get instant answers from your knowledge with AI
-                  </p>
-                </div>
               </div>
+              <h3 className="text-sm font-medium mb-1">Start Chatting</h3>
+              <p className="text-xs text-muted-foreground leading-relaxed">
+                Get instant answers from your knowledge with AI
+              </p>
             </a>
           </div>
         </div>
