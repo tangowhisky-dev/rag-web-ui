@@ -52,6 +52,25 @@ class Chat(Base, TimestampMixin):
         backref="chats"
     )
 
+class MessageCitation(Base):
+    """Links a retrieved document citation to a chat message."""
+    __tablename__ = "message_citations"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    message_id = Column(Integer, ForeignKey("messages.id", ondelete="CASCADE"), nullable=False, index=True)
+    document_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
+    chunk_index = Column(Integer, nullable=False)
+    citation_index = Column(Integer, nullable=False)
+    citation_metadata = Column(JSON, nullable=True)  # transient: score, dense_rank, sparse_rank, exact_rank, retrieval_leg
+
+    # Relationships
+    document = relationship("Document")
+    message = relationship("Message", back_populates="citations")
+
+    class Config:
+        from_attributes = True
+
+
 class Message(Base, TimestampMixin):
     __tablename__ = "messages"
 
@@ -70,6 +89,7 @@ class Message(Base, TimestampMixin):
 
     # Relationships
     chat = relationship("Chat", back_populates="messages")
+    citations = relationship("MessageCitation", back_populates="message", cascade="all, delete-orphan")
     siblings_rel = relationship(
         "Message",
         primaryjoin="Message.parent_message_id == foreign(Message.id)",

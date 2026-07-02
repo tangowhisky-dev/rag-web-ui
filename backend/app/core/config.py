@@ -7,7 +7,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     PROJECT_NAME: str = "InsightCore"
-    VERSION: str = "0.1.0"
+    VERSION: str = "1.0.0"
     API_V1_STR: str = "/api"
 
     # MySQL
@@ -215,14 +215,14 @@ class Settings(BaseSettings):
     # RRF weights for each leg. Weights don't need to sum to 1; they are
     # relative multipliers on the RRF term 1/(k + rank).
     HYBRID_DENSE_WEIGHT: float = float(os.getenv("HYBRID_DENSE_WEIGHT", "0.5"))
-    HYBRID_QDRANT_SPARSE_WEIGHT: float = float(os.getenv("HYBRID_QDRANT_SPARSE_WEIGHT", "0.3"))
+    HYBRID_SPARSE_WEIGHT: float = float(os.getenv("HYBRID_SPARSE_WEIGHT", "0.3"))
     HYBRID_EXACT_WEIGHT: float = float(os.getenv("HYBRID_EXACT_WEIGHT", "0.2"))
 
     # Per-leg retrieval enable/disable.
     # Affects retrieval ONLY — ingestion always indexes all three pipelines
     # so re-enabling a leg later requires no re-indexing.
     RETRIEVAL_DENSE_ENABLED: bool = os.getenv("RETRIEVAL_DENSE_ENABLED", "true").lower() == "true"
-    RETRIEVAL_QDRANT_SPARSE_ENABLED: bool = os.getenv("RETRIEVAL_QDRANT_SPARSE_ENABLED", "true").lower() == "true"
+    RETRIEVAL_SPARSE_ENABLED: bool = os.getenv("RETRIEVAL_SPARSE_ENABLED", "true").lower() == "true"
     RETRIEVAL_EXACT_ENABLED: bool = os.getenv("RETRIEVAL_EXACT_ENABLED", "true").lower() == "true"
 
     # ── Neo4j / GraphRAG ────────────────────────────────────────────────────────

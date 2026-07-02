@@ -119,7 +119,7 @@ class _SettingsPatcher:
     def __enter__(self):
         self._originals = {
             "HYBRID_DENSE_WEIGHT": settings.HYBRID_DENSE_WEIGHT,
-            "HYBRID_QDRANT_SPARSE_WEIGHT": settings.HYBRID_QDRANT_SPARSE_WEIGHT,
+            "HYBRID_SPARSE_WEIGHT": settings.HYBRID_SPARSE_WEIGHT,
             "HYBRID_EXACT_WEIGHT": settings.HYBRID_EXACT_WEIGHT,
             "RETRIEVAL_TOP_K": settings.RETRIEVAL_TOP_K,
             "RERANKER_SCORE_THRESHOLD": settings.RERANKER_SCORE_THRESHOLD,
@@ -131,7 +131,7 @@ class _SettingsPatcher:
         retrieval_mod._RRF_K = self.params.rrf_k
 
         settings.HYBRID_DENSE_WEIGHT = self.params.dense_weight
-        settings.HYBRID_QDRANT_SPARSE_WEIGHT = self.params.sparse_weight
+        settings.HYBRID_SPARSE_WEIGHT = self.params.sparse_weight
         settings.HYBRID_EXACT_WEIGHT = self.params.exact_weight
         settings.RETRIEVAL_TOP_K = self.params.top_k
         settings.RERANKER_SCORE_THRESHOLD = self.params.reranker_threshold
@@ -140,7 +140,7 @@ class _SettingsPatcher:
 
     def __exit__(self, *exc):
         settings.HYBRID_DENSE_WEIGHT = self._originals["HYBRID_DENSE_WEIGHT"]
-        settings.HYBRID_QDRANT_SPARSE_WEIGHT = self._originals["HYBRID_QDRANT_SPARSE_WEIGHT"]
+        settings.HYBRID_SPARSE_WEIGHT = self._originals["HYBRID_SPARSE_WEIGHT"]
         settings.HYBRID_EXACT_WEIGHT = self._originals["HYBRID_EXACT_WEIGHT"]
         settings.RETRIEVAL_TOP_K = self._originals["RETRIEVAL_TOP_K"]
         settings.RERANKER_SCORE_THRESHOLD = self._originals["RERANKER_SCORE_THRESHOLD"]
@@ -472,7 +472,7 @@ def load_best_config(path: Optional[str] = None) -> Optional[Dict[str, Any]]:
 
     config = payload.get("best_config", {})
     settings.HYBRID_DENSE_WEIGHT = config.get("dense_weight", settings.HYBRID_DENSE_WEIGHT)
-    settings.HYBRID_QDRANT_SPARSE_WEIGHT = config.get("sparse_weight", settings.HYBRID_QDRANT_SPARSE_WEIGHT)
+    settings.HYBRID_SPARSE_WEIGHT = config.get("sparse_weight", settings.HYBRID_SPARSE_WEIGHT)
     settings.HYBRID_EXACT_WEIGHT = config.get("exact_weight", settings.HYBRID_EXACT_WEIGHT)
     settings.RETRIEVAL_TOP_K = config.get("top_k", settings.RETRIEVAL_TOP_K)
     settings.RERANKER_SCORE_THRESHOLD = config.get("reranker_threshold", settings.RERANKER_SCORE_THRESHOLD)

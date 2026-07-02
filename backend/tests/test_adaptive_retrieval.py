@@ -68,7 +68,7 @@ def test_hybrid_search_applies_preset():
         
         # Patch the search legs to return empty results
         with patch('app.services.retrieval._dense_search', return_value={}):
-            with patch('app.services.retrieval._qdrant_sparse_search', return_value={}):
+            with patch('app.services.retrieval._sparse_search', return_value={}):
                 with patch('app.services.retrieval._exact_search', return_value={}):
                     # Call with FACTUAL query type
                     result = await hybrid_search_with_legs(
@@ -83,7 +83,7 @@ def test_hybrid_search_applies_preset():
                     
         # Patch for MULTI_PART which should disable exact leg
         with patch('app.services.retrieval._dense_search', return_value={}):
-            with patch('app.services.retrieval._qdrant_sparse_search', return_value={}):
+            with patch('app.services.retrieval._sparse_search', return_value={}):
                 with patch('app.services.retrieval._exact_search', return_value={}) as mock_exact:
                     result = await hybrid_search_with_legs(
                         query="test query",

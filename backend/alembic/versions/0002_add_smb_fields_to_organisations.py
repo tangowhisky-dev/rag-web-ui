@@ -8,7 +8,7 @@ from typing import Sequence, Union
 from alembic import op
 
 revision: str = '0002_add_smb_fields'
-down_revision: Union[str, None] = '0001_add_watch_dir_to_organisations'
+down_revision: Union[str, None] = '0001_add_watch_dir'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

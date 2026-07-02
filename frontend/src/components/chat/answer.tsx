@@ -203,11 +203,19 @@ interface Citation {
   id: number;
   text: string;
   metadata: Record<string, any>;
+  kb_id?: number;
+  data_store_id?: number;
+  document_id?: number;
+  file_name?: string;
+  chunk_index?: number;
   score?: number;
   dense_rank?: number;
-  qdrant_sparse_rank?: number;
+  sparse_rank?: number;
   exact_rank?: number;
   retrieval_leg?: string;
+  _legs?: string[];
+  _reranker_score?: number;
+  qdrant_point_id?: string;
 }
 
 interface KnowledgeBaseInfo {
@@ -389,7 +397,6 @@ const FailedLegsWarning: FC<{ legs: string[] }> = ({ legs }) => {
   if (legs.length === 0) return null;
   const names: Record<string, string> = {
     dense: "vector",
-    qdrant_sparse: "sparse",
     exact: "keyword",
     graph: "graph",
   };
@@ -438,7 +445,8 @@ const ConfidenceCollapsible: FC<{
   const [open, setOpen] = useState(false);
   const cfg = CONFIDENCE_COLORS[level];
   const label = CONFIDENCE_CONFIG[level].label;
-  const pct = score !== undefined ? Math.round(score * 100) : 0;
+  // score is 0-100 from the DB (not 0-1 decimal)
+  const pct = score !== undefined ? Math.min(100, Math.max(0, score)) : 0;
 
   return (
     <div className={`rounded-md border ${cfg.border} ${cfg.bg} text-xs not-prose`}>
@@ -453,7 +461,7 @@ const ConfidenceCollapsible: FC<{
           <ChevronRight className={`h-3 w-3 shrink-0 ${cfg.text}`} />
         )}
         <span className={`font-medium shrink-0 ${cfg.text}`}>
-          Confidence: {label}{score !== undefined ? ` · ${Math.round(score * 100)}/100` : ""}
+          Confidence: {label}{score !== undefined ? ` · ${score}/100` : ""}
         </span>
         {/* inline progress bar */}
         <div className="flex-1 h-1.5 rounded-full bg-zinc-200 dark:bg-zinc-700 overflow-hidden">
@@ -558,6 +566,21 @@ export const Answer: FC<{
     }
   }, [isStreaming]);
 
+  // Extract generate_answer latency from agentSteps (emitted by backend)
+  const generateAnswerLatencyMs = useMemo(() => {
+    if (!agentSteps?.length) return null;
+    const doneStep = agentSteps.find(
+      (s) => s.node === "generate_answer" && s.status === "done",
+    );
+    return doneStep?.latency_ms ?? null;
+  }, [agentSteps]);
+
+  // Filter out generate_answer from agentSteps — we display its latency inline instead
+  const filteredAgentSteps = useMemo(() => {
+    if (!agentSteps?.length) return undefined;
+    return agentSteps.filter((s) => s.node !== "generate_answer");
+  }, [agentSteps]);
+
   const parsedContent = useMemo(() => {
       // Two reasoning formats:
       //   OpenAI/DeepSeek/Qwen: <think>content</think>  <reasoning>...</reasoning>
@@ -631,7 +654,7 @@ export const Answer: FC<{
       const infoMap: Record<string, CitationInfo> = {};
 
       for (const citation of debouncedCitations) {
-        const { kb_id, document_id } = citation.metadata;
+        const { kb_id, document_id } = citation;
         if (!kb_id || !document_id) continue;
 
         const key = `${kb_id}-${document_id}`;
@@ -687,7 +710,7 @@ export const Answer: FC<{
 
       const citationInfo =
         citationInfoMapRef.current[
-          `${citation.metadata.kb_id}-${citation.metadata.document_id}`
+          `${citation.kb_id}-${citation.document_id}`
         ];
 
       return (
@@ -747,7 +770,7 @@ export const Answer: FC<{
                     <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded uppercase tracking-wide ${
                       citation.retrieval_leg === "dense"
                         ? "bg-blue-100 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300"
-                        : citation.retrieval_leg === "sparse" || citation.retrieval_leg === "qdrant_sparse"
+                        : citation.retrieval_leg === "sparse" || citation.retrieval_leg === "sparse"
                         ? "bg-purple-100 dark:bg-purple-950/60 text-purple-700 dark:text-purple-300"
                         : citation.retrieval_leg === "exact"
                         ? "bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300"
@@ -762,7 +785,7 @@ export const Answer: FC<{
               )}
               {/* Per-leg rank breakdown */}
               {(citation.dense_rank !== undefined ||
-                citation.qdrant_sparse_rank !== undefined ||
+                citation.sparse_rank !== undefined ||
                 citation.exact_rank !== undefined) && (
                 <div className="grid grid-cols-3 gap-1 text-[10px]">
                   {citation.dense_rank !== undefined && (
@@ -771,10 +794,10 @@ export const Answer: FC<{
                       <span className="text-blue-800 dark:text-blue-200 font-semibold">#{citation.dense_rank}</span>
                     </div>
                   )}
-                  {citation.qdrant_sparse_rank !== undefined && (
+                  {citation.sparse_rank !== undefined && (
                     <div className="flex flex-col items-center rounded bg-purple-50 dark:bg-purple-950/40 px-1.5 py-1">
                       <span className="text-purple-600 dark:text-purple-400 font-medium">Sparse</span>
-                      <span className="text-purple-800 dark:text-purple-200 font-semibold">#{citation.qdrant_sparse_rank}</span>
+                      <span className="text-purple-800 dark:text-purple-200 font-semibold">#{citation.sparse_rank}</span>
                     </div>
                   )}
                   {citation.exact_rank !== undefined && (
@@ -792,7 +815,8 @@ export const Answer: FC<{
                 </Markdown>
               </div>
               <Divider />
-              {Object.keys(citation.metadata).length > 0 && (
+              {['kb_id', 'data_store_id', 'document_id', 'file_name', 'chunk_index', '_legs', '_reranker_score', 'qdrant_point_id']
+                .some(k => k in citation && (citation as any)[k] !== undefined && (citation as any)[k] !== null) && (
                 <details className="text-xs group">
                   <summary className="cursor-pointer select-none list-none flex items-center gap-1 text-muted-foreground hover:text-foreground transition-colors py-0.5">
                     <svg className="h-3 w-3 transition-transform group-open:rotate-90 shrink-0" viewBox="0 0 12 12" fill="currentColor">
@@ -801,12 +825,31 @@ export const Answer: FC<{
                     Debug Info
                   </summary>
                   <div className="mt-1.5 bg-muted text-muted-foreground p-2 rounded space-y-1">
-                    {Object.entries(citation.metadata).map(([key, value]) => (
-                      <div key={key} className="flex">
-                        <span className="font-medium min-w-[100px] shrink-0">{key}:</span>
-                        <span className="text-foreground/80 break-all">{String(value)}</span>
-                      </div>
-                    ))}
+                    {['kb_id', 'data_store_id', 'document_id', 'file_name', 'chunk_index', '_legs', '_reranker_score', 'qdrant_point_id']
+                      .filter(k => k in citation && (citation as any)[k] !== undefined && (citation as any)[k] !== null)
+                      .map(key => {
+                        // Translate internal leg names to user-friendly labels
+                        const legNames: Record<string, string> = {
+                          dense: "vector",
+                          exact: "keyword",
+                          graph: "graph",
+                        };
+                        const raw = (citation as any)[key];
+                        if (key === '_legs' && Array.isArray(raw)) {
+                          return (
+                            <div key={key} className="flex">
+                              <span className="font-medium min-w-[100px] shrink-0">{key}:</span>
+                              <span className="text-foreground/80 break-all">{raw.map(l => legNames[l] ?? l).join(", ")}</span>
+                            </div>
+                          );
+                        }
+                        return (
+                          <div key={key} className="flex">
+                            <span className="font-medium min-w-[100px] shrink-0">{key}:</span>
+                            <span className="text-foreground/80 break-all">{String(raw)}</span>
+                          </div>
+                        );
+                      })}
                   </div>
                 </details>
               )}
@@ -880,14 +923,14 @@ export const Answer: FC<{
 
   return (
     <div className="prose prose-sm max-w-full">
-      {/* AgentTimeline consolidates: rewrittenQuery, queryClassification, toolTrace, failedLegs, retrievedContext, agentSteps */}
+      {/* AgentTimeline: rewrittenQuery, queryClassification, toolTrace, failedLegs, retrievedContext, agentSteps (minus generate_answer) */}
       <AgentTimeline
         rewrittenQuery={rewrittenQuery}
         retrievedContext={retrievedContext}
         queryClassification={queryClassification}
         toolTrace={toolTrace}
         failedLegs={failedLegs}
-        agentSteps={agentSteps}
+        agentSteps={filteredAgentSteps}
         isStreaming={isStreaming}
         answerStarted={isStreaming && !!markdown}
       />
@@ -978,17 +1021,22 @@ export const Answer: FC<{
             </button>
           </div>
 
-          {/* Right: confidence collapsible */}
-          {confidence && confidence !== "none" && (
-            <div className="flex-1 min-w-0 max-w-xs">
+          {/* Right: confidence + speed */}
+          <div className="flex-1 min-w-0 max-w-xs flex flex-col gap-1.5">
+            {confidence && confidence !== "none" && (
               <ConfidenceCollapsible
                 level={confidence}
                 score={confidenceScore}
                 suggestion={suggestion}
                 breakdown={confidenceBreakdown}
               />
-            </div>
-          )}
+            )}
+            {generateAnswerLatencyMs !== null && (
+              <span className="text-[10px] text-zinc-400 dark:text-zinc-500 select-none">
+                Generated in {generateAnswerLatencyMs < 1000 ? `${generateAnswerLatencyMs}ms` : `${(generateAnswerLatencyMs / 1000).toFixed(1)}s`}
+              </span>
+            )}
+          </div>
         </div>
       )}
     </div>

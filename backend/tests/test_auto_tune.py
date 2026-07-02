@@ -82,7 +82,7 @@ def test_settings_patcher_applies_and_restores():
     
     with _SettingsPatcher(params):
         assert settings.HYBRID_DENSE_WEIGHT == 0.8
-        assert settings.HYBRID_QDRANT_SPARSE_WEIGHT == 0.1
+        assert settings.HYBRID_SPARSE_WEIGHT == 0.1
         assert settings.HYBRID_EXACT_WEIGHT == 0.1
         assert settings.RETRIEVAL_TOP_K == 15
         assert settings.RERANKER_SCORE_THRESHOLD == 1.0

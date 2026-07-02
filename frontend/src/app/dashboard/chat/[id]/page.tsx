@@ -77,6 +77,7 @@ interface ChatMessage {
   confidence_breakdown?: string;
   file_name?: string;
   file_id?: number;
+  citations?: Citation[];
 }
 
 interface Chat {
@@ -229,45 +230,23 @@ function ChatPageInner({ params }: { params: { id: string } }) {
         content: msg.content,
         file_name: msg.file_name ?? undefined,
         file_id: msg.file_id ?? undefined,
+        citations: msg.citations ?? [],
       };
-    try {
-      if (!msg.content.includes("__LLM_RESPONSE__"))
-        return { id: msg.id.toString(), role: msg.role, content: msg.content };
 
-      const [base64Part, responseText] = msg.content.split("__LLM_RESPONSE__");
-      const contextData = base64Part
-        ? (JSON.parse(atob(base64Part.trim())) as {
-            context: Array<{ page_content: string; metadata: Record<string, any> }>;
-          })
-        : null;
-      const citations: Citation[] =
-        contextData?.context.map((c, i) => ({
-          id: i + 1,
-          text: c.page_content,
-          metadata: c.metadata,
-        })) || [];
-      return {
-        id: msg.id.toString(),
-        role: msg.role,
-        content: responseText || "",
-        citations,
-        confidence: msg.confidence_level as Message["confidence"] | undefined,
-        confidenceScore: msg.confidence_score ?? undefined,
-        confidenceBreakdown: msg.confidence_breakdown
-          ? JSON.parse(msg.confidence_breakdown)
-          : undefined,
-        file_name: msg.file_name ?? undefined,
-        file_id: msg.file_id ?? undefined,
-      };
-    } catch {
-      return {
-        id: msg.id.toString(),
-        role: msg.role,
-        content: msg.content,
-        file_name: msg.file_name ?? undefined,
-        file_id: msg.file_id ?? undefined,
-      };
-    }
+    // Assistant message — citations come from the API, content is the raw answer text
+    return {
+      id: msg.id.toString(),
+      role: msg.role,
+      content: msg.content,
+      citations: msg.citations ?? [],
+      confidence: msg.confidence_level as Message["confidence"] | undefined,
+      confidenceScore: msg.confidence_score ?? undefined,
+      confidenceBreakdown: msg.confidence_breakdown
+        ? JSON.parse(msg.confidence_breakdown)
+        : undefined,
+      file_name: msg.file_name ?? undefined,
+      file_id: msg.file_id ?? undefined,
+    };
   }, []);
 
   const fetchChat = async () => {

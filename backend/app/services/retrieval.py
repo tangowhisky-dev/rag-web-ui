@@ -15,11 +15,11 @@ Neo4j graph enrichment after merge:
 
 Configuration (.env / settings):
   HYBRID_DENSE_WEIGHT          — RRF weight for the dense leg          (default 0.5)
-  HYBRID_QDRANT_SPARSE_WEIGHT  — RRF weight for the Qdrant sparse leg  (default 0.3)
+  HYBRID_SPARSE_WEIGHT  — RRF weight for the Qdrant sparse leg  (default 0.3)
   HYBRID_EXACT_WEIGHT          — RRF weight for the MySQL exact leg     (default 0.2)
   RETRIEVAL_TOP_K              — number of documents returned           (default 10)
   RETRIEVAL_DENSE_ENABLED      — enable/disable dense leg               (default true)
-  RETRIEVAL_QDRANT_SPARSE_ENABLED — enable/disable sparse leg           (default true)
+  RETRIEVAL_SPARSE_ENABLED — enable/disable sparse leg           (default true)
   RETRIEVAL_EXACT_ENABLED      — enable/disable exact leg               (default true)
   RETRIEVAL_GRAPH_ENABLED      — enable/disable graph enrichment        (default true)
 
@@ -67,7 +67,7 @@ def get_retrieval_config(query_type: QueryType) -> dict:
         "use_sparse": preset.get("use_sparse", True),
         "use_exact": preset.get("use_exact", True),
         "dense_weight": preset.get("dense_weight", settings.HYBRID_DENSE_WEIGHT),
-        "sparse_weight": preset.get("sparse_weight", settings.HYBRID_QDRANT_SPARSE_WEIGHT),
+        "sparse_weight": preset.get("sparse_weight", settings.HYBRID_SPARSE_WEIGHT),
         "exact_weight": preset.get("exact_weight", settings.HYBRID_EXACT_WEIGHT),
         "top_k": preset.get("top_k", settings.RETRIEVAL_TOP_K),
     }
@@ -85,7 +85,7 @@ class _Candidate:
     doc: LangchainDocument
     content_hash: str
     dense_rank: int = -1           # -1 = absent from this leg
-    qdrant_sparse_rank: int = -1
+    sparse_rank: int = -1
     exact_rank: int = -1
 
     def rrf_score(
@@ -97,8 +97,8 @@ class _Candidate:
         score = 0.0
         if self.dense_rank >= 0:
             score += dense_weight / (_RRF_K + self.dense_rank)
-        if self.qdrant_sparse_rank >= 0:
-            score += sparse_weight / (_RRF_K + self.qdrant_sparse_rank)
+        if self.sparse_rank >= 0:
+            score += sparse_weight / (_RRF_K + self.sparse_rank)
         if self.exact_rank >= 0:
             score += exact_weight / (_RRF_K + self.exact_rank)
         return score
@@ -189,7 +189,7 @@ def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], candi
     return result
 
 
-def _qdrant_sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], candidates: int) -> Dict[str, _Candidate]:
+def _sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], candidates: int) -> Dict[str, _Candidate]:
     """Qdrant learned-sparse search (SPLADE via FastEmbed).
     
     Searches both KB collections (kb_{kb_id}) and DataStore collections (ds_{datastore_id}).
@@ -220,7 +220,7 @@ def _qdrant_sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int
                 with_payload=True,
             ).points
         except Exception as e:
-            logger.warning("qdrant_sparse_search: Qdrant query failed for kb_%d: %s", kb_id, e)
+            logger.warning("sparse_search: Qdrant query failed for kb_%d: %s", kb_id, e)
             continue
         logger.info("[SPARSE] qdrant response | kb_%d | hits=%d", kb_id, len(hits))
         for hit in hits:
@@ -230,7 +230,7 @@ def _qdrant_sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int
                 result[h] = _Candidate(
                     doc=_qdrant_payload_to_doc(hit.payload or {}),
                     content_hash=h,
-                    qdrant_sparse_rank=rank,
+                    sparse_rank=rank,
                 )
                 logger.debug("[SPARSE]   rank=%d score=%.4f text=%r", rank, getattr(hit, 'score', -1), text[:80])
                 rank += 1
@@ -247,7 +247,7 @@ def _qdrant_sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int
                 with_payload=True,
             ).points
         except Exception as e:
-            logger.warning("qdrant_sparse_search: Qdrant query failed for ds_%d: %s", ds_id, e)
+            logger.warning("sparse_search: Qdrant query failed for ds_%d: %s", ds_id, e)
             continue
         logger.info("[SPARSE] qdrant response | ds_%d | hits=%d", ds_id, len(hits))
         for hit in hits:
@@ -257,7 +257,7 @@ def _qdrant_sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int
                 result[h] = _Candidate(
                     doc=_qdrant_payload_to_doc(hit.payload or {}),
                     content_hash=h,
-                    qdrant_sparse_rank=rank,
+                    sparse_rank=rank,
                 )
                 logger.debug("[SPARSE]   rank=%d score=%.4f text=%r", rank, getattr(hit, 'score', -1), text[:80])
                 rank += 1
@@ -355,7 +355,7 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
 
 def _rrf_merge_candidates(
     dense: Dict[str, "_Candidate"],
-    qdrant_sparse: Dict[str, "_Candidate"],
+    sparse: Dict[str, "_Candidate"],
     exact: Dict[str, "_Candidate"],
     top_k: int,
     dense_weight: float = 0.5,
@@ -364,9 +364,9 @@ def _rrf_merge_candidates(
 ) -> list["_Candidate"]:
     merged: Dict[str, _Candidate] = {**dense}
 
-    for h, c in qdrant_sparse.items():
+    for h, c in sparse.items():
         if h in merged:
-            merged[h].qdrant_sparse_rank = c.qdrant_sparse_rank
+            merged[h].sparse_rank = c.sparse_rank
         else:
             merged[h] = c
 
@@ -389,7 +389,7 @@ def _rrf_merge_candidates(
             "  rrf[%d] score=%.5f dense_rank=%s sparse_rank=%s exact_rank=%s text=%r",
             i, c.rrf_score(dense_weight, sparse_weight, exact_weight),
             c.dense_rank if c.dense_rank >= 0 else "-",
-            c.qdrant_sparse_rank if c.qdrant_sparse_rank >= 0 else "-",
+            c.sparse_rank if c.sparse_rank >= 0 else "-",
             c.exact_rank if c.exact_rank >= 0 else "-",
             c.doc.page_content[:80],
         )
@@ -427,7 +427,7 @@ async def hybrid_search_with_legs(
         "retrieval_info": {
           "legs": {
             "dense":         {"status": "ok"|"failed"|"disabled", "count": N, "error": str|None},
-            "qdrant_sparse": {...},
+            "sparse": {...},
             "exact":         {...},
             "graph":         {"status": "ok"|"failed"|"disabled", "count": N, "error": str|None},
           },
@@ -445,7 +445,7 @@ async def hybrid_search_with_legs(
     """
     # Apply query-type preset if provided
     dense_weight = settings.HYBRID_DENSE_WEIGHT
-    sparse_weight = settings.HYBRID_QDRANT_SPARSE_WEIGHT
+    sparse_weight = settings.HYBRID_SPARSE_WEIGHT
     exact_weight = settings.HYBRID_EXACT_WEIGHT
 
     if query_type is not None:
@@ -466,7 +466,7 @@ async def hybrid_search_with_legs(
 
     enabled = {
         "dense":         use_dense    and settings.RETRIEVAL_DENSE_ENABLED,
-        "qdrant_sparse": use_sparse   and settings.RETRIEVAL_QDRANT_SPARSE_ENABLED,
+        "sparse": use_sparse   and settings.RETRIEVAL_SPARSE_ENABLED,
         "exact":         use_exact    and settings.RETRIEVAL_EXACT_ENABLED,
         "graph":         use_graph_rag and settings.RETRIEVAL_GRAPH_ENABLED,
     }
@@ -481,13 +481,13 @@ async def hybrid_search_with_legs(
         dense = {}
         legs["dense"] = {"status": "disabled", "count": 0, "error": None}
 
-    if enabled["qdrant_sparse"]:
-        results, err = _run_leg("qdrant_sparse", _qdrant_sparse_search, query, kb_ids, datastore_ids or [], pool)
-        legs["qdrant_sparse"] = {"status": "failed" if err else "ok", "count": len(results), "error": err}
-        qdrant_sparse = results
+    if enabled["sparse"]:
+        results, err = _run_leg("sparse", _sparse_search, query, kb_ids, datastore_ids or [], pool)
+        legs["sparse"] = {"status": "failed" if err else "ok", "count": len(results), "error": err}
+        sparse = results
     else:
-        qdrant_sparse = {}
-        legs["qdrant_sparse"] = {"status": "disabled", "count": 0, "error": None}
+        sparse = {}
+        legs["sparse"] = {"status": "disabled", "count": 0, "error": None}
 
     if enabled["exact"]:
         results, err = _run_leg("exact", _exact_search, query, kb_ids, datastore_ids or [], db, pool)
@@ -502,7 +502,7 @@ async def hybrid_search_with_legs(
         logger.warning("hybrid_search_with_legs: failed legs=%s", failed_legs)
 
     candidates = _rrf_merge_candidates(
-        dense, qdrant_sparse, exact, top_k,
+        dense, sparse, exact, top_k,
         dense_weight=dense_weight,
         sparse_weight=sparse_weight,
         exact_weight=exact_weight,
@@ -514,7 +514,7 @@ async def hybrid_search_with_legs(
     for c in candidates:
         contributing = []
         if c.dense_rank >= 0:         contributing.append("dense")
-        if c.qdrant_sparse_rank >= 0: contributing.append("qdrant_sparse")
+        if c.sparse_rank >= 0: contributing.append("sparse")
         if c.exact_rank >= 0:         contributing.append("exact")
         c.doc.metadata["_legs"] = contributing
         docs.append(c.doc)
@@ -621,7 +621,7 @@ async def hybrid_search(
 
     enabled = {
         "dense": settings.RETRIEVAL_DENSE_ENABLED,
-        "qdrant_sparse": settings.RETRIEVAL_QDRANT_SPARSE_ENABLED,
+        "sparse": settings.RETRIEVAL_SPARSE_ENABLED,
         "exact": settings.RETRIEVAL_EXACT_ENABLED,
         "graph": use_graph_rag and settings.RETRIEVAL_GRAPH_ENABLED,
     }
@@ -632,10 +632,10 @@ async def hybrid_search(
     )
 
     dense        = _dense_search(query, kb_ids, datastore_ids, pool)           if enabled["dense"]          else {}
-    qdrant_sparse = _qdrant_sparse_search(query, kb_ids, datastore_ids, pool)  if enabled["qdrant_sparse"]  else {}
+    sparse = _sparse_search(query, kb_ids, datastore_ids, pool)  if enabled["sparse"]  else {}
     exact        = _exact_search(query, kb_ids, datastore_ids, db, pool)       if enabled["exact"]          else {}
 
-    docs = [c.doc for c in _rrf_merge_candidates(dense, qdrant_sparse, exact, top_k)]
+    docs = [c.doc for c in _rrf_merge_candidates(dense, sparse, exact, top_k)]
 
     if enabled["graph"] and docs:
         try:

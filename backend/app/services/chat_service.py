@@ -1,6 +1,5 @@
 import asyncio
 import json
-import base64
 import logging
 import re
 import time
@@ -11,7 +10,7 @@ logger = logging.getLogger(__name__)
 from langchain_core.messages import HumanMessage, AIMessage
 from openai import AsyncOpenAI
 from app.core.config import settings
-from app.models.chat import Chat, Message
+from app.models.chat import Chat, Message, MessageCitation, ChatFile
 from app.models.knowledge import KnowledgeBase
 from app.services.retrieval import hybrid_search_with_legs
 from app.services.confidence import score_retrieval
@@ -341,6 +340,23 @@ async def _rewrite_query(
 
     logger.info("[STEP 1] raw_rewrite=%r | had_think=%s | standalone=%r",
                 raw_rewrite[:300], had_think, standalone)
+
+    # Guard: if the rewriter echoed the previous assistant response instead of
+    # rewriting the query, fall back to the original.  Answer-like patterns are
+    # a clear sign the model ignored the "do not answer" instruction.
+    answer_patterns = [
+        r"\bthere\s+is\s+no\s+information\b",
+        r"\bthe\s+text\s+only\s+discusses\b",
+        r"\bthe\s+context\s+does?\s+not\s+contain\b",
+        r"\bthe\s+provided\s+context\s+does?\s+not\b",
+        r"\bi\s+cannot\s+answer\b",
+        r"\bi\s+don't\s+have\s+enough\b",
+        r"\bno\s+information\s+found\b",
+    ]
+    if any(re.search(p, standalone, re.IGNORECASE) for p in answer_patterns):
+        logger.warning("[STEP 1] rewriter echoed assistant response — falling back to original query")
+        standalone = query
+
     return standalone
 
 
@@ -532,6 +548,12 @@ async def generate_response(
         full_response = ""
         rewritten_q = display_query or query
 
+        # Confidence capture from the context event
+        _confidence_level: str | None = None
+        _confidence_score: int | None = None
+        _confidence_breakdown: dict | None = None
+        _confidence_suggestion: str | None = None
+
         # ── Route to answering pipeline based on mode ──────────────────────
         if answering_mode in ("fast", "thinking"):
             from app.services.fast_pipeline import fast_stream
@@ -598,7 +620,14 @@ async def generate_response(
                 yield f'1:{json.dumps({"rewritten_query": rewritten_q})}\n'
 
             elif event_type == "context":
-                # Emit context + base64 prefix for legacy DB persistence
+                # Capture confidence data for persistence (written after stream)
+                _confidence_level = event.get("confidence")
+                _confidence_score = event.get("score")
+                _confidence_breakdown = event.get("breakdown")
+                _confidence_suggestion = event.get("suggestion")
+                _confidence_failed_legs = event.get("failed_legs")
+
+                # Store retrieved docs as citations in the new message_citations table
                 raw_docs = event.get("docs", [])
                 # Serialize LangChain Document objects to plain dicts
                 docs = [
@@ -606,20 +635,29 @@ async def generate_response(
                     if hasattr(d, "page_content") else d
                     for d in raw_docs
                 ]
-                base64_context = base64.b64encode(
-                    json.dumps({
-                        "context": docs,
-                        "rewritten_query": rewritten_q,
-                    }).encode()
-                ).decode()
-                separator = "__LLM_RESPONSE__"
-                # Preserve any answer text accumulated before this event
-                # (rag_graph emits context AFTER tokens; fast_pipeline emits it BEFORE).
-                # For fast_pipeline: full_response is still "" here, so answer_so_far is "".
-                # For rag_graph: full_response already holds the (possibly normalised) answer.
-                answer_so_far = full_response
-                full_response = base64_context + separator + answer_so_far
+                # Persist each doc as a MessageCitation row
+                for idx, doc in enumerate(docs, start=1):
+                    # Retrieval metadata has document_id and chunk_index
+                    document_id = doc.get("metadata", {}).get("document_id")
+                    chunk_index = doc.get("metadata", {}).get("chunk_index")
+                    if document_id is not None and chunk_index is not None:
+                        meta = {**(doc.get("metadata", {}) or {})}
+                        # Only store ranking fields if they actually exist
+                        for rk in ("score", "dense_rank", "sparse_rank", "exact_rank", "retrieval_leg"):
+                            v = doc.get(rk)
+                            if v is not None:
+                                meta[rk] = v
+                        citation = MessageCitation(
+                            message_id=bot_message.id,
+                            document_id=document_id,
+                            chunk_index=chunk_index,
+                            citation_index=idx,
+                            citation_metadata=meta,
+                        )
+                        db.add(citation)
+                db.flush()
 
+                # Build context payload for streaming (unchanged)
                 context_payload = {
                     k: (
                         [{"page_content": d.page_content, "metadata": d.metadata} if hasattr(d, "page_content") else d for d in v]
@@ -628,7 +666,6 @@ async def generate_response(
                     for k, v in event.items() if k != "event"
                 }
                 yield f'2:{json.dumps(context_payload)}\n'
-                yield f'0:"{base64_context}{separator}"\n'
 
             elif event_type == "token":
                 content = event.get("content", "")
@@ -658,7 +695,20 @@ async def generate_response(
 
         # ── Persist final answer ───────────────────────────────────────────
         bot_message.content = full_response
+
+        # Persist retrieval confidence for this message
+        if _confidence_level is not None:
+            bot_message.confidence_level = _confidence_level
+        if _confidence_score is not None:
+            bot_message.confidence_score = _confidence_score
+        if _confidence_breakdown is not None:
+            bot_message.confidence_breakdown = json.dumps(_confidence_breakdown)
+
         db.commit()
+        logger.info(
+            "[CHAT] confidence persisted | chat_id=%d | level=%s score=%d",
+            chat_id, _confidence_level, _confidence_score,
+        )
         clear_cancel_token(chat_id)
 
         # ── Post-turn: schedule summary update (fire-and-forget) ──────────

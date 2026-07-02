@@ -51,6 +51,7 @@ class MessageResponse(MessageBase):
     query_classification: Optional[QueryClassification] = None
     file_name: Optional[str] = None  # filename if a chat file was attached to this message
     file_id: Optional[int] = None      # chat_files.id — used to build download URL
+    # citations is added by the API endpoint after model_validate
 
     @field_serializer("created_at", "updated_at")
     def serialise_datetimes(self, v): return _as_utc_iso(v)

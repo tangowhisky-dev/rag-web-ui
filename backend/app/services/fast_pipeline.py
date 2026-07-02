@@ -16,7 +16,6 @@ Step data schema emitted per node:
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 import time
@@ -81,111 +80,6 @@ def _serialise_doc(doc: Any) -> dict:
     if isinstance(doc, dict):
         return doc
     return {"page_content": str(doc), "metadata": {}}
-
-
-async def _grade_answer_quality(
-    query: str,
-    answer: str,
-    context_chunks: list[str],
-    model_name: str,
-    api_base: Optional[str] = None,
-) -> dict:
-    """
-    Grade answer quality using the query model.
-
-    Returns dict with keys:
-        faithfulness  : float 0.00-1.00 (all claims backed by context?)
-        completeness  : float 0.00-1.00 (does it answer the question?)
-        coherence     : float 0.00-1.00 (well-structured?)
-        verdict       : str "pass", "needs_improvement", or "unsatisfactory"
-    """
-    from langchain_core.messages import HumanMessage, SystemMessage
-    from langchain_openai import ChatOpenAI
-    from app.core.config import settings
-
-    grading_prompt = f"""You are grading an AI assistant's answer to a knowledge-base query.
-
-Question: {query}
-
-Answer:
-{answer}
-
-Context chunks used:
-{chr(10).join(context_chunks[:10]) if context_chunks else '(none)'}
-
-Rate on a scale of 0.00 to 1.00:
-- faithfulness: are ALL factual claims in the answer directly supported by the context chunks? Penalize any claim not grounded in the provided context.
-- completeness: does the answer address all parts of the question? Penalize for missing key information.
-- coherence: is the answer well-structured and easy to understand? Penalize for rambling, repetition, or poor formatting.
-
-Return ONLY valid JSON with no markdown code fences:
-{{"faithfulness": <float>, "completeness": <float>, "coherence": <float>}}"""
-
-    system_msg = SystemMessage(content="You are a precise grader. Return ONLY valid JSON with three float keys.")
-    user_msg = HumanMessage(content=grading_prompt)
-
-    try:
-        # Non-streaming call for structured JSON output
-        strict_llm = ChatOpenAI(
-            model=model_name,
-            temperature=0.0,
-            openai_api_base=api_base or settings.OPENAI_API_BASE,
-            openai_api_key=settings.OPENAI_API_KEY,
-            streaming=False,
-        )
-        response = await strict_llm.ainvoke([system_msg, user_msg])
-        content = response.content.strip()
-
-        # Strip markdown code fences if present
-        if content.startswith("```"):
-            content = re.sub(r'^```(?:json)?\s*|\s*```$', '', content, flags=re.MULTILINE).strip()
-
-        scores = _parse_grading_json(content)
-    except Exception as exc:
-        logger.warning("[QUALITY] grading failed (non-fatal): %s", exc)
-        scores = {"faithfulness": 0.0, "completeness": 0.0, "coherence": 0.0}
-
-    scores["verdict"] = _compute_verdict(scores)
-    return scores
-
-
-def _parse_grading_json(raw: str) -> dict:
-    """Parse grading JSON from LLM response, extracting first JSON object found."""
-    # Try direct parse first
-    try:
-        result = json.loads(raw)
-        return {
-            "faithfulness": max(0.0, min(1.0, float(result.get("faithfulness", 0.5)))),
-            "completeness": max(0.0, min(1.0, float(result.get("completeness", 0.5)))),
-            "coherence": max(0.0, min(1.0, float(result.get("coherence", 0.5)))),
-        }
-    except (json.JSONDecodeError, ValueError, TypeError):
-        pass
-
-    # Try to extract JSON from markdown-fenced block
-    match = re.search(r'\{[^}]+\}', raw, re.DOTALL)
-    if match:
-        try:
-            result = json.loads(match.group())
-            return {
-                "faithfulness": max(0.0, min(1.0, float(result.get("faithfulness", 0.5)))),
-                "completeness": max(0.0, min(1.0, float(result.get("completeness", 0.5)))),
-                "coherence": max(0.0, min(1.0, float(result.get("coherence", 0.5)))),
-            }
-        except (json.JSONDecodeError, ValueError, TypeError):
-            pass
-
-    logger.warning("[QUALITY] could not parse grading JSON, returning defaults")
-    return {"faithfulness": 0.5, "completeness": 0.5, "coherence": 0.5}
-
-
-def _compute_verdict(scores: dict) -> str:
-    """Determine pass/needs_improvement/unsatisfactory from scores."""
-    if any(scores.get(k, 0) < 0.50 for k in ("faithfulness", "completeness", "coherence")):
-        return "unsatisfactory"
-    if any(scores.get(k, 0) < 0.70 for k in ("faithfulness", "completeness", "coherence")):
-        return "needs_improvement"
-    return "pass"
 
 
 async def fast_stream(
@@ -387,7 +281,7 @@ async def fast_stream(
     # Score confidence on standard docs only (not on all raw_docs)
     conf_result = score_retrieval(standard_docs, retrieval_info)
     conf_score = conf_result.score  # 0-100 scale
-    conf_score_01 = round(conf_score / 100, 2)  # normalise 0-100 → 0-1 for frontend
+    # score is already 0-100 from score_retrieval; keep it as-is for persistence
 
     # Count graph vs KB docs for breakdown
     def _count_graph(docs_list):
@@ -405,7 +299,7 @@ async def fast_stream(
         "event": "context",
         "docs": standard_serialised,
         "confidence": conf_result.level,
-        "score": conf_score_01,
+        "score": conf_score,
         "suggestion": conf_result.suggestion or "",
         "failed_legs": failed_legs,
         "breakdown": {
@@ -416,7 +310,7 @@ async def fast_stream(
         },
         "query_classification": {
             "type": "FACTUAL",
-            "confidence": conf_score_01,
+            "confidence": round(conf_score / 100, 2),
             "latency_ms": 0,
             "fallback": False,
         },
@@ -436,16 +330,21 @@ async def fast_stream(
         expanded_to = len(expanded_docs)
         exp_kb, exp_graph = _count_graph(expanded_docs)
 
+        # Recompute confidence on expanded_docs — reflects actual docs sent to LLM
+        conf_result_expanded = score_retrieval(expanded_docs, retrieval_info)
+        conf_score_expanded = conf_result_expanded.score
+        # conf_score_expanded is already 0-100 from score_retrieval
+
         adaptive_serialised = [_serialise_doc(d) for d in expanded_docs]
         yield {
             "event": "context",
             "docs": adaptive_serialised,
-            "confidence": conf_result.level,
-            "score": conf_score_01,
-            "suggestion": conf_result.suggestion or "",
+            "confidence": conf_result_expanded.level,
+            "score": conf_score_expanded,
+            "suggestion": conf_result_expanded.suggestion or "",
             "failed_legs": failed_legs,
             "breakdown": {
-                **conf_result.breakdown,
+                **conf_result_expanded.breakdown,
                 "kb_docs": exp_kb,
                 "graph_docs": exp_graph,
                 "adaptive": True,
@@ -456,7 +355,7 @@ async def fast_stream(
             },
             "query_classification": {
                 "type": "FACTUAL",
-                "confidence": conf_score_01,
+                "confidence": round(conf_score_expanded / 100, 2),
                 "latency_ms": 0,
                 "fallback": False,
             },
@@ -464,8 +363,8 @@ async def fast_stream(
             "synthesis_mode": False,
         }
         logger.info(
-            "[ADAPTIVE] standard_count=%d expanded_count=%d conf_score=%d",
-            expanded_from, expanded_to, conf_score,
+            "[ADAPTIVE] standard_count=%d expanded_count=%d conf_score=%d → expanded_conf=%d",
+            expanded_from, expanded_to, conf_score, conf_score_expanded,
         )
 
     # Serialise expanded_docs for LLM context (standard docs when high conf)
@@ -549,73 +448,5 @@ async def fast_stream(
     if normalised != raw_answer:
         yield {"event": "answer_rewrite", "content": normalised}
 
-    # ── 6. Quality grading (post-stream, only for low-confidence retrieval) ──
     final_answer = normalised or raw_answer
-    if conf_score < 55 and settings.ANSWER_QUALITY_GRADING_ENABLED:
-        # Build chunk previews for the grading prompt
-        grading_serialised = [_serialise_doc(d) for d in expanded_docs]
-        grading_chunks = [
-            _preview(d.get("page_content", ""), _PREVIEW_CHARS) + (" [" + d.get("metadata", {}).get("source", "") + "]" if d.get("metadata", {}).get("source") else "")
-            for d in grading_serialised
-        ]
-        try:
-            grading_scores = await _grade_answer_quality(
-                query=rewritten,
-                answer=final_answer,
-                context_chunks=grading_chunks,
-                model_name=effective_model,
-                api_base=api_base,
-            )
-            logger.info(
-                "[QUALITY] conf=%d | verdict=%s | faith=%.2f complete=%.2f coherent=%.2f",
-                conf_score, grading_scores["verdict"],
-                grading_scores["faithfulness"], grading_scores["completeness"],
-                grading_scores["coherence"],
-            )
-
-            if grading_scores["verdict"] == "needs_improvement":
-                # Regenerate with feedback appended to user message
-                t3 = time.monotonic()
-                feedback_msg = (
-                    f"\n\n[Quality feedback — please improve: "
-                    f"faithfulness={grading_scores['faithfulness']:.2f}, "
-                    f"completeness={grading_scores['completeness']:.2f}, "
-                    f"coherence={grading_scores['coherence']:.2f}.]"
-                )
-                feedback_messages = list(messages)  # shallow copy
-                feedback_messages[-1] = {
-                    "role": feedback_messages[-1]["role"],
-                    "content": feedback_messages[-1]["content"] + feedback_msg,
-                }
-                yield {"event": "agent_step", "node": "regenerate_answer", "status": "active", "latency_ms": None}
-                regenerate_llm = _get_llm(effective_model, temperature, api_base=api_base)
-                regen_parts: list[str] = []
-                async for chunk in regenerate_llm.astream(feedback_messages):
-                    token: str = chunk.content or ""
-                    if token:
-                        regen_parts.append(token)
-                        yield {"event": "token", "content": token}
-                regen_ms = round((time.monotonic() - t3) * 1000, 1)
-                final_answer = "".join(regen_parts)
-                yield {
-                    "event": "agent_step",
-                    "node": "regenerate_answer",
-                    "status": "done",
-                    "latency_ms": regen_ms,
-                }
-                logger.info("[QUALITY] regenerated after feedback in %.1fms", regen_ms)
-
-            elif grading_scores["verdict"] == "unsatisfactory":
-                # Append disclaimer to the answer
-                disclaimer = (
-                    "\n\n[Disclaimer: This answer could not meet quality standards. "
-                    "The information may be incomplete or inaccurate. "
-                    "Please verify with the source documents.]"
-                )
-                final_answer = final_answer + disclaimer
-                logger.info("[QUALITY] unsatisfactory — disclaimer appended")
-
-        except Exception as exc:
-            logger.warning("[QUALITY] grading failed (non-fatal): %s", exc)
-
     yield {"event": "done", "full_response": final_answer, "usage": usage}

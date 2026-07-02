@@ -105,3 +105,4 @@ lpt[1-9].*
 /.agents
 /.hermes
 /data
+/.gsd-backups

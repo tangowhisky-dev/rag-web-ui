@@ -279,12 +279,43 @@ def get_messages_paginated(
                 file_map[cf.message_id] = (cf.id, cf.file_name)
 
     from app.schemas.chat import MessageResponse
+    from app.models.chat import MessageCitation
+    from app.models.knowledge import DocumentChunk
     result = []
     for msg in messages:
         msg_dict = MessageResponse.model_validate(msg).model_dump()
         info = file_map.get(msg.id)
         msg_dict["file_name"] = info[1] if info else None
         msg_dict["file_id"]   = info[0] if info else None
+
+        # Reconstruct citations from message_citations table
+        citations = (
+            db.query(MessageCitation)
+            .filter(MessageCitation.message_id == msg.id)
+            .order_by(MessageCitation.citation_index)
+            .all()
+        )
+        if citations:
+            msg_dict["citations"] = []
+            for cit in citations:
+                # Look up chunk by (document_id, chunk_index) for the citation text
+                chunk = (
+                    db.query(DocumentChunk)
+                    .filter(
+                        DocumentChunk.document_id == cit.document_id,
+                        DocumentChunk.chunk_index == cit.chunk_index,
+                    )
+                    .first()
+                )
+                if chunk:
+                    # Keep citation_metadata as-is from DB (raw fields from 2: event)
+                    # Only add "text" for the citation content
+                    entry = {**(cit.citation_metadata or {})}  # type: ignore[misc]
+                    entry["text"] = chunk.chunk_text
+                    msg_dict["citations"].append(entry)
+        else:
+            msg_dict["citations"] = []
+
         result.append(msg_dict)
 
     return {"messages": result, "has_more": has_more}

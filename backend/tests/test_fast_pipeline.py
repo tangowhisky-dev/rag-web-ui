@@ -93,7 +93,7 @@ def _make_retrieval_result(docs, failed_legs=None, graph_count=0, graph_expanded
         "retrieval_info": {
             "legs": {
                 "dense": {"status": "ok", "count": max(len(docs) // 2, 0)},
-                "qdrant_sparse": {"status": "ok", "count": max(len(docs) // 2, 0)},
+                "sparse": {"status": "ok", "count": max(len(docs) // 2, 0)},
                 "exact": {"status": "disabled", "count": 0},
                 "graph": {"count": graph_count, "expanded": graph_expanded},
             },
@@ -185,7 +185,7 @@ async def test_standard_retrieval_single_context_event():
     assert len(context_events) == 1, f"Expected 1 context event, got {len(context_events)}"
 
     ctx = context_events[0]
-    assert ctx["score"] == 0.65
+    assert ctx["score"] == 65  # 0-100 scale, not 0-1
     assert ctx["confidence"] == "high"
     assert ctx["docs"] is not None
     assert len(ctx["docs"]) == 3

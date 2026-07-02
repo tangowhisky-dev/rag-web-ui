@@ -106,7 +106,7 @@ def score_retrieval(
       {
         "legs": {
           "dense":         {"status": "ok"|"failed"|"disabled", "count": N},
-          "qdrant_sparse": {...},
+          "sparse": {...},
           "exact":         {...},
           "graph":         {...},
         },

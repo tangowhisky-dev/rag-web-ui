@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { api, ApiError } from "@/lib/api";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
-import { APP_NAME, APP_DESCRIPTION, APP_ICON_SRC } from "@/lib/app-config";
+import { APP_NAME, APP_DESCRIPTION, APP_ICON_SRC, APP_VERSION } from "@/lib/app-config";
 import {
   Brain,
   Upload,
@@ -78,7 +78,7 @@ export default function Home() {
       });
       localStorage.setItem("token", data.access_token);
       document.cookie = `token=${data.access_token}; path=/; SameSite=Lax`;
-      window.location.href = "/dashboard";
+      router.push("/dashboard");
     } catch (err) {
       if (err instanceof ApiError) {
         // Handle rate limiting (429)
@@ -103,10 +103,13 @@ export default function Home() {
       {/* ── Top nav ─────────────────────────────────────────────────────── */}
       <header className="sticky top-0 z-50 w-full border-b bg-card/80 backdrop-blur-sm">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 flex h-14 items-center gap-4">
-          <Link href="/" className="flex items-center gap-2 font-semibold text-sm">
+          <div className="flex items-center gap-2">
             <img src={APP_ICON_SRC} alt={APP_NAME} className="h-7 w-7 rounded-lg" />
-            {APP_NAME}
-          </Link>
+            <div className="flex flex-col leading-none">
+              <Link href="/" className="font-semibold text-sm">{APP_NAME}</Link>
+              <span className="text-[10px] text-muted-foreground/60">v{APP_VERSION}</span>
+            </div>
+          </div>
           <nav className="hidden md:flex items-center gap-6 ml-8 text-sm text-muted-foreground">
             <a href="#features" className="hover:text-foreground transition-colors">Features</a>
             <a href="#how-it-works" className="hover:text-foreground transition-colors">How It Works</a>
@@ -237,9 +240,8 @@ export default function Home() {
               From ingestion to insight — every layer is optimised for accuracy, speed, and trust.
             </p>
           </div>
-          <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-6">
-            {/* Hero feature — spans 2 cols */}
-            <div className="lg:col-span-2 rounded-xl border bg-card p-6 space-y-3 hover:shadow-md transition-shadow">
+          <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+            <div className="rounded-xl border bg-card p-6 space-y-3 hover:shadow-md transition-shadow">
               <div className="h-10 w-10 rounded-lg bg-primary/10 flex items-center justify-center">
                 <Brain className="h-5 w-5 text-primary" />
               </div>
@@ -249,44 +251,44 @@ export default function Home() {
               </p>
             </div>
 
-            <div className="rounded-lg border bg-card p-5 space-y-2 hover:shadow-md transition-shadow">
-              <div className="h-9 w-9 rounded-md bg-muted flex items-center justify-center">
-                <Network className="h-4 w-4 text-muted-foreground" />
+            <div className="rounded-xl border bg-card p-6 space-y-3 hover:shadow-md transition-shadow">
+              <div className="h-10 w-10 rounded-lg bg-primary/10 flex items-center justify-center">
+                <Network className="h-5 w-5 text-primary" />
               </div>
-              <h3 className="font-medium text-sm">GraphRAG</h3>
-              <p className="text-xs text-muted-foreground leading-relaxed">Entity extraction and knowledge-graph traversal surface cross-document relationships.</p>
+              <h3 className="font-semibold">GraphRAG</h3>
+              <p className="text-sm text-muted-foreground leading-relaxed">Entity extraction and knowledge-graph traversal surface cross-document relationships.</p>
             </div>
 
-            <div className="rounded-lg border bg-card p-5 space-y-2 hover:shadow-md transition-shadow">
-              <div className="h-9 w-9 rounded-md bg-muted flex items-center justify-center">
-                <Upload className="h-4 w-4 text-muted-foreground" />
+            <div className="rounded-xl border bg-card p-6 space-y-3 hover:shadow-md transition-shadow">
+              <div className="h-10 w-10 rounded-lg bg-primary/10 flex items-center justify-center">
+                <Upload className="h-5 w-5 text-primary" />
               </div>
-              <h3 className="font-medium text-sm">Multi-format Ingestion</h3>
-              <p className="text-xs text-muted-foreground leading-relaxed">Upload PDF, DOCX, Markdown, and TXT. Chunking and vector indexing run automatically.</p>
+              <h3 className="font-semibold">Multi-format Ingestion</h3>
+              <p className="text-sm text-muted-foreground leading-relaxed">Upload PDF, DOCX, Markdown, and TXT. Chunking and vector indexing run automatically.</p>
             </div>
 
-            <div className="rounded-lg border bg-card p-5 space-y-2 hover:shadow-md transition-shadow">
-              <div className="h-9 w-9 rounded-md bg-muted flex items-center justify-center">
-                <MessageSquare className="h-4 w-4 text-muted-foreground" />
+            <div className="rounded-xl border bg-card p-6 space-y-3 hover:shadow-md transition-shadow">
+              <div className="h-10 w-10 rounded-lg bg-primary/10 flex items-center justify-center">
+                <MessageSquare className="h-5 w-5 text-primary" />
               </div>
-              <h3 className="font-medium text-sm">Cited Answers</h3>
-              <p className="text-xs text-muted-foreground leading-relaxed">Every response links back to the exact source passage with a relevance score.</p>
+              <h3 className="font-semibold">Cited Answers</h3>
+              <p className="text-sm text-muted-foreground leading-relaxed">Every response links back to the exact source passage with a relevance score.</p>
             </div>
 
-            <div className="rounded-lg border bg-card p-5 space-y-2 hover:shadow-md transition-shadow">
-              <div className="h-9 w-9 rounded-md bg-muted flex items-center justify-center">
-                <Zap className="h-4 w-4 text-muted-foreground" />
+            <div className="rounded-xl border bg-card p-6 space-y-3 hover:shadow-md transition-shadow">
+              <div className="h-10 w-10 rounded-lg bg-primary/10 flex items-center justify-center">
+                <Zap className="h-5 w-5 text-primary" />
               </div>
-              <h3 className="font-medium text-sm">Adaptive Retrieval</h3>
-              <p className="text-xs text-muted-foreground leading-relaxed">Query classification routes each question to the optimal retrieval strategy.</p>
+              <h3 className="font-semibold">Adaptive Retrieval</h3>
+              <p className="text-sm text-muted-foreground leading-relaxed">Query classification routes each question to the optimal retrieval strategy.</p>
             </div>
 
-            <div className="rounded-lg border bg-card p-5 space-y-2 hover:shadow-md transition-shadow">
-              <div className="h-9 w-9 rounded-md bg-muted flex items-center justify-center">
-                <Shield className="h-4 w-4 text-muted-foreground" />
+            <div className="rounded-xl border bg-card p-6 space-y-3 hover:shadow-md transition-shadow">
+              <div className="h-10 w-10 rounded-lg bg-primary/10 flex items-center justify-center">
+                <Shield className="h-5 w-5 text-primary" />
               </div>
-              <h3 className="font-medium text-sm">Private by Default</h3>
-              <p className="text-xs text-muted-foreground leading-relaxed">Self-hosted. Your documents never leave your infrastructure. JWT auth with per-user isolation.</p>
+              <h3 className="font-semibold">Private by Default</h3>
+              <p className="text-sm text-muted-foreground leading-relaxed">Self-hosted. Your documents never leave your infrastructure. JWT auth with per-user isolation.</p>
             </div>
           </div>
         </div>
