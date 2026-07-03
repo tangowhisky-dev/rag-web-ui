@@ -262,12 +262,15 @@ def _apply_config_to_chart(chart, config: dict):
         elif s_type == "radar":
             # Radar needs indicator range from config
             indicator = config.get("radar", {}).get("indicator", [])
-            if indicator:
-                radar_indicators = [
-                    opts.IndicatorItem(name=item.get("name", ""), max_=item.get("max", 100))
-                    for item in indicator
-                ]
-                chart.set_global_opts(radar_index_opts=radar_indicators)
+            radar_indicators = [
+                opts.RadarIndicatorItem(name=item.get("name", ""), max_=item.get("max", 100))
+                for item in indicator
+            ]
+            if radar_indicators:
+                chart.add_schema(
+                    schema=radar_indicators,
+                    start_angle=90,
+                )
             chart.add(
                 series_name=name,
                 data=list(data) if data else [],
@@ -388,13 +391,13 @@ def _apply_config_to_chart(chart, config: dict):
                 level_distance="auto",
             )
         elif s_type == "chord":
-            # Chord has nodes and links
-            nodes = series.get("data", [])
+            # Chord has data and links
+            data = series.get("data", [])
             links = series.get("links", [])
-            if nodes:
-                node_data = [opts.ChordNode(name=n.get("name", f"Node {i}")) for i, n in enumerate(nodes)]
+            if data:
+                chord_data = [opts.ChordData(name=n.get("name", f"Node {i}")) for i, n in enumerate(data)]
             else:
-                node_data = []
+                chord_data = []
             if links:
                 link_data = [
                     opts.ChordLink(source=l.get("source", ""), target=l.get("target", ""), value=l.get("value", 0))
@@ -404,9 +407,8 @@ def _apply_config_to_chart(chart, config: dict):
                 link_data = []
             chart.add(
                 series_name=name,
-                nodes=node_data,
+                data=chord_data,
                 links=link_data,
-                is_label_show=True,
                 tooltip_opts=opts.TooltipOpts(trigger="item"),
             )
         elif s_type == "liquidFill":

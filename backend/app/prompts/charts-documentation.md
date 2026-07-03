@@ -517,8 +517,8 @@ bar3D, line3D, scatter3D, surface3D, lines3D
   "title": {"text": "Performance Metrics", "left": "center"},
   "tooltip": {},
   "polar": {},
-  "xAxis": {"type": "category", "data": ["A", "B", "C", "D", "E"]},
-  "yAxis": {"type": "value"},
+  "angleAxis": {"type": "category", "data": ["A", "B", "C", "D", "E"]},
+  "radiusAxis": {"type": "value"},
   "series": [{
     "type": "bar",
     "data": [65, 80, 70, 90, 55],
