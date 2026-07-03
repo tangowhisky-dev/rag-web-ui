@@ -29,6 +29,10 @@ const MermaidDiagramDynamic = dynamic(
   () => import("./mermaid-diagram"),
   { ssr: false }
 );
+const EChartsDiagramDynamic = dynamic(
+  () => import("./echarts-diagram"),
+  { ssr: false }
+);
 import { api } from "@/lib/api";
 import { cleanChunkText } from "@/lib/utils";
 import { FileIcon } from "react-file-icon";
@@ -496,7 +500,7 @@ const ConfidenceCollapsible: FC<{
   );
 };
 
-// ── CodeBlock: renders mermaid fences as diagrams, others as <code> ─────────
+// ── CodeBlock: renders mermaid/echarts fences as diagrams, others as <code> ───
 
 const CodeBlock: FC<React.HTMLAttributes<HTMLElement> & { inline?: boolean }> = ({
   className,
@@ -507,6 +511,13 @@ const CodeBlock: FC<React.HTMLAttributes<HTMLElement> & { inline?: boolean }> = 
   if (!inline && className?.includes("language-mermaid")) {
     return (
       <MermaidDiagramDynamic
+        code={String(children).replace(/\n$/, "")}
+      />
+    );
+  }
+  if (!inline && className?.includes("language-echarts")) {
+    return (
+      <EChartsDiagramDynamic
         code={String(children).replace(/\n$/, "")}
       />
     );

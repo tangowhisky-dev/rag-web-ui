@@ -21,6 +21,8 @@ import re
 import time
 from typing import Any, AsyncGenerator, List, Optional
 
+from app.services.prompts.loader import append_chart_instructions
+
 logger = logging.getLogger(__name__)
 
 _ANSWER_SYSTEM_PROMPT = """\
@@ -40,6 +42,8 @@ When you use information from a chunk, cite it as a markdown link with ONLY the 
 The number must match the [KB-N] label of the chunk you are citing.
 Do NOT invent citations. Only cite chunks you actually used.
 """
+
+_ANSWER_SYSTEM_PROMPT = append_chart_instructions(_ANSWER_SYSTEM_PROMPT)
 
 _PREVIEW_CHARS = 120  # characters shown per chunk in the timeline
 

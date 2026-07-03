@@ -20,6 +20,7 @@ from app.services.rag_graph.helpers import (
     _dedup_and_reinforce,
     _build_context_string,
 )
+from app.services.prompts.loader import append_chart_instructions
 
 
 # Import _get_llm and _invoke_structured from the package root so that
@@ -1043,6 +1044,8 @@ If some parts of the question could not be answered from available context, clea
 
 If no relevant context was found at all, clearly state that.
 """
+
+_FINAL_ANSWER_SYSTEM = append_chart_instructions(_FINAL_ANSWER_SYSTEM)
 
 
 async def generate_answer_node(state: RAGGraphState) -> dict:

@@ -28,4 +28,5 @@ pyarrow>=14.0.0
 neo4j>=5.26
 neo4j-graphrag[qdrant]>=1.8.0
 watchdog>=3.0.0
+pyecharts>=2.1.0
 pytest-asyncio
