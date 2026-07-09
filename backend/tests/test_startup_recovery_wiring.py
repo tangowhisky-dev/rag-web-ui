@@ -66,7 +66,7 @@ class TestMainPyImportAndSyntax:
         with open(main_path) as f:
             source = f.read()
         assert (
-            "from app.services.startup_recovery_service import StartupRecoveryService"
+            "from app.services.discovery import StartupRecoveryService"
             in source
         )
 
@@ -150,13 +150,13 @@ class TestNoCircularImports:
 
     def test_startup_recovery_service_imports_cleanly(self):
         """The recovery service module must import without circular errors."""
-        from app.services.startup_recovery_service import StartupRecoveryService
+        from app.services.discovery import StartupRecoveryService
 
         assert StartupRecoveryService is not None
 
     def test_recovery_service_has_start_and_stop(self):
         """StartupRecoveryService must have start() and stop() methods."""
-        from app.services.startup_recovery_service import StartupRecoveryService
+        from app.services.discovery import StartupRecoveryService
 
         assert hasattr(StartupRecoveryService, "start")
         assert hasattr(StartupRecoveryService, "stop")

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { Paperclip, ArrowUp, Zap, Brain, Bot, Square, ArrowRight } from "lucide-react";
+import { Paperclip, ArrowUp, Square, ArrowRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
   Select,
@@ -12,14 +12,6 @@ import {
 } from "@/components/ui/select";
 import { api } from "@/lib/api";
 import { FileAttachButton, FileChip, useFileDropzone, type UploadedFile } from "./file-attachment";
-
-export type AnsweringMode = "fast" | "thinking" | "agentic";
-
-const MODE_META: Record<AnsweringMode, { label: string; description: string; icon: React.ElementType }> = {
-  fast:     { label: "Fast",     description: "Quick search + rerank + direct answer", icon: Zap },
-  thinking: { label: "Thinking", description: "Same as Fast but with a reasoning model", icon: Brain },
-  agentic:  { label: "Agentic",  description: "Full multi-step LangGraph pipeline",     icon: Bot },
-};
 
 interface KnowledgeBase {
   id: number;
@@ -45,10 +37,6 @@ interface InputBarProps {
   onFileError?: (msg: string) => void;
   /** Called when user clicks stop during generation */
   onStop?: () => void;
-  /** Current answering mode */
-  answeringMode?: AnsweringMode;
-  /** Called when user changes mode */
-  onAnsweringModeChange?: (mode: AnsweringMode) => void;
 }
 
 const LINE_HEIGHT_PX = 24;
@@ -76,18 +64,10 @@ export function InputBar({
   fileError = "",
   onFileError,
   onStop,
-  answeringMode: answeringModeProp,
-  onAnsweringModeChange,
 }: InputBarProps) {
   const [kbOpen, setKbOpen] = useState(false);
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]);
   const [selectedKbIds, setSelectedKbIds] = useState<number[]>([]);
-  const [internalMode, setInternalMode] = useState<AnsweringMode>("fast");
-  const activeMode: AnsweringMode = answeringModeProp ?? internalMode;
-  const setMode = (m: AnsweringMode) => {
-    setInternalMode(m);
-    onAnsweringModeChange?.(m);
-  };
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   useAutoResize(textareaRef, value);
 
@@ -225,94 +205,67 @@ export function InputBar({
         )}
       </div>
 
-      {/* Bottom row: attach + KB chips | mode pills */}
-      <div className="flex items-center justify-between px-2 pb-2 gap-2">
-        <div className="flex items-center gap-1">
-          {/* File attach button */}
-          <label
-            className={cn(
-              "p-1.5 rounded-lg cursor-pointer text-muted-foreground hover:text-foreground hover:bg-muted transition-colors",
-              disabled && "pointer-events-none opacity-50"
-            )}
-            aria-label="Attach file"
-            data-testid="chat-input-file-button"
-          >
-            <Paperclip className="h-4 w-4" />
-            <input
-              type="file"
-              className="hidden"
-              disabled={disabled}
-              accept=".pdf,.docx,.doc,.pptx,.ppt,.xlsx,.xls,.txt,.md,.html,.htm,.csv,.json,.xml,.eml,.epub,.jpg,.jpeg,.png,.gif,.zip"
-              data-testid="file-input"
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) {
-                  handleFileAccepted(file);
-                }
-                e.target.value = "";  // reset so same file can be re-selected
-              }}
-            />
-          </label>
-
-          {/* KB selector pills */}
-          {knowledgeBases.length > 0 && (
-            <Select open={kbOpen} onOpenChange={setKbOpen}>
-              <SelectTrigger
-                className="h-7 w-auto gap-1 rounded-full border px-2.5 text-xs shrink-0"
-                data-testid="chat-input-kb-selector"
-              >
-                <SelectValue placeholder="KBs" />
-              </SelectTrigger>
-              <SelectContent>
-                {knowledgeBases.map((kb) => (
-                  <SelectItem
-                    key={kb.id}
-                    value={String(kb.id)}
-                    onSelect={(e) => {
-                      e.preventDefault();
-                      handleKbToggle(kb.id, !selectedKbIds.includes(kb.id));
-                    }}
-                  >
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="checkbox"
-                        checked={selectedKbIds.includes(kb.id)}
-                        onChange={() => {}}
-                        className="h-3 w-3"
-                      />
-                      <span className="truncate max-w-[160px]">{kb.name}</span>
-                    </div>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+      {/* Bottom row: attach + KB chips */}
+      <div className="flex items-center justify-start px-2 pb-2 gap-2">
+        {/* File attach button */}
+        <label
+          className={cn(
+            "p-1.5 rounded-lg cursor-pointer text-muted-foreground hover:text-foreground hover:bg-muted transition-colors",
+            disabled && "pointer-events-none opacity-50"
           )}
-        </div>
+          aria-label="Attach file"
+          data-testid="chat-input-file-button"
+        >
+          <Paperclip className="h-4 w-4" />
+          <input
+            type="file"
+            className="hidden"
+            disabled={disabled}
+            accept=".pdf,.docx,.doc,.pptx,.ppt,.xlsx,.xls,.txt,.md,.html,.htm,.csv,.json,.xml,.eml,.epub,.jpg,.jpeg,.png,.gif,.zip"
+            data-testid="file-input"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) {
+                handleFileAccepted(file);
+              }
+              e.target.value = "";  // reset so same file can be re-selected
+            }}
+          />
+        </label>
 
-        {/* Mode selector pills — centered */}
-        <div className="flex items-center gap-0.5">
-          {(Object.entries(MODE_META) as [AnsweringMode, typeof MODE_META[AnsweringMode]][]).map(([mode, meta]) => {
-            const Icon = meta.icon;
-            const active = activeMode === mode;
-            return (
-              <button
-                key={mode}
-                type="button"
-                onClick={() => setMode(mode)}
-                title={meta.description}
-                className={cn(
-                  "flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium transition-all",
-                  active
-                    ? "bg-primary text-primary-foreground shadow-sm"
-                    : "text-muted-foreground hover:text-foreground hover:bg-muted"
-                )}
-              >
-                <Icon className="h-3 w-3" />
-                {meta.label}
-              </button>
-            );
-          })}
-        </div>
+        {/* KB selector pills */}
+        {knowledgeBases.length > 0 && (
+          <Select open={kbOpen} onOpenChange={setKbOpen}>
+            <SelectTrigger
+              className="h-7 w-auto gap-1 rounded-full border px-2.5 text-xs shrink-0"
+              data-testid="chat-input-kb-selector"
+            >
+              <SelectValue placeholder="KBs" />
+            </SelectTrigger>
+            <SelectContent>
+              {knowledgeBases.map((kb) => (
+                <SelectItem
+                  key={kb.id}
+                  value={String(kb.id)}
+                  onSelect={(e) => {
+                    e.preventDefault();
+                    handleKbToggle(kb.id, !selectedKbIds.includes(kb.id));
+                  }}
+                >
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={selectedKbIds.includes(kb.id)}
+                      onChange={() => {}}
+                      className="h-3 w-3"
+                    />
+                    <span className="truncate max-w-[160px]">{kb.name}</span>
+                  </div>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
       </div>
 
       {/* File error */}

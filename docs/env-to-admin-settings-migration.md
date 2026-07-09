@@ -340,8 +340,8 @@ Each org setting page has a **"Reset to app defaults"** button that deletes the 
 6. Update key services to use `SettingManager` instead of `settings.<KEY>`:
    - `chat_service.py` — `QUERY_CLASSIFIER_ENABLED`, `QUERY_CLASSIFIER_PROMPT`, `OPENAI_MODEL`, `OPENAI_API_BASE`, `effective_query_model`
    - `retrieval.py` — all hybrid weights, leg enablement flags, retrieval top-k, min RRF score
-   - `fast_pipeline.py` — adaptive retrieval, answer quality grading, historical memory, reranker
-   - `rag_graph.py` — reranker, graphRAG
+   - `agentic_rag/agentic_rag.py` — adaptive retrieval, answer quality grading, historical memory, reranker
+   - (removed: `fast_pipeline.py` and `rag_graph/` — replaced by single agentic pipeline)
    - `entity_extractor.py` — entity aware, graphRAG
    - `document_processor.py` — processing timeout
    - `datastore_watcher.py` — watcher settings

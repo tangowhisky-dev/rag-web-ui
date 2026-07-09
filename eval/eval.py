@@ -152,82 +152,8 @@ def main() -> None:
                         help="Parallel requests per config (useful with --generate-answers)")
     parser.add_argument("--classify", action="store_true",
                         help="Enable query classification — group results by inferred query type")
-    parser.add_argument("--tune", action="store_true",
-                        help="Run auto-tuning loop instead of eval sweep")
-    parser.add_argument("--tune-iterations", type=int, default=20,
-                        help="Max tuning iterations (default: 20)")
-    parser.add_argument("--tune-patience", type=int, default=5,
-                        help="Tuning patience — stop if no improvement (default: 5)")
-    parser.add_argument("--tune-seed", type=int, default=None,
-                        help="Random seed for tuning reproducibility")
     parser.add_argument("--output",    default="eval_results.json")
     args = parser.parse_args()
-
-    # ── Tuning mode ────────────────────────────────────────────────────────────
-    if args.tune:
-        with open(args.state) as f:
-            state = json.load(f)
-        kb_id = state["kb_id"]
-        questions = state["questions"]
-        print(f"Tuning mode: KB id={kb_id}, {len(questions)} questions")
-        print(f"  iterations={args.tune_iterations}, patience={args.tune_patience}")
-        print()
-
-        try:
-            from app.services.auto_tune import run_tuning_loop, save_best_config
-        except ImportError:
-            print("Error: auto_tune module not available. Run from backend/ or ensure app is on PYTHONPATH.", file=sys.stderr)
-            sys.exit(1)
-
-        result = run_tuning_loop(
-            questions=questions,
-            kb_id=kb_id,
-            base_url=args.base_url,
-            username=args.username,
-            password=args.password,
-            email=args.email,
-            max_iterations=args.tune_iterations,
-            patience=args.tune_patience,
-            seed=args.tune_seed,
-        )
-
-        output_path = save_best_config(result, kb_id)
-
-        print()
-        print("=" * 60)
-        print("Tuning complete!")
-        print(f"  Iterations: {result.n_iterations}")
-        print(f"  Converged:  {result.converged_at or 'No'}")
-        print(f"  Best F1:    {result.best_result.mean_f1:.4f}")
-        print(f"  Best EM:    {result.best_result.mean_em:.4f}")
-        print(f"  Best Hit:   {result.best_result.hit_rate:.4f}")
-        print(f"  Best Lat:   {result.best_result.mean_latency_ms:.0f}ms")
-        print(f"  Config:     {result.best_config.to_dict()}")
-        print(f"  Saved to:   {output_path}")
-        print("=" * 60)
-
-        # Write tuning results to output
-        tuning_output = {
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "mode": "tuning",
-            "kb_id": kb_id,
-            "n_questions": len(questions),
-            "n_iterations": result.n_iterations,
-            "converged_at": result.converged_at,
-            "best_config": result.best_config.to_dict(),
-            "best_metrics": {
-                "f1": result.best_result.mean_f1,
-                "em": result.best_result.mean_em,
-                "hit_rate": result.best_result.hit_rate,
-                "latency_ms": result.best_result.mean_latency_ms,
-            },
-            "f1_history": [h["f1"] for h in result.history],
-            "history": result.history,
-        }
-        with open(args.output, "w") as f:
-            json.dump(tuning_output, f, indent=2)
-        print(f"Tuning results written to {args.output}")
-        return
 
     with open(args.state) as f:
         state = json.load(f)

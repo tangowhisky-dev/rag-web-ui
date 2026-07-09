@@ -105,7 +105,7 @@ class TestHashFile:
 
     def test_hash_file_returns_64_char_hex(self, tmp_path):
         """hash_file() must return a 64-character hex digest."""
-        from app.services.discovery_engine import hash_file
+        from app.services.discovery import hash_file
 
         f = tmp_path / "small.txt"
         f.write_text("hello world")
@@ -116,7 +116,7 @@ class TestHashFile:
 
     def test_hash_file_known_content(self, tmp_path):
         """hash_file('hello world') must equal the known SHA-256 of 'hello world'."""
-        from app.services.discovery_engine import hash_file
+        from app.services.discovery import hash_file
 
         content = b"hello world"
         f = tmp_path / "known.bin"
@@ -126,7 +126,7 @@ class TestHashFile:
 
     def test_hash_file_empty_file(self, tmp_path):
         """hash_file() on an empty file must return a valid 64-char hex."""
-        from app.services.discovery_engine import hash_file
+        from app.services.discovery import hash_file
 
         f = tmp_path / "empty.bin"
         f.write_bytes(b"")
@@ -136,7 +136,7 @@ class TestHashFile:
 
     def test_hash_file_os_error_returns_empty(self, tmp_path):
         """hash_file() must return '' when the file cannot be read."""
-        from app.services.discovery_engine import hash_file
+        from app.services.discovery import hash_file
 
         f = tmp_path / "nope.txt"
         f.write_text("x")
@@ -152,40 +152,40 @@ class TestMatchesPattern:
     """Tests for _matches_pattern() — wildcard and hidden file filtering."""
 
     def test_wildcard_pdf(self):
-        from app.services.discovery_engine import _matches_pattern
+        from app.services.discovery import _matches_pattern
 
         assert _matches_pattern("doc.pdf", "*.pdf") is True
         assert _matches_pattern("report.pdf", "*.pdf") is True
 
     def test_wildcard_no_extension_mismatch(self):
-        from app.services.discovery_engine import _matches_pattern
+        from app.services.discovery import _matches_pattern
 
         assert _matches_pattern("doc.txt", "*.pdf") is False
 
     def test_hidden_file_skipped(self):
-        from app.services.discovery_engine import _matches_pattern
+        from app.services.discovery import _matches_pattern
 
         assert _matches_pattern(".DS_Store", "*", skip_hidden=True) is False
         assert _matches_pattern(".hidden", "*.txt", skip_hidden=True) is False
 
     def test_hidden_file_included_when_disabled(self):
-        from app.services.discovery_engine import _matches_pattern
+        from app.services.discovery import _matches_pattern
 
         assert _matches_pattern(".DS_Store", "*", skip_hidden=False) is True
 
     def test_star_matches_all(self):
-        from app.services.discovery_engine import _matches_pattern
+        from app.services.discovery import _matches_pattern
 
         assert _matches_pattern("anything.xyz", "*") is True
 
     def test_specific_extension(self):
-        from app.services.discovery_engine import _matches_pattern
+        from app.services.discovery import _matches_pattern
 
         assert _matches_pattern("file.docx", "*.docx") is True
         assert _matches_pattern("file.docx", "*.pdf") is False
 
     def test_nonexistent_hidden_when_enabled(self):
-        from app.services.discovery_engine import _matches_pattern
+        from app.services.discovery import _matches_pattern
 
         # basename starts with '.' should be excluded
         assert _matches_pattern("/a/b/.gitkeep", "*.git*", skip_hidden=True) is False
@@ -201,7 +201,7 @@ class TestDiscoverDatastore:
 
     def test_empty_datastore(self, tmp_datastore_dir):
         """Discovery on a datastore with zero files must return 0 new_files."""
-        from app.services.discovery_engine import discover_datastore
+        from app.services.discovery import discover_datastore
 
         folder_path, ds = tmp_datastore_dir
 
@@ -215,7 +215,7 @@ class TestDiscoverDatastore:
 
     def test_new_files_detected(self, tmp_datastore_dir):
         """Creating files and running discovery must classify them as new."""
-        from app.services.discovery_engine import discover_datastore
+        from app.services.discovery import discover_datastore
 
         folder_path, ds = tmp_datastore_dir
 
@@ -242,7 +242,7 @@ class TestDiscoverDatastore:
 
     def test_modified_file_detected(self, tmp_datastore_dir, db):
         """Modifying a file's content must show up as a modified entry."""
-        from app.services.discovery_engine import discover_datastore
+        from app.services.discovery import discover_datastore
 
         folder_path, ds = tmp_datastore_dir
 
@@ -268,7 +268,7 @@ class TestDiscoverDatastore:
 
     def test_deleted_file_detected(self, tmp_datastore_dir, db):
         """Deleting a file must show up as a deleted manifest entry."""
-        from app.services.discovery_engine import discover_datastore
+        from app.services.discovery import discover_datastore
 
         folder_path, ds = tmp_datastore_dir
 
@@ -295,7 +295,7 @@ class TestDiscoverDatastore:
 
     def test_combined_new_modified_deleted(self, tmp_datastore_dir, db):
         """A single discovery can simultaneously detect new, modified, and deleted files."""
-        from app.services.discovery_engine import discover_datastore
+        from app.services.discovery import discover_datastore
 
         folder_path, ds = tmp_datastore_dir
 
@@ -329,7 +329,7 @@ class TestDiscoverDatastore:
 
     def test_inactive_datastore_returns_0(self, tmp_datastore_dir):
         """Discovery on an inactive datastore must return zero files."""
-        from app.services.discovery_engine import discover_datastore
+        from app.services.discovery import discover_datastore
 
         folder_path, ds = tmp_datastore_dir
 
@@ -351,7 +351,7 @@ class TestDiscoverDatastore:
 
     def test_unknown_datastore_id(self, tmp_datastore_dir):
         """Discovering a non-existent datastore_id must return zero results."""
-        from app.services.discovery_engine import discover_datastore
+        from app.services.discovery import discover_datastore
 
         result = discover_datastore(999999)
 
@@ -361,7 +361,7 @@ class TestDiscoverDatastore:
 
     def test_scan_pattern_filters_files(self, tmp_datastore_dir):
         """When scan_pattern='*.pdf', non-PDF files must be excluded."""
-        from app.services.discovery_engine import discover_datastore, DiscoveryConfig
+        from app.services.discovery import discover_datastore, DiscoveryConfig
         from unittest.mock import patch
 
         folder_path, ds = tmp_datastore_dir
@@ -376,7 +376,7 @@ class TestDiscoverDatastore:
 
         # Patch DiscoveryConfig to use pdf-only pattern
         with patch(
-            "app.services.discovery_engine.DiscoveryConfig",
+            "app.services.discovery.discovery_engine.DiscoveryConfig",
             **{"return_value.scan_pattern": "*.pdf", "return_value.max_workers": 2},
         ):
             result = discover_datastore(ds.id)
@@ -398,7 +398,7 @@ class TestDiscoverAll:
         Uses mock to avoid the SQLAlchemy session-not-thread-safe issue
         when discover_all calls discover_datastore from multiple threads.
         """
-        from app.services.discovery_engine import discover_all, DiscoveryResult
+        from app.services.discovery import discover_all, DiscoveryResult
         from unittest.mock import patch
 
         ds_a_id, ds_a_path, ds_b_id, ds_b_path = active_datastores
@@ -417,7 +417,7 @@ class TestDiscoverAll:
             )
 
         with patch(
-            "app.services.discovery_engine.discover_datastore",
+            "app.services.discovery.discovery_engine.discover_datastore",
             side_effect=mock_discover,
         ):
             db_session = TestingSessionLocal()
@@ -435,7 +435,7 @@ class TestDiscoverAll:
 
     def test_discover_all_no_active_datastores(self):
         """discover_all() with no active datastores must return []."""
-        from app.services.discovery_engine import discover_all
+        from app.services.discovery import discover_all
 
         db_session = TestingSessionLocal()
         try:
@@ -447,7 +447,7 @@ class TestDiscoverAll:
 
     def test_discover_all_skips_inactive_datastores(self, active_datastores):
         """discover_all() must skip inactive datastores silently."""
-        from app.services.discovery_engine import discover_all, DiscoveryResult
+        from app.services.discovery import discover_all, DiscoveryResult
         from unittest.mock import patch
 
         ds_a_id, ds_a_path, ds_b_id, ds_b_path = active_datastores
@@ -472,7 +472,7 @@ class TestDiscoverAll:
             )
 
         with patch(
-            "app.services.discovery_engine.discover_datastore",
+            "app.services.discovery.discovery_engine.discover_datastore",
             side_effect=mock_discover,
         ):
             db_session = TestingSessionLocal()
@@ -493,7 +493,7 @@ class TestDiscoveryResult:
     """Tests for DiscoveryResult serialization."""
 
     def test_to_dict_serializable(self):
-        from app.services.discovery_engine import DiscoveryResult
+        from app.services.discovery import DiscoveryResult
 
         result = DiscoveryResult(
             datastore_id=1,
@@ -517,7 +517,7 @@ class TestDiscoveryResult:
         assert d["skipped_files"] == 1
 
     def test_to_dict_empty_result(self):
-        from app.services.discovery_engine import DiscoveryResult
+        from app.services.discovery import DiscoveryResult
 
         result = DiscoveryResult(
             datastore_id=0,

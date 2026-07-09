@@ -13,9 +13,9 @@ function generateId(): string {
 }
 
 import { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback } from "react";
-import { flushSync } from "react-dom";
+
 import { useRouter } from "next/navigation";
-import { Copy, Trash2 } from "lucide-react";
+import { Copy, Trash2, Lightbulb } from "lucide-react";
 import { useChatContext } from "@/contexts/chat-context";
 import ChatSettings from "@/components/chat/chat-settings";
 import type { ChatPatch } from "@/components/chat/chat-settings";
@@ -24,9 +24,10 @@ import { APP_LOGO_SRC } from "@/lib/app-config";
 import { cancelStream } from "@/lib/cancel-stream";
 import { useToast } from "@/components/ui/use-toast";
 import { Answer } from "@/components/chat/answer";
-import { InputBar, type AnsweringMode } from "@/components/chat/chat-input";
+import { InputBar } from "@/components/chat/chat-input";
 import { MessageFileChip, type UploadedFile } from "@/components/chat/file-attachment";
 import { BranchPicker } from "@/components/chat/branch-picker";
+import ClarificationDialog from "@/components/chat/clarification-dialog";
 
 interface AgentStep {
   node: string;
@@ -113,8 +114,36 @@ function ChatPageInner({ params }: { params: { id: string } }) {
   const [isLoading, setIsLoading] = useState(false);
   const [uploadedFile, setUploadedFile] = useState<UploadedFile | null>(null);
   const [fileError, setFileError] = useState<string>("");
-  const [answeringMode, setAnsweringMode] = useState<AnsweringMode>("fast");
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // ── Clarification state ───────────────────────────────────────────────────
+  const [clarificationState, setClarificationState] = useState<{
+    question: string;
+    options: string[];
+    rationale?: string;
+    assistantId: string;
+    attempt: number;
+    maxAttempts: number;
+  } | null>(null);
+
+  // ── Progress & task list state (new agentic agent) ────────────────────────
+  const [progressMessages, setProgressMessages] = useState<Array<{
+    phase: string;
+    message: string;
+    details?: Record<string, unknown>;
+  }>>([]);
+
+  const [taskList, setTaskList] = useState<Array<{
+    id: number;
+    text: string;
+    status: string;
+    progress?: unknown;
+  }>>([]);
+
+  const [thinkingContent, setThinkingContent] = useState<{
+    content: string;
+    done: boolean;
+  } | null>(null);
 
   // ── Pagination state ────────────────────────────────────────────────────────
   const [hasMoreMessages, setHasMoreMessages] = useState(false);
@@ -532,6 +561,53 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       return;
     }
 
+    // p: progress — transient status messages (new agentic agent)
+    if (trimmedLine.startsWith("p:")) {
+      try {
+        const payload = JSON.parse(trimmedLine.slice(2)) as {
+          phase: string;
+          message: string;
+          details?: Record<string, unknown>;
+        };
+        setProgressMessages((prev) => [...prev, payload]);
+      } catch (e) {
+        console.error("Failed to parse progress event:", e);
+      }
+      return;
+    }
+
+    // t: task_list — subtask list with status (new agentic agent)
+    if (trimmedLine.startsWith("t:")) {
+      try {
+        const payload = JSON.parse(trimmedLine.slice(2)) as {
+          tasks: Array<{
+            id: number;
+            text: string;
+            status: string;
+            progress?: unknown;
+          }>;
+        };
+        setTaskList(payload.tasks);
+      } catch (e) {
+        console.error("Failed to parse task_list event:", e);
+      }
+      return;
+    }
+
+    // th: thinking — chain-of-thought from reasoning models (new agentic agent)
+    if (trimmedLine.startsWith("th:")) {
+      try {
+        const payload = JSON.parse(trimmedLine.slice(2)) as {
+          content: string;
+          done: boolean;
+        };
+        setThinkingContent(payload);
+      } catch (e) {
+        console.error("Failed to parse thinking event:", e);
+      }
+      return;
+    }
+
     if (trimmedLine.startsWith("3:")) {
       const errorMessage = trimmedLine.slice(2);
       throw new Error(errorMessage || "Streaming request failed");
@@ -555,6 +631,46 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       }
       return;
     }
+
+    // c: clarification — agent needs user to clarify their query
+    if (trimmedLine.startsWith("c:")) {
+      try {
+        const payload = JSON.parse(trimmedLine.slice(2)) as {
+          question: string;
+          options: string[];
+          rationale?: string;
+          attempt?: number;
+          max_attempts?: number;
+        };
+        setClarificationState({
+          question: payload.question,
+          options: payload.options || [],
+          rationale: payload.rationale,
+          assistantId,
+          attempt: payload.attempt || 1,
+          maxAttempts: payload.max_attempts || 2,
+        });
+        // Pause loading state while waiting for clarification
+        setIsLoading(false);
+      } catch (e) {
+        console.error("Failed to parse clarification event:", e);
+      }
+      return;
+    }
+
+    // C: clarification_ready — user responded, agent resuming
+    if (trimmedLine.startsWith("C:")) {
+      try {
+        const payload = JSON.parse(trimmedLine.slice(2)) as { resumed: boolean };
+        if (payload.resumed) {
+          setClarificationState(null);
+          setIsLoading(true);
+        }
+      } catch (e) {
+        console.error("Failed to parse clarification_ready event:", e);
+      }
+      return;
+    }
   };
 
   /** Core SSE streaming: POST to /messages and pipe events into the given assistantId slot. */
@@ -563,6 +679,11 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     assistantId: string,
     fileId?: number
   ) => {
+    // Reset transient state for new query
+    setProgressMessages([]);
+    setTaskList([]);
+    setThinkingContent(null);
+
     const token =
       typeof window !== "undefined"
         ? window.localStorage.getItem("token") || ""
@@ -579,7 +700,6 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       },
       body: JSON.stringify({
         messages: requestMessages,
-        answering_mode: answeringMode,
         ...(fileId ? { file_id: fileId } : {}),
       }),
       signal: controller.signal,
@@ -605,7 +725,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       for (const line of lines) {
         const t = line.trim();
         if (t.startsWith("1:") || t.startsWith("2:")) {
-          flushSync(() => processStreamLine(line, assistantId));
+          processStreamLine(line, assistantId);
         } else if (t) {
           processStreamLine(line, assistantId);
           hasTokenLines = true;
@@ -760,6 +880,67 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     );
   };
 
+  /** Handle user's clarification response */
+  const handleClarificationResponse = async (response: string) => {
+    if (!clarificationState) return;
+
+    const { assistantId } = clarificationState;
+
+    // Add user's clarification as a message
+    const clarificationMessage: Message = {
+      id: generateId(),
+      role: "user",
+      content: response,
+    };
+
+    setMessages((prev) => [...prev, clarificationMessage]);
+    setClarificationState(null);
+    setIsLoading(true);
+
+    // Send clarification to backend
+    try {
+      const token = localStorage.getItem("token") || "";
+      await fetch(`/api/chat/clarification`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          chat_id: Number(params.id),
+          message_id: Number(assistantId),
+          response: response,
+        }),
+      });
+
+      // Resume streaming with clarified query
+      const requestMessages = messages
+        .filter((m) => m.role === "user" || m.role === "assistant")
+        .map((m) => ({
+          role: m.role,
+          content: m.content,
+        }))
+        .concat({ role: "user", content: response });
+
+      await streamFromMessages(requestMessages, assistantId);
+    } catch (error) {
+      console.error("Failed to send clarification:", error);
+      toast({
+        title: "Error",
+        description: error instanceof Error ? error.message : "Failed to send clarification",
+        variant: "destructive",
+      });
+      setIsLoading(false);
+    }
+  };
+
+  /** Handle user skipping clarification */
+  const handleClarificationSkip = () => {
+    if (!clarificationState) return;
+    setClarificationState(null);
+    setIsLoading(true);
+  };
+
   const processedMessages = useMemo(() => {
     return messages.map((message) => {
       if (message.role !== "assistant" || !message.content) return message;
@@ -857,10 +1038,12 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                     {/* Content */}
                     <div className="flex-1 min-w-0 text-sm">
                       {isLoading && !message.content && !message.rewrittenQuery ? (
-                        <div className="flex items-center gap-1 py-2">
-                          <div className="w-2 h-2 rounded-full bg-primary animate-bounce" />
-                          <div className="w-2 h-2 rounded-full bg-primary animate-bounce [animation-delay:0.2s]" />
-                          <div className="w-2 h-2 rounded-full bg-primary animate-bounce [animation-delay:0.4s]" />
+                        <div className="flex items-center justify-center py-2" aria-label="Generating response…">
+                          <div className="relative w-5 h-5">
+                            <div className="absolute inset-0 rounded-full bg-primary/40 animate-pulse" />
+                            <div className="absolute inset-0 rounded-full bg-primary/60"
+                                 style={{ animation: 'skeleton-size 1.5s ease-in-out infinite' }} />
+                          </div>
                         </div>
                       ) : (
                         <Answer
@@ -945,6 +1128,21 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                 )
               )}
 
+              {/* Clarification dialog — shown when agent needs user input */}
+              {clarificationState && (
+                <div className="max-w-3xl mx-auto px-4">
+                  <ClarificationDialog
+                    question={clarificationState.question}
+                    options={clarificationState.options}
+                    rationale={clarificationState.rationale}
+                    attempt={clarificationState.attempt}
+                    maxAttempts={clarificationState.maxAttempts}
+                    onRespond={handleClarificationResponse}
+                    onSkip={handleClarificationSkip}
+                  />
+                </div>
+              )}
+
             </div>
           )}
         </div>
@@ -964,8 +1162,6 @@ function ChatPageInner({ params }: { params: { id: string } }) {
               onFileRemove={handleFileRemove}
               fileError={fileError}
               onFileError={setFileError}
-              answeringMode={answeringMode}
-              onAnsweringModeChange={setAnsweringMode}
             />
           </div>
         </div>

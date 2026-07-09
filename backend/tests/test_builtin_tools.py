@@ -51,7 +51,7 @@ class TestBuiltinToolRegistration:
 
 class TestExtractEntitiesTool:
     def test_returns_entity_list(self):
-        from app.services.entity_extractor import Entity
+        from app.services.graph.entity_extractor import Entity
 
         mock_resp = MagicMock()
         mock_resp.choices[0].message.content = json.dumps({
@@ -61,7 +61,7 @@ class TestExtractEntitiesTool:
             ]
         })
 
-        with patch("app.services.entity_extractor._get_llm_client") as mock_client:
+        with patch("app.services.graph.entity_extractor._get_llm_client") as mock_client:
             mock_client.return_value.chat.completions.create.return_value = mock_resp
             result = execute_tool("extract_entities", {"text": "Bill Gates founded Microsoft."})
 
@@ -74,7 +74,7 @@ class TestExtractEntitiesTool:
         mock_resp = MagicMock()
         mock_resp.choices[0].message.content = json.dumps({"entities": []})
 
-        with patch("app.services.entity_extractor._get_llm_client") as mock_client:
+        with patch("app.services.graph.entity_extractor._get_llm_client") as mock_client:
             mock_client.return_value.chat.completions.create.return_value = mock_resp
             result = execute_tool("extract_entities", {"text": "what is the weather?"})
 
@@ -82,7 +82,7 @@ class TestExtractEntitiesTool:
         assert result.output == []
 
     def test_llm_failure_returns_empty_list(self):
-        with patch("app.services.entity_extractor._get_llm_client") as mock_client:
+        with patch("app.services.graph.entity_extractor._get_llm_client") as mock_client:
             mock_client.return_value.chat.completions.create.side_effect = Exception("timeout")
             result = execute_tool("extract_entities", {"text": "Apple acquired Beats."})
 

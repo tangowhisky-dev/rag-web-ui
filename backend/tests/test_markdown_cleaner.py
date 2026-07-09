@@ -1,6 +1,6 @@
 """Unit tests for markdown_cleaner.py."""
 import pytest
-from app.services.markdown_cleaner import clean_markdown
+from app.services.ingestion import clean_markdown
 
 
 def test_strips_page_numbers():

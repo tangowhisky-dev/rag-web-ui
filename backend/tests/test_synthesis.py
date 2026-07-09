@@ -11,8 +11,8 @@ import pytest
 # Ensure tools registered
 import app.services.builtin_tools  # noqa: F401
 from app.services.tool_registry import _registry, execute_tool
-from app.services.export_service import generate_synthesis_report
-from app.services.chat_service import _is_synthesis_query
+from app.services.export import generate_synthesis_report
+from app.services.chat import _is_synthesis_query
 
 
 # ── synthesize_documents registration ────────────────────────────────────────

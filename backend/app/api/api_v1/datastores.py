@@ -12,25 +12,21 @@ Endpoints:
 
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Response
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from pydantic.config import ConfigDict
 from sqlalchemy.orm import Session
 
-from app.db.session import SessionLocal as _SessionLocal
-
 from app.core.security import require_admin
 from app.db.session import get_db
 from app.models.datastore import DataStore, OrganizationDataStore
-from app.models.knowledge import Document, DocumentChunk, ProcessingTask, KnowledgeBaseDataStore
 from app.models.organisation import Organisation
 from app.services.datastore_watcher import DataStoreWatcher
-from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -439,7 +435,7 @@ def delete_datastore(
     Note: Actual files in the DataStore folder are NOT deleted from disk.
     Only database records (DataStore, Documents, Chunks, Vectors, Graph data) are removed.
     """
-    from app.services.deletion_service import delete_datastore as _delete_ds
+    from app.services.cleanup import delete_datastore as _delete_ds
     result, status = _delete_ds(db, datastore_id)
     # Return 204 No Content for success (maintains backward compatibility)
     if status == 204:
@@ -455,8 +451,6 @@ def assign_datastore_to_orgs(
     _: object = Depends(require_admin),
 ):
     """Assign a datastore to one or more organisations. Empty org_ids removes all assignments."""
-    ds = _get_datastore_or_404(db, datastore_id)
-
     if not payload.org_ids:
         # Remove all existing assignments
         deleted = (

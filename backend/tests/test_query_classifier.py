@@ -10,8 +10,8 @@ import time
 import pytest
 from unittest.mock import patch, AsyncMock
 
-from app.services.chat_service import classify_query
-from app.schemas.chat import QueryType, QueryClassification
+from app.services.chat import classify_query
+from app.models.query_classifier import QueryType, QueryClassification
 from app.core.config import settings
 
 
@@ -74,7 +74,7 @@ def test_classify_query_mocked(query, expected_type):
     async def _run():
         mock_response = _mock_classify_response(expected_type.value)
         
-        with patch('app.services.chat_service.AsyncOpenAI') as MockClient:
+        with patch('app.services.chat.chat_service.AsyncOpenAI') as MockClient:
             mock_client = AsyncMock()
             mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
             MockClient.return_value = mock_client
@@ -96,7 +96,7 @@ def test_classify_query_fuzzy_match(query, expected_type):
         # Simulate LLM returning extra text around the type
         mock_response = _mock_classify_response(f"The category is {expected_type.value} based on the query.")
         
-        with patch('app.services.chat_service.AsyncOpenAI') as MockClient:
+        with patch('app.services.chat.chat_service.AsyncOpenAI') as MockClient:
             mock_client = AsyncMock()
             mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
             MockClient.return_value = mock_client
@@ -129,7 +129,7 @@ def test_classify_query_disabled():
 def test_classify_query_llm_error_fallback():
     """Test fallback behavior when LLM raises an exception."""
     async def _run():
-        with patch('app.services.chat_service.AsyncOpenAI') as MockClient:
+        with patch('app.services.chat.chat_service.AsyncOpenAI') as MockClient:
             mock_client = AsyncMock()
             mock_client.chat.completions.create = AsyncMock(side_effect=Exception("Connection error"))
             MockClient.return_value = mock_client
@@ -152,7 +152,7 @@ def test_classify_query_empty_response_fallback():
         mock_response = AsyncMock()
         mock_response.choices = [mock_choice]
         
-        with patch('app.services.chat_service.AsyncOpenAI') as MockClient:
+        with patch('app.services.chat.chat_service.AsyncOpenAI') as MockClient:
             mock_client = AsyncMock()
             mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
             MockClient.return_value = mock_client
@@ -176,7 +176,7 @@ def test_classification_latency_benchmark():
         for i in range(100):
             mock_response = _mock_classify_response(QueryType.FACTUAL.value)
             
-            with patch('app.services.chat_service.AsyncOpenAI') as MockClient:
+            with patch('app.services.chat.chat_service.AsyncOpenAI') as MockClient:
                 mock_client = AsyncMock()
                 mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
                 MockClient.return_value = mock_client

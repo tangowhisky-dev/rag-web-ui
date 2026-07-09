@@ -20,7 +20,7 @@ from app.db.session import get_db
 from app.models.user import User
 from app.models.knowledge import KnowledgeBase, ProcessingTask
 from app.services.retrieval import hybrid_search_with_legs
-from app.services.confidence import score_retrieval
+from app.services.retrieval import score_retrieval
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -104,7 +104,6 @@ async def query(
     )
     docs            = retrieval_result["docs"]
     retrieval_info  = retrieval_result["retrieval_info"]
-    failed_legs     = retrieval_info["failed_legs"]
 
     # ── Confidence ────────────────────────────────────────────────────────────
     confidence_result = score_retrieval(docs, retrieval_info)

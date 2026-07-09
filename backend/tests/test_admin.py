@@ -659,7 +659,7 @@ def test_admin_llm_config_rejects_regular_user(client, db):
 
 def test_effective_llm_config_fallback(db):
     """When org_id is None, all values fall back to settings defaults."""
-    from app.services.chat_service import get_effective_llm_config
+    from app.services.chat import get_effective_llm_config
     from app.core.config import settings
 
     cfg = get_effective_llm_config(None, db)
@@ -670,7 +670,7 @@ def test_effective_llm_config_fallback(db):
 
 def test_effective_llm_config_org_override(db):
     """When an OrgLLMConfig row exists for the org, those values are returned."""
-    from app.services.chat_service import get_effective_llm_config
+    from app.services.chat import get_effective_llm_config
     from app.models.org_llm_config import OrgLLMConfig
     import app.models.org_llm_config  # noqa: ensure table is registered
 

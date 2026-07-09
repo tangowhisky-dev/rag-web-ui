@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from app.services.cancel_registry import (
+from app.services.infrastructure import (
     clear_cancel_token,
     get_cancel_token,
     is_cancelled,
@@ -18,7 +18,7 @@ from app.services.cancel_registry import (
 @pytest.fixture(autouse=True)
 def _fresh_registry():
     """Reset the module-level registry before every test."""
-    import app.services.cancel_registry as reg
+    from app.services.infrastructure import cancel_registry as reg
     reg._cancel_tokens.clear()
     yield
     reg._cancel_tokens.clear()

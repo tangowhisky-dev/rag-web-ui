@@ -2,58 +2,41 @@
 
 ## Overview
 
-A self-hosted knowledge base Q&A system with multi-tenant org management, three answering modes, 3-leg hybrid retrieval, optional GraphRAG, and an agentic LangGraph pipeline for complex queries.
+A self-hosted knowledge base Q&A system with multi-tenant org management, agentic multi-step retrieval, 3-leg hybrid retrieval, and optional GraphRAG.
 
 ```
-USER REQUEST → [Frontend:3000] → [Backend API:8000] → [Pipeline] → [LLM] → STREAMING RESPONSE
+USER REQUEST → [Frontend:3000] → [Backend API:8000] → [Agentic Pipeline] → [LLM] → STREAMING RESPONSE
 ```
 
 ---
 
 ## Answering Modes
 
-### Fast ⚡ and Thinking 🧠 (`fast_pipeline.py`)
+### Single Agentic Pipeline (`agentic_rag/agentic_rag.py`)
 
-Linear pipeline, low latency:
-
-```
-rewrite_query
-  → hybrid_search_with_legs (dense + sparse + exact in parallel; graph enrichment post-RRF)
-  → stream LLM answer
-```
-
-Fast uses `OPENAI_MODEL`; Thinking uses `REASONING_MODEL` (falls back to `OPENAI_MODEL`). Thinking mode is identical in structure — only the model changes.
-
-**Steps visible in UI:** Rewriting query → Retrieving context → (optional) Additional context from Neo4j → Generating answer.
-
-### Agentic 🤖 (`rag_graph.py`)
-
-Full LangGraph `StateGraph` with 11 nodes and a coverage-driven retry loop:
+The codebase consolidates to a single agentic pipeline. The former Fast/Thinking (`fast_pipeline.py`) and Agentic LangGraph (`rag_graph/`) pipelines have been removed. The agentic agent is now the sole production pipeline.
 
 ```
-rewrite_query
-  → context_router          (smart source routing: kb / file_current / file_prior / both)
-  → decompose_query         (LLM splits into 2–5 atomic sub-queries)
-  → parallel_retrieval      (hybrid search per sub-query via asyncio.gather; reinforced dedup)
-  → extract_file_sections   (LLM selects 3–6 relevant file sections; passthrough if ≤ 12 KB)
-  → draft_answer            (LLM draft keyed by sub-query, for grading only)
-  → grade_coverage          (LLM grades each sub-query: covered / partially_covered / not_covered)
-  → [conditional_router]
-      ├─ all covered         → generate_answer (final)
-      ├─ uncovered, attempt 0 → widened_retrieval (relaxed reranker threshold −5.0)
-      │                            → draft_answer → grade_coverage
-      ├─ uncovered, attempt 1 → keyword_search_loop (MySQL FULLTEXT: broad → narrow)
-      │                            → draft_answer → grade_coverage
-      └─ attempt ≥ 2          → generate_answer (partial / unable)
+User Query
+  │
+  ├─ 1. Rewrite query using chat history (LLM)
+  ├─ 2. Classify: simple (direct) or complex (decompose)
+  │
+  └─ SIMPLE path:
+      rewrite → hybrid search → rerank → stream answer
+  │
+  └─ COMPLEX path:
+      rewrite → decompose into sub-queries
+        └─ FOR EACH SUBTASK:
+            rewrite sub-query → search → rerank → stream answer (token-by-token)
+            update task list in UI
+      └─ FINAL: synthesize all subtask answers → grade → stream final summary
+         lightweight self-review (non-blocking)
 ```
 
-**Reinforced scoring:** a chunk retrieved for N sub-queries has its RRF score accumulated across those N results — making broadly relevant chunks rank higher.
+**Model auto-selection:** heuristic keyword matching on subtask text (`compare`, `analyze`, `design`, etc.) selects between `OPENAI_MODEL` and `REASONING_MODEL`. No extra LLM classification call.
 
-**Confidence scoring:** each sub-query is graded for coverage, and the overall confidence level (low/medium/high) is computed from the coverage results and chunk quality metrics.
-
-**Query classification:** each query is classified as FACTUAL, ENTITY_CENTRIC, MULTI_PART, or AMBIGUOUS with confidence and latency metrics — used for retrieval config presets.
-
-**All nodes emit `active` and `done` events** — the UI shows live step labels ("Decomposing query…" → "Sub-queries: [list]") with collapsible detail panels.
+**Model selection for complex queries:** if the overall query matches thinking keywords, all subtasks use `REASONING_MODEL`; otherwise `OPENAI_MODEL`.
 
 ---
 
@@ -83,24 +66,9 @@ document_processor.py
                 → (chunk)-[:FROM_CHUNK]->(entity) keyed by qdrant_point_id
 ```
 
-### 2. Fast / Thinking Pipeline (`fast_pipeline.py`)
+### 2. Agentic Pipeline (`agentic_rag/agentic_rag.py`)
 
-```
-User message
-    │
-    ▼
-chat_service.generate_response()
-    ├── answeringMode = "fast" or "thinking"
-    └── fast_stream()
-            ├── _rewrite_query()        — standalone question via QUERY_MODEL
-            ├── hybrid_search_with_legs() — all 3 legs in parallel
-            ├── [graph_enrichment step if Neo4j returned data]
-            └── ChatOpenAI.astream()    — token streaming
-```
-
-Events emitted: `agent_step` (active + done per node), `rewritten_query`, `context`, `token`, `done`.
-
-### 3. Agentic Pipeline (`rag_graph.py`)
+The sole production pipeline. `chat_service.generate_response()` delegates to `run_agentic_rag()` when `answering_mode = "agentic"` (the current default).
 
 ```
 User message
@@ -108,37 +76,33 @@ User message
     ▼
 chat_service.generate_response()
     ├── answeringMode = "agentic"
-    └── run_stream()
-            └── _rag_graph.astream_events()
-                    ├── on_chain_start  → emit agent_step {status: "active"}
-                    ├── on_chain_end    → emit agent_step {status: "done", ...node data}
-                    └── on_chat_model_stream → emit token events (generate_answer only)
+    └── run_agentic_rag()
+            ├─ 1. Rewrite query (LLM: QUERY_MODEL)
+            ├─ 2. Classify: simple or complex (heuristic, no LLM call)
+            │
+            ├─ SIMPLE path:
+            │   → hybrid search → rerank → stream answer
+            │
+            └─ COMPLEX path:
+                → decompose into N sub-queries (LLM)
+                └─ FOR EACH SUBTASK:
+                    → rewrite sub-query → search → rerank
+                    → stream answer (token-by-token) with progress events
+                → synthesize final answer
+                → lightweight post-review (non-blocking)
 ```
 
-#### Node-by-node detail
+**Event protocol (SSE prefixes):**
+- `p:` progress — transient status messages
+- `t:` task_list — subtask list with status
+- `th:` thinking — reasoning model chain-of-thought
+- `0:` token — streaming answer text
+- `1:` rewritten_query — standalone rewritten query (internal)
+- `2:` context — retrieved documents
+- `3:` error — exception message
+- `d:` done — finish reason + usage
 
-| Node | What it does | State written |
-|---|---|---|
-| `rewrite_query` | Condense with history → retrieval-friendly query | `rewritten_query` |
-| `context_router` | LLM decides: kb / file_current / file_prior / both | `sources`, `file_ids_needed` |
-| `decompose_query` | LLM splits into 2–5 atomic sub-queries | `sub_queries` |
-| `parallel_retrieval` | `hybrid_search_with_legs` per sub-query via `asyncio.gather`; dedup with reinforced scoring | `retrieved_docs` |
-| `extract_file_sections` | LLM selects 3–6 relevant sections from attached file; passthrough if ≤ 12 KB | `file_markdown` (trimmed) |
-| `draft_answer` | LLM writes per-sub-query draft using current context | `draft_answer` |
-| `grade_coverage` | LLM grades each sub-query as covered / partially_covered / not_covered | `coverage_result`, `uncovered_sub_queries` |
-| `widened_retrieval` | Retry for uncovered sub-queries; reranker threshold relaxed to −5.0 | `retrieved_docs` (accumulated), `retrieval_attempt=1` |
-| `keyword_search_loop` | MySQL FULLTEXT: broad keywords first, narrow if no results; max 3 sub-queries × 2 iterations | `retrieved_docs`, `keyword_iterations`, `retrieval_attempt=2` |
-| `generate_answer` | Final streaming answer with citation normalisation, confidence score, and partial-answer note | `answer`, `confidence`, `query_classification` |
-
-#### Conditional routing
-
-```python
-def _route_after_grade(state) -> str:
-    if not uncovered:           return "generate_answer"
-    if attempt == 0:            return "widened_retrieval"
-    if attempt == 1:            return "keyword_search_loop"
-    return "generate_answer"    # attempt >= 2: partial/unable
-```
+The frontend `agent-timeline.tsx` renders `p:`, `t:`, and `th:` events as real-time progress indicators. All other events follow the same contract as the previous `rag_graph.run_stream()` format.
 
 ### 4. Chat File Upload Pipeline
 
@@ -152,8 +116,7 @@ POST /api/chat/{chat_id}/files
     └── Client polls /files/{file_id} for status
 
 User sends message with file
-    ├── Fast/Thinking: file_markdown passed to fast_stream() — full content, no truncation
-    └── Agentic: file_markdown passed to run_stream() → extract_file_sections selects relevant sections
+    └── Agentic: file_markdown passed to run_agentic_rag() — full content, no truncation. File section selection uses LLM-based heuristic.
 
 Chat delete → rm -rf uploads/ephemeral/{chat_id}/
 ```
@@ -203,9 +166,12 @@ backend/app/
 ├── models/                 # SQLAlchemy ORM: User, KnowledgeBase, Document,
 │                             DocumentChunk, ProcessingTask, Chat, Message, ChatFile
 ├── services/
-│   ├── fast_pipeline.py    # Fast/Thinking: rewrite → hybrid search → stream
-│   ├── rag_graph.py        # Agentic: 11-node LangGraph StateGraph
-│   ├── chat_service.py     # Routes to fast_stream or run_stream by answering_mode
+│   ├── agentic_rag/        # Single agentic pipeline (rewrite → classify → subtasks → stream)
+│   │   ├── agentic_rag.py  # Autonomous agent: rewrite, decompose, iterate, synthesize
+│   │   ├── context_manager.py  # Token budgeting
+│   │   ├── user_profile.py   # User preference store
+│   │   └── tools/            # Safe DB query, graph query tools
+│   ├── chat_service.py     # Routes to run_agentic_rag()
 │   ├── retrieval.py        # 3-leg hybrid search + weighted RRF + adaptive presets
 │   ├── reranker.py         # Cross-encoder reranking (score_threshold configurable)
 │   ├── document_processor.py # Ingest: parse → chunk → embed → index
@@ -213,7 +179,6 @@ backend/app/
 │   ├── entity_extractor.py # LLM entity extraction from queries + Neo4j score boost
 │   ├── confidence.py       # 4-level retrieval confidence scoring
 │   ├── export_service.py   # PDF/Word/Image export
-│   ├── auto_tune.py        # Retrieval config auto-tuning
 │   └── markdown_cleaner.py # Post-processing for LLM markdown output
 └── startup/                # Alembic auto-migrate on startup
 ```
@@ -236,14 +201,11 @@ frontend/src/
 │       └── files/[fileId]/download/route.ts
 ├── components/chat/
 │   ├── agent-timeline.tsx  # Real-time pipeline step display (active/done collapsibles)
-│   │                         Nodes: rewrite_query, context_router, decompose_query,
-│   │                                parallel_retrieval, extract_file_sections,
-│   │                                draft_answer, grade_coverage, widened_retrieval,
-│   │                                keyword_search_loop, graph_enrichment, generate_answer
+│   │                         Events: p: (progress), t: (task list), th: (thinking)
 │   ├── answer.tsx          # Markdown renderer with [N](N) citation link parsing
 │   │                         Think blocks, confidence score, query classification badge,
 │   │                         tool trace, retrieved context blocks, citation popovers
-│   ├── chat-input.tsx      # Textarea + mode selector (Fast/Thinking/Agentic pills)
+│   ├── chat-input.tsx      # Textarea + mode selector (agentic mode)
 │   │                         + Stop button (replaces Send during generation)
 │   │                         + KB selector + file upload chip
 │   ├── chat-sidebar.tsx    # Collapsible sidebar; drag-to-folder; message search
@@ -271,23 +233,23 @@ frontend/src/
 
 ## Key Architectural Decisions
 
-### 1. Three Answering Modes with a Single Streaming Contract
-All three modes (`fast_stream`, `run_stream`) emit the same SSE event shapes: `agent_step`, `rewritten_query`, `context`, `token`, `answer_rewrite`, `done`. The frontend handles them identically regardless of mode.
+### 1. Single Agentic Pipeline with Simple/Complex Branching
+The codebase consolidates to one production pipeline: `agentic_rag/agentic_rag.py`. The former Fast/Thinking (`fast_pipeline.py`) and Agentic LangGraph (`rag_graph/`) pipelines were removed as dead code. The agent classifies queries as simple (direct answer) or complex (subtask decomposition) using heuristic keyword matching — no extra LLM classification call.
 
-### 2. Draft-Grade-Retry Loop (Agentic)
-Rather than grading individual documents (which misses synthesis failures), the agentic pipeline generates a per-sub-query draft answer and grades it for coverage. This catches cases where 8 individually relevant chunks together still don't answer the compound question. Retry escalates from widened vector search to keyword search to partial-answer transparency — always showing the user what was found and what wasn't.
+### 2. Inline Streaming for Complex Subtasks
+Rather than buffering all results, each subtask streams tokens in real-time. The UI shows a task list that updates as each subtask completes. The final synthesis is a lightweight post-review that never blocks streaming.
 
-### 3. Reinforced Scoring (Agentic)
-A chunk retrieved for N sub-queries has its RRF score accumulated across those N results. Chunks central to many aspects of the question naturally rank higher than chunks relevant to only one edge.
+### 3. Reinforced Scoring (via shared `retrieval.py`)
+A chunk retrieved for N sub-queries has its RRF score accumulated across those N results. Chunks central to many aspects of the question naturally rank higher than chunks relevant to only one edge. Implemented in the shared `retrieval.hybrid_search_with_legs()` and `_dedup_and_reinforce()` logic used by all retrieval paths.
 
 ### 4. File Token Budget Before Pipeline
-Both file size (10 MB) and token count (25% of `OPENAI_MODEL_CONTEXT_SIZE`) are enforced at upload/processing time — not at generation time. By the time a file reaches either pipeline, it has already been approved. No silent truncation at the LLM boundary.
+Both file size (10 MB) and token count (25% of `OPENAI_MODEL_CONTEXT_SIZE`) are enforced at upload/processing time — not at generation time. By the time a file reaches the pipeline, it has already been approved. No silent truncation at the LLM boundary.
 
-### 5. Smart Routing Preserved in Agentic Mode
-`context_router` (LLM-based, JSON-schema constrained) decides whether to search the KB, use the attached file, or both — before decomposition and retrieval. `extract_file_sections` then selects the relevant portions of the file for the sub-queries. These nodes are inherited from v1 and unchanged.
+### 5. Simple vs Complex Branching
+For simple queries, the agent takes a direct path: rewrite → search → rerank → stream. For complex queries, it decomposes into subtasks with progress events. Heuristic keyword matching (`compare`, `analyze`, `design`, etc.) determines the path. No LLM classification overhead.
 
-### 6. Active State Visibility via `on_chain_start`
-LangGraph's `astream_events` fires `on_chain_start` before a node runs. The `run_stream` generator intercepts this and emits an `agent_step` with `status: "active"` immediately, so the UI shows "Decomposing query…" before the LLM call completes — not after.
+### 6. Real-Time Progress Events
+The agentic pipeline emits `p:` (progress), `t:` (task list), and `th:` (thinking) SSE events. The frontend `agent-timeline.tsx` renders these as live progress indicators — no LangGraph `on_chain_start` intercept needed.
 
 ### 7. 3-Leg Hybrid Retrieval with Adaptive Presets
 Dense vectors handle paraphrases; SPLADE captures TF-IDF signal; MySQL FTS handles exact keywords. Weighted RRF fuses all three. Per-query-type presets (`RETRIEVAL_CONFIG_PRESETS`) allow different leg weights for FACTUAL vs ENTITY_CENTRIC vs MULTI_PART queries.

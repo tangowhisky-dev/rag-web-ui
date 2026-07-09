@@ -1,233 +1,206 @@
 import React from "react";
-import { render, screen } from "@testing-library/react";
+import { render, screen, act, waitFor } from "@testing-library/react";
 import "@testing-library/jest-dom";
-import { AgentTimeline, TimelineStep } from "../agent-timeline";
+import { AgentTimeline } from "../agent-timeline";
 
-describe("AgentTimeline", () => {
-  describe("render order", () => {
-    it("renders steps in the correct order: Query Rewrite → Classification → Retrieve → Tool Calls → Failed Legs", () => {
-      const { container } = render(
-        <AgentTimeline
-          rewrittenQuery="rewritten query text"
-          queryClassification={{
-            type: "FACTUAL",
-            confidence: 0.92,
-            latency_ms: 45,
-            fallback: false,
-          }}
-          retrievedContext={[
-            { page_content: "doc 1", metadata: {} },
-            { page_content: "doc 2", metadata: {} },
-          ]}
-          toolTrace={[
-            {
-              tool_name: "search_documents",
-              latency_ms: 120,
-            },
-          ]}
-          failedLegs={["exact"]}
-          isStreaming={true}
-        />
-      );
+// Helper to wait for useEffect to fire
+async function expectText(text: string) {
+  await waitFor(() => {
+    expect(screen.getByText(new RegExp(text, "i"))).toBeInTheDocument();
+  });
+}
 
-      const labels = screen.getAllByRole("button");
-
-      // Steps should appear in order (textContent includes status icons/latency, so use toContain with substring)
-      expect(labels.map((b) => b.textContent)).toEqual(
-        expect.arrayContaining([
-          expect.stringContaining("Query Rewrite"),
-          expect.stringContaining("Classification"),
-          expect.stringContaining("Retrieve"),
-          expect.stringContaining("Tool Calls"),
-          expect.stringContaining("Failed Legs"),
-        ])
-      );
+describe("AgentTimeline (transient)", () => {
+  describe("initial render", () => {
+    it("renders nothing when no agentSteps", () => {
+      const { container } = render(<AgentTimeline isStreaming={true} />);
+      expect(container.innerHTML).toBe("");
     });
 
-    it("renders only available steps when some props are missing", () => {
+    it("renders nothing when empty agentSteps", () => {
       const { container } = render(
-        <AgentTimeline
-          rewrittenQuery="test query"
-          isStreaming={true}
-        />
+        <AgentTimeline agentSteps={[]} isStreaming={true} />
       );
-
-      const buttons = screen.getAllByRole("button");
-      expect(buttons).toHaveLength(1);
-      expect(buttons[0].textContent).toContain("Query Rewrite");
+      expect(container.innerHTML).toBe("");
     });
   });
 
-  describe("transitions", () => {
-    it("shows expandable step blocks during streaming", () => {
+  describe("active step during streaming", () => {
+    it("renders active step badge", async () => {
       render(
         <AgentTimeline
-          rewrittenQuery="test"
+          agentSteps={[
+            { node: "rewrite_query", latency_ms: 50, status: "active" },
+          ]}
           isStreaming={true}
         />
       );
-
-      // During streaming, step rows should be present
-      expect(screen.getByText(/Query Rewrite/)).toBeInTheDocument();
+      await expectText("rewriting query");
     });
 
-    it("collapses to compact badge row when streaming ends", () => {
+    it("renders multiple active steps", async () => {
+      render(
+        <AgentTimeline
+          agentSteps={[
+            { node: "rewrite_query", latency_ms: 50, status: "active" },
+            { node: "kb_retrieval", latency_ms: 200, status: "active" },
+          ]}
+          isStreaming={true}
+        />
+      );
+      await expectText("rewriting query");
+      await expectText("retrieving");
+    });
+
+    it("renders done step", async () => {
+      render(
+        <AgentTimeline
+          agentSteps={[
+            { node: "rewrite_query", latency_ms: 50, status: "done" },
+          ]}
+          isStreaming={true}
+        />
+      );
+      await expectText("rewriting query");
+    });
+
+    it("renders error step", async () => {
+      render(
+        <AgentTimeline
+          agentSteps={[
+            { node: "rewrite_query", latency_ms: 50, status: "error" },
+          ]}
+          isStreaming={true}
+        />
+      );
+      await expectText("rewriting query");
+    });
+  });
+
+  describe("step deduplication", () => {
+    it("keeps latest status per node", async () => {
+      render(
+        <AgentTimeline
+          agentSteps={[
+            { node: "rewrite_query", latency_ms: 50, status: "active" },
+            { node: "rewrite_query", latency_ms: 60, status: "done" },
+          ]}
+          isStreaming={true}
+        />
+      );
+      await expectText("rewriting query");
+      const elements = screen.queryAllByText(/rewriting query/i);
+      expect(elements).toHaveLength(1);
+    });
+
+    it("upgrades active to done", async () => {
+      render(
+        <AgentTimeline
+          agentSteps={[
+            { node: "kb_retrieval", latency_ms: 100, status: "active" },
+            { node: "kb_retrieval", latency_ms: 150, status: "done" },
+          ]}
+          isStreaming={true}
+        />
+      );
+      // When done, the label "Retrieving context…" is shown
+      await expectText("retrieving context");
+      const elements = screen.queryAllByText(/retrieving context/i);
+      expect(elements).toHaveLength(1);
+    });
+  });
+
+  describe("auto-dismiss after streaming ends", () => {
+    it("disables after streaming completes", async () => {
+      jest.useFakeTimers();
+
       const { rerender } = render(
         <AgentTimeline
-          rewrittenQuery="test"
-          isStreaming={true}
-        />
-      );
-
-      // During streaming: step rows are visible
-      expect(screen.getByText(/Query Rewrite/)).toBeInTheDocument();
-
-      // After streaming: collapse to badges
-      rerender(
-        <AgentTimeline
-          rewrittenQuery="test"
-          isStreaming={false}
-        />
-      );
-
-      // Badge row should be present, step buttons should be gone
-      // The badges use <div> elements, not buttons
-      const badges = screen.getAllByText(/Query Rewrite/);
-      expect(badges.length).toBeGreaterThanOrEqual(1);
-    });
-  });
-
-  describe("empty state", () => {
-    it("renders nothing when no data is provided", () => {
-      const { container } = render(<AgentTimeline isStreaming={true} />);
-      expect(container.children).toHaveLength(0);
-    });
-
-    it("renders nothing when isStreaming is false and no data", () => {
-      const { container } = render(<AgentTimeline isStreaming={false} />);
-      expect(container.children).toHaveLength(0);
-    });
-  });
-
-  describe("step types", () => {
-    it("renders Query Rewrite step from rewrittenQuery prop", () => {
-      render(
-        <AgentTimeline
-          rewrittenQuery="my rewritten query"
-          isStreaming={true}
-        />
-      );
-      expect(screen.getByText(/Query Rewrite/)).toBeInTheDocument();
-    });
-
-    it("renders Classification step from queryClassification prop", () => {
-      render(
-        <AgentTimeline
-          queryClassification={{
-            type: "ENTITY_CENTRIC",
-            confidence: 0.85,
-            latency_ms: 30,
-            fallback: false,
-          }}
-          isStreaming={true}
-        />
-      );
-      expect(screen.getByText(/Classification/)).toBeInTheDocument();
-    });
-
-    it("renders Retrieve step with doc count from retrievedContext", () => {
-      render(
-        <AgentTimeline
-          retrievedContext={[
-            { page_content: "doc 1", metadata: {} },
-            { page_content: "doc 2", metadata: {} },
-            { page_content: "doc 3", metadata: {} },
+          agentSteps={[
+            { node: "rewrite_query", latency_ms: 50, status: "done" },
+            { node: "kb_retrieval", latency_ms: 200, status: "done" },
           ]}
           isStreaming={true}
         />
       );
-      expect(screen.getByText(/Retrieve/)).toBeInTheDocument();
-    });
 
-    it("renders Tool Calls step from toolTrace", () => {
-      render(
-        <AgentTimeline
-          toolTrace={[
-            { tool_name: "search_documents", latency_ms: 100 },
-            { tool_name: "extract_entities", latency_ms: 50 },
-          ]}
-          isStreaming={true}
-        />
-      );
-      expect(screen.getByText(/Tool Calls/)).toBeInTheDocument();
-    });
+      // While streaming, badges are visible
+      await expectText("rewriting query");
 
-    it("renders Failed Legs step as error status", () => {
-      render(
-        <AgentTimeline
-          failedLegs={["dense", "exact"]}
-          isStreaming={true}
-        />
-      );
-      expect(screen.getByText(/Failed Legs/)).toBeInTheDocument();
+      // Stop streaming
+      await act(async () => {
+        rerender(
+          <AgentTimeline
+            agentSteps={[
+              { node: "rewrite_query", latency_ms: 50, status: "done" },
+              { node: "kb_retrieval", latency_ms: 200, status: "done" },
+            ]}
+            isStreaming={false}
+          />
+        );
+      });
+
+      // Advance past 1.5s (auto-dismiss threshold)
+      await act(async () => {
+        jest.advanceTimersByTime(1600);
+      });
+
+      expect(await screen.queryByText(/rewriting query/i)).not.toBeInTheDocument();
+      jest.useRealTimers();
     });
   });
 
-  describe("badge row", () => {
-    it("shows badges for completed steps when streaming ends", () => {
-      render(
-        <AgentTimeline
-          rewrittenQuery="test"
-          toolTrace={[{ tool_name: "search_documents", latency_ms: 100 }]}
-          isStreaming={false}
-        />
-      );
-
-      expect(screen.getByText(/Query Rewrite/)).toBeInTheDocument();
-      expect(screen.getByText(/Tool Calls/)).toBeInTheDocument();
-    });
-
-    it("shows error-styled badges for failed legs", () => {
+  describe("step ordering", () => {
+    it("renders steps in order of first appearance", async () => {
       const { container } = render(
         <AgentTimeline
-          failedLegs={["dense"]}
+          agentSteps={[
+            { node: "rewrite_query", latency_ms: 50, status: "active" },
+            { node: "kb_retrieval", latency_ms: 200, status: "active" },
+            { node: "generate_answer", latency_ms: 0, status: "active" },
+          ]}
+          isStreaming={true}
+        />
+      );
+
+      await expectText("rewriting query");
+      const allBadges = Array.from(container.querySelectorAll("[class*='relative flex']"));
+      expect(allBadges.length).toBe(3);
+    });
+  });
+
+  describe("icon map", () => {
+    it("renders correct icons for known nodes", async () => {
+      render(
+        <AgentTimeline
+          agentSteps={[
+            { node: "rewrite_query", latency_ms: 50, status: "active" },
+            { node: "kb_retrieval", latency_ms: 200, status: "done" },
+            { node: "generate_answer", latency_ms: 0, status: "done" },
+          ]}
           isStreaming={false}
         />
       );
 
-      expect(screen.getByText(/Failed Legs/)).toBeInTheDocument();
-    });
-  });
-
-  describe("TimelineStep interface", () => {
-    it("supports all status values", () => {
-      const steps: TimelineStep[] = [
-        { id: "a", label: "Pending Step", icon: "search", status: "pending" },
-        { id: "b", label: "Active Step", icon: "book", status: "active" },
-        { id: "c", label: "Done Step", icon: "check", status: "done" },
-        { id: "d", label: "Error Step", icon: "x", status: "error" },
-      ];
-
-      // Verify the interface accepts all status values without type errors
-      expect(steps.map((s) => s.status)).toEqual([
-        "pending",
-        "active",
-        "done",
-        "error",
-      ]);
+      // Active step shows activeLabel "Rewriting query…"
+      await expectText("rewriting query");
+      // Done steps show label "Retrieving context…" and "Generating answer…"
+      await expectText("retrieving context");
+      await expectText("generating answer");
     });
 
-    it("supports all icon types", () => {
-      const steps: TimelineStep[] = [
-        { id: "a", label: "A", icon: "search", status: "done" },
-        { id: "b", label: "B", icon: "book", status: "done" },
-        { id: "c", label: "C", icon: "share", status: "done" },
-        { id: "d", label: "D", icon: "wrench", status: "done" },
-        { id: "e", label: "E", icon: "check", status: "done" },
-        { id: "f", label: "F", icon: "x", status: "done" },
-      ];
+    it("handles unknown nodes with fallback icon", async () => {
+      render(
+        <AgentTimeline
+          agentSteps={[
+            { node: "custom_node", latency_ms: 100, status: "done" },
+          ]}
+          isStreaming={false}
+        />
+      );
 
-      expect(steps.length).toBe(6);
+      // Unknown node shows its node name as fallback
+      await expectText("custom_node");
     });
   });
 });

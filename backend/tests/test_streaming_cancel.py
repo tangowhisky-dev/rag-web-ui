@@ -22,7 +22,7 @@ import pytest
 
 def _fresh_registry():
     """Reset the cancel registry before each test."""
-    import app.services.cancel_registry as reg
+    from app.services.infrastructure import cancel_registry as reg
     reg._cancel_tokens.clear()
 
 
@@ -40,6 +40,56 @@ def _make_mock_chat():
     return chat
 
 
+class BotMessage:
+    """Simple class to track content assignment (not a MagicMock, which returns mocks on attribute access)."""
+    def __init__(self, chat_id=0):
+        self.content = ""
+        self.role = "assistant"
+        self.chat_id = chat_id
+
+
+def _make_bot_msg(chat_id=0):
+    """Create a simple BotMessage that tracks content assignments."""
+    return BotMessage(chat_id=chat_id)
+
+
+def _make_mock_chat():
+    """Create a mock Chat object."""
+    chat = MagicMock()
+    chat.history_summary = None
+    return chat
+
+
+def _make_mock_db(chat_id):
+    """Create a mock DB with proper query setup for generate_response."""
+    from app.models.knowledge import KnowledgeBase
+    from app.models.chat import Chat
+    
+    db = MagicMock()
+    db.commit = MagicMock()
+    db.add = MagicMock()
+    db.close = MagicMock()
+    db.flush = MagicMock()
+    
+    mock_query = MagicMock()
+    mock_chat = _make_mock_chat()
+    mock_query.filter.return_value.first.return_value = mock_chat
+    mock_query.filter.return_value.all.return_value = []
+    
+    mock_kb = MagicMock()
+    mock_kb.id = 1
+    
+    def query_side_effect(model):
+        if model.__name__ == "KnowledgeBase":
+            return MagicMock(filter=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[mock_kb]))))
+        if model.__name__ == "Chat":
+            return MagicMock(filter=MagicMock(return_value=MagicMock(first=MagicMock(return_value=mock_chat))))
+        return MagicMock(filter=MagicMock(return_value=MagicMock(first=MagicMock(return_value=None))), all=MagicMock(return_value=[]))
+    
+    db.query.side_effect = query_side_effect
+    return db
+
+
 # ---------------------------------------------------------------------------
 # test_cancel_during_streaming
 # ---------------------------------------------------------------------------
@@ -48,8 +98,8 @@ def _make_mock_chat():
 async def test_cancel_during_streaming():
     """When the cancel token is set during streaming, the loop breaks
     and the partial response is saved."""
-    from app.services.chat_service import generate_response
-    from app.services.cancel_registry import set_cancel_token
+    from app.services.chat import generate_response
+    from app.services.infrastructure import set_cancel_token
 
     chat_id = 201
     db = MagicMock()
@@ -60,13 +110,19 @@ async def test_cancel_during_streaming():
     mock_query.filter.return_value.first.return_value = _make_mock_chat()
     db.query.return_value = mock_query
 
-    bot_msg = MagicMock()
-    bot_msg.content = ""
-    bot_msg.role = "assistant"
-    bot_msg.chat_id = chat_id
-    bot_msg.rewritten_query = None
+    # Setup knowledge base mock — generate_response queries for KnowledgeBase first
+    from app.models.knowledge import KnowledgeBase
+    mock_kb = MagicMock()
+    mock_kb.id = 1
+    db.query.side_effect = lambda model: (
+        MagicMock(filter=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[mock_kb]))))
+        if model.__name__ == "KnowledgeBase"
+        else mock_query
+    )
 
-    with patch("app.services.chat_service.Message") as MockMsg:
+    bot_msg = _make_bot_msg(chat_id)
+
+    with patch("app.services.chat.chat_service.Message") as MockMsg:
         MockMsg.side_effect = [
             MagicMock(id=1, content="test", role="user", chat_id=chat_id),
             bot_msg,
@@ -82,8 +138,8 @@ async def test_cancel_during_streaming():
             set_cancel_token(chat_id)
             yield {"event": "token", "content": " world"}
 
-        with patch("app.services.rag_graph.run_stream", return_value=mock_stream_iter()):
-            with patch("app.services.chat_service.asyncio.create_task"):
+        with patch("app.services.agentic_rag.run_agentic_rag", side_effect=lambda *a, **k: mock_stream_iter()):
+            with patch("asyncio.create_task"):
                 frames = []
                 async for frame in generate_response(
                     query="test question",
@@ -108,8 +164,8 @@ async def test_cancel_during_streaming():
 async def test_cancel_before_streaming():
     """When cancel is set before the stream loop starts, the loop breaks
     immediately and partial response '(generation stopped)' is saved."""
-    from app.services.chat_service import generate_response
-    from app.services.cancel_registry import set_cancel_token
+    from app.services.chat import generate_response
+    from app.services.infrastructure import set_cancel_token
 
     chat_id = 301
     db = MagicMock()
@@ -120,13 +176,9 @@ async def test_cancel_before_streaming():
     mock_query.filter.return_value.first.return_value = _make_mock_chat()
     db.query.return_value = mock_query
 
-    bot_msg = MagicMock()
-    bot_msg.content = ""
-    bot_msg.role = "assistant"
-    bot_msg.chat_id = chat_id
-    bot_msg.rewritten_query = None
+    bot_msg = _make_bot_msg(chat_id)
 
-    with patch("app.services.chat_service.Message") as MockMsg:
+    with patch("app.services.chat.chat_service.Message") as MockMsg:
         MockMsg.side_effect = [
             MagicMock(id=1, content="test", role="user", chat_id=chat_id),
             bot_msg,
@@ -137,8 +189,8 @@ async def test_cancel_before_streaming():
 
         set_cancel_token(chat_id)
 
-        with patch("app.services.rag_graph.run_stream", return_value=mock_stream_iter()):
-            with patch("app.services.chat_service.asyncio.create_task"):
+        with patch("app.services.agentic_rag.run_agentic_rag", side_effect=lambda *a, **k: mock_stream_iter()):
+            with patch("asyncio.create_task"):
                 frames = []
                 async for frame in generate_response(
                     query="test question",
@@ -162,7 +214,7 @@ async def test_cancel_before_streaming():
 async def test_no_cancel_normal_flow():
     """Normal completion without cancellation should persist the full response
     and not trigger the cancel branch."""
-    from app.services.chat_service import generate_response
+    from app.services.chat import generate_response
 
     chat_id = 401
     db = MagicMock()
@@ -173,14 +225,10 @@ async def test_no_cancel_normal_flow():
     mock_query.filter.return_value.first.return_value = _make_mock_chat()
     db.query.return_value = mock_query
 
-    bot_msg = MagicMock()
-    bot_msg.content = ""
-    bot_msg.role = "assistant"
-    bot_msg.chat_id = chat_id
-    bot_msg.rewritten_query = None
+    bot_msg = _make_bot_msg(chat_id)
     bot_msg.id = 2  # must be serializable for json.dumps in chat_service
 
-    with patch("app.services.chat_service.Message") as MockMsg:
+    with patch("app.services.chat.chat_service.Message") as MockMsg:
         MockMsg.side_effect = [
             MagicMock(id=1, content="test", role="user", chat_id=chat_id),
             bot_msg,
@@ -191,8 +239,8 @@ async def test_no_cancel_normal_flow():
             yield {"event": "token", "content": " response"}
             yield {"event": "done", "usage": {"promptTokens": 5, "completionTokens": 2}}
 
-        with patch("app.services.rag_graph.run_stream", return_value=mock_stream_iter()):
-            with patch("app.services.chat_service.asyncio.create_task"):
+        with patch("app.services.agentic_rag.run_agentic_rag", side_effect=lambda *a, **k: mock_stream_iter()):
+            with patch("asyncio.create_task"):
                 frames = []
                 async for frame in generate_response(
                     query="test question",
@@ -217,8 +265,8 @@ async def test_no_cancel_normal_flow():
 async def test_partial_response_saved():
     """Verify bot_message.content is set to partial text on cancel,
     not overwritten by a full response."""
-    from app.services.chat_service import generate_response
-    from app.services.cancel_registry import set_cancel_token
+    from app.services.chat import generate_response
+    from app.services.infrastructure import set_cancel_token
 
     chat_id = 501
     db = MagicMock()
@@ -229,15 +277,11 @@ async def test_partial_response_saved():
     mock_query.filter.return_value.first.return_value = _make_mock_chat()
     db.query.return_value = mock_query
 
-    bot_msg = MagicMock()
-    bot_msg.content = ""
-    bot_msg.role = "assistant"
-    bot_msg.chat_id = chat_id
-    bot_msg.rewritten_query = None
+    bot_msg = _make_bot_msg(chat_id)
 
     partial_text = "Partial answer that was streamed before cancellation"
 
-    with patch("app.services.chat_service.Message") as MockMsg:
+    with patch("app.services.chat.chat_service.Message") as MockMsg:
         MockMsg.side_effect = [
             MagicMock(id=1, content="test", role="user", chat_id=chat_id),
             bot_msg,
@@ -252,8 +296,8 @@ async def test_partial_response_saved():
                 if i == cancel_at_idx:
                     set_cancel_token(chat_id)
 
-        with patch("app.services.rag_graph.run_stream", return_value=mock_stream_iter()):
-            with patch("app.services.chat_service.asyncio.create_task"):
+        with patch("app.services.agentic_rag.run_agentic_rag", side_effect=lambda *a, **k: mock_stream_iter()):
+            with patch("asyncio.create_task"):
                 frames = []
                 async for frame in generate_response(
                     query="test question",
@@ -277,8 +321,8 @@ async def test_partial_response_saved():
 @pytest.mark.asyncio
 async def test_cancel_token_cleaned_on_normal_completion():
     """After normal completion (no cancel), clear_cancel_token should be called."""
-    from app.services.chat_service import generate_response
-    from app.services.cancel_registry import get_cancel_token, set_cancel_token
+    from app.services.chat import generate_response
+    from app.services.infrastructure import get_cancel_token, set_cancel_token
 
     chat_id = 601
     db = MagicMock()
@@ -298,7 +342,7 @@ async def test_cancel_token_cleaned_on_normal_completion():
     set_cancel_token(chat_id)
     assert get_cancel_token(chat_id).is_set()
 
-    with patch("app.services.chat_service.Message") as MockMsg:
+    with patch("app.services.chat.chat_service.Message") as MockMsg:
         MockMsg.side_effect = [
             MagicMock(id=1, content="test", role="user", chat_id=chat_id),
             bot_msg,
@@ -308,8 +352,8 @@ async def test_cancel_token_cleaned_on_normal_completion():
             yield {"event": "token", "content": "answer"}
             yield {"event": "done", "usage": {"promptTokens": 1, "completionTokens": 1}}
 
-        with patch("app.services.rag_graph.run_stream", return_value=mock_stream_iter()):
-            with patch("app.services.chat_service.asyncio.create_task"):
+        with patch("app.services.agentic_rag.run_agentic_rag", side_effect=lambda *a, **k: mock_stream_iter()):
+            with patch("asyncio.create_task"):
                 frames = []
                 async for frame in generate_response(
                     query="test question",
@@ -321,7 +365,7 @@ async def test_cancel_token_cleaned_on_normal_completion():
                     frames.append(frame)
 
     # After normal completion, the token should be cleared
-    import app.services.cancel_registry as reg
+    from app.services.infrastructure import cancel_registry as reg
     assert chat_id not in reg._cancel_tokens
 
 
@@ -332,8 +376,8 @@ async def test_cancel_token_cleaned_on_normal_completion():
 @pytest.mark.asyncio
 async def test_cancel_token_cleaned_on_error():
     """After an exception, clear_cancel_token should be called."""
-    from app.services.chat_service import generate_response
-    from app.services.cancel_registry import set_cancel_token
+    from app.services.chat import generate_response
+    from app.services.infrastructure import set_cancel_token
 
     chat_id = 701
     db = MagicMock()
@@ -351,7 +395,7 @@ async def test_cancel_token_cleaned_on_error():
 
     set_cancel_token(chat_id)
 
-    with patch("app.services.chat_service.Message") as MockMsg:
+    with patch("app.services.chat.chat_service.Message") as MockMsg:
         MockMsg.side_effect = [
             MagicMock(id=1, content="test", role="user", chat_id=chat_id),
             bot_msg,
@@ -360,8 +404,8 @@ async def test_cancel_token_cleaned_on_error():
         async def mock_stream_iter():
             raise RuntimeError("LLM connection failed")
 
-        with patch("app.services.rag_graph.run_stream", return_value=mock_stream_iter()):
-            with patch("app.services.chat_service.asyncio.create_task"):
+        with patch("app.services.agentic_rag.run_agentic_rag", side_effect=lambda *a, **k: mock_stream_iter()):
+            with patch("asyncio.create_task"):
                 frames = []
                 async for frame in generate_response(
                     query="test question",
@@ -377,7 +421,7 @@ async def test_cancel_token_cleaned_on_error():
     # Error message should be in bot_message.content
     assert "Error generating response" in bot_msg.content
     # Token should be cleaned up
-    import app.services.cancel_registry as reg
+    from app.services.infrastructure import cancel_registry as reg
     assert chat_id not in reg._cancel_tokens
 
 
@@ -391,8 +435,8 @@ async def test_cancel_mid_agent_step():
     the stream loop breaks immediately and the partial response (including
     agent steps seen so far) is saved. This verifies R008: cancellation
     stops an active agent step mid-execution."""
-    from app.services.chat_service import generate_response
-    from app.services.cancel_registry import set_cancel_token
+    from app.services.chat import generate_response
+    from app.services.infrastructure import set_cancel_token
 
     chat_id = 801
     db = MagicMock()
@@ -403,13 +447,9 @@ async def test_cancel_mid_agent_step():
     mock_query.filter.return_value.first.return_value = _make_mock_chat()
     db.query.return_value = mock_query
 
-    bot_msg = MagicMock()
-    bot_msg.content = ""
-    bot_msg.role = "assistant"
-    bot_msg.chat_id = chat_id
-    bot_msg.rewritten_query = None
+    bot_msg = _make_bot_msg(chat_id)
 
-    with patch("app.services.chat_service.Message") as MockMsg:
+    with patch("app.services.chat.chat_service.Message") as MockMsg:
         MockMsg.side_effect = [
             MagicMock(id=1, content="test", role="user", chat_id=chat_id),
             bot_msg,
@@ -429,8 +469,8 @@ async def test_cancel_mid_agent_step():
             yield {"event": "token", "content": "should not appear"}
             yield {"event": "agent_step", "node": "draft_answer", "status": "done", "latency_ms": 100}
 
-        with patch("app.services.rag_graph.run_stream", return_value=mock_stream_iter()):
-            with patch("app.services.chat_service.asyncio.create_task"):
+        with patch("app.services.agentic_rag.run_agentic_rag", side_effect=lambda *a, **k: mock_stream_iter()):
+            with patch("asyncio.create_task"):
                 frames = []
                 async for frame in generate_response(
                     query="test question",
@@ -464,7 +504,7 @@ async def test_cancel_mid_agent_step():
     db.commit.assert_called()
 
     # Token should be cleaned up
-    import app.services.cancel_registry as reg
+    from app.services.infrastructure import cancel_registry as reg
     assert chat_id not in reg._cancel_tokens
 
     # Tokens after cancel should NOT appear
@@ -480,8 +520,8 @@ async def test_cancel_then_chat_reusable():
     """After a response is cancelled and partial response saved,
     the chat remains reusable for new queries. This verifies R016:
     the ask→cancel→edit→branch flow works end-to-end."""
-    from app.services.chat_service import generate_response
-    from app.services.cancel_registry import set_cancel_token
+    from app.services.chat import generate_response
+    from app.services.infrastructure import set_cancel_token
 
     chat_id = 901
     db = MagicMock()
@@ -492,13 +532,9 @@ async def test_cancel_then_chat_reusable():
     mock_query.filter.return_value.first.return_value = _make_mock_chat()
     db.query.return_value = mock_query
 
-    bot_msg = MagicMock()
-    bot_msg.content = ""
-    bot_msg.role = "assistant"
-    bot_msg.chat_id = chat_id
-    bot_msg.rewritten_query = None
+    bot_msg = _make_bot_msg(chat_id)
 
-    with patch("app.services.chat_service.Message") as MockMsg:
+    with patch("app.services.chat.chat_service.Message") as MockMsg:
         MockMsg.side_effect = [
             MagicMock(id=1, content="test", role="user", chat_id=chat_id),
             bot_msg,
@@ -509,8 +545,8 @@ async def test_cancel_then_chat_reusable():
             set_cancel_token(chat_id)
             yield {"event": "token", "content": "should not appear"}
 
-        with patch("app.services.rag_graph.run_stream", return_value=mock_stream_iter()):
-            with patch("app.services.chat_service.asyncio.create_task"):
+        with patch("app.services.agentic_rag.run_agentic_rag", side_effect=lambda *a, **k: mock_stream_iter()):
+            with patch("asyncio.create_task"):
                 frames = []
                 async for frame in generate_response(
                     query="first question",
@@ -533,7 +569,7 @@ async def test_cancel_then_chat_reusable():
     bot_msg2.rewritten_query = None
     bot_msg2.id = 3  # must be serializable for json.dumps in chat_service
 
-    with patch("app.services.chat_service.Message") as MockMsg:
+    with patch("app.services.chat.chat_service.Message") as MockMsg:
         MockMsg.side_effect = [
             MagicMock(id=4, content="second", role="user", chat_id=chat_id),
             bot_msg2,
@@ -544,8 +580,8 @@ async def test_cancel_then_chat_reusable():
             yield {"event": "token", "content": "answer"}
             yield {"event": "done", "usage": {"promptTokens": 5, "completionTokens": 2}}
 
-        with patch("app.services.rag_graph.run_stream", return_value=mock_stream_iter2()):
-            with patch("app.services.chat_service.asyncio.create_task"):
+        with patch("app.services.agentic_rag.run_agentic_rag", side_effect=lambda *a, **k: mock_stream_iter2()):
+            with patch("asyncio.create_task"):
                 frames2 = []
                 async for frame in generate_response(
                     query="second question",
@@ -570,8 +606,8 @@ async def test_cancel_preserves_agent_steps_in_db():
     """When cancellation occurs mid-stream, the partial response saved to DB
     includes any context/agent-step data that was accumulated before cancel.
     This verifies R008: agent steps captured before cancellation persist."""
-    from app.services.chat_service import generate_response
-    from app.services.cancel_registry import set_cancel_token
+    from app.services.chat import generate_response
+    from app.services.infrastructure import set_cancel_token
 
     chat_id = 951
     db = MagicMock()
@@ -582,13 +618,9 @@ async def test_cancel_preserves_agent_steps_in_db():
     mock_query.filter.return_value.first.return_value = _make_mock_chat()
     db.query.return_value = mock_query
 
-    bot_msg = MagicMock()
-    bot_msg.content = ""
-    bot_msg.role = "assistant"
-    bot_msg.chat_id = chat_id
-    bot_msg.rewritten_query = None
+    bot_msg = _make_bot_msg(chat_id)
 
-    with patch("app.services.chat_service.Message") as MockMsg:
+    with patch("app.services.chat.chat_service.Message") as MockMsg:
         MockMsg.side_effect = [
             MagicMock(id=1, content="test", role="user", chat_id=chat_id),
             bot_msg,
@@ -603,8 +635,8 @@ async def test_cancel_preserves_agent_steps_in_db():
             set_cancel_token(chat_id)
             yield {"event": "token", "content": "should not appear"}
 
-        with patch("app.services.rag_graph.run_stream", return_value=mock_stream_iter()):
-            with patch("app.services.chat_service.asyncio.create_task"):
+        with patch("app.services.agentic_rag.run_agentic_rag", side_effect=lambda *a, **k: mock_stream_iter()):
+            with patch("asyncio.create_task"):
                 frames = []
                 async for frame in generate_response(
                     query="test question",
@@ -616,8 +648,7 @@ async def test_cancel_preserves_agent_steps_in_db():
                     frames.append(frame)
 
     # Partial response saved with accumulated content
-    # Note: context event wraps response in base64 + "__LLM_RESPONSE__" prefix
-    assert "__LLM_RESPONSE__Answer " in bot_msg.content
+    assert "Answer " in bot_msg.content
     db.commit.assert_called()
 
     # Verify that the rewritten_query was captured
@@ -632,5 +663,5 @@ async def test_cancel_preserves_agent_steps_in_db():
     assert node["status"] == "done"
 
     # Token cleanup
-    import app.services.cancel_registry as reg
+    from app.services.infrastructure import cancel_registry as reg
     assert chat_id not in reg._cancel_tokens

@@ -1,8 +1,6 @@
 # Haystack Evaluation: LangGraph → Haystack Migration Research
 
-**Source:** Context7 official docs (haystack-ai, v2.30) + web research  
-**Date:** 2026-06-24  
-**Status:** Complete — ready for recommendation
+> **⚠️ OUTDATED — `rag_graph.py` has been removed.** This evaluation analyzed our LangGraph `rag_graph.py` pipeline for a potential migration to Haystack. The `rag_graph/` package has been deleted. The current pipeline is `agentic_rag/agentic_rag.py` — a simpler agentic agent with simple/complex branching. This document is retained for historical comparison purposes only.
 
 ---
 

@@ -10,7 +10,6 @@ Flow:
 import asyncio
 import logging
 import os
-from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
@@ -18,38 +17,14 @@ from sqlalchemy.orm import Session
 from app.api.api_v1.auth import get_current_user
 from app.api.api_v1.rbac import chat_owner_filter as _chat_owner_filter
 from app.core.config import settings
-from app.core.storage import save_ephemeral_file, delete_ephemeral_chat_files
+from app.core.storage import save_ephemeral_file
 from app.db.session import get_db
 from app.models.chat import Chat, ChatFile
 from app.models.user import User
+from app.services.ingestion import MAX_FILE_SIZE, SUPPORTED_EXTENSIONS, _convert_to_markdown
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
-
-SUPPORTED_EXTENSIONS = {
-    ".pdf", ".docx", ".doc", ".pptx", ".ppt", ".xlsx", ".xls",
-    ".txt", ".md", ".html", ".htm", ".csv", ".json", ".xml", ".eml", ".epub",
-    ".jpg", ".jpeg", ".png", ".gif", ".zip",
-}
-
-
-def _convert_to_markdown(tmp_path: str, filename: str) -> str:
-    """Convert a file to markdown using markitdown."""
-    try:
-        from markitdown import MarkItDown
-        md = MarkItDown()
-        result = md.convert(tmp_path)
-        return result.text_content or ""
-    except Exception as exc:
-        logger.warning("[chat_files] markitdown failed for %s: %s", filename, exc)
-        # Fallback: read as plain text
-        try:
-            with open(tmp_path, "r", errors="replace") as f:
-                return f.read()
-        except Exception:
-            return ""
 
 
 def _estimate_tokens(text: str) -> int:

@@ -10,7 +10,7 @@ from app.models.knowledge import ProcessingTask
 from app.models.organisation import Organisation
 from app.models.user import User, UserRole
 from app.services.datastore_watcher import DataStoreWatcher
-from app.services.startup_recovery_service import StartupRecoveryService
+from app.services.discovery import StartupRecoveryService
 from fastapi import FastAPI
 
 logging.basicConfig(
@@ -147,13 +147,6 @@ async def startup_event():
 
     # Initialize local file storage
     init_storage()
-
-    # Load best tuning config from disk (precedence: .env > best_config > defaults)
-    try:
-        from app.services.auto_tune import load_best_config
-        load_best_config()
-    except Exception as e:
-        logging.getLogger(__name__).warning("Failed to load best tuning config: %s", e)
 
     # Start the startup recovery service FIRST — walks all datastore folders,
     # discovers existing/new/modified files, and ingests them. After recovery

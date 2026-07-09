@@ -68,11 +68,14 @@ describe('Answer Component - Issue #69 Fix', () => {
       file_name: 'test.pdf',
     });
 
+    // Citation shape must match the real model: kb_id/document_id at top level
     const initialCitations = [
       {
         id: 1,
         text: 'Citation 1',
         metadata: { kb_id: 1, document_id: 1 },
+        kb_id: 1,
+        document_id: 1,
       },
     ];
 
@@ -93,6 +96,8 @@ describe('Answer Component - Issue #69 Fix', () => {
                 id: 1,
                 text: `Citation ${i}`,
                 metadata: { kb_id: 1, document_id: 1 },
+                kb_id: 1,
+                document_id: 1,
               },
             ]}
           />
@@ -144,6 +149,8 @@ describe('Answer Component - Issue #69 Fix', () => {
                 id: 1,
                 text: `Citation ${i}`,
                 metadata: { kb_id: 1, document_id: 1 },
+                kb_id: 1,
+                document_id: 1,
               },
             ]}
           />
@@ -183,6 +190,8 @@ describe('Answer Component - Issue #69 Fix', () => {
         id: 1,
         text: 'Test citation',
         metadata: { kb_id: 1, document_id: 1 },
+        kb_id: 1,
+        document_id: 1,
       },
     ];
 

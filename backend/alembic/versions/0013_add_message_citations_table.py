@@ -21,11 +21,12 @@ def upgrade() -> None:
         'message_citations',
         sa.Column('id', sa.Integer(), primary_key=True, autoincrement=True),
         sa.Column('message_id', sa.Integer(), nullable=False, index=True),
-        sa.Column('chunk_id', sa.String(64), nullable=False),
+        sa.Column('document_id', sa.Integer(), nullable=False),
+        sa.Column('chunk_index', sa.Integer(), nullable=False),
         sa.Column('citation_index', sa.Integer(), nullable=False),
         sa.Column('citation_metadata', sa.JSON(), nullable=True),
         sa.ForeignKeyConstraint(['message_id'], ['messages.id'], ondelete='CASCADE'),
-        sa.ForeignKeyConstraint(['chunk_id'], ['document_chunks.id']),
+        sa.ForeignKeyConstraint(['document_id'], ['documents.id'], ondelete='CASCADE'),
     )
 
 

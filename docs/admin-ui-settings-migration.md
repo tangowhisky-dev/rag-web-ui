@@ -324,13 +324,12 @@ Approach A is cleaner for the retrieval pipeline since `org_id` is already avail
 - `services/retrieval.py` — uses ~30 settings for query routing, weights, thresholds
 - `services/graph_service.py` — uses GRAPHRAG_*, NEO4J_LLM_CONTEXT
 - `services/document_processor.py` — uses CHUNK_SIZE, OVERLAP_PERCENTAGE, GRAPHRAG_ENABLED
-- `services/rag_graph.py` — uses many settings for LangGraph pipeline config
+- `services/agentic_rag/agentic_rag.py` — uses many settings for agentic pipeline config
 - `services/confidence.py` — uses thresholds for confidence scoring
 - `services/reranker.py` — uses RERANKER_* settings
 - `services/entity_extractor.py` — uses ENTITY_AWARE_ENABLED, ENTITY_BOOST_FACTOR
 - `services/chat_service.py` — uses TOOL_CALLING_ENABLED, MAX_TOOL_ITERATIONS, etc.
 - `services/historical_memory.py` — uses HISTORICAL_MEMORY_* settings
-- `services/auto_tune.py` — uses adaptive retrieval settings
 
 ### Phase 5: Frontend UI
 

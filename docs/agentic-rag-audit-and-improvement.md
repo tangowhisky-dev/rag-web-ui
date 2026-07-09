@@ -1,12 +1,12 @@
 # Agentic RAG Pipeline Audit & Improvement Plan
 
-**Date:** 2026-06-24  
-**Scope:** Full agentic pipeline analysis + RAGFlow comparison + state-of-the-art techniques  
-**Goal:** Best agentic RAG — fully autonomous, intent-aware, self-correcting
+> **⚠️ OUTDATED — `rag_graph.py` has been removed.** This audit was produced on 2026-06-24 analyzing `rag_graph.py` (LangGraph StateGraph). The `rag_graph/` package and `fast_pipeline.py` have been deleted. The current agentic pipeline at `agentic_rag/agentic_rag.py` follows a different architecture (simple/complex branching). Sections 3, 4, and 6 were never implemented.
 
 ---
 
 ## 1. Current Pipeline Architecture
+
+> **⚠️ The pipeline described below (`rag_graph.py`) has been removed.** See `agentic_rag/agentic_rag.py` for the current implementation.
 
 ### Flow Diagram
 ```

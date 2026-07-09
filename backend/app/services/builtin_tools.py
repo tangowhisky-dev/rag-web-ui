@@ -58,7 +58,7 @@ def search_documents(
     function is safe to call from any context (including inside a running
     event loop, e.g. during tool-calling in chat_service).
     """
-    from app.services.retrieval import hybrid_search_with_legs
+    from app.services.retrieval import hybrid_search_with_legs, get_effective_datastore_ids
     from app.db.session import SessionLocal
     import concurrent.futures
 
@@ -66,17 +66,7 @@ def search_documents(
         import asyncio
         _db = SessionLocal()
         try:
-            # Get linked datastores for these KBs
-            datastore_ids = []
-            if kb_ids:
-                from app.models.knowledge import KnowledgeBaseDataStore
-                datastore_links = (
-                    _db.query(KnowledgeBaseDataStore.data_store_id)
-                    .filter(KnowledgeBaseDataStore.knowledge_base_id.in_(kb_ids))
-                    .distinct()
-                    .all()
-                )
-                datastore_ids = [row.data_store_id for row in datastore_links]
+            datastore_ids = get_effective_datastore_ids(kb_ids, None, _db)
 
             return asyncio.run(
                 hybrid_search_with_legs(query=query, kb_ids=kb_ids, db=_db, datastore_ids=datastore_ids)
@@ -126,7 +116,7 @@ def search_documents(
 )
 def extract_entities(text: str) -> List[Dict[str, str]]:
     """Extract named entities from text using the GRAPHRAG_LLM model."""
-    from app.services.entity_extractor import extract_entities_from_query
+    from app.services.graph.entity_extractor import extract_entities_from_query
 
     try:
         entities = extract_entities_from_query(text)
@@ -253,7 +243,7 @@ def synthesize_documents(
     """
     import hashlib
     import concurrent.futures
-    from app.services.retrieval import hybrid_search_with_legs
+    from app.services.retrieval import hybrid_search_with_legs, get_effective_datastore_ids
 
     if not sub_queries:
         return {"topic": topic, "chunks": [], "total_unique": 0, "sub_queries_run": 0}
@@ -263,17 +253,7 @@ def synthesize_documents(
         from app.db.session import SessionLocal
         _db = SessionLocal()
         try:
-            # Get linked datastores for these KBs
-            datastore_ids = []
-            if kb_ids:
-                from app.models.knowledge import KnowledgeBaseDataStore
-                datastore_links = (
-                    _db.query(KnowledgeBaseDataStore.data_store_id)
-                    .filter(KnowledgeBaseDataStore.knowledge_base_id.in_(kb_ids))
-                    .distinct()
-                    .all()
-                )
-                datastore_ids = [row.data_store_id for row in datastore_links]
+            datastore_ids = get_effective_datastore_ids(kb_ids, None, _db)
 
             async def _gather():
                 tasks = [

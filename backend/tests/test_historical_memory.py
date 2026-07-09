@@ -14,7 +14,7 @@ Covers:
 
 Uses conftest's in-memory SQLite stub.
 DB interactions are mocked with MagicMock (same pattern as test_adaptive_retrieval.py).
-The reranker is patched at its source module (`app.services.reranker.rerank`)
+The reranker is patched at its source module (`app.services.retrieval.rerank`)
 because historical_memory.py imports it inside the function body.
 """
 
@@ -76,11 +76,11 @@ def test_normal_case_returns_top_k_reranked():
     mock_db = MagicMock()
     mock_db.execute.return_value.fetchall.return_value = rows
 
-    with patch("app.services.historical_memory.settings") as mock_settings:
+    with patch("app.services.chat.historical_memory.settings") as mock_settings:
         mock_settings.HISTORICAL_MEMORY_ENABLED = True
         mock_settings.RERANKER_ENABLED = True
-        with patch("app.services.reranker.rerank", return_value=mock_reranked):
-            from app.services.historical_memory import retrieve_historical_memory
+        with patch("app.services.retrieval.rerank", return_value=mock_reranked):
+            from app.services.chat import retrieve_historical_memory
 
             result = retrieve_historical_memory(
                 chat_id=42, query="What is RAG?", db=mock_db,
@@ -104,11 +104,11 @@ def test_no_messages_returns_empty():
     mock_db = MagicMock()
     mock_db.execute.return_value.fetchall.return_value = []
 
-    with patch("app.services.historical_memory.settings") as mock_settings:
+    with patch("app.services.chat.historical_memory.settings") as mock_settings:
         mock_settings.HISTORICAL_MEMORY_ENABLED = True
         mock_settings.RERANKER_ENABLED = True
-        with patch("app.services.reranker.rerank") as mock_rerank:
-            from app.services.historical_memory import retrieve_historical_memory
+        with patch("app.services.retrieval.rerank") as mock_rerank:
+            from app.services.chat import retrieve_historical_memory
             result = retrieve_historical_memory(
                 chat_id=99, query="What was I talking about?", db=mock_db,
             )
@@ -133,13 +133,13 @@ def test_all_scores_below_threshold_returns_empty():
     mock_db = MagicMock()
     mock_db.execute.return_value.fetchall.return_value = rows
 
-    with patch("app.services.historical_memory.settings") as mock_settings:
+    with patch("app.services.chat.historical_memory.settings") as mock_settings:
         mock_settings.HISTORICAL_MEMORY_ENABLED = True
         mock_settings.RERANKER_ENABLED = True
         # The real reranker returns [] when all docs fail the threshold.
         # We simulate that exact behavior.
-        with patch("app.services.reranker.rerank", return_value=[]):
-            from app.services.historical_memory import retrieve_historical_memory
+        with patch("app.services.retrieval.rerank", return_value=[]):
+            from app.services.chat import retrieve_historical_memory
             result = retrieve_historical_memory(
                 chat_id=10, query="Find old messages", db=mock_db,
                 score_threshold=2.0,
@@ -161,11 +161,11 @@ def test_reranker_disabled_returns_last_k_raw():
     mock_db = MagicMock()
     mock_db.execute.return_value.fetchall.return_value = rows
 
-    with patch("app.services.historical_memory.settings") as mock_settings:
+    with patch("app.services.chat.historical_memory.settings") as mock_settings:
         mock_settings.HISTORICAL_MEMORY_ENABLED = True
         mock_settings.RERANKER_ENABLED = False  # disabled
-        with patch("app.services.reranker.rerank") as mock_rerank:
-            from app.services.historical_memory import retrieve_historical_memory
+        with patch("app.services.retrieval.rerank") as mock_rerank:
+            from app.services.chat import retrieve_historical_memory
             result = retrieve_historical_memory(
                 chat_id=20, query="What happened?", db=mock_db, top_k=3,
             )
@@ -206,11 +206,11 @@ def test_historical_memory_disabled_returns_empty():
     mock_db = MagicMock()
     mock_db.execute.return_value.fetchall.return_value = rows
 
-    with patch("app.services.historical_memory.settings") as mock_settings:
+    with patch("app.services.chat.historical_memory.settings") as mock_settings:
         mock_settings.HISTORICAL_MEMORY_ENABLED = False
         mock_settings.RERANKER_ENABLED = True
-        with patch("app.services.reranker.rerank") as mock_rerank:
-            from app.services.historical_memory import retrieve_historical_memory
+        with patch("app.services.retrieval.rerank") as mock_rerank:
+            from app.services.chat import retrieve_historical_memory
             result = retrieve_historical_memory(
                 chat_id=30, query="test", db=mock_db,
             )
@@ -229,11 +229,11 @@ def test_db_query_failure_returns_empty():
     mock_db = MagicMock()
     mock_db.execute.side_effect = Exception("Connection refused")
 
-    with patch("app.services.historical_memory.settings") as mock_settings:
+    with patch("app.services.chat.historical_memory.settings") as mock_settings:
         mock_settings.HISTORICAL_MEMORY_ENABLED = True
         mock_settings.RERANKER_ENABLED = True
-        with patch("app.services.reranker.rerank") as mock_rerank:
-            from app.services.historical_memory import retrieve_historical_memory
+        with patch("app.services.retrieval.rerank") as mock_rerank:
+            from app.services.chat import retrieve_historical_memory
             result = retrieve_historical_memory(
                 chat_id=40, query="test", db=mock_db,
             )
@@ -255,14 +255,14 @@ def test_reranker_failure_returns_empty():
     mock_db = MagicMock()
     mock_db.execute.return_value.fetchall.return_value = rows
 
-    with patch("app.services.historical_memory.settings") as mock_settings:
+    with patch("app.services.chat.historical_memory.settings") as mock_settings:
         mock_settings.HISTORICAL_MEMORY_ENABLED = True
         mock_settings.RERANKER_ENABLED = True
         with patch(
-            "app.services.reranker.rerank",
+            "app.services.retrieval.rerank",
             side_effect=Exception("Model not found"),
         ):
-            from app.services.historical_memory import retrieve_historical_memory
+            from app.services.chat import retrieve_historical_memory
             result = retrieve_historical_memory(
                 chat_id=50, query="test", db=mock_db,
             )
@@ -279,11 +279,11 @@ def test_top_k_zero_returns_empty():
     mock_db = MagicMock()
     mock_db.execute.return_value.fetchall.return_value = rows
 
-    with patch("app.services.historical_memory.settings") as mock_settings:
+    with patch("app.services.chat.historical_memory.settings") as mock_settings:
         mock_settings.HISTORICAL_MEMORY_ENABLED = True
         mock_settings.RERANKER_ENABLED = False
-        with patch("app.services.reranker.rerank") as mock_rerank:
-            from app.services.historical_memory import retrieve_historical_memory
+        with patch("app.services.retrieval.rerank") as mock_rerank:
+            from app.services.chat import retrieve_historical_memory
             result = retrieve_historical_memory(
                 chat_id=60, query="test", db=mock_db, top_k=0,
             )
@@ -301,11 +301,11 @@ def test_top_k_exceeds_available_returns_all():
     mock_db = MagicMock()
     mock_db.execute.return_value.fetchall.return_value = rows
 
-    with patch("app.services.historical_memory.settings") as mock_settings:
+    with patch("app.services.chat.historical_memory.settings") as mock_settings:
         mock_settings.HISTORICAL_MEMORY_ENABLED = True
         mock_settings.RERANKER_ENABLED = False
-        with patch("app.services.reranker.rerank") as mock_rerank:
-            from app.services.historical_memory import retrieve_historical_memory
+        with patch("app.services.retrieval.rerank") as mock_rerank:
+            from app.services.chat import retrieve_historical_memory
             result = retrieve_historical_memory(
                 chat_id=70, query="test", db=mock_db, top_k=10,
             )

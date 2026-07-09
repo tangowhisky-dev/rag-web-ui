@@ -5,7 +5,6 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Backgro
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from qdrant_client import QdrantClient
-from sqlalchemy import text
 import logging
 from datetime import datetime, timedelta, timezone
 from pydantic import BaseModel
@@ -51,7 +50,13 @@ from app.schemas.knowledge import (
     PreviewRequest,
     DataStoreInfo
 )
-from app.services.document_processor import process_document_background, upload_document, preview_document, PreviewResult, SUPPORTED_EXTENSIONS
+from app.services.ingestion import (
+    process_document_background,
+    upload_document,
+    preview_document,
+    PreviewResult,
+)
+from app.services.ingestion import SUPPORTED_EXTENSIONS
 from app.core.config import settings
 from app.core.storage import save_file, delete_file
 
@@ -104,21 +109,6 @@ def get_knowledge_bases(
     """
     Retrieve knowledge bases with linked data sources.
     """
-    # Get datastores assigned to user's org and all descendant orgs
-    org_datastores = []
-    if current_user.org_id:
-        user_org_ids = _get_user_org_ids(db, current_user.org_id)
-        org_datastores = (
-            db.query(DataStore)
-            .join(OrganizationDataStore)
-            .filter(
-                OrganizationDataStore.org_id.in_(user_org_ids),
-                OrganizationDataStore.is_active == True,
-                DataStore.is_active == True,
-            )
-            .all()
-        )
-    
     knowledge_bases = (
         db.query(KnowledgeBase)
         .filter(_kb_owner_filter(current_user))
@@ -180,21 +170,6 @@ def get_knowledge_base(
 
     if not kb:
         raise HTTPException(status_code=404, detail="Knowledge base not found")
-    
-    # Get datastores assigned to user's org and all descendant orgs
-    org_datastores = []
-    if current_user.org_id:
-        user_org_ids = _get_user_org_ids(db, current_user.org_id)
-        org_datastores = (
-            db.query(DataStore)
-            .join(OrganizationDataStore)
-            .filter(
-                OrganizationDataStore.org_id.in_(user_org_ids),
-                OrganizationDataStore.is_active == True,
-                DataStore.is_active == True,
-            )
-            .all()
-        )
     
     # Get only explicitly linked datastores
     linked_ds_ids = [link.data_store_id for link in kb.data_sources]
@@ -271,7 +246,7 @@ async def delete_knowledge_base(
     if not kb:
         raise HTTPException(status_code=404, detail="Knowledge base not found")
     
-    from app.services.deletion_service import delete_kb as _delete_kb
+    from app.services.cleanup import delete_kb as _delete_kb
     result, status = _delete_kb(db, kb_id, current_user.id)
     return JSONResponse(status_code=status, content=result)
 
@@ -328,7 +303,6 @@ async def upload_kb_documents(
         # 3. Save to temp directory
         temp_path = f"user_{current_user.id}/kb_{kb_id}/temp/{file.filename}"
         try:
-            file_size = len(file_content)
             save_file(temp_path, file_content)
         except Exception as e:
             logger.error(f"Failed to save file to storage: {str(e)}")
@@ -409,8 +383,6 @@ async def process_kb_documents(
     """
     Process multiple documents asynchronously.
     """
-    start_time = time.time()
-    
     kb = db.query(KnowledgeBase).filter(
         KnowledgeBase.id == kb_id,
         _kb_owner_filter(current_user)
@@ -588,7 +560,7 @@ async def delete_document(
     - Processing task records from MySQL
     - The document record itself from MySQL
     """
-    from app.services.document_processor import _chunk_id_to_point_id
+    from app.services.ingestion import _chunk_id_to_point_id
     from qdrant_client.models import PointIdsList
 
     # Verify the KB belongs to this user/org
@@ -664,7 +636,7 @@ async def delete_document(
 
         # 5b. Delete Neo4j graph nodes for this document
         try:
-            from app.services.graph_service import delete_graph_for_document
+            from app.services.graph import delete_graph_for_document
             await asyncio.get_event_loop().run_in_executor(
                 None, lambda: delete_graph_for_document(kb_id=kb_id, document_id=doc_id)
             )

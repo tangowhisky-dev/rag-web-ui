@@ -5,13 +5,7 @@ import DashboardLayout from "@/components/layout/dashboard-layout";
 import { Book, MessageSquare, ArrowRight, Plus, Brain, Sparkles, Shield, Upload, Link2 } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { isAdmin } from "@/lib/auth";
-
-// Track hydration to avoid SSR/client mismatch
-const useHydrated = () => {
-  const [hydrated, setHydrated] = useState(false);
-  useEffect(() => setHydrated(true), []);
-  return hydrated;
-};
+import { useHydrated } from "@/lib/hooks";
 
 interface Stats {
   knowledgeBases: number;

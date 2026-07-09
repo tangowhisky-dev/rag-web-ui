@@ -29,7 +29,7 @@ from app.services.datastore_watcher.handler import (
     _Debouncer,
     _SyntheticEvent,
 )
-from app.services.document_processor import (
+from app.services.ingestion import (
     SUPPORTED_EXTENSIONS,
     process_document_background,
     _chunk_id_to_point_id,
@@ -769,7 +769,7 @@ class DataStoreWatcher:
         except OSError:
             file_size = 0
 
-        from app.services.document_processor import CONTENT_TYPE_MAP
+        from app.services.ingestion.document_processor import CONTENT_TYPE_MAP
         content_type = CONTENT_TYPE_MAP.get(ext, "application/octet-stream")
 
         if file_hash is None:
@@ -863,7 +863,7 @@ class DataStoreWatcher:
         except OSError:
             file_size = 0
 
-        from app.services.document_processor import CONTENT_TYPE_MAP
+        from app.services.ingestion.document_processor import CONTENT_TYPE_MAP
         content_type = CONTENT_TYPE_MAP.get(ext, "application/octet-stream")
 
         db: Session = SessionLocal()

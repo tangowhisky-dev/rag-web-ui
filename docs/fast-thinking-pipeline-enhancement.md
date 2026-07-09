@@ -1,10 +1,14 @@
 # Fast & Thinking Pipeline Enhancement Plan
 
+> **⚠️ OUTDATED — Pipeline removed.** This document describes enhancements to `fast_stream()` which has been deleted as dead code. The current single pipeline is `agentic_rag/agentic_rag.py`. The adaptive retrieval, answer quality grading, and historical memory concepts described here are now implemented within the agentic agent.
+
+---
+
 ## Current State Analysis
 
-### Fast/Thinking Pipeline Flow (unchanged)
+### Agentic Pipeline Flow (current, replacing deleted Fast/Thinking)
 ```
-fast_stream() / thinking_stream() (same function, different model)
+run_agentic_rag() — single agentic pipeline
   │
   ├─ 1. _rewrite_query()          — 1 LLM call (QUERY_MODEL)
   │     Uses: recent_lc_history (3-turn sliding window)

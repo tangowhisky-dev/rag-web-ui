@@ -2,7 +2,7 @@ import json
 import os
 from typing import Any, Dict, Optional
 
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -295,12 +295,26 @@ class Settings(BaseSettings):
         "ANSWER_QUALITY_GRADING_ENABLED", "true"
     ).lower() == "true"
 
+    # ── Autonomous Agentic Agent ──────────────────────────────────────────────
+    # Maximum retry iterations for the autonomous agent loop (supervisor → worker → critic).
+    # Each iteration re-runs the supervisor with critic feedback to adjust the plan.
+    AGENT_MAX_ITERATIONS: int = int(os.getenv("AGENT_MAX_ITERATIONS", "3"))
+    # Minimum quality score (0-100) for the critic to accept an answer.
+    # Below this threshold, the agent retries with adjusted strategy.
+    AGENT_QUALITY_THRESHOLD: int = int(os.getenv("AGENT_QUALITY_THRESHOLD", "70"))
+    # Enable/disable the autonomous agent mode. When false, falls back to
+    # the existing fast/thinking/agentic pipelines.
+    AGENT_ENABLED: bool = os.getenv("AGENT_ENABLED", "true").lower() == "true"
+    # Optional model override for the supervisor and critic LLM calls.
+    # Falls back to OPENAI_MODEL when unset.
+    AGENT_SUPERVISOR_MODEL: Optional[str] = os.getenv("AGENT_SUPERVISOR_MODEL") or None
+
     @property
     def graphrag_model(self) -> str:
         """Model to use for entity/relationship extraction. Falls back to OPENAI_MODEL."""
         return self.GRAPHRAG_LLM or self.OPENAI_MODEL
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
 
 settings = Settings()

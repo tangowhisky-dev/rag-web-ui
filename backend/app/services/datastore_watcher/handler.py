@@ -28,12 +28,12 @@ from app.db.session import SessionLocal
 from app.models.datastore import DataStore, OrganizationDataStore
 from app.models.knowledge import Document, DocumentUpload, ProcessingTask, DocumentChunk
 from app.models.knowledge import KnowledgeBase
-from app.services.document_processor import (
+from app.services.ingestion import (
     SUPPORTED_EXTENSIONS,
     process_document_background,
     _chunk_id_to_point_id,
 )
-from app.services.utils import get_qdrant_client
+from app.services.infrastructure import get_qdrant_client
 
 from watchdog.events import FileSystemEventHandler
 
@@ -715,7 +715,7 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
         except OSError:
             file_size = 0
 
-        from app.services.document_processor import CONTENT_TYPE_MAP
+        from app.services.ingestion.document_processor import CONTENT_TYPE_MAP
 
         content_type = CONTENT_TYPE_MAP.get(ext, "application/octet-stream")
 
@@ -829,7 +829,7 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
         except OSError:
             file_size = 0
 
-        from app.services.document_processor import CONTENT_TYPE_MAP
+        from app.services.ingestion.document_processor import CONTENT_TYPE_MAP
 
         content_type = CONTENT_TYPE_MAP.get(ext, "application/octet-stream")
 
@@ -967,7 +967,7 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
 
                     # Clean up Neo4j graph nodes for this document
                     try:
-                        from app.services.graph_service import delete_graph_for_document
+                        from app.services.graph import delete_graph_for_document
                         delete_graph_for_document(kb_id=None, document_id=doc.id)
                         logger.info(
                             "[WATCHER] Neo4j cleanup done for document_id=%s",
@@ -1033,7 +1033,7 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
 
                         # Clean up Neo4j graph nodes for this document
                         try:
-                            from app.services.graph_service import delete_graph_for_document
+                            from app.services.graph import delete_graph_for_document
                             delete_graph_for_document(kb_id=kb_id, document_id=doc.id)
                             logger.info(
                                 "[WATCHER] Neo4j cleanup done for kb_id=%s doc_id=%s",

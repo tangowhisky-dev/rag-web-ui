@@ -934,17 +934,8 @@ export const Answer: FC<{
 
   return (
     <div className="prose prose-sm max-w-full">
-      {/* AgentTimeline: rewrittenQuery, queryClassification, toolTrace, failedLegs, retrievedContext, agentSteps (minus generate_answer) */}
-      <AgentTimeline
-        rewrittenQuery={rewrittenQuery}
-        retrievedContext={retrievedContext}
-        queryClassification={queryClassification}
-        toolTrace={toolTrace}
-        failedLegs={failedLegs}
-        agentSteps={filteredAgentSteps}
-        isStreaming={isStreaming}
-        answerStarted={isStreaming && !!markdown}
-      />
+      {/* AgentTimeline: transient progress badges only */}
+      <AgentTimeline agentSteps={filteredAgentSteps} isStreaming={isStreaming} />
       {confidence === "none" && suggestion && (
         <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 mb-2">
           <span className="mt-0.5 shrink-0">⚠</span>

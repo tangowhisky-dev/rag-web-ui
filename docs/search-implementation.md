@@ -14,8 +14,11 @@ All three legs run independently; their ranked lists are merged by weighted RRF.
 
 ## Pipeline
 
-### Fast / Thinking mode (`fast_pipeline.py`)
+### Single Agentic Pipeline (`agentic_rag/agentic_rag.py`)
 
+The sole production path. The agent classifies queries as simple (direct) or complex (subtask decomposition), and each path uses the same hybrid retrieval:
+
+**Simple path:**
 ```
 rewrite_query (standalone question via QUERY_MODEL)
     │
@@ -37,28 +40,20 @@ reranker.py — cross-encoder reranking (score_threshold configurable)
 LLM streaming answer
 ```
 
-### Agentic mode (`rag_graph.py`)
-
-Parallel sub-query retrieval with reinforced deduplication:
-
+**Complex path:**
 ```
-decompose_query → [sub_query_1, ..., sub_query_N]
+rewrite_query → decompose into N sub-queries (LLM)
     │
     ▼
-asyncio.gather(hybrid_search_with_legs(sq) for sq in sub_queries)
+FOR EACH SUBTASK (sequential, streaming each answer):
+    rewrite → hybrid_search_with_legs() → rerank → stream answer
+    │
+    │   └─ (subtask results shown in real-time via `t:` task_list SSE events)
     │
     ▼
-_dedup_and_reinforce()
-    └── Chunks found by N sub-queries get score × N (reinforced scoring)
-    └── Deduplicated by content hash, sorted by reinforced score
-    │
+Synthesize final answer from all subtask results
     ▼
-[Retry 1 if uncovered: widened_retrieval]
-    └── Same legs, reranker threshold relaxed to -5.0, merges with prior docs
-    │
-    ▼
-[Retry 2 if still uncovered: keyword_search_loop]
-    └── LLM extracts broad + narrow keywords → MySQL FULLTEXT only → merges
+Lightweight post-review (non-blocking)
 ```
 
 ---
@@ -203,6 +198,8 @@ Disabling a leg affects retrieval only. Ingestion always writes to all three sto
 
 ## Where retrieval is called
 
-**Fast/Thinking:** `fast_pipeline.fast_stream()` calls `hybrid_search_with_legs()` once with the rewritten query.
+**Agentic (`agentic_rag/agentic_rag.py`):**
+- **Simple queries:** `hybrid_search_with_legs()` called once with the rewritten query, then reranked and streamed.
+- **Complex queries:** `hybrid_search_with_legs()` called once per sub-query (sequential, not parallel), then reranked and streamed per subtask.
 
-**Agentic:** `rag_graph.parallel_retrieval_node()` calls `hybrid_search_with_legs()` once per sub-query via `asyncio.gather`, then deduplicates with reinforced scoring. `widened_retrieval_node()` re-runs for uncovered sub-queries with a relaxed reranker threshold. `keyword_search_loop_node()` calls `_exact_search()` directly (no vector legs) for the final fallback.
+The former Fast/Thinking (`fast_pipeline.py`) and Agentic LangGraph (`rag_graph/`) pipelines have been removed. The agentic pipeline is the sole production path.

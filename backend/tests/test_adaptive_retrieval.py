@@ -8,7 +8,7 @@ import pytest
 from unittest.mock import patch, AsyncMock, MagicMock
 from httpx import AsyncClient, ASGITransport
 
-from app.schemas.chat import QueryType
+from app.models.query_classifier import QueryType
 from app.services.retrieval import get_retrieval_config
 
 
@@ -67,9 +67,9 @@ def test_hybrid_search_applies_preset():
         mock_db.execute = MagicMock(return_value=MagicMock(fetchall=lambda: []))
         
         # Patch the search legs to return empty results
-        with patch('app.services.retrieval._dense_search', return_value={}):
-            with patch('app.services.retrieval._sparse_search', return_value={}):
-                with patch('app.services.retrieval._exact_search', return_value={}):
+        with patch('app.services.retrieval.retrieval._dense_search', return_value={}):
+            with patch('app.services.retrieval.retrieval._sparse_search', return_value={}):
+                with patch('app.services.retrieval.retrieval._exact_search', return_value={}):
                     # Call with FACTUAL query type
                     result = await hybrid_search_with_legs(
                         query="test query",
@@ -82,9 +82,9 @@ def test_hybrid_search_applies_preset():
                     assert "retrieval_info" in result
                     
         # Patch for MULTI_PART which should disable exact leg
-        with patch('app.services.retrieval._dense_search', return_value={}):
-            with patch('app.services.retrieval._sparse_search', return_value={}):
-                with patch('app.services.retrieval._exact_search', return_value={}) as mock_exact:
+        with patch('app.services.retrieval.retrieval._dense_search', return_value={}):
+            with patch('app.services.retrieval.retrieval._sparse_search', return_value={}):
+                with patch('app.services.retrieval.retrieval._exact_search', return_value={}) as mock_exact:
                     result = await hybrid_search_with_legs(
                         query="test query",
                         kb_ids=[1],

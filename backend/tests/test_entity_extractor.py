@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from langchain_core.documents import Document
 
-from app.services.entity_extractor import (
+from app.services.graph.entity_extractor import (
     Entity,
     EntityNeighbor,
     apply_entity_boost,
@@ -45,7 +45,7 @@ class TestExtractEntitiesFromQuery:
             {"name": "Apple", "type": "ORG"},
             {"name": "Tim Cook", "type": "PERSON"},
         ])
-        with patch("app.services.entity_extractor._get_llm_client") as mock_client:
+        with patch("app.services.graph.entity_extractor._get_llm_client") as mock_client:
             mock_client.return_value.chat.completions.create.return_value = mock_resp
             result = extract_entities_from_query("What did Apple CEO Tim Cook announce?")
 
@@ -60,7 +60,7 @@ class TestExtractEntitiesFromQuery:
             {"name": "Apple", "type": "ORG"},
             {"name": "Apple", "type": "ORG"},  # duplicate
         ])
-        with patch("app.services.entity_extractor._get_llm_client") as mock_client:
+        with patch("app.services.graph.entity_extractor._get_llm_client") as mock_client:
             mock_client.return_value.chat.completions.create.return_value = mock_resp
             result = extract_entities_from_query("Apple Apple")
 
@@ -75,7 +75,7 @@ class TestExtractEntitiesFromQuery:
         assert result == []
 
     def test_llm_failure_returns_empty(self):
-        with patch("app.services.entity_extractor._get_llm_client") as mock_client:
+        with patch("app.services.graph.entity_extractor._get_llm_client") as mock_client:
             mock_client.return_value.chat.completions.create.side_effect = Exception("LLM error")
             result = extract_entities_from_query("What did Apple acquire?")
 
@@ -83,7 +83,7 @@ class TestExtractEntitiesFromQuery:
 
     def test_empty_entity_list_from_llm(self):
         mock_resp = _llm_resp([])
-        with patch("app.services.entity_extractor._get_llm_client") as mock_client:
+        with patch("app.services.graph.entity_extractor._get_llm_client") as mock_client:
             mock_client.return_value.chat.completions.create.return_value = mock_resp
             result = extract_entities_from_query("What is the weather today?")
 
@@ -94,7 +94,7 @@ class TestExtractEntitiesFromQuery:
             {"name": "A", "type": "ORG"},   # too short
             {"name": "Google", "type": "ORG"},
         ])
-        with patch("app.services.entity_extractor._get_llm_client") as mock_client:
+        with patch("app.services.graph.entity_extractor._get_llm_client") as mock_client:
             mock_client.return_value.chat.completions.create.return_value = mock_resp
             result = extract_entities_from_query("A Google query")
 
@@ -132,8 +132,8 @@ class TestExpandQueryEntities:
             {"name": "Tim Cook", "type": "PERSON", "rel": "LED_BY"},
         ])
 
-        with patch("app.services.entity_extractor._get_neo4j_driver", return_value=driver):
-            with patch("app.services.entity_extractor.settings") as mock_settings:
+        with patch("app.services.graph.entity_extractor._get_neo4j_driver", return_value=driver):
+            with patch("app.services.graph.entity_extractor.settings") as mock_settings:
                 mock_settings.GRAPHRAG_ENABLED = True
                 result = expand_query_entities(entities, [1])
 
@@ -147,16 +147,16 @@ class TestExpandQueryEntities:
 
     def test_graphrag_disabled_returns_empty(self):
         entities = [Entity(name="Apple", type="ORG")]
-        with patch("app.services.entity_extractor.settings") as mock_settings:
+        with patch("app.services.graph.entity_extractor.settings") as mock_settings:
             mock_settings.GRAPHRAG_ENABLED = False
             result = expand_query_entities(entities, [1])
         assert result == []
 
     def test_neo4j_failure_returns_empty(self):
         entities = [Entity(name="Apple", type="ORG")]
-        with patch("app.services.entity_extractor._get_neo4j_driver") as mock_driver_fn:
+        with patch("app.services.graph.entity_extractor._get_neo4j_driver") as mock_driver_fn:
             mock_driver_fn.return_value.session.side_effect = Exception("connection refused")
-            with patch("app.services.entity_extractor.settings") as mock_settings:
+            with patch("app.services.graph.entity_extractor.settings") as mock_settings:
                 mock_settings.GRAPHRAG_ENABLED = True
                 result = expand_query_entities(entities, [1])
         assert result == []
@@ -168,8 +168,8 @@ class TestExpandQueryEntities:
             {"name": "Beats", "type": "ORG", "rel": "ACQUIRED"},  # duplicate
         ])
 
-        with patch("app.services.entity_extractor._get_neo4j_driver", return_value=driver):
-            with patch("app.services.entity_extractor.settings") as mock_settings:
+        with patch("app.services.graph.entity_extractor._get_neo4j_driver", return_value=driver):
+            with patch("app.services.graph.entity_extractor.settings") as mock_settings:
                 mock_settings.GRAPHRAG_ENABLED = True
                 result = expand_query_entities(entities, [1])
 
@@ -183,7 +183,7 @@ class TestApplyEntityBoost:
         docs = [_doc("Apple acquired Beats in 2014.", score=0.8)]
         entities = [Entity(name="Apple", type="ORG")]
 
-        with patch("app.services.entity_extractor.settings") as mock_settings:
+        with patch("app.services.graph.entity_extractor.settings") as mock_settings:
             mock_settings.ENTITY_BOOST_FACTOR = 0.1
             result = apply_entity_boost(docs, entities)
 
@@ -194,7 +194,7 @@ class TestApplyEntityBoost:
         docs = [_doc("Google released a new product.", score=0.8)]
         entities = [Entity(name="Apple", type="ORG")]
 
-        with patch("app.services.entity_extractor.settings") as mock_settings:
+        with patch("app.services.graph.entity_extractor.settings") as mock_settings:
             mock_settings.ENTITY_BOOST_FACTOR = 0.1
             result = apply_entity_boost(docs, entities)
 
@@ -211,7 +211,7 @@ class TestApplyEntityBoost:
         entities = [Entity(name="Apple", type="ORG")]  # not in text
         neighbors = [EntityNeighbor(name="Beats Electronics", type="ORG", relation="ACQUIRED")]
 
-        with patch("app.services.entity_extractor.settings") as mock_settings:
+        with patch("app.services.graph.entity_extractor.settings") as mock_settings:
             mock_settings.ENTITY_BOOST_FACTOR = 0.1
             result = apply_entity_boost(docs, entities, neighbors)
 
@@ -223,7 +223,7 @@ class TestApplyEntityBoost:
         docs = [_doc("Apple Apple Apple.", score=1.0)]
         entities = [Entity(name="Apple", type="ORG")]
 
-        with patch("app.services.entity_extractor.settings") as mock_settings:
+        with patch("app.services.graph.entity_extractor.settings") as mock_settings:
             mock_settings.ENTITY_BOOST_FACTOR = 0.1
             result = apply_entity_boost(docs, entities)
 
@@ -234,7 +234,7 @@ class TestApplyEntityBoost:
         docs = [_doc("Apple and Google compete.", score=0.5)]
         entities = [Entity(name="Apple", type="ORG"), Entity(name="Google", type="ORG")]
 
-        with patch("app.services.entity_extractor.settings") as mock_settings:
+        with patch("app.services.graph.entity_extractor.settings") as mock_settings:
             mock_settings.ENTITY_BOOST_FACTOR = 0.1
             result = apply_entity_boost(docs, entities)
 
@@ -254,9 +254,9 @@ class TestExtractExpandBoost:
 
         mock_resp = _llm_resp([{"name": "Apple", "type": "ORG"}])
 
-        with patch("app.services.entity_extractor._get_llm_client") as mock_llm, \
-             patch("app.services.entity_extractor._get_neo4j_driver") as mock_neo4j, \
-             patch("app.services.entity_extractor.settings") as mock_settings:
+        with patch("app.services.graph.entity_extractor._get_llm_client") as mock_llm, \
+             patch("app.services.graph.entity_extractor._get_neo4j_driver") as mock_neo4j, \
+             patch("app.services.graph.entity_extractor.settings") as mock_settings:
 
             mock_llm.return_value.chat.completions.create.return_value = mock_resp
             mock_settings.GRAPHRAG_ENABLED = False  # skip Neo4j expansion
@@ -277,8 +277,8 @@ class TestExtractExpandBoost:
         docs = [_doc("Some text.", score=0.5)]
 
         mock_resp = _llm_resp([])
-        with patch("app.services.entity_extractor._get_llm_client") as mock_llm, \
-             patch("app.services.entity_extractor.settings") as mock_settings:
+        with patch("app.services.graph.entity_extractor._get_llm_client") as mock_llm, \
+             patch("app.services.graph.entity_extractor.settings") as mock_settings:
 
             mock_llm.return_value.chat.completions.create.return_value = mock_resp
             mock_settings.GRAPHRAG_LLM = "test-model"

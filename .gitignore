@@ -106,3 +106,4 @@ lpt[1-9].*
 /.hermes
 /data
 /.gsd-backups
+/frontend/.pnpm-store

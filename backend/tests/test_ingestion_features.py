@@ -108,7 +108,7 @@ def get_admin_token(client, db) -> str:
 # 1. QueryExpander unit tests (no DB)
 # ---------------------------------------------------------------------------
 
-from app.services.query_expander import expand
+from app.services.retrieval import expand
 
 
 def test_query_expander_basic():
@@ -385,7 +385,7 @@ def test_org_ingestion_status_rejects_non_admin(client, db):
 
 # ── Group 4: ProgressTimeout ──────────────────────────────────────────────
 import asyncio as _asyncio
-from app.services.progress_timeout import ProgressTimeout
+from app.services.infrastructure.progress_timeout import ProgressTimeout
 
 
 @pytest.mark.asyncio

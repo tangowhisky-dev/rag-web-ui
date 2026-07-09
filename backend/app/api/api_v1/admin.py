@@ -4,7 +4,9 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.core.security import require_admin, require_super_admin
+logger = logging.getLogger(__name__)
+
+from app.core.security import require_admin
 from app.db.session import get_db
 from app.models.organisation import Organisation
 from app.models.org_llm_config import OrgLLMConfig
@@ -70,7 +72,7 @@ def create_org(
 
     db.commit()
     db.refresh(org)
-    logging.info(f"[ADMIN] org_created id={org.id} name={org.name}")
+    logger.info("[ADMIN] org_created id=%s name=%s", org.id, org.name)
     return org
 
 
@@ -140,7 +142,7 @@ def delete_org(
 
     db.delete(org)
     db.commit()
-    logging.info(f"[ADMIN] org_deleted id={org_id} name={org.name}")
+    logger.info("[ADMIN] org_deleted id=%s name=%s", org_id, org.name)
 
 
 @org_router.get("/orgs/{org_id}/llm-config", response_model=OrgLLMConfigResponse)
@@ -176,7 +178,7 @@ def upsert_org_llm_config(
 
     db.commit()
     db.refresh(config)
-    logging.info("[ADMIN] org_llm_config_updated id=%s", org_id)
+    logger.info("[ADMIN] org_llm_config_updated id=%s", org_id)
     return config
 
 
@@ -222,7 +224,7 @@ def get_org_ingestion_status(
     terminal_tasks = [t for t in tasks if t.status in ("completed", "failed")]
     last_run_at = max((t.updated_at for t in terminal_tasks), default=None)
 
-    logging.info(
+    logger.info(
         "[ADMIN] org_ingestion_status_fetched org_id=%s status=%s total_docs=%s",
         org_id, status, total_docs,
     )
@@ -309,7 +311,7 @@ def create_abbreviation(
     db.add(abbrev)
     db.commit()
     db.refresh(abbrev)
-    logging.info("[ADMIN] abbreviation_created org_id=%s short=%s", org_id, payload.short)
+    logger.info("[ADMIN] abbreviation_created org_id=%s short=%s", org_id, payload.short)
     return abbrev
 
 
@@ -341,7 +343,7 @@ def delete_abbreviation(
         raise HTTPException(status_code=404, detail="Abbreviation not found")
     db.delete(abbrev)
     db.commit()
-    logging.info("[ADMIN] abbreviation_deleted id=%s org_id=%s", abbrev_id, org_id)
+    logger.info("[ADMIN] abbreviation_deleted id=%s org_id=%s", abbrev_id, org_id)
 
 
 # ---------------------------------------------------------------------------
@@ -402,7 +404,7 @@ def create_user(
     db.add(user)
     db.commit()
     db.refresh(user)
-    logging.info(f"[ADMIN] user_created id={user.id} role={user.role}")
+    logger.info("[ADMIN] user_created id=%s role=%s", user.id, user.role)
     return user
 
 
@@ -466,7 +468,7 @@ def change_user_password(
     user.hashed_password = get_password_hash(payload.new_password)
     db.commit()
     db.refresh(user)
-    logging.info(f"[ADMIN] password_changed user_id={user_id} username={user.username}")
+    logger.info("[ADMIN] password_changed user_id=%s username=%s", user_id, user.username)
     return {"message": "Password changed successfully"}
 
 
@@ -492,5 +494,5 @@ def delete_user(
     username = user.username
     db.delete(user)
     db.commit()
-    logging.info(f"[ADMIN] user_deleted id={user_id} username={username}")
+    logger.info("[ADMIN] user_deleted id=%s username=%s", user_id, username)
     return UserDeleteResponse(id=user.id, username=username, email=user.email)

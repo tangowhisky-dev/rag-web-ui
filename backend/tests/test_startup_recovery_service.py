@@ -195,7 +195,7 @@ def make_discovery_result(ds_id=1, ds_name="Test Store", folder="/tmp/fake_ds",
     modified_files = [{"file_path": f"/fake/modified{i}.txt"} for i in range(modified_count)]
     deleted_files = [{"file_path": f"/fake/deleted{i}.txt"} for i in range(deleted_count)]
 
-    from app.services.discovery_engine import DiscoveryResult
+    from app.services.discovery import DiscoveryResult
     return DiscoveryResult(
         datastore_id=ds_id,
         datastore_name=ds_name,
@@ -218,7 +218,7 @@ class TestRecoveryStartsOnStartup:
     def test_recovery_starts_on_startup(self):
         """Mock discovery, verify background thread launched per datastore,
         verify discovery pipeline called for each active datastore."""
-        from app.services.startup_recovery_service import StartupRecoveryService
+        from app.services.discovery import StartupRecoveryService
 
         with tempfile.TemporaryDirectory() as tmp_str:
             tmp_path = Path(tmp_str)
@@ -228,9 +228,9 @@ class TestRecoveryStartsOnStartup:
 
             # Patch discover_datastore so discovery completes quickly
             discovery_result = make_discovery_result(new_count=0, modified_count=0, deleted_count=0)
-            with patch("app.services.startup_recovery_service.SessionLocal", side_effect=TestingSessionLocal):
+            with patch("app.services.discovery.startup_recovery_service.SessionLocal", side_effect=TestingSessionLocal):
                 with patch(
-                    "app.services.discovery_engine.discover_datastore",
+                    "app.services.discovery.discover_datastore",
                     return_value=discovery_result,
                 ):
                     with patch.object(service, '_submit_ingestion'):
@@ -261,7 +261,7 @@ class TestRecoveryNewFileQueued:
     def test_recovery_new_file_queued(self):
         """New file discovered → Document created, ProcessingTask created,
         ingestion submitted to background processor."""
-        from app.services.startup_recovery_service import StartupRecoveryService
+        from app.services.discovery import StartupRecoveryService
 
         with tempfile.TemporaryDirectory() as tmp_str:
             tmp_path = Path(tmp_str)
@@ -281,9 +281,9 @@ class TestRecoveryNewFileQueued:
             discovery_result = make_discovery_result(new_count=1)
             discovery_result.new_files[0]["file_path"] = str(test_file)
 
-            with patch("app.services.startup_recovery_service.SessionLocal", side_effect=TestingSessionLocal):
+            with patch("app.services.discovery.startup_recovery_service.SessionLocal", side_effect=TestingSessionLocal):
                 with patch(
-                    "app.services.discovery_engine.discover_datastore",
+                    "app.services.discovery.discover_datastore",
                     return_value=discovery_result,
                 ):
                     with patch.object(
@@ -330,7 +330,7 @@ class TestRecoveryModifiedFileIngested:
 
     def test_recovery_modified_file_ingested(self):
         """Modified file discovered → Document metadata updated, re-ingestion queued."""
-        from app.services.startup_recovery_service import StartupRecoveryService
+        from app.services.discovery import StartupRecoveryService
 
         with tempfile.TemporaryDirectory() as tmp_str:
             tmp_path = Path(tmp_str)
@@ -368,9 +368,9 @@ class TestRecoveryModifiedFileIngested:
             discovery_result = make_discovery_result(modified_count=1)
             discovery_result.modified_files[0]["file_path"] = str(test_file)
 
-            with patch("app.services.startup_recovery_service.SessionLocal", side_effect=TestingSessionLocal):
+            with patch("app.services.discovery.startup_recovery_service.SessionLocal", side_effect=TestingSessionLocal):
                 with patch(
-                    "app.services.discovery_engine.discover_datastore",
+                    "app.services.discovery.discover_datastore",
                     return_value=discovery_result,
                 ):
                     with patch.object(
@@ -407,7 +407,7 @@ class TestRecoveryDeletedFileCleanedUp:
     def test_recovery_deleted_file_cleaned_up(self):
         """Deleted file → Document, DocumentChunk, ProcessingTask, manifest deleted;
         Qdrant vectors and Neo4j graph cleaned up."""
-        from app.services.startup_recovery_service import StartupRecoveryService
+        from app.services.discovery import StartupRecoveryService
 
         ds_id = create_datastore(TestingSessionLocal(), "/nonexistent/deleted_path_99999")
 
@@ -469,9 +469,9 @@ class TestRecoveryDeletedFileCleanedUp:
         discovery_result = make_discovery_result(deleted_count=1)
         discovery_result.deleted_files[0]["file_path"] = "/fake/deleted_file.txt"
 
-        with patch("app.services.startup_recovery_service.SessionLocal", side_effect=TestingSessionLocal):
+        with patch("app.services.discovery.startup_recovery_service.SessionLocal", side_effect=TestingSessionLocal):
             with patch(
-                "app.services.discovery_engine.discover_datastore",
+                "app.services.discovery.discover_datastore",
                 return_value=discovery_result,
             ):
                 # Qdrant client and Neo4j modules may fail to import (neo4j not installed)
@@ -485,11 +485,11 @@ class TestRecoveryDeletedFileCleanedUp:
                     {"app.services.graph_service": mock_graph_service},
                 ):
                     with patch(
-                        "app.services.utils.get_qdrant_client"
+                        "app.services.infrastructure.get_qdrant_client"
                     ) as mock_qdrant_getter:
                         mock_qdrant_getter.return_value = mock_qdrant_client
                         with patch(
-                            "app.services.document_qdrant._chunk_id_to_point_id"
+                            "app.services.ingestion._chunk_id_to_point_id"
                         ) as mock_chunk_id:
                             mock_chunk_id.return_value = "point-0"
                             service.start()
@@ -523,7 +523,7 @@ class TestRecoveryDeletedFileCleanedUp:
     def test_recovery_deleted_file_skipped_when_doc_not_found(self):
         """When a deleted file has no Document record, deletion should be skipped
         gracefully without error."""
-        from app.services.startup_recovery_service import StartupRecoveryService
+        from app.services.discovery import StartupRecoveryService
 
         ds_id = create_datastore(TestingSessionLocal(), "/nonexistent/path_skip")
 
@@ -531,9 +531,9 @@ class TestRecoveryDeletedFileCleanedUp:
         discovery_result = make_discovery_result(deleted_count=1)
         discovery_result.deleted_files[0]["file_path"] = "/fake/ghost_file.txt"
 
-        with patch("app.services.startup_recovery_service.SessionLocal", side_effect=TestingSessionLocal):
+        with patch("app.services.discovery.startup_recovery_service.SessionLocal", side_effect=TestingSessionLocal):
             with patch(
-                "app.services.discovery_engine.discover_datastore",
+                "app.services.discovery.discover_datastore",
                 return_value=discovery_result,
             ):
                 # Should not raise — just logs and returns
@@ -680,7 +680,7 @@ class TestRecoverySkipInactiveDatastore:
 
     def test_recovery_skip_inactive_datastore(self):
         """Inactive datastore → no background thread, no active scan entry."""
-        from app.services.startup_recovery_service import StartupRecoveryService
+        from app.services.discovery import StartupRecoveryService
 
         # Create one active and one inactive datastore
         with tempfile.TemporaryDirectory() as tmp_str:
@@ -696,9 +696,9 @@ class TestRecoverySkipInactiveDatastore:
             service = StartupRecoveryService()
 
             discovery_result = make_discovery_result(new_count=0)
-            with patch("app.services.startup_recovery_service.SessionLocal", side_effect=TestingSessionLocal):
+            with patch("app.services.discovery.startup_recovery_service.SessionLocal", side_effect=TestingSessionLocal):
                 with patch(
-                    "app.services.discovery_engine.discover_datastore",
+                    "app.services.discovery.discover_datastore",
                     return_value=discovery_result,
                 ):
                     with patch.object(service, '_submit_ingestion'):
@@ -729,7 +729,7 @@ class TestRecoveryParallelDatastores:
 
     def test_recovery_parallel_datastores(self):
         """Two active datastores → two scan entries, concurrent execution."""
-        from app.services.startup_recovery_service import StartupRecoveryService
+        from app.services.discovery import StartupRecoveryService
 
         with tempfile.TemporaryDirectory() as tmp_str:
             tmp_path = Path(tmp_str)
@@ -744,9 +744,9 @@ class TestRecoveryParallelDatastores:
             service = StartupRecoveryService()
 
             discovery_result = make_discovery_result(new_count=0)
-            with patch("app.services.startup_recovery_service.SessionLocal", side_effect=TestingSessionLocal):
+            with patch("app.services.discovery.startup_recovery_service.SessionLocal", side_effect=TestingSessionLocal):
                 with patch(
-                    "app.services.discovery_engine.discover_datastore",
+                    "app.services.discovery.discover_datastore",
                     return_value=discovery_result,
                 ):
                     with patch.object(service, '_submit_ingestion'):
@@ -771,12 +771,12 @@ class TestRecoveryMissingMigrationError:
 
     def test_recovery_missing_migration_error_handled(self):
         """When DB query fails (e.g., migration not applied), recovery skips gracefully."""
-        from app.services.startup_recovery_service import StartupRecoveryService
+        from app.services.discovery import StartupRecoveryService
 
         service = StartupRecoveryService()
 
         # Simulate the query raising an error (e.g., table doesn't exist)
-        with patch("app.services.startup_recovery_service.SessionLocal") as mock_session:
+        with patch("app.services.discovery.startup_recovery_service.SessionLocal") as mock_session:
             mock_db = MagicMock()
             mock_db.query.side_effect = Exception("Table 'data_stores' doesn't exist")
             mock_session.return_value = mock_db
@@ -801,7 +801,7 @@ class TestRecoveryNonBlocking:
     def test_recovery_non_blocking(self):
         """Recovery service starts in background threads — start() should return
         immediately without waiting for discovery to complete."""
-        from app.services.startup_recovery_service import StartupRecoveryService
+        from app.services.discovery import StartupRecoveryService
 
         with tempfile.TemporaryDirectory() as tmp_str:
             tmp_path = Path(tmp_str)
@@ -818,9 +818,9 @@ class TestRecoveryNonBlocking:
                 return make_discovery_result(new_count=0)
 
             start_time = time.time()
-            with patch("app.services.startup_recovery_service.SessionLocal", side_effect=TestingSessionLocal):
+            with patch("app.services.discovery.startup_recovery_service.SessionLocal", side_effect=TestingSessionLocal):
                 with patch(
-                    "app.services.discovery_engine.discover_datastore",
+                    "app.services.discovery.discover_datastore",
                     slow_discover,
                 ):
                     with patch.object(service, '_submit_ingestion'):
@@ -852,7 +852,7 @@ class TestRecoveryGetStatusIdle:
 
     def test_recovery_get_status_idle(self):
         """No active scan → get_status returns {'status': 'idle'}."""
-        from app.services.startup_recovery_service import StartupRecoveryService
+        from app.services.discovery import StartupRecoveryService
 
         service = StartupRecoveryService()
 
@@ -861,7 +861,7 @@ class TestRecoveryGetStatusIdle:
 
     def test_recovery_get_status_for_active_scan(self):
         """Active scan → get_status returns the scan dict."""
-        from app.services.startup_recovery_service import StartupRecoveryService
+        from app.services.discovery import StartupRecoveryService
 
         service = StartupRecoveryService()
 
@@ -898,7 +898,7 @@ class TestRecoveryGetAllStatus:
 
     def test_recovery_get_all_status(self):
         """Multiple active scans → get_all_status returns sorted list."""
-        from app.services.startup_recovery_service import StartupRecoveryService
+        from app.services.discovery import StartupRecoveryService
 
         service = StartupRecoveryService()
 
@@ -955,7 +955,7 @@ class TestRecoveryGetAllStatus:
 
     def test_recovery_get_all_status_empty(self):
         """No scans → get_all_status returns empty list."""
-        from app.services.startup_recovery_service import StartupRecoveryService
+        from app.services.discovery import StartupRecoveryService
 
         service = StartupRecoveryService()
 
@@ -972,7 +972,7 @@ class TestUtils:
 
     def test_sha256_returns_64_char_hex(self, tmp_path):
         """_sha256() must return a 64-character hex SHA-256 digest."""
-        from app.services.startup_recovery_service import _sha256
+        from app.services.discovery.startup_recovery_service import _sha256
 
         f = tmp_path / "test.txt"
         f.write_text("hello world")
@@ -983,7 +983,7 @@ class TestUtils:
 
     def test_sha256_empty_file(self, tmp_path):
         """_sha256() on empty file should return SHA-256 of empty string."""
-        from app.services.startup_recovery_service import _sha256
+        from app.services.discovery.startup_recovery_service import _sha256
         import hashlib
 
         f = tmp_path / "empty.txt"
@@ -994,7 +994,7 @@ class TestUtils:
 
     def test_sha256_unreadable_file(self, tmp_path):
         """_sha256() on missing file should return SHA-256 of empty string (graceful)."""
-        from app.services.startup_recovery_service import _sha256
+        from app.services.discovery.startup_recovery_service import _sha256
         import hashlib
 
         digest = _sha256("/nonexistent/path/file.txt")
@@ -1003,17 +1003,17 @@ class TestUtils:
 
     def test_guess_content_type_text(self):
         """_guess_content_type should return 'text/plain' for .txt files."""
-        from app.services.startup_recovery_service import _guess_content_type
+        from app.services.discovery.startup_recovery_service import _guess_content_type
         assert _guess_content_type("doc.txt") == "text/plain"
 
     def test_guess_content_type_pdf(self):
         """_guess_content_type should return 'application/pdf' for .pdf files."""
-        from app.services.startup_recovery_service import _guess_content_type
+        from app.services.discovery.startup_recovery_service import _guess_content_type
         assert _guess_content_type("doc.pdf") == "application/pdf"
 
     def test_guess_content_type_unknown(self):
         """_guess_content_type should return 'application/octet-stream' for unknown extensions."""
-        from app.services.startup_recovery_service import _guess_content_type
+        from app.services.discovery.startup_recovery_service import _guess_content_type
         assert _guess_content_type("doc.unknown_ext") == "application/octet-stream"
 
     def test_guess_content_type_md(self):
@@ -1023,14 +1023,14 @@ class TestUtils:
         'text/markdown'. The service falls back to 'application/octet-stream' if
         mimetypes returns None, so we just verify it returns a non-empty string.
         """
-        from app.services.startup_recovery_service import _guess_content_type
+        from app.services.discovery.startup_recovery_service import _guess_content_type
         result = _guess_content_type("doc.md")
         assert result is not None
         assert isinstance(result, str)
 
     def test_stop_sets_running_false(self):
         """stop() should set _running to False and shutdown the executor."""
-        from app.services.startup_recovery_service import StartupRecoveryService
+        from app.services.discovery import StartupRecoveryService
 
         service = StartupRecoveryService()
         assert service._running is True
@@ -1040,7 +1040,7 @@ class TestUtils:
 
     def test_scan_id_counter_increments(self):
         """_next_scan_id should return incrementing integers."""
-        from app.services.startup_recovery_service import StartupRecoveryService
+        from app.services.discovery import StartupRecoveryService
 
         service = StartupRecoveryService()
         id1 = service._next_scan_id()
@@ -1052,11 +1052,11 @@ class TestUtils:
 
     def test_process_new_file_file_not_found(self):
         """process_new_file should log warning and return when file is missing."""
-        from app.services.startup_recovery_service import StartupRecoveryService
+        from app.services.discovery import StartupRecoveryService
 
         service = StartupRecoveryService()
 
-        with patch("app.services.startup_recovery_service.SessionLocal", side_effect=TestingSessionLocal):
+        with patch("app.services.discovery.startup_recovery_service.SessionLocal", side_effect=TestingSessionLocal):
             with patch.object(StartupRecoveryService, '_submit_ingestion'):
                 # File doesn't exist — should log warning and return without error
                 service.process_new_file("/nonexistent/file.txt", datastore_id=1)
@@ -1074,7 +1074,7 @@ class TestUtils:
 
     def test_process_deleted_file_calls_handle_deletion(self):
         """process_deleted_file should delegate to _handle_deletion_records."""
-        from app.services.startup_recovery_service import StartupRecoveryService
+        from app.services.discovery import StartupRecoveryService
 
         service = StartupRecoveryService()
 
@@ -1084,7 +1084,7 @@ class TestUtils:
 
     def test_get_status_internal_calls_get_status(self):
         """_get_status is a wrapper around get_status."""
-        from app.services.startup_recovery_service import StartupRecoveryService
+        from app.services.discovery import StartupRecoveryService
 
         service = StartupRecoveryService()
 
@@ -1101,7 +1101,7 @@ class TestRecoveryStatusIncludesLastRecoveredAt:
 
     def test_recovery_status_includes_last_recovered_at(self):
         """After recovery completes, last_recovered_at is set on the DataStore record in the DB."""
-        from app.services.startup_recovery_service import StartupRecoveryService
+        from app.services.discovery import StartupRecoveryService
 
         with tempfile.TemporaryDirectory() as tmp_str:
             tmp_path = Path(tmp_str)
@@ -1113,9 +1113,9 @@ class TestRecoveryStatusIncludesLastRecoveredAt:
             service = StartupRecoveryService()
 
             discovery_result = make_discovery_result(new_count=0, modified_count=0, deleted_count=0)
-            with patch("app.services.startup_recovery_service.SessionLocal", side_effect=TestingSessionLocal):
+            with patch("app.services.discovery.startup_recovery_service.SessionLocal", side_effect=TestingSessionLocal):
                 with patch(
-                    "app.services.discovery_engine.discover_datastore",
+                    "app.services.discovery.discover_datastore",
                     return_value=discovery_result,
                 ):
                     with patch.object(service, '_submit_ingestion'):

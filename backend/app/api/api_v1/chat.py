@@ -1,10 +1,11 @@
 import logging
 import os
 import tempfile
-import time
+from datetime import datetime, timezone
 from typing import List, Any, Literal, Optional
+from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
-from fastapi.responses import StreamingResponse, Response
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.orm import Session, joinedload
 from app.db.session import get_db
 from app.models.user import User
@@ -16,19 +17,17 @@ from app.schemas.chat import (
     ChatCreate,
     ChatResponse,
     ChatUpdate,
-    MessageCreate,
     MessageEditRequest,
     MessageResponse,
     SearchResult,
 )
 from app.core.security import get_current_user
-from app.services.chat_service import generate_response, get_effective_llm_config
-from app.services.cancel_registry import set_cancel_token
-from app.services.document_processor import _convert_to_markdown, SUPPORTED_EXTENSIONS
+from app.services.chat import generate_response, get_effective_llm_config
+from app.services.infrastructure import set_cancel_token
+from app.services.ingestion import SUPPORTED_EXTENSIONS
+from app.services.ingestion import MAX_FILE_SIZE, _convert_to_markdown
 
 logger = logging.getLogger(__name__)
-
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 
 router = APIRouter()
 
@@ -349,7 +348,6 @@ async def create_message(
     temperature: float = float(messages.get("temperature", 0.0))
     model_name: Optional[str] = messages.get("model_name") or None
     file_id: Optional[int] = messages.get("file_id") or None
-    answering_mode: str = messages.get("answering_mode", "agentic")
 
     # ── File context injection ─────────────────────────────────────────────────
     # Build augmented query from: attached file (current turn) + any files from
@@ -399,8 +397,6 @@ async def create_message(
     llm_cfg = get_effective_llm_config(current_user.org_id, db)
 
     async def response_stream():
-        # After generate_response creates the user Message, link the chat_file to it
-        user_msg_id: Optional[int] = None
         async for chunk in generate_response(
             query=query_text,
             messages=messages,
@@ -416,7 +412,6 @@ async def create_message(
             display_query=display_query,
             file_id=file_id,
             file_markdown=current_file_markdown,
-            answering_mode=answering_mode,
             api_base=llm_cfg["api_base"],
             query_model=llm_cfg["query_model"],
             org_id=current_user.org_id,
@@ -581,7 +576,7 @@ def export_message(
     if "__LLM_RESPONSE__" in content:
         content = content.split("__LLM_RESPONSE__", 1)[1]
 
-    from app.services.export_service import export_message as _export
+    from app.services.export import export_message as _export
     try:
         data, media_type, filename = _export(content, format)
     except Exception as exc:
@@ -804,3 +799,145 @@ def get_message_siblings(
         )
 
     return siblings
+
+
+# ── Clarification State Machine ─────────────────────────────────────────────────
+
+from app.models.clarification import ClarificationRequest as ClarificationRequestModel
+
+
+class ClarificationSubmitRequest(BaseModel):
+    """Request body for user clarification response."""
+    chat_id: int
+    clarification_id: int  # The ClarificationRequest.id from the pending endpoint
+    response: str          # User's clarification answer
+
+
+class ClarificationPendingResponse(BaseModel):
+    """Response from the pending clarification check."""
+    pending: bool
+    question: str = ""
+    options: list[str] = []
+    rationale: str = ""
+    clarification_id: int = 0
+    attempt: int = 1
+    max_attempts: int = 2
+
+
+@router.get("/clarification/pending", response_model=ClarificationPendingResponse)
+async def get_pending_clarification(
+    *,
+    db: Session = Depends(get_db),
+    chat_id: int = Query(...),
+    current_user: User = Depends(get_current_user),
+) -> Any:
+    """
+    Check if there is a pending clarification request for this chat.
+
+    The frontend polls this endpoint every 2 seconds while waiting for
+    the agent to respond. If the agent needs clarification, it creates
+    a ClarificationRequest row and yields a 'c:' SSE event. The frontend
+    polls this endpoint to get the question details.
+    """
+    # Verify chat ownership
+    chat = (
+        db.query(Chat)
+        .filter(
+            Chat.id == chat_id,
+            _chat_owner_filter(current_user),
+        )
+        .first()
+    )
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    # Find the most recent pending clarification for this chat
+    pending = (
+        db.query(ClarificationRequestModel)
+        .filter(
+            ClarificationRequestModel.chat_id == chat_id,
+            ClarificationRequestModel.status == "pending",
+        )
+        .order_by(ClarificationRequestModel.created_at.desc())
+        .first()
+    )
+
+    if not pending:
+        return ClarificationPendingResponse(pending=False)
+
+    return ClarificationPendingResponse(
+        pending=True,
+        question=pending.question or "",
+        options=pending.options or [],
+        rationale=pending.rationale or "",
+        clarification_id=pending.id,
+        attempt=pending.attempt,
+        max_attempts=2,
+    )
+
+
+@router.post("/clarification", response_model=dict)
+async def submit_clarification(
+    *,
+    db: Session = Depends(get_db),
+    body: ClarificationSubmitRequest,
+    current_user: User = Depends(get_current_user),
+) -> Any:
+    """
+    Submit user's clarification response to an in-progress agent query.
+
+    This endpoint is called when the user responds to a clarification request.
+    It updates the ClarificationRequest row with the user's response, marks it
+    as answered, and stores the response as a system message in the chat.
+    """
+    # Verify chat ownership
+    chat = (
+        db.query(Chat)
+        .filter(
+            Chat.id == body.chat_id,
+            _chat_owner_filter(current_user),
+        )
+        .first()
+    )
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    # Find and verify the clarification request
+    clarification = (
+        db.query(ClarificationRequestModel)
+        .filter(
+            ClarificationRequestModel.id == body.clarification_id,
+            ClarificationRequestModel.chat_id == body.chat_id,
+            ClarificationRequestModel.status == "pending",
+        )
+        .first()
+    )
+    if not clarification:
+        raise HTTPException(status_code=404, detail="Clarification request not found or already answered")
+
+    # Update the clarification request with user response
+    clarification.user_response = body.response
+    clarification.status = "answered"
+    clarification.answered_at = datetime.now(timezone.utc)
+
+    # Store clarification response as a system message in the chat
+    clarification_msg = Message(
+        content=f"__CLARIFICATION_RESPONSE__\n{body.response}",
+        role="system",
+        chat_id=body.chat_id,
+    )
+
+    db.add(clarification_msg)
+    db.commit()
+    db.refresh(clarification)
+
+    logger.info(
+        "[CLARIFICATION] chat_id=%d clarification_id=%d response_id=%d user=%d",
+        body.chat_id, clarification.id, clarification_msg.id, current_user.id,
+    )
+
+    return {
+        "status": "received",
+        "clarification_id": clarification.id,
+        "message": "Clarification response received. Agent will resume processing.",
+    }
