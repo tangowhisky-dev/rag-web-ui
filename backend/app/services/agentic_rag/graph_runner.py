@@ -14,6 +14,8 @@ from typing import Any, AsyncGenerator, List, Optional
 
 from langchain_core.messages import HumanMessage, AIMessage
 
+from app.core.config import settings
+
 from .callbacks import SSEEventEmitter
 from .graph import build_main_graph
 from .graph_state import AgentState
@@ -146,6 +148,46 @@ async def run_agentic_rag(
         final_answer = state.get("final_answer") or state.get("answer", "")
         thinking_chunks = state.get("thinking_chunks", [])
         usage = {"promptTokens": 0, "completionTokens": 0}
+
+        # ── In-pipeline answer quality evaluation ───────────────────
+        if settings.ANSWER_QUALITY_GRADING_ENABLED and final_answer and all_docs:
+            try:
+                from .evaluator import evaluate_answer, summarize_evaluation
+                from .utils import format_context_string
+
+                context_text = format_context_string(all_docs, state.get("file_markdown"))
+                conf_score = state.get("retrieval_confidence", 0.0)
+                conf_level = "very_high" if conf_score > 0.8 else (
+                    "high" if conf_score > 0.6 else (
+                        "medium" if conf_score > 0.3 else "low"
+                    )
+                )
+
+                evaluation = await evaluate_answer(
+                    query=state.get("original_query", ""),
+                    answer=final_answer,
+                    context_preview=context_text,
+                    confidence_level=conf_level,
+                )
+                eval_summary = summarize_evaluation(evaluation)
+                usage["evaluation"] = {
+                    "faithfulness": evaluation.faithfulness,
+                    "completeness": evaluation.completeness,
+                    "citation_quality": evaluation.citation_quality,
+                    "confidence_match": evaluation.confidence_match,
+                    "flags": evaluation.flags,
+                }
+                # Emit evaluation as a standalone event before done
+                await emitter.emit_evaluation(
+                    faithfulness=evaluation.faithfulness,
+                    completeness=evaluation.completeness,
+                    citation_quality=evaluation.citation_quality,
+                    confidence_match=evaluation.confidence_match,
+                    flags=evaluation.flags,
+                )
+                logger.info("[EVAL] answer_quality=%s", eval_summary)
+            except Exception as exc:
+                logger.warning("[EVAL] evaluation skipped: %s", exc)
 
         yield {"event": "done", "full_response": final_answer, "usage": usage}
 

@@ -65,6 +65,24 @@ class SSEEventEmitter:
         """Emit an answer_rewrite event (internal normalization)."""
         await self.emit({"event": "answer_rewrite", "content": content})
 
+    async def emit_evaluation(
+        self,
+        faithfulness: int,
+        completeness: int,
+        citation_quality: int,
+        confidence_match: bool,
+        flags: list[str],
+    ) -> None:
+        """Emit an evaluation event with answer quality metrics."""
+        await self.emit({
+            "event": "evaluation",
+            "faithfulness": faithfulness,
+            "completeness": completeness,
+            "citation_quality": citation_quality,
+            "confidence_match": confidence_match,
+            "flags": flags,
+        })
+
     async def drain(self) -> AsyncGenerator[dict, None]:
         """Yield all queued events until the queue is empty."""
         while not self._event_queue.empty():
