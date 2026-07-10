@@ -24,99 +24,115 @@ def estimate_messages_tokens(messages: list) -> int:
     return total
 
 
-def extract_chat_id(state: dict, chat_id: int) -> int:
-    """Extract chat_id from state or fall back to the parameter."""
-    if isinstance(state, dict):
-        return state.get("chat_id", chat_id)
-    return chat_id
-
-
 def strip_reasoning_tags(text: str) -> str:
     """Strip <think>...</think> tags from text."""
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
 
-def extract_thinking_content(text: str) -> tuple[str, str]:
-    """Extract thinking content and response from text with reasoning tags.
-    
-    Returns (thinking_content, response_text).
+def format_context_string(docs: list[dict], file_markdown: str | None = None) -> str:
+    """Format a list of serialized documents into a context string for the LLM.
+
+    Each doc becomes ``[KB-N] (source)\\ncontent``.  If *file_markdown* is
+    provided it is appended after a ``[File Content]`` header.
     """
-    match = re.search(r"<think>(.*?)</think>(.*)", text, re.DOTALL)
-    if match:
-        return match.group(1).strip(), match.group(2).strip()
-    return "", text.strip()
-
-
-def truncate_to_words(text: str, max_words: int) -> str:
-    """Truncate text to at most max_words."""
-    words = text.split()
-    if len(words) <= max_words:
-        return text
-    return " ".join(words[:max_words]) + "..."
-
-
-def safe_json_parse(text: str) -> dict | list | None:
-    """Safely parse JSON from text, extracting from markdown code blocks if present."""
-    try:
-        # Try direct parse first
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-
-    # Try to find JSON in markdown code blocks
-    match = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group(1))
-        except json.JSONDecodeError:
-            return None
-
-    # Try to extract first JSON object/array
-    match = re.search(r"(\[.*\]|\{.*\})", text, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group(0))
-        except json.JSONDecodeError:
-            return None
-
-    return None
-
-
-def format_context_string(docs: list[dict]) -> str:
-    """Format a list of serialized documents into a context string for the LLM."""
-    parts = []
+    parts: list[str] = []
     for i, doc in enumerate(docs, 1):
         content = doc.get("page_content", "").strip()
         source = doc.get("metadata", {}).get("source", "")
         header = f"[KB-{i}]" + (f" ({source})" if source else "")
         parts.append(f"{header}\n{content}")
+    if file_markdown:
+        parts.append(f"[File Content]\n{file_markdown}")
     return "\n\n---\n\n".join(parts)
 
 
-def build_task_list_events(
-    subtasks: list[str],
-    completed_idx: int,
-    total: int,
-) -> list[dict]:
-    """Build task_list events for the current subtask index.
-    
-    Args:
-        subtasks: List of subtask strings.
-        completed_idx: Index of the current subtask being executed.
-        total: Total number of subtasks.
-        
-    Returns:
-        List of task_list event dicts.
+def rewrite_query(
+    query: str,
+    recent_history: list,
+    api_base: str | None = None,
+    query_model: str | None = None,
+    openai_api_key: str = "",
+    openai_api_base: str = "",
+) -> str:
+    """Rewrite *query* into a self-contained search query using chat history.
+
+    Shared by ``rewrite_query_node`` (nodes.py) and ``_rewrite_query``
+    (chat_service.py).  Returns the original query on failure or when the
+    model echoes an answer instead of rewriting.
     """
-    return [{
-        "event": "task_list",
-        "tasks": [
-            {
-                "id": i,
-                "text": s,
-                "status": "done" if i < completed_idx else ("running" if i == completed_idx else "pending"),
-                "progress": None,
-            }
-            for i, s in enumerate(subtasks)
-        ],
-    }]
+    if not recent_history:
+        return query
+
+    system_msg = (
+        "You are a search query rewriter for a document retrieval system. "
+        "Your ONLY job is to rewrite the user's latest message into a self-contained search query "
+        "that can be sent to a vector database. "
+        "Use the chat history solely to resolve pronouns and references — "
+        "never to answer, evaluate, or judge the question.\n\n"
+        "Rules:\n"
+        "1. Output a standalone question or keyword phrase — nothing else.\n"
+        "2. Resolve pronouns and references from history "
+        "(e.g. 'it' → the specific topic discussed).\n"
+        "3. Do NOT answer the question. Do NOT say whether information exists or not.\n"
+        "4. Do NOT add information not needed to resolve an ambiguous reference.\n"
+        "5. Keep the output short — one sentence or a keyword phrase, maximum 30 words.\n\n"
+        "Examples:\n"
+        "History: [user: tell me about Linux, assistant: Linux is an open-source OS...]\n"
+        "Query: 'any other worthwhile OS you like to mention?'\n"
+        "Output: 'other notable operating systems worth mentioning'\n\n"
+        "History: [user: summarise assignment 1, assistant: ...summary...]\n"
+        "Query: 'what is question 1'\n"
+        "Output: 'What is Question 1 in Assignment 1?'\n\n"
+        "History: [user: tell me about the StreamVC paper]\n"
+        "Query: 'what model does it use'\n"
+        "Output: 'What model architecture does StreamVC use?'"
+    )
+
+    messages: list[dict] = [{"role": "system", "content": system_msg}]
+    from langchain_core.messages import HumanMessage, AIMessage
+
+    for m in recent_history:
+        if isinstance(m, HumanMessage):
+            messages.append({"role": "user", "content": m.content})
+        elif isinstance(m, AIMessage):
+            messages.append({"role": "assistant", "content": m.content[:400]})
+    messages.append({"role": "user", "content": query})
+
+    from openai import AsyncOpenAI as _OAI
+    client = _OAI(api_key=openai_api_key, base_url=api_base or openai_api_base)
+    resp = client.chat.completions.create(
+        model=query_model or "default",
+        messages=messages,
+        max_tokens=60,
+        temperature=0,
+        stream=False,
+        extra_body={"thinking": {"type": "disabled"}},
+    )
+    raw_rewrite = (resp.choices[0].message.content or "").strip()
+    standalone = strip_reasoning_tags(raw_rewrite) or query
+
+    # Strip meta-commentary preamble that some models emit
+    if re.search(
+        r"\buser\b.*\rewrite\b|\brewritten\b|\bstandalone\b",
+        standalone, re.IGNORECASE,
+    ):
+        if ":" in standalone:
+            candidate = standalone.rsplit(":", 1)[-1].strip()
+        else:
+            sentences = re.split(r"(?<=[.?!])\s+", standalone)
+            candidate = sentences[-1].strip()
+        if len(candidate) > 5:
+            standalone = candidate
+
+    # Guard: if the rewriter echoed the previous assistant response
+    answer_patterns = [
+        r"\bthere\s+is\s+no\s+information\b",
+        r"\bthe\s+context\s+does?\s+not\s+contain\b",
+        r"\bi\s+cannot\s+answer\b",
+        r"\bi\s+don't\s+have\s+enough\b",
+        r"\bno\s+information\s+found\b",
+    ]
+    if any(re.search(p, standalone, re.IGNORECASE) for p in answer_patterns):
+        standalone = query
+
+    return standalone

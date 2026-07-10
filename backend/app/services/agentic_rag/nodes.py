@@ -5,14 +5,13 @@ from __future__ import annotations
 import json
 import logging
 import re
-import time
-from typing import Any, AsyncGenerator, List, Optional
+from typing import Any, List, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 
 from app.core.config import settings
-from app.services.infrastructure import strip_reasoning_tags
+
 from app.services.infrastructure.utils import _serialise_doc
 from app.services.retrieval import score_retrieval
 from app.services.retrieval import hybrid_search_with_legs, get_effective_datastore_ids
@@ -20,7 +19,7 @@ from app.services.prompts.loader import append_chart_instructions
 
 from .graph_state import AgentState
 from .schemas import QueryAnalysis
-from .utils import estimate_messages_tokens
+from .utils import estimate_messages_tokens, strip_reasoning_tags
 
 logger = logging.getLogger(__name__)
 
@@ -43,50 +42,6 @@ Do NOT invent citations. Only cite chunks you actually used.
 
 IMPORTANT: Do NOT repeat the user's question in your answer. Just provide the answer directly.
 """)
-
-_REWRITE_SYSTEM = """\
-You are a search query rewriter for a document retrieval system.
-Your ONLY job is to rewrite the user's latest message into a self-contained search query
-that can be sent to a vector database.
-Use the chat history solely to resolve pronouns and references -
-never to answer, evaluate, or judge the question.
-
-Rules:
-1. Output a standalone question or keyword phrase - nothing else.
-2. Resolve pronouns and references from history.
-3. Do NOT answer the question.
-4. Keep the output short - one sentence or a keyword phrase, maximum 30 words.
-
-Examples:
-History: [user: tell me about Linux, assistant: Linux is an open-source OS...]
-Query: 'any other worthwhile OS you like to mention?'
-Output: 'other notable operating systems worth mentioning'
-
-History: [user: tell me about the StreamVC paper]
-Query: 'what model does it use'
-Output: 'What model architecture does StreamVC use?'"""
-
-_THINKING_KEYWORDS = [
-    "compare", "contrast", "analyze", "evaluate", "design",
-    "reason", "deduce", "infer", "explain why", "explain how",
-    "tradeoff", "pros and cons", "architect", "implement",
-    "discuss", "argue", "assess", "critique", "weigh",
-    "implications", "limitations", "strengths", "weaknesses",
-]
-
-
-# ---------------------------------------------------------------------------
-# Utility: model selection
-# ---------------------------------------------------------------------------
-
-def _select_model(subtask_text: str, is_complex: bool) -> str:
-    """Auto-select model based on query nature."""
-    lower = subtask_text.lower()
-    is_thinking = any(kw in lower for kw in _THINKING_KEYWORDS)
-    if is_thinking or is_complex:
-        return settings.REASONING_MODEL or settings.OPENAI_MODEL
-    return settings.OPENAI_MODEL
-
 
 def _get_llm(
     model_name: Optional[str] = None,
@@ -111,53 +66,22 @@ async def rewrite_query_node(
     state: AgentState,
     api_base: Optional[str] = None,
 ) -> dict:
-    """Rewrite query using chat history."""
+    """Rewrite query using chat history.
+
+    Delegates to the shared ``rewrite_query`` in utils.py.
+    """
+    from .utils import rewrite_query as _rewrite_query
+
     messages = state.get("messages", [])
-    recent_history = []
-    for m in messages:
-        if isinstance(m, HumanMessage):
-            recent_history.append(m)
-        elif isinstance(m, AIMessage):
-            recent_history.append(m)
-
     query = state.get("original_query", "")
-    if not recent_history:
-        return {"rewritten_query": query}
-
-    rewrite_messages = [{"role": "system", "content": _REWRITE_SYSTEM}]
-    for m in recent_history:
-        if isinstance(m, HumanMessage):
-            rewrite_messages.append({"role": "user", "content": m.content})
-        elif isinstance(m, AIMessage):
-            rewrite_messages.append({"role": "assistant", "content": m.content[:400]})
-    rewrite_messages.append({"role": "user", "content": query})
-
-    from openai import AsyncOpenAI
-    client = AsyncOpenAI(
-        api_key=settings.OPENAI_API_KEY,
-        base_url=api_base or settings.OPENAI_API_BASE,
+    rewritten = _rewrite_query(
+        query=query,
+        recent_history=messages,
+        api_base=api_base,
+        query_model=settings.effective_query_model,
+        openai_api_key=settings.OPENAI_API_KEY,
+        openai_api_base=settings.OPENAI_API_BASE,
     )
-    resp = await client.chat.completions.create(
-        model=settings.effective_query_model,
-        messages=rewrite_messages,
-        max_tokens=60,
-        temperature=0,
-        stream=False,
-        extra_body={"thinking": {"type": "disabled"}},
-    )
-    raw = (resp.choices[0].message.content or "").strip()
-    rewritten = strip_reasoning_tags(raw) or query
-
-    answer_patterns = [
-        r"\bthere\s+is\s+no\s+information\b",
-        r"\bthe\s+context\s+does?\s+not\s+contain\b",
-        r"\bi\s+cannot\s+answer\b",
-        r"\bi\s+don't\s+have\s+enough\b",
-        r"\bno\s+information\s+found\b",
-    ]
-    if any(re.search(p, rewritten, re.IGNORECASE) for p in answer_patterns):
-        rewritten = query
-
     return {"rewritten_query": rewritten}
 
 
@@ -190,9 +114,9 @@ async def classify_query_node(
         is_clear = getattr(response, "is_clear", True)
         questions = getattr(response, "questions", [rewritten]) or [rewritten]
     except Exception as exc:
-        logger.warning("[CLASSIFY] structured classification failed: %s - using heuristic", exc)
+        logger.warning("[CLASSIFY] structured classification failed: %s - using fallback", exc)
         is_clear = True
-        questions = _heuristic_classify(query, rewritten)
+        questions = [rewritten]
 
     subtasks = questions if len(questions) > 1 else [rewritten]
 
@@ -201,30 +125,6 @@ async def classify_query_node(
         "subtasks": subtasks,
         "is_complex": len(subtasks) > 1,
     }
-
-
-def _heuristic_classify(query: str, rewritten: str) -> List[str]:
-    """Fallback heuristic classification for when structured output fails."""
-    combined = (query + " " + rewritten).lower()
-    # Multi-part indicators
-    multi = re.search(
-        r"\b(and|or|but|yet|also|plus|along with|as well as|in addition)\b.*"
-        r"\b(and|or|but|yet|also|plus|along with|as well as|in addition)\b",
-        combined,
-    )
-    if multi:
-        return [rewritten]
-
-    questions = re.findall(
-        r"\b(what|how|why|when|where|which|compare|list|explain)\b", combined
-    )
-    if len(questions) >= 3:
-        return [rewritten]
-
-    if len(rewritten.split()) > 30:
-        return [rewritten]
-
-    return [rewritten]
 
 
 # ---------------------------------------------------------------------------
@@ -293,115 +193,16 @@ async def direct_retrieval_node(
     conf_result = score_retrieval(docs, retrieval_info) if docs else None
     conf_score = conf_result.score if conf_result else 0
 
+    from .utils import format_context_string
+
     serialised = [_serialise_doc(d) for d in docs]
-    context_text = ""
-    if serialised:
-        parts = []
-        for i, doc in enumerate(serialised, 1):
-            content = doc.get("page_content", "").strip()
-            source = doc.get("metadata", {}).get("source", "")
-            header = f"[KB-{i}]" + (f" ({source})" if source else "")
-            parts.append(f"{header}\n{content}")
-        if file_markdown:
-            parts.append(f"[File Content]\n{file_markdown}")
-        context_text = "\n\n---\n\n".join(parts)
+    context_text = format_context_string(serialised, file_markdown)
 
     return {
         "retrieved_docs": serialised,
         "retrieved_contexts": [context_text],
         "retrieval_confidence": conf_score / 100.0 if conf_score else 0.0,
         "retrieval_iterations": 1,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Node: generate (stream answer)
-# ---------------------------------------------------------------------------
-
-async def generate_node(
-    state: AgentState,
-    llm: ChatOpenAI | None = None,
-    api_base: Optional[str] = None,
-) -> dict:
-    """Generate an answer from context. Returns the full answer text."""
-    from app.services.infrastructure import strip_reasoning_tags
-
-    query = state.get("rewritten_query", state.get("original_query", ""))
-    context_text = state.get("retrieved_contexts", [""])[0] if state.get("retrieved_contexts") else ""
-    existing_summary = state.get("existing_summary", "")
-    model_name = state.get("model_used", settings.OPENAI_MODEL)
-
-    messages: list = [{"role": "system", "content": _ANSWER_SYSTEM_PROMPT}]
-
-    if existing_summary:
-        messages.append({
-            "role": "system",
-            "content": f"[Conversation summary so far]\n{existing_summary}",
-        })
-
-    context_section = f"\nContext:\n{context_text}\n\nQuestion: {query}" if context_text else query
-    messages.append({"role": "user", "content": context_section})
-
-    model = llm or _get_llm(model_name, 0.0, api_base=api_base)
-    streamed_parts: list[str] = []
-    thinking_parts: list[str] = []
-    usage: dict = {"promptTokens": 0, "completionTokens": 0}
-
-    try:
-        async for chunk in model.astream(messages):
-            token: str = chunk.content or ""
-
-            if settings.REASONING_MODEL and model_name == settings.REASONING_MODEL:
-                is_thinking = True
-                stripped = strip_reasoning_tags(token)
-                if stripped != token:
-                    full_match = re.search(r'</think>(.*?)</think>', token, re.DOTALL)
-                    if full_match:
-                        thinking_parts.append(full_match.group(1))
-                        token = token[full_match.end():]
-                    else:
-                        open_match = re.search(r'</think>', token)
-                        if open_match:
-                            token = token[open_match.end():]
-
-                if stripped and token != stripped:
-                    thinking_parts.append(stripped)
-
-            if token:
-                streamed_parts.append(token)
-
-            if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
-                usage = {
-                    "promptTokens": chunk.usage_metadata.get("input_tokens", 0),
-                    "completionTokens": chunk.usage_metadata.get("output_tokens", 0),
-                }
-    except Exception as exc:
-        logger.error("[NODE] generation failed: %s", exc)
-        streamed_parts.append("I encountered an error generating the response. Please try again.")
-
-    answer = "".join(streamed_parts)
-    normalised = re.sub(
-        r'\[(\d+)\](?!\()',
-        lambda m: f'[{m.group(1)}]({m.group(1)})',
-        answer,
-    )
-
-    # Validate chart JSON
-    chart_pattern = re.compile(r'\[chart\](.*?)\[/chart\]', re.DOTALL)
-    matches = list(chart_pattern.finditer(normalised))
-    if matches:
-        valid_count = 0
-        for i, match in enumerate(matches):
-            try:
-                json.loads(match.group(1))
-                valid_count += 1
-            except (json.JSONDecodeError, TypeError):
-                pass
-        logger.info("[CHART] validation: %d valid of %d", valid_count, len(matches))
-
-    return {
-        "answer": normalised or answer,
-        "thinking_chunks": thinking_parts,
     }
 
 
@@ -488,41 +289,6 @@ def fallback_response_node(state: AgentState) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Node: summarize history
-# ---------------------------------------------------------------------------
-
-async def summarize_history_node(
-    state: AgentState,
-    llm: ChatOpenAI,
-) -> dict:
-    """Reduce conversation history using rolling summaries."""
-    messages = state.get("messages", [])
-
-    plain_msgs = [m for m in messages if not getattr(m, "tool_calls", None)]
-    keep_count = 4
-    older = plain_msgs[:-keep_count] if len(plain_msgs) > keep_count else []
-    if older:
-        existing_summary = state.get("existing_summary", "").strip()
-        conversation = f"Existing summary:\n{existing_summary or '(none)'}\n\n"
-        conversation += "New messages:\n" + "\n".join(
-            f"{'User' if isinstance(m, HumanMessage) else 'Assistant'}: {m.content[:200]}"
-            for m in older
-        )
-
-        response = await llm.ainvoke([
-            {"role": "system", "content": (
-                "You are a conversation summarizer. Provide a concise summary of key facts, "
-                "decisions, and context. Max 200 words."
-            )},
-            {"role": "user", "content": conversation},
-        ])
-
-        return {"existing_summary": response.content.strip() if hasattr(response, "content") else str(response)}
-
-    return {}
-
-
-# ---------------------------------------------------------------------------
 # Node: compress context (between retrieval iterations)
 # ---------------------------------------------------------------------------
 
@@ -546,8 +312,6 @@ def compress_context_node(state: AgentState) -> dict:
 
 def should_compress_context(state: AgentState) -> str:
     """Decide whether to compress context based on token budget."""
-    from .utils import estimate_messages_tokens
-
     messages = state.get("messages", [])
     current_tokens = estimate_messages_tokens(messages)
     max_allowed = settings.OPENAI_MODEL_CONTEXT_SIZE * 0.8

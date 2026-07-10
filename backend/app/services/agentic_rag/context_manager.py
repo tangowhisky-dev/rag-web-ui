@@ -16,6 +16,7 @@ subagent context, and use prompt caching.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import time

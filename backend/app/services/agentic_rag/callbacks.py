@@ -8,25 +8,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, AsyncGenerator, Dict, List, Optional
-
-from langchain_core.callbacks import BaseCallbackHandler
-
-from .utils import build_task_list_events
+from typing import AsyncGenerator
 
 logger = logging.getLogger(__name__)
 
 
 class SSEEventEmitter:
-    """Manages SSE event emission for graph execution.
-    
-    This is the bridge between LangGraph's node execution and the
-    existing SSE event protocol used by the frontend.
-    """
+    """Manages SSE event emission for graph execution."""
 
     def __init__(self) -> None:
         self._event_queue: asyncio.Queue[dict] = asyncio.Queue()
-        self._running = False
 
     async def emit(self, event: dict) -> None:
         """Emit an event to the SSE queue."""
@@ -75,58 +66,10 @@ class SSEEventEmitter:
         await self.emit({"event": "answer_rewrite", "content": content})
 
     async def drain(self) -> AsyncGenerator[dict, None]:
-        """Yield all queued events until the queue is empty and no more are coming.
-        
-        Used after graph execution to flush remaining events.
-        """
+        """Yield all queued events until the queue is empty."""
         while not self._event_queue.empty():
             try:
                 event = self._event_queue.get_nowait()
                 yield event
             except asyncio.QueueEmpty:
                 break
-
-
-# ---------------------------------------------------------------------------
-# LangChain callback handler
-# ---------------------------------------------------------------------------
-
-class LangGraphCallbackHandler(BaseCallbackHandler):
-    """LangChain callback handler that emits SSE events from graph transitions."""
-
-    def __init__(self, emitter: SSEEventEmitter) -> None:
-        self.emitter = emitter
-        self.supported_methods = ["on_chain_start", "on_chain_end", "on_llm_start", "on_llm_end"]
-        self.supported_types = ["chain", "llm"]
-        self._node_entered = False
-
-    async def on_chain_start(self, serialized: dict, inputs: dict | None, **kwargs: Any) -> None:
-        node_name = serialized.get("name", "")
-        await self.emitter.emit_progress(
-            node_name,
-            f"Starting {node_name}...",
-            {"node": node_name},
-        )
-
-    async def on_chain_end(self, outputs: dict | None = None, **kwargs: Any) -> None:
-        node_name = kwargs.get("name") or (kwargs.get("serialized", {}).get("name", "")) if isinstance(kwargs.get("serialized"), dict) else ""
-        if node_name:
-            await self.emitter.emit_progress(
-                node_name,
-                f"Finished {node_name}",
-            )
-
-    async def on_llm_start(self, serialized: dict, inputs: dict | None, **kwargs: Any) -> None:
-        await self.emitter.emit_progress(
-            "llm_call",
-            f"Calling {serialized.get('name', 'LLM')}...",
-        )
-
-    async def on_llm_end(self, response: dict | None = None, **kwargs: Any) -> None:
-        await self.emitter.emit_progress(
-            "llm_call",
-            "LLM call complete.",
-        )
-
-    async def on_llm_new_token(self, token: str, **kwargs: Any) -> None:
-        await self.emitter.emit_token(token)

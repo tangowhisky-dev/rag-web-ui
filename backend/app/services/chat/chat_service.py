@@ -257,8 +257,7 @@ async def _maybe_update_summary(
         try:
             db.close()
         except Exception:
-            pass  # session may already be closed by caller or during cancellation
-
+            pass  # session may already be closed
 
 # ── Query rewrite ──────────────────────────────────────────────────────────────
 
@@ -268,99 +267,20 @@ async def _rewrite_query(
     api_base: Optional[str] = None,
     query_model: Optional[str] = None,
 ) -> str:
+    """Rewrite query into a self-contained search query using chat history.
+
+    Delegates to the shared ``rewrite_query`` in agentic_rag/utils.py.
     """
-    Condense the current query + recent chat history into a self-contained
-    standalone question for retrieval.
-    """
-    if not recent_history:
-        return query
+    from app.services.agentic_rag.utils import rewrite_query as _rewrite_query_impl
 
-    # Build messages manually — avoids LangChain template curly-brace hazards
-    # and lets us set max_tokens to prevent the small model from answering instead of rewriting
-    system_msg = (
-        "You are a search query rewriter for a document retrieval system. "
-        "Your ONLY job is to rewrite the user's latest message into a self-contained search query "
-        "that can be sent to a vector database. "
-        "Use the chat history solely to resolve pronouns and references — "
-        "never to answer, evaluate, or judge the question.\n\n"
-        "Rules:\n"
-        "1. Output a standalone question or keyword phrase — nothing else.\n"
-        "2. Resolve pronouns and references from history "
-        "(e.g. 'it' → the specific topic discussed).\n"
-        "3. Do NOT answer the question. Do NOT say whether information exists or not.\n"
-        "4. Do NOT add information not needed to resolve an ambiguous reference.\n"
-        "5. Keep the output short — one sentence or a keyword phrase, maximum 30 words.\n\n"
-        "Examples:\n"
-        "History: [user: tell me about Linux, assistant: Linux is an open-source OS...]\n"
-        "Query: 'any other worthwhile OS you like to mention?'\n"
-        "Output: 'other notable operating systems worth mentioning'\n\n"
-        "History: [user: summarise assignment 1, assistant: ...summary...]\n"
-        "Query: 'what is question 1'\n"
-        "Output: 'What is Question 1 in Assignment 1?'\n\n"
-        "History: [user: tell me about the StreamVC paper]\n"
-        "Query: 'what model does it use'\n"
-        "Output: 'What model architecture does StreamVC use?'"
+    return _rewrite_query_impl(
+        query=query,
+        recent_history=recent_history,
+        api_base=api_base,
+        query_model=query_model,
+        openai_api_key=settings.OPENAI_API_KEY,
+        openai_api_base=settings.OPENAI_API_BASE,
     )
-    messages: list[dict] = [{"role": "system", "content": system_msg}]
-    for m in recent_history:
-        if isinstance(m, HumanMessage):
-            messages.append({"role": "user", "content": m.content})
-        elif isinstance(m, AIMessage):
-            # Truncate long AI responses to avoid flooding the rewrite context
-            messages.append({"role": "assistant", "content": m.content[:400]})
-    messages.append({"role": "user", "content": query})
-
-    from openai import AsyncOpenAI as _OAI
-    client = _OAI(api_key=settings.OPENAI_API_KEY, base_url=api_base or settings.OPENAI_API_BASE)
-    resp = await client.chat.completions.create(
-        model=query_model or settings.effective_query_model,
-        messages=messages,
-        max_tokens=60,
-        temperature=0,
-        stream=False,
-        extra_body={"thinking": {"type": "disabled"}},  # Qwen3: suppress reasoning preamble
-    )
-    raw_rewrite = (resp.choices[0].message.content or "").strip()
-
-    had_think = bool(strip_reasoning_tags(raw_rewrite) != raw_rewrite)
-    standalone = _strip_think(raw_rewrite) or query
-
-    # Strip meta-commentary preamble that some models emit before the actual rewrite
-    # e.g. "The user is asking me to rewrite... Here is the rewritten query: ..."
-    # The actual rewritten query is always the last sentence / after the last colon.
-    if re.search(r"\buser\b.*\brewrite\b|\brewritten\b|\bstandalone\b", standalone, re.IGNORECASE):
-        # Take everything after the last colon if present, else last sentence
-        if ":" in standalone:
-            candidate = standalone.rsplit(":", 1)[-1].strip()
-        else:
-            sentences = re.split(r"(?<=[.?!])\s+", standalone)
-            candidate = sentences[-1].strip()
-        if len(candidate) > 5:
-            standalone = candidate
-
-    logger.info("[STEP 1] raw_rewrite=%r | had_think=%s | standalone=%r",
-                raw_rewrite[:300], had_think, standalone)
-
-    # Guard: if the rewriter echoed the previous assistant response instead of
-    # rewriting the query, fall back to the original.  Answer-like patterns are
-    # a clear sign the model ignored the "do not answer" instruction.
-    answer_patterns = [
-        r"\bthere\s+is\s+no\s+information\b",
-        r"\bthe\s+text\s+only\s+discusses\b",
-        r"\bthe\s+context\s+does?\s+not\s+contain\b",
-        r"\bthe\s+provided\s+context\s+does?\s+not\b",
-        r"\bi\s+cannot\s+answer\b",
-        r"\bi\s+don't\s+have\s+enough\b",
-        r"\bno\s+information\s+found\b",
-    ]
-    if any(re.search(p, standalone, re.IGNORECASE) for p in answer_patterns):
-        logger.warning("[STEP 1] rewriter echoed assistant response — falling back to original query")
-        standalone = query
-
-    return standalone
-
-
-# ── Query classification ──────────────────────────────────────────────────────
 
 async def classify_query(query: str, api_base: Optional[str] = None, query_model: Optional[str] = None) -> "QueryClassification":
     """
@@ -553,6 +473,14 @@ async def generate_response(
         _confidence_breakdown: dict | None = None
         _confidence_suggestion: str | None = None
 
+        # ── Close DB session before streaming ───────────────────────────────
+        # Release the connection now — streaming holds it open for 30–120s,
+        # which exhausts the pool under load. Citations are buffered in-memory
+        # and persisted after the stream completes via a fresh session.
+        db.close()
+        buffered_citations: list[tuple[int, int, int, int, dict]] = []
+        # (message_id, document_id, chunk_index, citation_index, metadata)
+
         # ── Agentic pipeline: single autonomous agent ───────────────────────
         # New agentic agent: rewrite → search → stream in real-time
         from app.services.agentic_rag import run_agentic_rag
@@ -601,35 +529,26 @@ async def generate_response(
                 _confidence_suggestion = event.get("suggestion")
                 _confidence_failed_legs = event.get("failed_legs")
 
-                # Store retrieved docs as citations in the new message_citations table
+                # Buffer retrieved docs as citations — persisted after streaming
+                # via a fresh DB session (connection was closed before stream).
                 raw_docs = event.get("docs", [])
-                # Serialize LangChain Document objects to plain dicts
                 docs = [
                     {"page_content": d.page_content, "metadata": d.metadata}
                     if hasattr(d, "page_content") else d
                     for d in raw_docs
                 ]
-                # Persist each doc as a MessageCitation row
                 for idx, doc in enumerate(docs, start=1):
-                    # Retrieval metadata has document_id and chunk_index
                     document_id = doc.get("metadata", {}).get("document_id")
                     chunk_index = doc.get("metadata", {}).get("chunk_index")
                     if document_id is not None and chunk_index is not None:
                         meta = {**(doc.get("metadata", {}) or {})}
-                        # Only store ranking fields if they actually exist
                         for rk in ("score", "dense_rank", "sparse_rank", "exact_rank", "retrieval_leg"):
                             v = doc.get(rk)
                             if v is not None:
                                 meta[rk] = v
-                        citation = MessageCitation(
-                            message_id=bot_message.id,
-                            document_id=document_id,
-                            chunk_index=chunk_index,
-                            citation_index=idx,
-                            citation_metadata=meta,
-                        )
-                        db.add(citation)
-                db.flush()
+                        buffered_citations.append((
+                            bot_message.id, document_id, chunk_index, idx, meta,
+                        ))
 
                 # Build context payload for streaming (unchanged)
                 context_payload = {
