@@ -305,10 +305,6 @@ class Settings(BaseSettings):
     # Enable/disable the autonomous agent mode. When false, falls back to
     # the existing fast/thinking/agentic pipelines.
     AGENT_ENABLED: bool = os.getenv("AGENT_ENABLED", "true").lower() == "true"
-    # Enable/disable LangGraph-based pipeline execution. When false, uses
-    # the existing generator-based pipeline. When true, routes through
-    # the LangGraph StateGraph with nested subgraph architecture.
-    USE_LANGGRAPH: bool = os.getenv("USE_LANGGRAPH", "false").lower() == "true"
     # Optional model override for the supervisor and critic LLM calls.
     # Falls back to OPENAI_MODEL when unset.
     AGENT_SUPERVISOR_MODEL: Optional[str] = os.getenv("AGENT_SUPERVISOR_MODEL") or None
