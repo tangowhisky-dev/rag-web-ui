@@ -36,7 +36,10 @@ const ICON_MAP: Record<string, FC<{ className?: string }>> = {
 
 const NODE_META: Record<string, { label: string; activeLabel?: string; icon: TimelineStep["icon"] }> = {
   rewrite_query:         { label: "Rewriting query…",       activeLabel: "Rewriting query…",  icon: "search" },
+  classify_query:        { label: "Classifying query…",     activeLabel: "Classifying query…", icon: "search" },
+  request_clarification: { label: "Requesting clarification…", activeLabel: "Requesting clarification…", icon: "share" },
   context_router:        { label: "Routing sources…",       activeLabel: "Routing sources…",  icon: "share" },
+  complex_query:         { label: "Analyzing complexity…",  activeLabel: "Analyzing complexity…", icon: "wrench" },
   decompose_query:       { label: "Decomposing query…",     activeLabel: "Decomposing query…", icon: "search" },
   parallel_retrieval:    { label: "Retrieving for each sub-query…", activeLabel: "Retrieving…", icon: "book" },
   graph_enrichment:      { label: "Fetching graph context…", activeLabel: "Fetching graph context…", icon: "share" },
@@ -49,6 +52,7 @@ const NODE_META: Record<string, { label: string; activeLabel?: string; icon: Tim
   kb_retrieval:          { label: "Retrieving context…",    activeLabel: "Retrieving…",       icon: "book" },
   grade_documents:       { label: "Grading documents…",     activeLabel: "Grading documents…", icon: "check" },
   merge_context:         { label: "Merging context…",       activeLabel: "Merging context…",  icon: "book" },
+  synthesize:            { label: "Synthesizing final answer…", activeLabel: "Synthesizing…",  icon: "wrench" },
 };
 
 // ── Props ────────────────────────────────────────────────────────────────────
