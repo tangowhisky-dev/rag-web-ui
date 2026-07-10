@@ -51,9 +51,21 @@ class AgentState(MessagesState):
     retrieval_iterations: int = 0
     retrieval_confidence: float = 0.0
 
+    # ── Per-leg retrieval tracking ──────────────────────────────────────
+    leg_results: dict = {}  # {leg_name: {"status": ok/failed/disabled, "count": N}}
+    failed_legs: List[str] = []  # Legs that failed (for confidence messages)
+    leg_doc_counts: dict = {}  # {leg_name: count} for sufficiency check
+
+    # ── Sufficiency check state ─────────────────────────────────────────
+    sufficiency_met: bool = False
+    sufficiency_message: str = ""
+    needs_graph_expansion: bool = False
+
     # ── Generation state ────────────────────────────────────────────────
     answer: str = ""
     thinking_chunks: List[str] = []
+    is_chart_query: bool = False
+    chart_data: Optional[Any] = None
 
     # ── Synthesis state ─────────────────────────────────────────────────
     subtask_answers: Annotated[List[dict], accumulate] = []  # {subtask, answer, docs}

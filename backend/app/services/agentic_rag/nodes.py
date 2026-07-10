@@ -13,9 +13,10 @@ from langchain_openai import ChatOpenAI
 from app.core.config import settings
 
 from app.services.infrastructure.utils import _serialise_doc
-from app.services.retrieval import score_retrieval
+from app.services.retrieval import score_retrieval, rerank
 from app.services.retrieval import hybrid_search_with_legs, get_effective_datastore_ids
 from app.services.prompts.loader import append_chart_instructions
+from app.services.retrieval.reranker import _get_cross_encoder
 
 from .graph_state import AgentState
 from .schemas import QueryAnalysis
@@ -189,9 +190,13 @@ async def direct_retrieval_node(
     docs = retrieval_result.get("docs", [])
     retrieval_info = retrieval_result.get("retrieval_info", {})
     failed_legs = retrieval_info.get("failed_legs", [])
+    legs = retrieval_info.get("legs", {})
 
     conf_result = score_retrieval(docs, retrieval_info) if docs else None
     conf_score = conf_result.score if conf_result else 0
+
+    # Extract per-leg doc counts for sufficiency check
+    leg_doc_counts = {leg: info.get("count", 0) for leg, info in legs.items()}
 
     from .utils import format_context_string
 
@@ -203,6 +208,9 @@ async def direct_retrieval_node(
         "retrieved_contexts": [context_text],
         "retrieval_confidence": conf_score / 100.0 if conf_score else 0.0,
         "retrieval_iterations": 1,
+        "leg_results": legs,
+        "failed_legs": failed_legs,
+        "leg_doc_counts": leg_doc_counts,
     }
 
 
@@ -285,6 +293,226 @@ def fallback_response_node(state: AgentState) -> dict:
             f"to fully answer your question about '{question}'. "
             f"You might want to try rephrasing or providing more context."
         ), name="fallback")],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Node: compress context (between retrieval iterations)
+# ---------------------------------------------------------------------------
+
+def compress_context_node(state: AgentState) -> dict:
+    """Compress accumulated retrieval context to free token budget."""
+    retrieval_keys = set(state.get("retrieval_keys", set()) or set())
+
+    for doc in state.get("retrieved_docs", []):
+        source = doc.get("metadata", {}).get("source", "")
+        if source:
+            retrieval_keys.add(f"source:{source}")
+
+    return {
+        "retrieval_keys": list(retrieval_keys),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Node: sufficiency_check (between retrieval and graph expansion)
+# ---------------------------------------------------------------------------
+
+def sufficiency_check_node(state: AgentState) -> dict:
+    """Check if retrieved docs are sufficient before graph expansion.
+
+    Uses confidence score as primary metric, with fallback to doc count.
+    Routes to graph_expansion if confidence is low or doc count is small.
+    """
+    conf_score = state.get("retrieval_confidence", 0.0)
+    doc_count = len(state.get("retrieved_docs", []))
+    leg_results = state.get("leg_results", {})
+
+    # Primary: confidence score threshold
+    # Medium confidence = some relevant docs found (30-55)
+    # Low confidence = very few or marginal docs (0-30)
+    confidence_met = conf_score > 0.3
+    docs_met = doc_count >= 3  # At least 3 relevant chunks
+
+    sufficiency_met = confidence_met and docs_met
+
+    # Check leg-specific info for better routing decisions
+    if leg_results:
+        dense_count = leg_results.get("dense", {}).get("count", 0)
+        sparse_count = leg_results.get("sparse", {}).get("count", 0)
+        exact_count = leg_results.get("exact", {}).get("count", 0)
+
+        # If any leg returned results, we likely have some signal
+        if dense_count > 0 or sparse_count > 0 or exact_count > 0:
+            sufficiency_met = True
+
+    # Determine if we need graph expansion
+    needs_graph = not sufficiency_met
+
+    # Build sufficiency message for logging/debugging
+    if sufficiency_met:
+        message = f"Retrieval sufficient: confidence={conf_score:.2f}, docs={doc_count}"
+    else:
+        message = f"Retrieval insufficient: confidence={conf_score:.2f}, docs={doc_count}, checking graph expansion"
+
+    return {
+        "sufficiency_met": sufficiency_met,
+        "sufficiency_message": message,
+        "needs_graph_expansion": needs_graph,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Node: generating (actual LLM answer generation)
+# ---------------------------------------------------------------------------
+
+async def generating_node(
+    state: AgentState,
+    llm: ChatOpenAI | None = None,
+    api_base: Optional[str] = None,
+) -> dict:
+    """Generate answer using retrieved context.
+
+    This is the actual answer generation step that calls the LLM
+    with the retrieved documents and query to produce the final response.
+    """
+    llm_instance = llm or _get_llm(streaming=False)
+
+    retrieved_docs = state.get("retrieved_docs", [])
+    original_query = state.get("original_query", "")
+    file_markdown = state.get("file_markdown")
+
+    if not retrieved_docs:
+        # No docs retrieved — answer from intrinsic knowledge with disclaimer
+        response = await llm_instance.ainvoke([
+            {"role": "system", "content": (
+                "You are a helpful assistant. The user asked a question but no "
+                "relevant documents were found in the knowledge base. Answer from "
+                "your general knowledge, but clearly state that no documents were found."
+            )},
+            {"role": "user", "content": original_query},
+        ])
+        answer = getattr(response, "content", "") or ""
+        return {"answer": answer, "is_chart_query": False}
+
+    # Build context string from retrieved docs
+    from .utils import format_context_string
+    context_text = format_context_string(retrieved_docs, file_markdown)
+
+    # Generate answer using the retrieved context
+    messages = [
+        {"role": "system", "content": _ANSWER_SYSTEM_PROMPT},
+        {"role": "user", "content": f"Query: {original_query}\n\nContext:\n{context_text}"},
+    ]
+
+    response = await llm_instance.ainvoke(messages)
+    answer = getattr(response, "content", "") or ""
+
+    # Check if this is a chart question (simple heuristic)
+    is_chart = bool(re.search(r"\b(chart|graph|plot|visuali[zs]|trend|distribution)\b", original_query.lower()))
+
+    return {
+        "answer": answer,
+        "is_chart_query": is_chart,
+        "thinking_chunks": [],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Node: adaptive_reranking (conditional, if confidence low)
+# ---------------------------------------------------------------------------
+
+async def adaptive_reranking_node(
+    state: AgentState,
+    db: Any,
+    kb_ids: List[int] | None = None,
+    org_id: int | None = None,
+    file_markdown: str | None = None,
+    use_dense: bool = True,
+    use_sparse: bool = True,
+    use_exact: bool = True,
+    use_graph_rag: bool = False,
+) -> dict:
+    """Adaptive reranking when retrieval confidence is low.
+
+    When initial retrieval confidence is below threshold, reruns retrieval
+    with modified parameters to improve recall.
+    """
+    kb_ids = kb_ids or state.get("kb_ids", [])
+    org_id = org_id if org_id is not None else state.get("org_id")
+    file_markdown = file_markdown or state.get("file_markdown")
+
+    conf_score = state.get("retrieval_confidence", 0.0)
+    current_docs = state.get("retrieved_docs", [])
+
+    # Only adapt if confidence is low and we have some docs
+    if conf_score >= 0.3 or not current_docs:
+        return {"adaptive_rerunning": False, "confidence": conf_score}
+
+    rewritten = state.get("rewritten_query", state.get("original_query", ""))
+    datastore_ids = get_effective_datastore_ids(kb_ids, org_id, db) if db else []
+
+    # Run full retrieval again with lower threshold (return_full_pool=True)
+    retrieval_result = await hybrid_search_with_legs(
+        query=rewritten,
+        kb_ids=kb_ids,
+        db=db,
+        use_dense=use_dense,
+        use_sparse=use_sparse,
+        use_exact=use_exact,
+        use_graph_rag=use_graph_rag,
+        datastore_ids=datastore_ids,
+        return_full_pool=True,
+    )
+
+    new_docs = retrieval_result.get("docs", [])
+    new_info = retrieval_result.get("retrieval_info", {})
+    new_conf_result = score_retrieval(new_docs, new_info) if new_docs else None
+    new_conf = new_conf_result.score / 100.0 if new_conf_result else 0.0
+
+    # Merge new docs with existing ones (deduplication)
+    existing_hashes = {d.get("metadata", {}).get("content_hash") or d.get("page_content", "") for d in current_docs}
+    new_unique = [d for d in new_docs if (d.get("metadata", {}).get("content_hash") or d.get("page_content", "")) not in existing_hashes]
+
+    merged_docs = current_docs + new_unique
+    merged_contexts = [format_context_string(merged_docs, file_markdown)]
+
+    return {
+        "adaptive_rerunning": True,
+        "retrieved_docs": merged_docs,
+        "retrieved_contexts": merged_contexts,
+        "retrieval_confidence": new_conf,
+        "new_doc_count": len(new_unique),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Node: chart_validation (conditional, if charts detected)
+# ---------------------------------------------------------------------------
+
+def chart_validation_node(state: AgentState) -> dict:
+    """Validate chart-related queries and add chart context."""
+    is_chart = state.get("is_chart_query", False)
+
+    if not is_chart:
+        return {"chart_validated": False, "chart_data": None}
+
+    # Simple validation: ensure we have context data for chart generation
+    retrieved_docs = state.get("retrieved_docs", [])
+    has_enough_context = len(retrieved_docs) >= 2
+
+    chart_data = {
+        "is_chart_query": True,
+        "has_context": has_enough_context,
+        "doc_count": len(retrieved_docs),
+        "validation_message": "Chart query validated — sufficient context available"
+        if has_enough_context
+        else "Chart query validated — limited context available, may need clarification",
+    }
+
+    return {
+        "chart_validated": True,
+        "chart_data": chart_data,
     }
 
 

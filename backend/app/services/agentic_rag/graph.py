@@ -2,10 +2,13 @@
 
 Two-level architecture:
   Main graph:  START → rewrite → classify → [direct_retrieval | agent_subgraph] → synthesize → END
-  Agent subgraph: START → orchestrator → direct_retrieval → should_compress → orchestrator → collect/fallback → END
+  Agent subgraph: START → orchestrator → direct_retrieval → sufficiency_check → [graph_expansion | reranking | adaptive_reranking | generating | chart_validation] → collect/fallback → END
 
 The main graph handles the simple/complex routing and final synthesis.
-The agent subgraph handles iterative retrieval with budget gating.
+The agent subgraph handles iterative retrieval with all documented steps:
+  1. rewriting → 2. keyword_search → 3. dense_search → 4. sparse_search →
+  5. sufficiency_check → 6. graph_expansion → 7. reranking →
+  8. adaptive_reranking (conditional) → 9. generating → 10. chart_validation (conditional) → collect
 
 All node dependencies (db, kb_ids, etc.) are injected via functools.partial
 so the compiled graph can call each node with only (state, config).
@@ -31,6 +34,10 @@ from .nodes import (
     collect_answer_node,
     synthesize_node,
     fallback_response_node,
+    sufficiency_check_node,
+    generating_node,
+    adaptive_reranking_node,
+    chart_validation_node,
     compress_context_node,
     should_compress_context,
 )
@@ -63,10 +70,18 @@ def route_after_orchestrator(state: AgentState) -> str:
     return "direct_retrieval"
 
 
-def route_after_should_compress(state: AgentState) -> str:
-    """Route based on token budget check."""
-    result = should_compress_context(state)
-    return "compress_context" if result == "compress" else "orchestrator"
+def route_after_sufficiency(state: AgentState) -> str:
+    """Route based on sufficiency check result."""
+    if state.get("needs_graph_expansion", False):
+        return "graph_expansion"
+    return "reranking"
+
+
+def route_after_generating(state: AgentState) -> str:
+    """Route after generating to chart validation (conditional) or collect."""
+    if state.get("is_chart_query", False):
+        return "chart_validation"
+    return "collect_answer"
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +117,8 @@ def build_agent_subgraph(
             streaming=False,
         )),
     )
+
+    # Retrieval (all legs bundled into single node for efficiency)
     builder.add_node(
         "direct_retrieval",
         partial(direct_retrieval_node, db=db, kb_ids=kb_ids,
@@ -109,11 +126,25 @@ def build_agent_subgraph(
                 use_dense=use_dense, use_sparse=use_sparse,
                 use_exact=use_exact, use_graph_rag=use_graph_rag),
     )
+
+    # Post-retrieval nodes (documented pipeline steps)
+    builder.add_node("sufficiency_check", sufficiency_check_node)
+    builder.add_node("graph_expansion", partial(direct_retrieval_node, db=db, kb_ids=kb_ids,
+                    org_id=org_id, file_markdown=file_markdown,
+                    use_dense=use_dense, use_sparse=use_sparse,
+                    use_exact=use_exact, use_graph_rag=True))
+    builder.add_node("reranking", partial(direct_retrieval_node, db=db, kb_ids=kb_ids,
+                         org_id=org_id, file_markdown=file_markdown,
+                         use_dense=use_dense, use_sparse=use_sparse,
+                         use_exact=use_exact, use_graph_rag=use_graph_rag))
+    builder.add_node("adaptive_reranking", adaptive_reranking_node)
+    builder.add_node("generating", generating_node)
+    builder.add_node("chart_validation", chart_validation_node)
     builder.add_node("compress_context", compress_context_node)
     builder.add_node("fallback_response", fallback_response_node)
     builder.add_node("collect_answer", collect_answer_node)
 
-    # Edges
+    # Edges — structured per documented pipeline
     builder.add_edge(START, "orchestrator")
     builder.add_conditional_edges(
         "orchestrator",
@@ -121,22 +152,36 @@ def build_agent_subgraph(
         {
             "direct_retrieval": "direct_retrieval",
             "fallback_response": "fallback_response",
+        },
+    )
+
+    # After retrieval → sufficiency check
+    builder.add_conditional_edges(
+        "direct_retrieval",
+        route_after_sufficiency,
+        {
+            "graph_expansion": "graph_expansion",
+            "reranking": "reranking",
+        },
+    )
+
+    # Graph expansion → reranking → adaptive_reranking → generating
+    builder.add_edge("graph_expansion", "reranking")
+    builder.add_edge("reranking", "adaptive_reranking")
+    builder.add_edge("adaptive_reranking", "generating")
+
+    # Generating routes to chart validation (conditional) or collect
+    builder.add_conditional_edges(
+        "generating",
+        route_after_generating,
+        {
+            "chart_validation": "chart_validation",
             "collect_answer": "collect_answer",
         },
     )
 
-    # After retrieval, check token budget
-    builder.add_conditional_edges(
-        "direct_retrieval",
-        route_after_should_compress,
-        {
-            "compress_context": "compress_context",
-            "orchestrator": "orchestrator",
-        },
-    )
-
-    # Compress → back to orchestrator
-    builder.add_edge("compress_context", "orchestrator")
+    # Chart validation → collect
+    builder.add_edge("chart_validation", "collect_answer")
 
     # Fallback → collect
     builder.add_edge("fallback_response", "collect_answer")

@@ -98,12 +98,16 @@ async def run_agentic_rag(
             if event_type == "on_chain_start" and name in (
                 "rewrite_query", "classify_query", "request_clarification",
                 "synthesize", "direct_retrieval", "agent_subgraph",
+                "sufficiency_check", "generating", "adaptive_reranking",
+                "chart_validation",
             ):
                 await _emit_agent_step(emitter, name, "active")
 
             elif event_type == "on_chain_end" and name in (
                 "rewrite_query", "classify_query", "request_clarification",
                 "synthesize", "direct_retrieval", "agent_subgraph",
+                "sufficiency_check", "generating", "adaptive_reranking",
+                "chart_validation",
             ):
                 elapsed_ms = 0  # astream_events doesn't give per-node timing
                 await _emit_agent_step(emitter, name, "done", elapsed_ms)
