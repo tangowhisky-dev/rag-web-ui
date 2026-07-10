@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, field_serializer, field_validator
+from pydantic import BaseModel, EmailStr, field_serializer, field_validator, ConfigDict
 from typing import Optional
 from datetime import datetime
 from app.core.security import validate_password_strength
@@ -15,6 +15,7 @@ class UserBase(BaseModel):
     username: str
     is_active: bool = True
 
+
 class UserCreate(UserBase):
     password: str
 
@@ -25,6 +26,7 @@ class UserCreate(UserBase):
         if error:
             raise ValueError(error)
         return v
+
 
 class UserUpdate(UserBase):
     password: Optional[str] = None
@@ -58,8 +60,7 @@ class UserDeleteResponse(BaseModel):
     username: str
     email: str
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class UserResponse(UserBase):
@@ -72,8 +73,7 @@ class UserResponse(UserBase):
     @field_serializer("created_at", "updated_at")
     def serialise_datetimes(self, v): return _as_utc_iso(v)
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class PasswordChange(BaseModel):

@@ -1,5 +1,8 @@
+import asyncio
 import logging
 import os
+
+from contextlib import asynccontextmanager
 
 from app.api.api_v1.api import api_router
 from app.core.config import settings
@@ -121,55 +124,31 @@ def _seed_root_org_and_superadmin() -> None:
 logging.getLogger("neo4j.notifications").setLevel(logging.WARNING)
 logging.getLogger("neo4j_graphrag").setLevel(logging.WARNING)
 
-app = FastAPI(
-    title=settings.PROJECT_NAME,
-    version=settings.VERSION,
-    openapi_url=f"{settings.API_V1_STR}/openapi.json",
-    redirect_slashes=False,
-)
 
-# DataStoreWatcher — started on demand during startup
-watcher_service: DataStoreWatcher | None = None
-
-# StartupRecoveryService — background ingestion on app start
-startup_recovery: StartupRecoveryService | None = None
-
-# Include routers
-app.include_router(api_router, prefix=settings.API_V1_STR)
-
-
-@app.on_event("startup")
-async def startup_event():
-    global watcher_service, startup_recovery
-
+async def lifespan(app: FastAPI):
+    """Startup and shutdown lifecycle for the application."""
     # Seed root organisation and superadmin (runs before other startup tasks)
     _seed_root_org_and_superadmin()
 
     # Initialize local file storage
     init_storage()
 
-    # Start the startup recovery service FIRST — walks all datastore folders,
-    # discovers existing/new/modified files, and ingests them. After recovery
-    # completes, start the DataStore watcher so it only needs to detect NEW
-    # filesystem events (recovery already handled everything on disk).
+    # Start the startup recovery service FIRST
     try:
-        startup_recovery = StartupRecoveryService()
-        startup_recovery.start()
+        _services["recovery"] = StartupRecoveryService()
+        _services["recovery"].start()
     except Exception as e:
         logging.getLogger(__name__).error("Failed to start recovery service: %s", e)
 
-    # Start the DataStore watcher service after recovery — it will only
-    # detect new/changed files that arrive after the observer starts.
+    # Start the DataStore watcher service after recovery
     if settings.WATCHER_ENABLED:
         try:
-            watcher_service = DataStoreWatcher()
-            watcher_service.start()
+            _services["watcher"] = DataStoreWatcher()
+            _services["watcher"].start()
         except Exception as e:
             logging.getLogger(__name__).error("Failed to start DataStoreWatcher: %s", e)
 
     # Reset any tasks left in "processing" state from a previous worker crash.
-    # With --reload, a file-write event kills the worker mid-flight leaving tasks
-    # permanently stuck. On restart we mark them failed so clients don't hang.
     db = SessionLocal()
     try:
         stuck = db.query(ProcessingTask).filter(ProcessingTask.status == "processing").all()
@@ -185,19 +164,33 @@ async def startup_event():
     finally:
         db.close()
 
+    yield
+
+    # Shutdown
+    if _services["watcher"] is not None:
+        _services["watcher"].stop()
+    if _services["recovery"] is not None:
+        _services["recovery"].stop()
+
+
+app = FastAPI(
+    title=settings.PROJECT_NAME,
+    version=settings.VERSION,
+    openapi_url=f"{settings.API_V1_STR}/openapi.json",
+    redirect_slashes=False,
+    lifespan=lifespan,
+)
+
+# DataStoreWatcher — started on demand during startup
+_services = {"watcher": None, "recovery": None}
+
+# Include routers
+app.include_router(api_router, prefix=settings.API_V1_STR)
+
 
 @app.get("/")
 def root():
     return {"message": "Welcome to InsightCore API"}
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    global watcher_service, startup_recovery
-    if watcher_service is not None:
-        watcher_service.stop()
-    if startup_recovery is not None:
-        startup_recovery.stop()
 
 
 @app.get("/api/health")

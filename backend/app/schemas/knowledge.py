@@ -1,6 +1,6 @@
 from typing import Optional, List
 from datetime import datetime, timezone
-from pydantic import BaseModel, field_serializer
+from pydantic import BaseModel, field_serializer, ConfigDict
 
 
 def _as_utc_iso(dt: datetime) -> str:
@@ -49,8 +49,7 @@ class DocumentUploadResponse(DocumentUploadBase):
     @field_serializer("created_at")
     def serialise_created_at(self, v): return _as_utc_iso(v)
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class ProcessingTaskBase(BaseModel):
     status: str
@@ -72,8 +71,7 @@ class ProcessingTask(ProcessingTaskBase):
     @field_serializer("created_at", "updated_at")
     def serialise_datetimes(self, v): return _as_utc_iso(v)
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class DocumentResponse(DocumentBase):
     id: int
@@ -85,16 +83,14 @@ class DocumentResponse(DocumentBase):
     @field_serializer("created_at", "updated_at")
     def serialise_datetimes(self, v): return _as_utc_iso(v)
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class DataStoreInfo(BaseModel):
     id: int
     name: str
     folder_path: str
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class KnowledgeBaseResponse(KnowledgeBaseBase):
     id: int
@@ -108,8 +104,7 @@ class KnowledgeBaseResponse(KnowledgeBaseBase):
     @field_serializer("created_at", "updated_at")
     def serialise_datetimes(self, v): return _as_utc_iso(v)
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class PreviewRequest(BaseModel):
     document_ids: List[int]

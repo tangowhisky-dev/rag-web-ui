@@ -36,8 +36,7 @@ class OrgResponse(OrgBase):
     def serialise_datetimes(self, v: datetime) -> Optional[str]:
         return _as_utc_iso(v)
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 # ---------------------------------------------------------------------------

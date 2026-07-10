@@ -430,6 +430,7 @@ async def trigger_datastore_scan(
         )
 
     # Check if a scan is already running for this datastore
+    watcher = None
     try:
         watcher = _get_watcher()
         logger.info(
@@ -445,25 +446,29 @@ async def trigger_datastore_scan(
     except HTTPException:
         raise
     except Exception:
-        pass
+        logger.warning(
+            "[DATASTORE] scan_check error for datastore_id=%d",
+            datastore_id,
+        )
 
     # Clean up any stale scans from previous runs
-    stale_scan_id = None
-    for sid, info in watcher._active_scans.items():
-        if info.get("datastore_id") == datastore_id:
-            stale_scan_id = sid
-            break
-    if stale_scan_id is not None:
-        watcher._active_scans.pop(stale_scan_id, None)
-        logger.info(
-            "[DATASTORE] cleanup_stale_scan scan_id=%d datastore_id=%d",
-            stale_scan_id, datastore_id,
-        )
-    else:
-        logger.info(
-            "[DATASTORE] no_stale_scan_for_datastore datastore_id=%d active_scans=%s",
-            datastore_id, list(watcher._active_scans.keys()),
-        )
+    if watcher is not None:
+        stale_scan_id = None
+        for sid, info in watcher._active_scans.items():
+            if info.get("datastore_id") == datastore_id:
+                stale_scan_id = sid
+                break
+        if stale_scan_id is not None:
+            watcher._active_scans.pop(stale_scan_id, None)
+            logger.info(
+                "[DATASTORE] cleanup_stale_scan scan_id=%d datastore_id=%d",
+                stale_scan_id, datastore_id,
+            )
+        else:
+            logger.info(
+                "[DATASTORE] no_stale_scan_for_datastore datastore_id=%d active_scans=%s",
+                datastore_id, list(watcher._active_scans.keys()),
+            )
 
     # Also check the DB record
     try:

@@ -1,14 +1,13 @@
-"""Tests for wiring StartupRecoveryService into main.py lifecycle.
+"""Tests for wiring StartupRecoveryService into main.py lifespan.
 
 Verifies:
 1. main.py imports cleanly (syntax + import validation).
-2. startup_recovery module-level variable exists in main.py.
-3. StartupRecoveryService start/stop are wired in startup_event and shutdown_event.
-4. startup_event respects WATCHER_ENABLED gating.
-5. shutdown_event handles startup_recovery being None (null safety).
+2. _services module-level dict exists in main.py.
+3. StartupRecoveryService start/stop are wired in lifespan.
+4. lifespan respects WATCHER_ENABLED gating.
+5. lifespan handles _services being empty (null safety).
 6. No circular import errors.
 """
-import ast
 import asyncio
 import os
 from unittest.mock import MagicMock, patch
@@ -22,17 +21,16 @@ import pytest
 def reset_main_globals():
     """Reset module-level globals in main.py before each test.
 
-    startup_event and shutdown_event mutate the global variables
-    `startup_recovery` and `watcher_service`. Without resetting
-    between tests, later tests see stale values from earlier tests.
+    lifespan mutates the module-level `_services` dict. Without
+    resetting between tests, later tests see stale values from earlier tests.
     """
     import app.main
 
-    app.main.startup_recovery = None
-    app.main.watcher_service = None
+    app.main._services["watcher"] = None
+    app.main._services["recovery"] = None
     yield
-    app.main.startup_recovery = None
-    app.main.watcher_service = None
+    app.main._services["watcher"] = None
+    app.main._services["recovery"] = None
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +43,7 @@ class TestMainPyImportAndSyntax:
 
     def test_main_py_syntax_is_valid(self):
         """main.py must parse without SyntaxError."""
+        import ast
         main_path = os.path.join(
             os.path.dirname(__file__),
             "..",
@@ -70,8 +69,8 @@ class TestMainPyImportAndSyntax:
             in source
         )
 
-    def test_main_py_has_startup_recovery_module_variable(self):
-        """main.py must declare `startup_recovery: StartupRecoveryService | None = None`."""
+    def test_main_py_has_services_dict(self):
+        """main.py must declare _services dict."""
         main_path = os.path.join(
             os.path.dirname(__file__),
             "..",
@@ -80,12 +79,10 @@ class TestMainPyImportAndSyntax:
         )
         with open(main_path) as f:
             source = f.read()
-        assert (
-            "startup_recovery: StartupRecoveryService | None = None" in source
-        )
+        assert "_services" in source
 
     def test_main_py_shutdown_handles_recovery(self):
-        """main.py shutdown_event must reference startup_recovery.stop()."""
+        """main.py lifespan must reference _services['recovery'].stop()."""
         main_path = os.path.join(
             os.path.dirname(__file__),
             "..",
@@ -94,40 +91,10 @@ class TestMainPyImportAndSyntax:
         )
         with open(main_path) as f:
             source = f.read()
-        assert "startup_recovery.stop()" in source
-
-    def test_main_py_shutdown_includes_recovery_in_global(self):
-        """main.py shutdown_event must declare startup_recovery as global."""
-        main_path = os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            "app",
-            "main.py",
-        )
-        with open(main_path) as f:
-            source = f.read()
-        assert "startup_recovery" in source
-
-    def test_main_py_startup_recovery_in_try_except(self):
-        """startup_recovery must be created inside try/except in startup_event."""
-        main_path = os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            "app",
-            "main.py",
-        )
-        with open(main_path) as f:
-            source = f.read()
-        # StartupRecoveryService is created before the watcher starts so that
-        # recovery completes before the observer begins watching.
-        watcher_idx = source.find("watcher_service.start()")
-        recovery_idx = source.find("StartupRecoveryService()")
-        assert recovery_idx < watcher_idx, (
-            "StartupRecoveryService() must be started before watcher_service.start()"
-        )
+        assert "_services['recovery'].stop()" in source or "_services[\"recovery\"].stop()" in source
 
     def test_main_py_recovery_before_watcher_in_try_except(self):
-        """startup_recovery must be created inside try/except in startup_event."""
+        """startup recovery must be created before watcher in lifespan."""
         main_path = os.path.join(
             os.path.dirname(__file__),
             "..",
@@ -136,10 +103,15 @@ class TestMainPyImportAndSyntax:
         )
         with open(main_path) as f:
             source = f.read()
-        # StartupRecoveryService is created before the watcher starts so that
-        # recovery completes before the observer begins watching.
         watcher_idx = source.find("watcher_service.start()")
+        if watcher_idx == -1:
+            watcher_idx = source.find("_services['watcher'].start()")
+        if watcher_idx == -1:
+            watcher_idx = source.find('_services["watcher"].start()')
         recovery_idx = source.find("StartupRecoveryService()")
+        assert recovery_idx > 0 and watcher_idx > 0, (
+            "Both StartupRecoveryService() and watcher start must be present"
+        )
         assert recovery_idx < watcher_idx, (
             "StartupRecoveryService() must be started before watcher_service.start()"
         )
@@ -165,23 +137,15 @@ class TestNoCircularImports:
 
 
 # ---------------------------------------------------------------------------
-# Runtime wiring tests — patch everything before calling lifecycle functions
+# Runtime wiring tests — patch everything before calling lifespan
 # ---------------------------------------------------------------------------
 
 
-def _build_startup_patchers():
-    """Return a list of context managers that mock all startup_event internals."""
-    return [
-        patch("app.main._seed_root_org_and_superadmin"),
-        patch("app.main.init_storage"),
-    ]
+class TestLifespanWiring:
+    """Test that lifespan properly starts and stops the recovery service."""
 
-
-class TestStartupEventWiring:
-    """Test that startup_event properly starts the recovery service."""
-
-    def test_startup_event_starts_recovery_service(self):
-        """startup_event must create and start StartupRecoveryService when WATCHER_ENABLED."""
+    def test_lifespan_starts_recovery_service(self):
+        """lifespan must create and start StartupRecoveryService when WATCHER_ENABLED."""
 
         async def run():
             with patch("app.main.settings") as mock_settings, patch(
@@ -199,31 +163,32 @@ class TestStartupEventWiring:
                 mock_recovery_instance = MagicMock()
                 mock_recovery_cls.return_value = mock_recovery_instance
 
-                # Mock the DB query at the bottom of startup_event
+                # Mock the DB query at the bottom of lifespan
                 mock_query = MagicMock()
                 mock_query.filter.return_value.all.return_value = []
                 mock_session_cls.return_value.query.return_value = mock_query
 
-                from app.main import startup_event
+                import app.main as main_module
+                from app.main import app
 
-                await startup_event()
-
-                mock_recovery_cls.assert_called_once()
-                mock_recovery_instance.start.assert_called_once()
+                # Call the lifespan generator directly
+                gen = main_module.lifespan(app)
+                try:
+                    await gen.__anext__()
+                    mock_recovery_cls.assert_called_once()
+                    mock_recovery_instance.start.assert_called_once()
+                finally:
+                    try:
+                        await gen.__anext__()
+                    except StopAsyncIteration:
+                        pass
 
         asyncio.run(run())
 
-    def test_startup_event_skips_recovery_when_watcher_disabled(self):
-        """startup_event must NOT start DataStoreWatcher when WATCHER_ENABLED is False.
-
-        Note: StartupRecoveryService is always created regardless of WATCHER_ENABLED,
-        because it only walks the datastore folder tree on disk and does not need
-        the filesystem observer.
-        """
+    def test_lifespan_skips_watcher_when_disabled(self):
+        """lifespan must NOT start DataStoreWatcher when WATCHER_ENABLED is False."""
 
         async def run():
-            from app.main import startup_event
-
             with patch("app.main.settings") as mock_settings, patch(
                 "app.main._seed_root_org_and_superadmin"
             ), patch("app.main.init_storage"), patch(
@@ -240,23 +205,30 @@ class TestStartupEventWiring:
                 mock_query.filter.return_value.all.return_value = []
                 mock_session_cls.return_value.query.return_value = mock_query
 
-                await startup_event()
+                import app.main as main_module
+                from app.main import app
 
-                # Recovery service is always created (independent of WATCHER_ENABLED)
-                mock_recovery_cls.assert_called_once()
-                mock_recovery_cls.return_value.start.assert_called_once()
+                gen = main_module.lifespan(app)
+                try:
+                    await gen.__anext__()
+                    # Recovery service is always created (independent of WATCHER_ENABLED)
+                    mock_recovery_cls.assert_called_once()
+                    mock_recovery_cls.return_value.start.assert_called_once()
 
-                # Watcher should NOT be created when disabled
-                mock_watcher_cls.assert_not_called()
+                    # Watcher should NOT be created when disabled
+                    mock_watcher_cls.assert_not_called()
+                finally:
+                    try:
+                        await gen.__anext__()
+                    except StopAsyncIteration:
+                        pass
 
         asyncio.run(run())
 
-    def test_startup_event_catches_recovery_start_exception(self):
-        """startup_event must not crash if StartupRecoveryService.start() raises."""
+    def test_lifespan_catches_recovery_start_exception(self):
+        """lifespan must not crash if StartupRecoveryService.start() raises."""
 
         async def run():
-            from app.main import startup_event
-
             with patch("app.main.settings") as mock_settings, patch(
                 "app.main._seed_root_org_and_superadmin"
             ), patch("app.main.init_storage"), patch(
@@ -276,19 +248,23 @@ class TestStartupEventWiring:
                 mock_query.filter.return_value.all.return_value = []
                 mock_session_cls.return_value.query.return_value = mock_query
 
-                # Must NOT raise
-                await startup_event()
+                import app.main as main_module
+                from app.main import app
 
-                # The exception was raised but caught (we get here without crash)
+                gen = main_module.lifespan(app)
+                try:
+                    # Must NOT raise
+                    await gen.__anext__()
+                finally:
+                    try:
+                        await gen.__anext__()
+                    except StopAsyncIteration:
+                        pass
 
         asyncio.run(run())
 
-
-class TestShutdownEventWiring:
-    """Test that shutdown_event properly stops the recovery service."""
-
-    def test_shutdown_event_stops_recovery_service(self):
-        """shutdown_event must call startup_recovery.stop() when not None."""
+    def test_lifespan_stops_recovery_service(self):
+        """lifespan must call _services['recovery'].stop() on shutdown."""
 
         async def run():
             with patch("app.main.settings") as mock_settings, patch(
@@ -309,20 +285,24 @@ class TestShutdownEventWiring:
                 mock_query.filter.return_value.all.return_value = []
                 mock_session_cls.return_value.query.return_value = mock_query
 
-                from app.main import startup_event
+                import app.main as main_module
+                from app.main import app
 
-                await startup_event()
+                gen = main_module.lifespan(app)
+                try:
+                    await gen.__anext__()
+                finally:
+                    try:
+                        await gen.__anext__()
+                    except StopAsyncIteration:
+                        pass
 
-            from app.main import shutdown_event
-
-            await shutdown_event()
-
-            mock_recovery_instance.stop.assert_called_once()
+                mock_recovery_instance.stop.assert_called_once()
 
         asyncio.run(run())
 
-    def test_shutdown_event_handles_none_recovery(self):
-        """shutdown_event must not crash if startup_recovery is None (never started)."""
+    def test_lifespan_handles_none_recovery(self):
+        """lifespan must not crash if _services['recovery'] is None (never started)."""
 
         async def run():
             with patch("app.main.settings") as mock_settings, patch(
@@ -339,13 +319,17 @@ class TestShutdownEventWiring:
                 mock_query.filter.return_value.all.return_value = []
                 mock_session_cls.return_value.query.return_value = mock_query
 
-                from app.main import startup_event
+                import app.main as main_module
+                from app.main import app
 
-                await startup_event()
-
-            from app.main import shutdown_event
-
-            # Must not raise
-            await shutdown_event()
+                gen = main_module.lifespan(app)
+                try:
+                    # Must not raise
+                    await gen.__anext__()
+                finally:
+                    try:
+                        await gen.__anext__()
+                    except StopAsyncIteration:
+                        pass
 
         asyncio.run(run())

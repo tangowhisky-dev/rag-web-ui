@@ -1,5 +1,5 @@
 from enum import Enum
-from pydantic import BaseModel, model_validator, field_serializer
+from pydantic import BaseModel, model_validator, field_serializer, ConfigDict
 from typing import Any, List, Optional
 from datetime import datetime
 
@@ -30,8 +30,10 @@ class MessageBase(BaseModel):
     content: str
     role: str
 
+
 class MessageCreate(MessageBase):
     chat_id: int
+
 
 class MessageEditRequest(BaseModel):
     content: str
@@ -56,11 +58,12 @@ class MessageResponse(MessageBase):
     @field_serializer("created_at", "updated_at")
     def serialise_datetimes(self, v): return _as_utc_iso(v)
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
+
 
 class ChatBase(BaseModel):
     title: str
+
 
 class ChatCreate(ChatBase):
     knowledge_base_ids: List[int]
@@ -68,6 +71,7 @@ class ChatCreate(ChatBase):
     use_dense:     bool = True
     use_sparse:    bool = True
     use_exact:     bool = True
+
 
 class ChatUpdate(BaseModel):
     title: Optional[str] = None
@@ -78,11 +82,14 @@ class ChatUpdate(BaseModel):
     use_graph_rag: Optional[bool] = None
     knowledge_base_ids: Optional[List[int]] = None
 
+
 class FolderCreate(BaseModel):
     name: str
 
+
 class FolderUpdate(BaseModel):
     name: Optional[str] = None
+
 
 class FolderResponse(BaseModel):
     id: int
@@ -93,14 +100,15 @@ class FolderResponse(BaseModel):
     @field_serializer("created_at")
     def serialise_created_at(self, v): return _as_utc_iso(v)
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
+
 
 class SearchResult(BaseModel):
     chat_id: int
     chat_title: str
     snippet: str
     message_id: int
+
 
 class ChatResponse(ChatBase):
     id: int
@@ -128,5 +136,4 @@ class ChatResponse(ChatBase):
             data.__dict__['knowledge_base_ids'] = [kb.id for kb in data.knowledge_bases]
         return data
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
