@@ -658,64 +658,91 @@ async def run_agentic_rag(
     Single autonomous agentic agent. No supervisor, no workers, no critic gate.
 
     Streams everything in real-time: tokens, progress, thinking traces.
+
+    Feature flag: USE_LANGGRAPH routes to the LangGraph-based pipeline.
+    When disabled (default), uses the existing generator-based pipeline.
     """
-    t0 = time.monotonic()
-    effective_model = model_name or settings.OPENAI_MODEL
+    from app.core.config import settings
 
-    # 1. Rewrite query
-    yield {"event": "progress", "phase": "rewriting", "message": "Rewriting query..."}
-    rewritten = await _rewrite_query(query, recent_lc_history, api_base=api_base)
-    yield {"event": "rewritten_query", "query": rewritten}
-
-    # 2. Decide simple vs complex
-    complexity = await _classify_complexity(query, rewritten, recent_lc_history)
-
-    if not complexity["complex"]:
-        # Simple path
-        yield {"event": "progress", "phase": "simple", "message": "Answering directly..."}
-        async for event in _direct_answer(
+    if settings.USE_LANGGRAPH:
+        logger.info("[AGENT] using LangGraph pipeline")
+        from .graph_runner import run_agentic_rag_via_graph
+        async for event in run_agentic_rag_via_graph(
             query=query,
             kb_ids=knowledge_base_ids,
             db=db,
-            api_base=api_base,
-            model_name=effective_model,
-            temperature=temperature,
-            file_markdown=file_markdown,
+            recent_lc_history=recent_lc_history,
             existing_summary=existing_summary,
+            file_markdown=file_markdown,
             use_dense=use_dense,
             use_sparse=use_sparse,
             use_exact=use_exact,
             use_graph_rag=use_graph_rag,
+            temperature=temperature,
+            model_name=model_name,
+            api_base=api_base,
             org_id=org_id,
             chat_id=chat_id,
         ):
             yield event
     else:
-        # Complex path
-        subtasks = complexity["subtasks"]
-        yield {
-            "event": "progress",
-            "phase": "decomposition",
-            "message": f"Breaking down into {len(subtasks)} subtasks...",
-            "details": {"subtask_total": len(subtasks)},
-        }
-        async for event in _complex_answer(
-            query=query,
-            kb_ids=knowledge_base_ids,
-            db=db,
-            api_base=api_base,
-            model_name=effective_model,
-            temperature=temperature,
-            file_markdown=file_markdown,
-            existing_summary=existing_summary,
-            use_dense=use_dense,
-            use_sparse=use_sparse,
-            use_exact=use_exact,
-            use_graph_rag=use_graph_rag,
-            org_id=org_id,
-            chat_id=chat_id,
-            subtasks=subtasks,
-        ):
-            yield event
+        t0 = time.monotonic()
+        effective_model = model_name or settings.OPENAI_MODEL
 
-    logger.info("[AGENT] total latency=%.1fms query=%r", (time.monotonic() - t0) * 1000, query[:80])
+        # 1. Rewrite query
+        yield {"event": "progress", "phase": "rewriting", "message": "Rewriting query..."}
+        rewritten = await _rewrite_query(query, recent_lc_history, api_base=api_base)
+        yield {"event": "rewritten_query", "query": rewritten}
+
+        # 2. Decide simple vs complex
+        complexity = await _classify_complexity(query, rewritten, recent_lc_history)
+
+        if not complexity["complex"]:
+            # Simple path
+            yield {"event": "progress", "phase": "simple", "message": "Answering directly..."}
+            async for event in _direct_answer(
+                query=query,
+                kb_ids=knowledge_base_ids,
+                db=db,
+                api_base=api_base,
+                model_name=effective_model,
+                temperature=temperature,
+                file_markdown=file_markdown,
+                existing_summary=existing_summary,
+                use_dense=use_dense,
+                use_sparse=use_sparse,
+                use_exact=use_exact,
+                use_graph_rag=use_graph_rag,
+                org_id=org_id,
+                chat_id=chat_id,
+            ):
+                yield event
+        else:
+            # Complex path
+            subtasks = complexity["subtasks"]
+            yield {
+                "event": "progress",
+                "phase": "decomposition",
+                "message": f"Breaking down into {len(subtasks)} subtasks...",
+                "details": {"subtask_total": len(subtasks)},
+            }
+            async for event in _complex_answer(
+                query=query,
+                kb_ids=knowledge_base_ids,
+                db=db,
+                api_base=api_base,
+                model_name=effective_model,
+                temperature=temperature,
+                file_markdown=file_markdown,
+                existing_summary=existing_summary,
+                use_dense=use_dense,
+                use_sparse=use_sparse,
+                use_exact=use_exact,
+                use_graph_rag=use_graph_rag,
+                org_id=org_id,
+                chat_id=chat_id,
+                subtasks=subtasks,
+            ):
+                yield event
+
+        logger.info("[AGENT] total latency=%.1fms query=%r", (time.monotonic() - t0) * 1000, query[:80])
