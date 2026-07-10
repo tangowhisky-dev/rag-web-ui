@@ -1,8 +1,5 @@
-import asyncio
 import logging
 import os
-
-from contextlib import asynccontextmanager
 
 from app.api.api_v1.api import api_router
 from app.core.config import settings
