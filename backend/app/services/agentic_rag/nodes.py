@@ -381,35 +381,29 @@ def chart_validation_node(state: AgentState) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Helper: simple RRF merge for per-leg docs
+# Helper: merge per-leg docs (deduplicate only, no ranking)
 # ---------------------------------------------------------------------------
 
-def _rrf_merge_docs(
+def _merge_docs(
     leg_docs: dict[str, list[dict]],
-    k: float = 60.0,
-    weights: dict[str, float] | None = None,
 ) -> list[dict]:
-    """Merge docs from multiple retrieval legs using Reciprocal Rank Fusion.
+    """Merge docs from multiple retrieval legs into a single deduplicated list.
 
-    Each doc must be a serialised dict with a ``content_hash`` in its metadata.
+    No ranking is performed here — the cross-encoder reranker handles ranking.
     """
-    weights = weights or {"dense": 0.5, "sparse": 0.3, "exact": 0.2}
-    scores: dict[str, float] = {}
-    docs_by_hash: dict[str, dict] = {}
+    seen_hashes: set[str] = set()
+    merged: list[dict] = []
 
-    for leg, docs in leg_docs.items():
-        w = weights.get(leg, 0.0)
-        if not w:
-            continue
-        for rank, doc in enumerate(docs, start=1):
+    for docs in leg_docs.values():
+        for doc in docs:
             h = doc.get("metadata", {}).get("content_hash") or content_hash(
                 doc.get("page_content", "")
             )
-            docs_by_hash[h] = doc
-            scores[h] = scores.get(h, 0.0) + w * (1.0 / (k + rank))
+            if h not in seen_hashes:
+                seen_hashes.add(h)
+                merged.append(doc)
 
-    ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-    return [docs_by_hash[h] for h, _ in ranked]
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -631,7 +625,7 @@ def merge_node(
     state: AgentState,
     file_markdown: str | None = None,
 ) -> dict:
-    """Merge per-leg retrieval results into a single ranked doc list."""
+    """Merge per-leg retrieval results into a single deduplicated doc list."""
     file_markdown = file_markdown or state.get("file_markdown")
 
     leg_docs = {
@@ -640,7 +634,7 @@ def merge_node(
         "exact": state.get("exact_docs", []),
     }
 
-    merged = _rrf_merge_docs(leg_docs)
+    merged = _merge_docs(leg_docs)
     context_text = format_context_string(merged, file_markdown) if merged else ""
 
     return {
