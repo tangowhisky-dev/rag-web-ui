@@ -611,21 +611,24 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       try {
         const payload = JSON.parse(trimmedLine.slice(2)) as {
           messageId?: number;
-          final_confidence?: number;
-          confidence_level?: string;
-          faithfulness?: number;
-          completeness?: number;
+          usage?: {
+            final_confidence?: number;
+            confidence_level?: string;
+            faithfulness?: number;
+            completeness?: number;
+          };
         };
+        const usage = payload.usage;
         setMessages((prev) =>
           prev.map((message) =>
             message.id === assistantId
               ? {
                   ...message,
-                  id: payload.messageId!.toString(),
-                  finalConfidence: payload.final_confidence,
-                  finalConfidenceLevel: payload.confidence_level as Message["finalConfidenceLevel"],
-                  faithfulness: payload.faithfulness,
-                  completeness: payload.completeness,
+                  id: payload.messageId?.toString() ?? message.id,
+                  finalConfidence: usage?.final_confidence,
+                  finalConfidenceLevel: usage?.confidence_level as Message["finalConfidenceLevel"],
+                  faithfulness: usage?.faithfulness,
+                  completeness: usage?.completeness,
                 }
               : message
           )

@@ -451,7 +451,6 @@ const ConfidenceCollapsible: FC<{
   // Final evaluation metrics
   finalConfidence?: number;
   finalConfidenceLevel?: ConfidenceLevel;
-  retrievalConfidence?: number;
   faithfulness?: number;
   completeness?: number;
   failedLegs?: string[];
@@ -462,7 +461,6 @@ const ConfidenceCollapsible: FC<{
   breakdown,
   finalConfidence,
   finalConfidenceLevel,
-  retrievalConfidence,
   faithfulness,
   completeness,
   failedLegs,
@@ -547,14 +545,14 @@ const ConfidenceCollapsible: FC<{
           )}
 
           {/* Retrieval confidence */}
-          {retrievalConfidence !== undefined && (
+          {score !== undefined && (
             <div className="space-y-1">
               <p className={`text-[10px] font-semibold uppercase tracking-wide ${cfg.text} opacity-60`}>
                 Retrieval Quality
               </p>
               <div className="flex justify-between gap-4">
                 <span className="text-zinc-500 dark:text-zinc-400">Retrieval confidence</span>
-                <span className={`font-medium ${cfg.text}`}>{Math.round(retrievalConfidence * 100)}/100</span>
+                <span className={`font-medium ${cfg.text}`}>{score}/100</span>
               </div>
             </div>
           )}
@@ -689,10 +687,9 @@ export const Answer: FC<{
   // Final evaluation metrics (from answer_evaluation_node)
   finalConfidence?: number;
   finalConfidenceLevel?: "very_high" | "high" | "medium" | "low" | "none";
-  retrievalConfidence?: number;
   faithfulness?: number;
   completeness?: number;
-}> = ({ messageId, chatId, markdown, citations = [], rewrittenQuery, retrievedContext, confidence, confidenceScore, confidenceBreakdown, suggestion, failedLegs, queryClassification, toolTrace, agentSteps, taskList, synthesisMode, isStreaming = false, onDelete }) => {
+}> = ({ messageId, chatId, markdown, citations = [], rewrittenQuery, retrievedContext, confidence, confidenceScore, confidenceBreakdown, suggestion, failedLegs, queryClassification, toolTrace, agentSteps, taskList, synthesisMode, isStreaming = false, onDelete, finalConfidence, finalConfidenceLevel, faithfulness, completeness }) => {
   const [citationInfoMap, setCitationInfoMap] = useState<
     Record<string, CitationInfo>
   >({});
@@ -1182,7 +1179,6 @@ export const Answer: FC<{
                 breakdown={confidenceBreakdown}
                 finalConfidence={finalConfidence}
                 finalConfidenceLevel={finalConfidenceLevel}
-                retrievalConfidence={retrievalConfidence}
                 faithfulness={faithfulness}
                 completeness={completeness}
                 failedLegs={failedLegs}
