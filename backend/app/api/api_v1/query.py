@@ -2,25 +2,26 @@
 POST /api/query          — stateless RAG query, returns JSON (no SSE, no chat session)
 GET  /api/query/kb/{id}/ingest-status — KB processing readiness check
 
-These two endpoints are the only additions needed for an external eval harness.
-The harness never needs to touch the chat/session machinery.
+The query endpoint now uses the same agentic RAG pipeline as the chat endpoint.
+It is stateless: no chat session is persisted, but a transient thread id is used
+for the agent graph checkpoint.
 """
 import time
 import logging
+import uuid
 from typing import Any, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from openai import AsyncOpenAI
 
 from app.core.config import settings
 from app.core.security import get_current_user
 from app.db.session import get_db
 from app.models.user import User
 from app.models.knowledge import KnowledgeBase, ProcessingTask
-from app.services.retrieval import hybrid_search_with_legs
 from app.services.retrieval import score_retrieval
+from app.services.agentic_rag import run_agentic_rag
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -31,15 +32,9 @@ router = APIRouter()
 class QueryRequest(BaseModel):
     question: str
     kb_ids: List[int]
-    # Per-request leg flags — AND-ed with global .env settings.
-    # Default all True so the endpoint behaves like the full hybrid pipeline
-    # unless the caller explicitly disables a leg for benchmarking.
-    use_dense:     bool = True
-    use_sparse:    bool = True
-    use_exact:     bool = True
-    use_graph_rag: bool = False
-    # Pass False to skip LLM answer generation — retrieval-only benchmark runs
-    # are much faster and don't consume LLM tokens.
+    # All globally enabled retrieval sources are always used. Chat-level toggles
+    # were removed; this endpoint no longer accepts per-request leg flags.
+    # generate_answer=False skips LLM generation for faster retrieval benchmarks.
     generate_answer: bool = True
 
 
@@ -92,51 +87,45 @@ async def query(
     if len(kbs) != len(body.kb_ids):
         raise HTTPException(status_code=404, detail="One or more knowledge bases not found")
 
-    # ── Retrieval ──────────────────────────────────────────────────────────────
-    retrieval_result = await hybrid_search_with_legs(
+    # Use a transient chat id for the stateless agent graph checkpoint so
+    # concurrent stateless queries do not collide in the checkpoint store.
+    transient_chat_id = abs(hash(uuid.uuid4().hex)) % (2**31)
+
+    # Run the same agentic pipeline as chat, but collect events into a JSON response.
+    answer: Optional[str] = None
+    docs: List[dict] = []
+    retrieval_confidence = 0.0
+
+    async for event in run_agentic_rag(
         query=body.question,
         kb_ids=body.kb_ids,
         db=db,
-        use_dense=body.use_dense,
-        use_sparse=body.use_sparse,
-        use_exact=body.use_exact,
-        use_graph_rag=body.use_graph_rag,
-    )
-    docs            = retrieval_result["docs"]
-    retrieval_info  = retrieval_result["retrieval_info"]
+        chat_id=transient_chat_id,
+        recent_lc_history=[],
+        existing_summary=None,
+        generate_answer=body.generate_answer,
+    ):
+        if event.get("event") == "context":
+            docs = event.get("docs", docs)
+            retrieval_confidence = event.get("score", retrieval_confidence) / 100.0
+        elif event.get("event") == "done":
+            answer = event.get("full_response") or answer
 
-    # ── Confidence ────────────────────────────────────────────────────────────
-    confidence_result = score_retrieval(docs, retrieval_info)
-
-    # Release the DB connection before the LLM call — retrieval is complete and
-    # the connection would otherwise be held open for the entire generation time,
-    # exhausting the pool under parallel eval / concurrent requests.
+    # Release the DB connection now that the agentic pipeline is done.
     db.close()
 
-    answer: Optional[str] = None
-    if body.generate_answer and docs:
-        context_text = "\n\n".join(
-            f"[{i + 1}] {doc.page_content}" for i, doc in enumerate(docs)
-        )
-        system_prompt = (
-            "You are a precise question-answering assistant. "
-            "Answer the question using ONLY the provided context. "
-            "Cite sources as [1], [2], etc. "
-            "If the context does not contain enough information, say so briefly."
-        )
-        openai_client = AsyncOpenAI(
-            api_key=settings.OPENAI_API_KEY,
-            base_url=settings.OPENAI_API_BASE,
-        )
-        response = await openai_client.chat.completions.create(
-            model=settings.OPENAI_MODEL,
-            messages=[
-                {"role": "system", "content": f"{system_prompt}\n\nContext:\n{context_text}"},
-                {"role": "user", "content": body.question},
-            ],
-            temperature=0,
-        )
-        answer = response.choices[0].message.content
+    # Build a basic retrieval_info map: all globally enabled sources are active.
+    retrieval_info = {
+        "legs": {
+            "dense": {"status": "ok" if settings.RETRIEVAL_DENSE_ENABLED else "disabled", "count": 0},
+            "sparse": {"status": "ok" if settings.RETRIEVAL_SPARSE_ENABLED else "disabled", "count": 0},
+            "exact": {"status": "ok" if settings.RETRIEVAL_EXACT_ENABLED else "disabled", "count": 0},
+            "graph": {"status": "ok" if settings.RETRIEVAL_GRAPH_ENABLED else "disabled", "count": 0},
+        }
+    }
+
+    # Score retrieval confidence using the same helper as the legacy path.
+    confidence_result = score_retrieval(docs, retrieval_info)
 
     latency_ms = int((time.monotonic() - t0) * 1000)
     logger.info(
@@ -147,7 +136,7 @@ async def query(
     return QueryResponse(
         question=body.question,
         answer=answer,
-        contexts=[ContextChunk(content=d.page_content, metadata=d.metadata) for d in docs],
+        contexts=[ContextChunk(content=d.get("page_content", ""), metadata=d.get("metadata", {})) for d in docs],
         confidence=confidence_result.level,
         suggestion=confidence_result.suggestion,
         retrieval_info={**retrieval_info, "confidence_breakdown": confidence_result.breakdown},

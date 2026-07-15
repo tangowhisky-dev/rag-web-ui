@@ -15,25 +15,24 @@ from app.services.retrieval import get_retrieval_config
 # ── Unit-level integration: classification → retrieval config ─────────────────
 
 def test_classification_routes_to_correct_config():
-    """Verify that each query type maps to the correct retrieval config."""
+    """Verify that each query type maps to the correct retrieval config.
+
+    Chat-level leg toggles were removed; presets now only carry weights and top_k.
+    """
     configs = {
         QueryType.FACTUAL: {
-            "use_dense": True, "use_sparse": True, "use_exact": True,
             "dense_weight": 0.5, "sparse_weight": 0.3, "exact_weight": 0.2,
             "top_k": 10,
         },
         QueryType.ENTITY_CENTRIC: {
-            "use_dense": True, "use_sparse": True, "use_exact": True,
             "dense_weight": 0.6, "sparse_weight": 0.2, "exact_weight": 0.2,
             "top_k": 10,
         },
         QueryType.MULTI_PART: {
-            "use_dense": True, "use_sparse": True, "use_exact": False,
             "dense_weight": 0.5, "sparse_weight": 0.5, "exact_weight": 0.0,
             "top_k": 10,
         },
         QueryType.AMBIGUOUS: {
-            "use_dense": True, "use_sparse": True, "use_exact": True,
             "dense_weight": 0.4, "sparse_weight": 0.4, "exact_weight": 0.2,
             "top_k": 15,
         },
@@ -56,32 +55,21 @@ def test_hybrid_search_accepts_query_type():
 
 
 def test_hybrid_search_applies_preset():
-    """Verify that query_type parameter affects retrieval behavior."""
+    """Verify that query_type parameter affects retrieval weights/top_k.
+
+    All globally enabled legs now run regardless of query type; presets only
+    tune RRF weights and result pool size.
+    """
     import asyncio
-    
+
     async def _run():
         from app.services.retrieval import hybrid_search_with_legs
-        
+
         # Mock the DB and search legs to avoid actual database calls
         mock_db = MagicMock()
         mock_db.execute = MagicMock(return_value=MagicMock(fetchall=lambda: []))
-        
+
         # Patch the search legs to return empty results
-        with patch('app.services.retrieval.retrieval._dense_search', return_value={}):
-            with patch('app.services.retrieval.retrieval._sparse_search', return_value={}):
-                with patch('app.services.retrieval.retrieval._exact_search', return_value={}):
-                    # Call with FACTUAL query type
-                    result = await hybrid_search_with_legs(
-                        query="test query",
-                        kb_ids=[1],
-                        db=mock_db,
-                        query_type=QueryType.FACTUAL,
-                    )
-                    
-                    assert "docs" in result
-                    assert "retrieval_info" in result
-                    
-        # Patch for MULTI_PART which should disable exact leg
         with patch('app.services.retrieval.retrieval._dense_search', return_value={}):
             with patch('app.services.retrieval.retrieval._sparse_search', return_value={}):
                 with patch('app.services.retrieval.retrieval._exact_search', return_value={}) as mock_exact:
@@ -91,10 +79,12 @@ def test_hybrid_search_applies_preset():
                         db=mock_db,
                         query_type=QueryType.MULTI_PART,
                     )
-                    
-                    # MULTI_PART preset disables exact leg — _exact_search should NOT be called
-                    assert not mock_exact.called, "exact_search should not be called for MULTI_PART"
-    
+
+                    assert "docs" in result
+                    assert "retrieval_info" in result
+                    # Exact leg is no longer disabled per query type
+                    assert mock_exact.called, "exact_search should still be called for MULTI_PART"
+
     asyncio.run(_run())
 
 

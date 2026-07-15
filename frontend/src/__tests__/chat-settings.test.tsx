@@ -14,10 +14,6 @@ const mockChat = {
   title: "Test Chat",
   temperature: 0.7,
   model_name: "gpt-4o",
-  use_dense: true,
-  use_sparse: true,
-  use_exact: false,
-  use_graph_rag: false,
 };
 
 describe("ChatSettings", () => {
@@ -27,25 +23,6 @@ describe("ChatSettings", () => {
     );
     expect(screen.getByTestId("temperature-slider")).toBeInTheDocument();
     expect(screen.getByTestId("temperature-value")).toHaveTextContent("0.7");
-  });
-
-  it("renders all retrieval leg toggles", () => {
-    render(
-      <ChatSettings chat={mockChat} onClose={jest.fn()} onUpdate={jest.fn()} />
-    );
-    expect(screen.getByTestId("toggle-vector")).toBeInTheDocument();
-    expect(screen.getByTestId("toggle-exact")).toBeInTheDocument();
-    expect(screen.getByTestId("toggle-graph")).toBeInTheDocument();
-  });
-
-  it("toggles a retrieval leg when clicked", () => {
-    render(
-      <ChatSettings chat={mockChat} onClose={jest.fn()} onUpdate={jest.fn()} />
-    );
-    const toggle = screen.getByTestId("toggle-vector");
-    expect(toggle).toHaveAttribute("aria-checked", "true");
-    fireEvent.click(toggle);
-    expect(toggle).toHaveAttribute("aria-checked", "false");
   });
 
   it("updates temperature value when slider changes", () => {

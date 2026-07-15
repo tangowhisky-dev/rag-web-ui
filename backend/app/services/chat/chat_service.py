@@ -12,8 +12,6 @@ from openai import AsyncOpenAI
 from app.core.config import settings
 from app.models.chat import Chat, Message, MessageCitation, ChatFile
 from app.models.knowledge import KnowledgeBase
-from app.services.retrieval import hybrid_search_with_legs
-from app.services.retrieval import score_retrieval
 from app.services.infrastructure import get_cancel_token, clear_cancel_token
 
 
@@ -65,44 +63,6 @@ _IDENTITY_RESPONSE = (
 
 def _is_identity_question(query: str) -> bool:
     return bool(_IDENTITY_PATTERNS.match(query.strip()))
-
-
-_SYNTHESIS_KEYWORDS = re.compile(
-    r"\b(summarize|summary|themes?|across|compare|comparison|overview|report|"
-    r"aggregate|synthesis|synthesize|all\s+\w+|key\s+(findings?|points?|themes?))\b",
-    re.IGNORECASE,
-)
-
-def _is_synthesis_query(query: str, query_type: str = "") -> bool:
-    """
-    Heuristic: True for MULTI_PART queries that contain synthesis keywords.
-    These queries benefit from synthesize_documents rather than single-shot retrieval.
-    """
-    if query_type.upper() not in ("MULTI_PART", "AMBIGUOUS"):
-        return False
-    return bool(_SYNTHESIS_KEYWORDS.search(query))
-
-
-_SYNTHESIS_SYSTEM_PROMPT = (
-    "You are a professional research assistant that synthesizes information from multiple documents.\n\n"
-    "## Your task\n"
-    "The user wants a comprehensive synthesis across multiple documents. Follow this workflow:\n\n"
-    "1. **Gather coverage**: Call `synthesize_documents` with the topic and 3–6 targeted sub-queries "
-    "to retrieve a broad, deduplicated set of relevant chunks.\n"
-    "2. **Extract entities** (optional): Call `extract_entities` on the combined text if entity context "
-    "would enrich the synthesis.\n"
-    "3. **Summarize**: Call `summarize_chunks` with a precise instruction to synthesize the gathered chunks.\n"
-    "4. **Write the report**: After tool calls are done, write a structured Markdown report with:\n"
-    "   - `## Executive Summary` — 2–3 sentence overview\n"
-    "   - `## Key Themes` — bullet points for each major theme\n"
-    "   - `## Details` — elaboration per theme with [citation:N] references\n"
-    "   - `## Sources` — list of source documents cited\n\n"
-    "## Citation rules\n"
-    "Cite using EXACTLY [citation:N] format where N is the chunk number from context (1-indexed). "
-    "Do NOT use [1], (1), or any other format.\n\n"
-    "## Style\n"
-    "Be precise, professional, and concise. Do not pad. Do not repeat yourself."
-)
 
 
 # ── LLM helpers ───────────────────────────────────────────────────────────────
@@ -259,6 +219,7 @@ async def _maybe_update_summary(
         except Exception:
             pass  # session may already be closed
 
+
 # ── Query rewrite ──────────────────────────────────────────────────────────────
 
 async def _rewrite_query(
@@ -358,6 +319,8 @@ async def classify_query(query: str, api_base: Optional[str] = None, query_model
 
 
 
+# ── SSE event formatter ───────────────────────────────────────────────────────
+
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 async def generate_response(
@@ -366,10 +329,6 @@ async def generate_response(
     knowledge_base_ids: List[int],
     chat_id: int,
     db: Session,
-    use_dense:     bool = True,
-    use_sparse:    bool = True,
-    use_exact:     bool = True,
-    use_graph_rag: bool = False,
     temperature:   float = 0.0,
     model_name:    Optional[str] = None,
     display_query: Optional[str] = None,
@@ -382,8 +341,8 @@ async def generate_response(
     """
     Stream a chat response for the given query.
 
-    Delegates the full RAG pipeline (query rewrite → routing → retrieval →
-    grading → generation) to run_agentic_rag(), which emits typed events
+    Delegates the full RAG pipeline (query rewrite -> routing -> retrieval ->
+    grading -> generation) to run_agentic_rag(), which emits typed events
     that are forwarded as Vercel AI SDK SSE frames:
 
       0:  token             (streaming answer text)
@@ -402,6 +361,7 @@ async def generate_response(
         logger.info("[CHAT] api_base=%s", api_base)
 
     try:
+        _bot_message_id: int = 0  # cached before db.close() so error handler can use it
         # ── Persist user message ───────────────────────────────────────────
         user_message = Message(content=display_query or query, role="user", chat_id=chat_id)
         db.add(user_message)
@@ -473,16 +433,14 @@ async def generate_response(
         _confidence_breakdown: dict | None = None
         _confidence_suggestion: str | None = None
 
-        # ── Close DB session before streaming ───────────────────────────────
-        # Release the connection now — streaming holds it open for 30–120s,
-        # which exhausts the pool under load. Citations are buffered in-memory
-        # and persisted after the stream completes via a fresh session.
-        db.close()
+        # Cache the message ID so the error handler can reference it even if
+        # the bot_message instance becomes detached.
+        _bot_message_id = getattr(bot_message, "id", 0) or 0
         buffered_citations: list[tuple[int, int, int, int, dict]] = []
         # (message_id, document_id, chunk_index, citation_index, metadata)
 
         # ── Agentic pipeline: single autonomous agent ───────────────────────
-        # New agentic agent: rewrite → search → stream in real-time
+        # New agentic agent: rewrite -> search -> stream in real-time
         from app.services.agentic_rag import run_agentic_rag
         stream_iter = run_agentic_rag(
             query=query,
@@ -492,10 +450,6 @@ async def generate_response(
             knowledge_base_ids=knowledge_base_ids,
             recent_lc_history=recent_lc_history,
             existing_summary=existing_summary,
-            use_dense=use_dense,
-            use_sparse=use_sparse,
-            use_exact=use_exact,
-            use_graph_rag=use_graph_rag,
             temperature=temperature,
             model_name=model_name,
             display_query=display_query,
@@ -515,11 +469,13 @@ async def generate_response(
             if event_type == "agent_step":
                 # Forward graph-node events for AgentTimeline rendering
                 yield f'4:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
+                await asyncio.sleep(0)
 
             elif event_type == "rewritten_query":
                 rewritten_q = event.get("query", query)
                 bot_message.rewritten_query = rewritten_q
                 yield f'1:{json.dumps({"rewritten_query": rewritten_q})}\n'
+                await asyncio.sleep(0)
 
             elif event_type == "context":
                 # Capture confidence data for persistence (written after stream)
@@ -559,34 +515,41 @@ async def generate_response(
                     for k, v in event.items() if k != "event"
                 }
                 yield f'2:{json.dumps(context_payload)}\n'
+                await asyncio.sleep(0)
 
             elif event_type == "token":
                 content = event.get("content", "")
                 full_response += content
                 yield f'0:{json.dumps(content)}\n'
+                await asyncio.sleep(0)
 
             elif event_type == "answer_rewrite":
                 # Citation normalisation: replace accumulated streamed text with
                 # the citation-linked version. Frontend handles this via event type 'r'.
                 full_response = event.get("content", full_response)
                 yield f'r:{json.dumps({"content": full_response})}\n'
+                await asyncio.sleep(0)
 
             elif event_type == "done":
                 usage = event.get("usage", {"promptTokens": 0, "completionTokens": 0})
-                yield f'd:{json.dumps({"finishReason": "stop", "usage": usage, "messageId": bot_message.id})}\n'
+                yield f'd:{json.dumps({"finishReason": "stop", "usage": usage, "messageId": _bot_message_id})}\n'
+                await asyncio.sleep(0)
 
             # ── New agentic agent SSE events ──────────────────────────────────
             elif event_type == "progress":
                 # Transient progress/status messages — forwarded as 'p:' event
                 yield f'p:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
+                await asyncio.sleep(0)
 
             elif event_type == "task_list":
                 # Subtask list with status — forwarded as 't:' event
                 yield f't:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
+                await asyncio.sleep(0)
 
             elif event_type == "thinking":
                 # Thinking model chain-of-thought — forwarded as 'th:' event
                 yield f'th:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
+                await asyncio.sleep(0)
 
         logger.info("[CHAT] stream complete | response_length=%d chars", len(full_response))
 
@@ -610,11 +573,18 @@ async def generate_response(
         if _confidence_breakdown is not None:
             bot_message.confidence_breakdown = json.dumps(_confidence_breakdown)
 
-        db.commit()
-        logger.info(
-            "[CHAT] confidence persisted | chat_id=%d | level=%s score=%s",
-            chat_id, _confidence_level, _confidence_score,
-        )
+        try:
+            db.commit()
+            logger.info(
+                "[CHAT] confidence persisted | chat_id=%d | level=%s score=%s",
+                chat_id, _confidence_level, _confidence_score,
+            )
+        except Exception as commit_err:
+            logger.warning("[CHAT] failed to persist confidence: %s", commit_err)
+            try:
+                db.rollback()
+            except Exception:
+                pass
         clear_cancel_token(chat_id)
 
         # ── Post-turn: schedule summary update (fire-and-forget) ──────────
@@ -636,10 +606,17 @@ async def generate_response(
         error_message = f"Error generating response: {str(e)}"
         logger.error(error_message)
         yield f'3:{json.dumps(error_message)}\n'
-        yield f'd:{{"finishReason":"error","messageId":{bot_message.id}}}\n'
-        if 'bot_message' in locals():
-            bot_message.content = error_message
-            db.commit()
+        yield f'd:{{"finishReason":"error","messageId":{_bot_message_id}}}\n'
+        if 'bot_message' in locals() and db.is_active:
+            try:
+                bot_message.content = error_message
+                db.commit()
+            except Exception as commit_err:
+                logger.warning("[CHAT] failed to persist error message: %s", commit_err)
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
         clear_cancel_token(chat_id)
     finally:
         try:

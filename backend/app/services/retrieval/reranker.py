@@ -22,36 +22,44 @@ and in chat_history_retrieval_node() for prior-answer scoring.
 
 import logging
 import os
+import threading
 from typing import List, Optional
 
 from langchain_core.documents import Document as LangchainDocument
 
 from app.core.config import settings
+from app.services.agentic_rag.retry import with_retry_sync
 
 logger = logging.getLogger(__name__)
 
 # Module-level singleton — loaded once on first use, reused across all requests.
 # TextCrossEncoder is stateless between calls so it is safe to share.
 _cross_encoder = None
+_cross_encoder_lock = threading.Lock()
 
 
 def _get_cross_encoder():
     global _cross_encoder
     if _cross_encoder is None:
-        from fastembed.rerank.cross_encoder import TextCrossEncoder
+        with _cross_encoder_lock:
+            # Double-check after acquiring lock — another thread may have
+            # loaded the model while we were waiting.
+            if _cross_encoder is None:
+                from fastembed.rerank.cross_encoder import TextCrossEncoder
 
-        model_name = settings.RERANKER_MODEL
-        cache_dir = settings.RERANKER_CACHE_DIR
+                model_name = settings.RERANKER_MODEL
+                cache_dir = settings.RERANKER_CACHE_DIR
 
-        os.makedirs(cache_dir, exist_ok=True)
+                os.makedirs(cache_dir, exist_ok=True)
 
-        logger.info("Reranker: loading model=%s cache_dir=%s", model_name, cache_dir)
-        _cross_encoder = TextCrossEncoder(model_name=model_name, cache_dir=cache_dir)
-        logger.info("Reranker: model loaded")
+                logger.info("Reranker: loading model=%s cache_dir=%s", model_name, cache_dir)
+                _cross_encoder = TextCrossEncoder(model_name=model_name, cache_dir=cache_dir)
+                logger.info("Reranker: model loaded")
 
     return _cross_encoder
 
 
+@with_retry_sync(max_attempts=3)
 def rerank(
     query: str,
     docs: List[LangchainDocument],

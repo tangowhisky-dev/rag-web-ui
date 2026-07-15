@@ -500,6 +500,56 @@ const ConfidenceCollapsible: FC<{
   );
 };
 
+// ── SubtaskList: live TODO checklist for complex multi-subtask queries ────────
+
+interface SubtaskItem {
+  id: number;
+  text: string;
+  status: "pending" | "active" | "done";
+}
+
+const SubtaskList: FC<{ tasks: SubtaskItem[] }> = ({ tasks }) => {
+  if (!tasks.length) return null;
+
+  return (
+    <div className="not-prose mb-3 rounded-lg border border-border bg-muted/30 px-3 py-2.5 space-y-1.5">
+      <p className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground mb-2">
+        Subtasks
+      </p>
+      {tasks.map((task) => (
+        <div key={task.id} className="flex items-start gap-2">
+          <span className="mt-0.5 shrink-0 w-3.5 h-3.5 flex items-center justify-center">
+            {task.status === "done" ? (
+              <svg className="text-emerald-500" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg" width="12" height="12">
+                <circle cx="6" cy="6" r="5.5" fill="currentColor" fillOpacity="0.15" stroke="currentColor" strokeWidth="1"/>
+                <path d="M3.5 6l1.8 1.8L8.5 4.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+            ) : task.status === "active" ? (
+              <svg className="text-primary animate-spin" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg" width="12" height="12">
+                <circle cx="6" cy="6" r="4.5" stroke="currentColor" strokeOpacity="0.2" strokeWidth="1.5"/>
+                <path d="M6 1.5A4.5 4.5 0 0 1 10.5 6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+              </svg>
+            ) : (
+              <svg className="text-muted-foreground/40" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg" width="12" height="12">
+                <circle cx="6" cy="6" r="5.5" stroke="currentColor" strokeWidth="1"/>
+              </svg>
+            )}
+          </span>
+          <span className={`text-[12px] leading-snug ${
+            task.status === "done"
+              ? "text-muted-foreground line-through decoration-muted-foreground/40"
+              : task.status === "active"
+              ? "text-foreground font-medium"
+              : "text-muted-foreground"
+          }`}>
+            {task.text}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+};
+
 // ── CodeBlock: renders mermaid/echarts fences as diagrams, others as <code> ───
 
 const CodeBlock: FC<React.HTMLAttributes<HTMLElement> & { inline?: boolean }> = ({
@@ -544,10 +594,11 @@ export const Answer: FC<{
   queryClassification?: QueryClassification;
   toolTrace?: ToolTraceEntry[];
   agentSteps?: Array<{ node: string; latency_ms: number; status: string; [key: string]: unknown }>;
+  taskList?: Array<{ id: number; text: string; status: string }>;
   synthesisMode?: boolean;
   isStreaming?: boolean;
   onDelete?: (id: string) => void;
-}> = ({ messageId, chatId, markdown, citations = [], rewrittenQuery, retrievedContext, confidence, confidenceScore, confidenceBreakdown, suggestion, failedLegs, queryClassification, toolTrace, agentSteps, synthesisMode, isStreaming = false, onDelete }) => {
+}> = ({ messageId, chatId, markdown, citations = [], rewrittenQuery, retrievedContext, confidence, confidenceScore, confidenceBreakdown, suggestion, failedLegs, queryClassification, toolTrace, agentSteps, taskList, synthesisMode, isStreaming = false, onDelete }) => {
   const [citationInfoMap, setCitationInfoMap] = useState<
     Record<string, CitationInfo>
   >({});
@@ -934,6 +985,10 @@ export const Answer: FC<{
 
   return (
     <div className="prose prose-sm max-w-full">
+      {/* Subtask checklist — shown during streaming for complex multi-part queries */}
+      {taskList && taskList.length > 1 && (
+        <SubtaskList tasks={taskList as SubtaskItem[]} />
+      )}
       {/* AgentTimeline: transient progress badges only */}
       <AgentTimeline agentSteps={filteredAgentSteps} isStreaming={isStreaming} />
       {confidence === "none" && suggestion && (

@@ -1,5 +1,8 @@
 # LangGraph Migration Plan: Agentic RAG Pipeline
 
+> **⚠️ SUPERCEDED — This document is kept for historical context only.**
+> The consolidated autonomous enterprise assistant plan is now in [`kimi_agentic_recoms.md`](kimi_agentic_recoms.md).
+
 > **Date:** 2026-07-10
 > **Status:** Design
 > **Reference:** [GiovanniPasq/agentic-rag-for-dummies](https://github.com/GiovanniPasq/agentic-rag-for-dummies)

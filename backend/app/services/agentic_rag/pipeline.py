@@ -37,16 +37,13 @@ async def run_agentic_rag(
     recent_lc_history: list,
     existing_summary: Optional[str] = None,
     file_markdown: Optional[str] = None,
-    use_dense: bool = True,
-    use_sparse: bool = True,
-    use_exact: bool = True,
-    use_graph_rag: bool = False,
     temperature: float = 0.0,
     model_name: Optional[str] = None,
     display_query: Optional[str] = None,
     api_base: Optional[str] = None,
     query_model: Optional[str] = None,
     org_id: Optional[int] = None,
+    generate_answer: bool = True,
 ) -> AsyncGenerator[dict, None]:
     """Single autonomous agentic agent via LangGraph StateGraph.
 
@@ -60,14 +57,11 @@ async def run_agentic_rag(
         recent_lc_history=recent_lc_history,
         existing_summary=existing_summary,
         file_markdown=file_markdown,
-        use_dense=use_dense,
-        use_sparse=use_sparse,
-        use_exact=use_exact,
-        use_graph_rag=use_graph_rag,
         temperature=temperature,
         model_name=model_name,
         api_base=api_base,
         org_id=org_id,
         chat_id=chat_id,
+        generate_answer=generate_answer,
     ):
         yield event

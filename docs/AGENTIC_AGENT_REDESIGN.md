@@ -1,6 +1,7 @@
 # Agentic Agent Redesign — Implementation Plan
 
-> **⚠️ OUTDATED — Superseded by live implementation.**
+> **⚠️ SUPERCEDED — This document is kept for historical context only.**
+> The consolidated autonomous enterprise assistant plan is now in [`kimi_agentic_recoms.md`](kimi_agentic_recoms.md).
 > This design document describes the planned agentic agent. The implementation now lives at
 > `backend/app/services/agentic_rag/agentic_rag.py`. The former Fast/Thinking pipeline
 > (`fast_pipeline.py`) and Agentic LangGraph (`rag_graph/`) have been removed. The live

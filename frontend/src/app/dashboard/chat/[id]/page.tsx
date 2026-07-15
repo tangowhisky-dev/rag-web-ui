@@ -84,7 +84,6 @@ interface ChatMessage {
 interface Chat {
   id: number;
   title: string;
-  use_graph_rag: boolean;
   messages: ChatMessage[];
 }
 
@@ -102,10 +101,6 @@ function ChatPageInner({ params }: { params: { id: string } }) {
   const { setActiveChat, setGraphRagActive } = useChatContext();
   const [isInitialLoad, setIsInitialLoad] = useState(true);
   const [chatTitle, setChatTitle] = useState<string | undefined>();
-  const [useGraphRag, setUseGraphRag] = useState(false);
-  const [useDense, setUseDense] = useState(true);
-  const [useSparse, setUseSparse] = useState(true);
-  const [useExact, setUseExact] = useState(false);
   const [temperature, setTemperature] = useState(0.7);
   const [modelName, setModelName] = useState("gpt-4o");
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -222,10 +217,6 @@ function ChatPageInner({ params }: { params: { id: string } }) {
   }, [params.id, setActiveChat, setGraphRagActive]);
 
   useEffect(() => {
-    setGraphRagActive(useGraphRag);
-  }, [useGraphRag, setGraphRagActive]);
-
-  useEffect(() => {
     if (isInitialLoad) {
       fetchChat();
       // NOTE: do NOT setIsInitialLoad(false) here — fetchChat does it in its finally block
@@ -286,10 +277,6 @@ function ChatPageInner({ params }: { params: { id: string } }) {
         api.get(`/api/chat/${params.id}/messages/paginated?limit=20`),
       ]);
       setChatTitle(meta.title);
-      setUseGraphRag(meta.use_graph_rag ?? false);
-      setUseDense((meta as any).use_dense ?? true);
-      setUseSparse((meta as any).use_sparse ?? true);
-      setUseExact((meta as any).use_exact ?? false);
       setTemperature((meta as any).temperature ?? 0.7);
       setModelName((meta as any).model_name ?? "gpt-4o");
       setMessages(page.messages.map(formatMessage));
@@ -978,10 +965,6 @@ function ChatPageInner({ params }: { params: { id: string } }) {
   };
 
   const handleSettingsUpdate = (patch: Partial<ChatPatch>) => {
-    if (patch.use_graph_rag !== undefined) setUseGraphRag(patch.use_graph_rag);
-    if (patch.use_dense !== undefined) setUseDense(patch.use_dense);
-    if (patch.use_sparse !== undefined) setUseSparse(patch.use_sparse);
-    if (patch.use_exact !== undefined) setUseExact(patch.use_exact);
     if (patch.temperature !== undefined) setTemperature(patch.temperature);
     if (patch.model_name !== undefined) setModelName(patch.model_name);
   };
@@ -998,10 +981,6 @@ function ChatPageInner({ params }: { params: { id: string } }) {
               title: chatTitle ?? "",
               temperature,
               model_name: modelName,
-              use_dense: useDense,
-              use_sparse: useSparse,
-              use_exact: useExact,
-              use_graph_rag: useGraphRag,
             }}
             onClose={() => setIsSettingsOpen(false)}
             onUpdate={handleSettingsUpdate}
@@ -1062,6 +1041,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                           queryClassification={message.id === lastAssistantId ? message.queryClassification : undefined}
                           toolTrace={message.id === lastAssistantId ? message.toolTrace : undefined}
                           agentSteps={message.id === lastAssistantId ? message.agentSteps : undefined}
+                          taskList={message.id === lastAssistantId && isLoading ? taskList : undefined}
                           synthesisMode={message.synthesisMode}
                           isStreaming={isLoading && message.id === lastAssistantId}
                           onDelete={(id) => setMessages((prev) => prev.filter((m) => m.id !== id))}

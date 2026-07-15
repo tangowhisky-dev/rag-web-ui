@@ -32,10 +32,6 @@ class Chat(Base, TimestampMixin):
     title = Column(String(255), nullable=False)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     history_summary = Column(LONGTEXT, nullable=True)  # rolling summary of messages beyond the sliding window
-    use_graph_rag = Column(Boolean, nullable=False, default=False, server_default="0")
-    use_dense     = Column(Boolean, nullable=False, default=True,  server_default="1")
-    use_sparse    = Column(Boolean, nullable=False, default=True,  server_default="1")
-    use_exact     = Column(Boolean, nullable=False, default=True,  server_default="1")
     pinned        = Column(Boolean, nullable=False, default=False, server_default="0")
     folder_id     = Column(Integer, ForeignKey("folders.id", ondelete="SET NULL"), nullable=True, index=True)
     org_id        = Column(Integer, ForeignKey('organisations.id'), nullable=True, index=True)

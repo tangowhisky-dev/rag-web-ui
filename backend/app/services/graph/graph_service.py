@@ -69,6 +69,7 @@ import neo4j
 from langchain_core.documents import Document as LangchainDocument
 
 from app.core.config import settings
+from app.services.agentic_rag.retry import with_retry_sync
 
 logger = logging.getLogger(__name__)
 
@@ -510,6 +511,7 @@ async def build_graph_for_document(
 
 # ── Retrieval: graph expansion ─────────────────────────────────────────────────
 
+@with_retry_sync(max_attempts=3)
 def expand_docs_via_graph(
     docs: list[LangchainDocument],
     kb_ids: list[int],
@@ -633,6 +635,7 @@ def expand_docs_via_graph(
 
 # ── Retrieval: entity context enrichment ──────────────────────────────────────
 
+@with_retry_sync(max_attempts=3)
 def enrich_docs_with_graph(docs: list[LangchainDocument]) -> list[LangchainDocument]:
     """
     Append [Graph context] entity relationship triples to each doc's text.

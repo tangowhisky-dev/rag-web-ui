@@ -201,7 +201,7 @@ The skill auto-detects the project stack (Tailwind + shadcn/ui here) and routes 
 
 When the user corrects your approach, append a one-line rule here before ending the session. Write it concretely ("Always use X for Y"), never abstractly ("be careful with Y"). If an existing line already covers the correction, tighten it instead of adding a new one. Remove lines when the underlying issue goes away (model upgrades, refactors, process changes).
 
-- (empty)
+- Never restart Docker containers unless the user explicitly asks; when a restart is required, use `docker compose -f docker-compose.dev.yml`.
 
 ---
 

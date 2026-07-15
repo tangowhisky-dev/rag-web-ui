@@ -1,5 +1,8 @@
 # Agentic RAG Implementation Roadmap
 
+> **⚠️ SUPERCEDED — This document is kept for historical context only.**
+> The consolidated autonomous enterprise assistant plan is now in [`kimi_agentic_recoms.md`](kimi_agentic_recoms.md).
+
 **Vision:** Fully autonomous agent that understands user intent, decomposes complex queries, adapts retrieval strategies dynamically, learns from conversation history, and iterates until the answer is complete.
 
 **Principle:** Three pipelines serving three user needs. Never compromise fast for agentic; always respect the speed/depth tradeoff.

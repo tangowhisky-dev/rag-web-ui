@@ -7,8 +7,8 @@ Neo4j graph enrichment after merge:
   Leg 3 — Exact   : MySQL InnoDB FULLTEXT search (BM25/TF-IDF, server-side)
 
   Graph enrichment (post-merge, not a scored leg):
-    When GRAPHRAG_ENABLED=true and use_graph_rag=True, after RRF merge the top-K
-    docs are enriched with entity/relationship triples from Neo4j. Neo4j is
+    When RETRIEVAL_GRAPH_ENABLED=true, after RRF merge the top-K docs are
+    enriched with entity/relationship triples from Neo4j. Neo4j is
     queried by (document_id, chunk_index) from each doc's Qdrant payload — the
     cross-reference link established at ingest. Enriched docs then go to the
     reranker so it sees the expanded context.
@@ -48,6 +48,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.models.query_classifier import QueryType
 from app.services.infrastructure import content_hash, get_qdrant_client, get_openai_client, get_sparse_embedder
+from app.services.agentic_rag.retry import with_retry_sync
 
 logger = logging.getLogger(__name__)
 
@@ -64,33 +65,62 @@ def get_effective_datastore_ids(
       2. OrganizationDataStore   — org-to-datastore links (for standalone DataStores)
 
     Returns the deduplicated union of both.
+
+    IMPORTANT: This function creates its own fresh SessionLocal() session instead
+    of using the passed ``db`` session. The passed session may be shared across
+    LangGraph nodes and can become corrupted when a MySQL connection drops, which
+    would cascade failures to every subsequent node. A fresh session per call
+    isolates failures and allows the pool to provision a new connection.
     """
+    from app.db.session import SessionLocal
+
     datastore_ids: list[int] = []
 
-    if kb_ids and db:
-        from app.models.knowledge import KnowledgeBaseDataStore
+    for attempt in range(3):
+        fresh_db: Session | None = None
+        try:
+            fresh_db = SessionLocal()
+            if kb_ids and fresh_db:
+                from app.models.knowledge import KnowledgeBaseDataStore
 
-        datastore_links = (
-            db.query(KnowledgeBaseDataStore.data_store_id)
-            .filter(KnowledgeBaseDataStore.knowledge_base_id.in_(kb_ids))
-            .distinct()
-            .all()
-        )
-        datastore_ids = [row.data_store_id for row in datastore_links]
+                datastore_links = (
+                    fresh_db.query(KnowledgeBaseDataStore.data_store_id)
+                    .filter(KnowledgeBaseDataStore.knowledge_base_id.in_(kb_ids))
+                    .distinct()
+                    .all()
+                )
+                datastore_ids = [row.data_store_id for row in datastore_links]
 
-    if org_id and db and datastore_ids is not None:
-        from app.models.datastore import OrganizationDataStore
+            if org_id and fresh_db and datastore_ids is not None:
+                from app.models.datastore import OrganizationDataStore
 
-        ds_org_links = (
-            db.query(OrganizationDataStore.data_store_id)
-            .filter(OrganizationDataStore.org_id == org_id)
-            .distinct()
-            .all()
-        )
-        org_ds_ids = [row.data_store_id for row in ds_org_links]
-        for ds_id in org_ds_ids:
-            if ds_id not in datastore_ids:
-                datastore_ids.append(ds_id)
+                ds_org_links = (
+                    fresh_db.query(OrganizationDataStore.data_store_id)
+                    .filter(OrganizationDataStore.org_id == org_id)
+                    .distinct()
+                    .all()
+                )
+                org_ds_ids = [row.data_store_id for row in ds_org_links]
+                for ds_id in org_ds_ids:
+                    if ds_id not in datastore_ids:
+                        datastore_ids.append(ds_id)
+            break
+        except Exception as exc:
+            logger.warning("get_effective_datastore_ids failed (attempt %d): %s", attempt + 1, exc)
+            try:
+                if fresh_db is not None:
+                    fresh_db.rollback()
+            except Exception:
+                pass
+            if fresh_db is not None:
+                try:
+                    fresh_db.close()
+                except Exception:
+                    pass
+            if attempt == 2:
+                raise
+            import time
+            time.sleep(0.1 * (2 ** attempt))
 
     return datastore_ids
 
@@ -106,9 +136,6 @@ def get_retrieval_config(query_type: QueryType) -> dict:
     preset = presets.get(query_type.value, {})
     
     config = {
-        "use_dense": preset.get("use_dense", True),
-        "use_sparse": preset.get("use_sparse", True),
-        "use_exact": preset.get("use_exact", True),
         "dense_weight": preset.get("dense_weight", settings.HYBRID_DENSE_WEIGHT),
         "sparse_weight": preset.get("sparse_weight", settings.HYBRID_SPARSE_WEIGHT),
         "exact_weight": preset.get("exact_weight", settings.HYBRID_EXACT_WEIGHT),
@@ -158,6 +185,7 @@ def _qdrant_payload_to_doc(payload: dict) -> LangchainDocument:
 
 # ── Search legs ───────────────────────────────────────────────────────────────
 
+@with_retry_sync(max_attempts=3)
 def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], candidates: int) -> Dict[str, _Candidate]:
     """Qdrant cosine-similarity search using the dense (OpenAI) embedding.
     
@@ -232,6 +260,7 @@ def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], candi
     return result
 
 
+@with_retry_sync(max_attempts=3)
 def _sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], candidates: int) -> Dict[str, _Candidate]:
     """Qdrant learned-sparse search (SPLADE via FastEmbed).
     
@@ -308,11 +337,21 @@ def _sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], cand
     return result
 
 
+@with_retry_sync(max_attempts=3)
 def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: Session, candidates: int) -> Dict[str, _Candidate]:
     """MySQL InnoDB FULLTEXT search — exact keyword / BM25 scoring, server-side.
     
     Searches both KB documents and DataStore documents.
+
+    IMPORTANT: This function creates its own fresh SessionLocal() session for
+    each retry attempt instead of using the passed ``db`` session. The passed
+    session may be shared across LangGraph nodes and can become corrupted when
+    a MySQL connection drops, which would cause all retries to fail on the
+    same dead connection. A fresh session per retry lets the pool provision
+    a new connection.
     """
+    from app.db.session import SessionLocal
+
     if not query.strip():
         return {}
 
@@ -349,14 +388,32 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
     kb_rows = []
     ds_rows = []
     
-    try:
-        if kb_ids:
-            kb_rows = db.execute(kb_sql, {"query": query, "kb_ids": kb_ids, "candidates": candidates}).fetchall()
-        if datastore_ids:
-            ds_rows = db.execute(ds_sql, {"query": query, "ds_ids": datastore_ids, "candidates": candidates}).fetchall()
-    except Exception as e:
-        logger.warning("exact_search: MySQL FTS query failed: %s", e)
-        return {}
+    for attempt in range(3):
+        fresh_db: Session | None = None
+        try:
+            fresh_db = SessionLocal()
+            if kb_ids:
+                kb_rows = fresh_db.execute(kb_sql, {"query": query, "kb_ids": kb_ids, "candidates": candidates}).fetchall()
+            if datastore_ids:
+                ds_rows = fresh_db.execute(ds_sql, {"query": query, "ds_ids": datastore_ids, "candidates": candidates}).fetchall()
+            break
+        except Exception as e:
+            logger.warning("exact_search: MySQL FTS query failed (attempt %d): %s", attempt + 1, e)
+            try:
+                if fresh_db is not None:
+                    fresh_db.rollback()
+            except Exception:
+                pass
+            if fresh_db is not None:
+                try:
+                    fresh_db.close()
+                except Exception:
+                    pass
+            if attempt == 2:
+                return {}
+            # Give the pool a moment to replace a bad connection before retrying.
+            import time
+            time.sleep(0.1 * (2 ** attempt))
 
     # Merge results and re-rank by FTS score
     all_rows = list(kb_rows) + list(ds_rows)
@@ -442,12 +499,12 @@ def _rrf_merge_candidates(
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def _run_leg(name: str, fn, *args) -> tuple[dict, str | None]:
-    """Run a single retrieval leg, catching any exception.
-    Returns (results_dict, error_message_or_None)."""
+    """Run a single retrieval leg, catching any exception.    # The decorated leg function already retries internally; this wrapper
+    # catches the final failure so other legs can still run.    Returns (results_dict, error_message_or_None)."""
     try:
         return fn(*args), None
     except Exception as exc:
-        logger.error("[LEG:%s] failed: %s", name, exc)
+        logger.error("[LEG:%s] failed after retries: %s", name, exc)
         return {}, str(exc)
 
 
@@ -455,10 +512,6 @@ async def hybrid_search_with_legs(
     query: str,
     kb_ids: List[int],
     db: Session,
-    use_dense:     bool = True,
-    use_sparse:    bool = True,
-    use_exact:     bool = True,
-    use_graph_rag: bool = False,
     query_type: Optional[QueryType] = None,
     datastore_ids: Optional[List[int]] = None,
     return_full_pool: bool = False,
@@ -493,9 +546,6 @@ async def hybrid_search_with_legs(
 
     if query_type is not None:
         preset = get_retrieval_config(query_type)
-        use_dense = preset["use_dense"]
-        use_sparse = preset["use_sparse"]
-        use_exact = preset["use_exact"]
         top_k = preset["top_k"]
         # Apply per-preset weights (overrides global defaults when present)
         dense_weight = preset.get("dense_weight", dense_weight)
@@ -508,10 +558,10 @@ async def hybrid_search_with_legs(
     pool  = top_k * 4
 
     enabled = {
-        "dense":         use_dense    and settings.RETRIEVAL_DENSE_ENABLED,
-        "sparse": use_sparse   and settings.RETRIEVAL_SPARSE_ENABLED,
-        "exact":         use_exact    and settings.RETRIEVAL_EXACT_ENABLED,
-        "graph":         use_graph_rag and settings.RETRIEVAL_GRAPH_ENABLED,
+        "dense": settings.RETRIEVAL_DENSE_ENABLED,
+        "sparse": settings.RETRIEVAL_SPARSE_ENABLED,
+        "exact": settings.RETRIEVAL_EXACT_ENABLED,
+        "graph": settings.RETRIEVAL_GRAPH_ENABLED,
     }
 
     legs: dict[str, dict] = {}
@@ -651,12 +701,12 @@ async def hybrid_search(
     query: str,
     kb_ids: List[int],
     db: Session,
-    use_graph_rag: bool = False,
     datastore_ids: Optional[List[int]] = None,
 ) -> List[LangchainDocument]:
     """Run enabled retrieval legs in parallel (sync calls) and merge via RRF.
-    
+
     Searches both KB collections and DataStore collections.
+    All globally enabled retrieval sources are used; chat-level toggles were removed.
     """
     top_k = settings.RETRIEVAL_TOP_K
     pool = top_k * 4
@@ -666,7 +716,7 @@ async def hybrid_search(
         "dense": settings.RETRIEVAL_DENSE_ENABLED,
         "sparse": settings.RETRIEVAL_SPARSE_ENABLED,
         "exact": settings.RETRIEVAL_EXACT_ENABLED,
-        "graph": use_graph_rag and settings.RETRIEVAL_GRAPH_ENABLED,
+        "graph": settings.RETRIEVAL_GRAPH_ENABLED,
     }
     logger.info(
         "hybrid_search | kb_ids=%s | ds_ids=%s | top_k=%d | legs=%s",
@@ -690,3 +740,67 @@ async def hybrid_search(
 
     logger.info("hybrid_search returned %d documents", len(docs))
     return docs
+
+
+# ── Single-leg public API (used by agentic RAG nodes) ─────────────────────────
+
+# Shared candidate pool multiplier — large enough for downstream reranking.
+_LEG_POOL_MULTIPLIER = 4
+
+
+def _candidates_to_docs(candidates: Dict[str, _Candidate], leg: str) -> List[LangchainDocument]:
+    """Convert a candidate dict to an ordered list of LangchainDocuments.
+
+    Preserves per-leg rank and marks which leg produced each doc.
+    """
+    docs: List[LangchainDocument] = []
+    for c in sorted(candidates.values(), key=lambda x: getattr(x, f"{leg}_rank"), reverse=False):
+        if getattr(c, f"{leg}_rank") < 0:
+            continue
+        c.doc.metadata["_legs"] = [leg]
+        c.doc.metadata["_leg_rank"] = getattr(c, f"{leg}_rank")
+        docs.append(c.doc)
+    return docs
+
+
+def dense_search_docs(
+    query: str,
+    kb_ids: List[int],
+    datastore_ids: List[int],
+    top_k: Optional[int] = None,
+) -> List[LangchainDocument]:
+    """Run only the dense leg and return its ranked candidate docs."""
+    candidates = top_k or settings.RETRIEVAL_TOP_K
+    pool = candidates * _LEG_POOL_MULTIPLIER
+    return _candidates_to_docs(
+        _dense_search(query, kb_ids, datastore_ids, pool), "dense"
+    )
+
+
+def sparse_search_docs(
+    query: str,
+    kb_ids: List[int],
+    datastore_ids: List[int],
+    top_k: Optional[int] = None,
+) -> List[LangchainDocument]:
+    """Run only the sparse leg and return its ranked candidate docs."""
+    candidates = top_k or settings.RETRIEVAL_TOP_K
+    pool = candidates * _LEG_POOL_MULTIPLIER
+    return _candidates_to_docs(
+        _sparse_search(query, kb_ids, datastore_ids, pool), "sparse"
+    )
+
+
+def exact_search_docs(
+    query: str,
+    kb_ids: List[int],
+    datastore_ids: List[int],
+    db: Session,
+    top_k: Optional[int] = None,
+) -> List[LangchainDocument]:
+    """Run only the exact (MySQL FTS) leg and return its ranked candidate docs."""
+    candidates = top_k or settings.RETRIEVAL_TOP_K
+    pool = candidates * _LEG_POOL_MULTIPLIER
+    return _candidates_to_docs(
+        _exact_search(query, kb_ids, datastore_ids, db, pool), "exact"
+    )

@@ -98,7 +98,7 @@ def rewrite_query(
             messages.append({"role": "assistant", "content": m.content[:400]})
     messages.append({"role": "user", "content": query})
 
-    from openai import AsyncOpenAI as _OAI
+    from openai import OpenAI as _OAI
     client = _OAI(api_key=openai_api_key, base_url=api_base or openai_api_base)
     resp = client.chat.completions.create(
         model=query_model or "default",

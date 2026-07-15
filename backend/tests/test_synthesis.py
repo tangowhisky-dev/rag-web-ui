@@ -12,7 +12,6 @@ import pytest
 import app.services.builtin_tools  # noqa: F401
 from app.services.tool_registry import _registry, execute_tool
 from app.services.export import generate_synthesis_report
-from app.services.chat import _is_synthesis_query
 
 
 # ── synthesize_documents registration ────────────────────────────────────────
@@ -159,34 +158,6 @@ class TestSynthesizeDocumentsTool:
 
         chunks = result.output["chunks"]
         assert chunks[0]["score"] >= chunks[-1]["score"]
-
-
-# ── _is_synthesis_query ───────────────────────────────────────────────────────
-
-class TestIsSynthesisQuery:
-    def test_detects_summarize_keyword_multi_part(self):
-        assert _is_synthesis_query("Summarize key themes across earnings calls", "MULTI_PART")
-
-    def test_detects_themes_keyword(self):
-        assert _is_synthesis_query("What are the key themes across all reports?", "MULTI_PART")
-
-    def test_detects_compare_keyword(self):
-        assert _is_synthesis_query("Compare approaches across documents", "MULTI_PART")
-
-    def test_detects_overview_keyword(self):
-        assert _is_synthesis_query("Give me an overview of all findings", "AMBIGUOUS")
-
-    def test_returns_false_for_factual_type(self):
-        assert not _is_synthesis_query("Summarize the document", "FACTUAL")
-
-    def test_returns_false_for_entity_centric(self):
-        assert not _is_synthesis_query("Summarize Apple's strategy", "ENTITY_CENTRIC")
-
-    def test_returns_false_without_keywords(self):
-        assert not _is_synthesis_query("What is the revenue?", "MULTI_PART")
-
-    def test_returns_false_for_empty_query(self):
-        assert not _is_synthesis_query("", "MULTI_PART")
 
 
 # ── generate_synthesis_report ─────────────────────────────────────────────────

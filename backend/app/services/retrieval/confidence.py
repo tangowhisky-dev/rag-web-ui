@@ -31,11 +31,23 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from langchain_core.documents import Document as LangchainDocument
 
 from app.core.config import settings
+
+
+def _normalise_doc(doc: Any) -> LangchainDocument:
+    """Accept Document objects or serialized dicts from the RAG graph."""
+    if isinstance(doc, LangchainDocument):
+        return doc
+    if isinstance(doc, dict):
+        return LangchainDocument(
+            page_content=doc.get("page_content", ""),
+            metadata=dict(doc.get("metadata", {})),
+        )
+    return LangchainDocument(page_content=str(doc), metadata={})
 
 
 # ── Level ──────────────────────────────────────────────────────────────────────
@@ -94,7 +106,7 @@ def _level_and_suggestion(score: int, failed_legs: list) -> tuple[str, Optional[
 
 
 def score_retrieval(
-    docs: List[LangchainDocument],
+    docs: List[Any],
     retrieval_info: dict,
 ) -> ConfidenceResult:
     """
@@ -113,6 +125,7 @@ def score_retrieval(
         "failed_legs": ["dense", ...]
       }
     """
+    docs = [_normalise_doc(d) for d in docs]
     failed_legs = retrieval_info.get("failed_legs", [])
 
     # Zero docs → none, regardless of leg stats.

@@ -57,10 +57,6 @@ def create_chat(
         title=chat_in.title,
         user_id=current_user.id,
         org_id=current_user.org_id,
-        use_graph_rag=chat_in.use_graph_rag,
-        use_dense=chat_in.use_dense,
-        use_sparse=chat_in.use_sparse,
-        use_exact=chat_in.use_exact,
     )
     chat.knowledge_bases = knowledge_bases
     
@@ -403,10 +399,6 @@ async def create_message(
             knowledge_base_ids=knowledge_base_ids,
             chat_id=chat_id,
             db=db,
-            use_dense=chat.use_dense,
-            use_sparse=chat.use_sparse,
-            use_exact=chat.use_exact,
-            use_graph_rag=chat.use_graph_rag,
             temperature=temperature,
             model_name=model_name,
             display_query=display_query,
@@ -421,7 +413,12 @@ async def create_message(
     return StreamingResponse(
         response_stream(),
         media_type="text/event-stream",
-        headers={"x-vercel-ai-data-stream": "v1"},
+        headers={
+            "x-vercel-ai-data-stream": "v1",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 @router.post("/{chat_id}/messages/with-file")
@@ -497,10 +494,6 @@ async def create_message_with_file(
             knowledge_base_ids=knowledge_base_ids,
             chat_id=chat_id,
             db=db,
-            use_dense=chat.use_dense,
-            use_sparse=chat.use_sparse,
-            use_exact=chat.use_exact,
-            use_graph_rag=chat.use_graph_rag,
             display_query=message,
             api_base=llm_cfg["api_base"],
             query_model=llm_cfg["query_model"],
@@ -511,7 +504,12 @@ async def create_message_with_file(
     return StreamingResponse(
         response_stream(),
         media_type="text/event-stream",
-        headers={"x-vercel-ai-data-stream": "v1"},
+        headers={
+            "x-vercel-ai-data-stream": "v1",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
@@ -656,14 +654,6 @@ def update_chat(
         chat.title = chat_in.title
     if chat_in.pinned is not None:
         chat.pinned = chat_in.pinned
-    if chat_in.use_dense is not None:
-        chat.use_dense = chat_in.use_dense
-    if chat_in.use_sparse is not None:
-        chat.use_sparse = chat_in.use_sparse
-    if chat_in.use_exact is not None:
-        chat.use_exact = chat_in.use_exact
-    if chat_in.use_graph_rag is not None:
-        chat.use_graph_rag = chat_in.use_graph_rag
     db.commit()
     db.refresh(chat)
     return chat

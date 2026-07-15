@@ -1,6 +1,8 @@
 # Agentic RAG Pipeline Audit & Improvement Plan
 
-> **⚠️ OUTDATED — `rag_graph.py` has been removed.** This audit was produced on 2026-06-24 analyzing `rag_graph.py` (LangGraph StateGraph). The `rag_graph/` package and `fast_pipeline.py` have been deleted. The current agentic pipeline at `agentic_rag/agentic_rag.py` follows a different architecture (simple/complex branching). Sections 3, 4, and 6 were never implemented.
+> **⚠️ SUPERCEDED — This document is kept for historical context only.**
+> The consolidated autonomous enterprise assistant plan is now in [`kimi_agentic_recoms.md`](kimi_agentic_recoms.md).
+> This audit references the removed `rag_graph.py` and is no longer authoritative. This audit was produced on 2026-06-24 analyzing `rag_graph.py` (LangGraph StateGraph). The `rag_graph/` package and `fast_pipeline.py` have been deleted. The current agentic pipeline at `agentic_rag/agentic_rag.py` follows a different architecture (simple/complex branching). Sections 3, 4, and 6 were never implemented.
 
 ---
 

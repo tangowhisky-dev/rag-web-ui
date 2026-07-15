@@ -18,9 +18,6 @@ export default function NewChatPage() {
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]);
   const [selectedKB, setSelectedKB] = useState<number | null>(null);
   const [title, setTitle] = useState("");
-  const [useGraphRag, setUseGraphRag] = useState(false);
-  const [useVector,   setUseVector]   = useState(true);
-  const [useExact,    setUseExact]    = useState(true);
   const [error, setError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -52,10 +49,6 @@ export default function NewChatPage() {
       const data = await api.post("/api/chat", {
         title,
         knowledge_base_ids: [selectedKB],
-        use_graph_rag: useGraphRag,
-        use_dense:     useVector,
-        use_sparse:    useVector,
-        use_exact:     useExact,
       });
       router.push(`/dashboard/chat/${data.id}`);
     } catch (error) {
@@ -149,44 +142,6 @@ export default function NewChatPage() {
         </div>
 
         {error && <div className="text-sm text-red-500">{error}</div>}
-
-        <div className="space-y-1">
-          <label className="text-sm font-medium leading-none">Retrieval Sources</label>
-          <p className="text-xs text-muted-foreground">Select which techniques/sources to use for retrieval.</p>
-          <div className="grid gap-2">
-            {([
-              { id: "use-exact",     label: "Keyword Search",        desc: "MySQL full-text search — fast, exact term matching",            checked: useExact,    onChange: setUseExact,    disabled: true  },
-              { id: "use-vector",    label: "Sparse + Dense Vectors", desc: "SPLADE + Qdrant — hybrid bag-of-words + semantic search",       checked: useVector,   onChange: setUseVector,   disabled: false },
-              { id: "use-graph-rag", label: "Knowledge Graph",       desc: "Neo4j multi-hop GraphRAG — richer context, slower",            checked: useGraphRag, onChange: setUseGraphRag, disabled: false },
-            ] as const).map(({ id, label, desc, checked, onChange, disabled }) => (
-              <label
-                key={id}
-                htmlFor={id}
-                className={`flex items-start gap-3 rounded-lg border px-4 py-3 transition-colors ${
-                  disabled
-                    ? "border-primary bg-primary/5 cursor-default opacity-75"
-                    : checked
-                      ? "border-primary bg-primary/5 cursor-pointer"
-                      : "hover:border-primary/40 cursor-pointer"
-                }`}
-              >
-                <input
-                  id={id}
-                  type="checkbox"
-                  checked={checked}
-                  onChange={(e) => !disabled && onChange(e.target.checked)}
-                  disabled={disabled}
-                  className="mt-0.5 h-4 w-4 shrink-0 rounded border border-input accent-primary disabled:cursor-not-allowed"
-                />
-                <div>
-                  <span className="text-sm font-medium">{label}</span>
-                  {disabled && <span className="ml-2 text-xs text-muted-foreground">(always on)</span>}
-                  <span className="block text-xs text-muted-foreground">{desc}</span>
-                </div>
-              </label>
-            ))}
-          </div>
-        </div>
 
         <div className="flex justify-end space-x-4">
           <button

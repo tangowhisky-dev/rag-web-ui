@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import threading
 from typing import Any, Optional
 
 from fastembed import SparseTextEmbedding
@@ -19,6 +20,7 @@ logger = logging.getLogger(__name__)
 _qdrant_client: Optional[QdrantClient] = None
 _openai_client: Optional[SyncOpenAI] = None
 _sparse_embedder: Optional[SparseTextEmbedding] = None
+_singleton_lock = threading.Lock()
 
 
 def _serialise_doc(doc: Any) -> dict:
@@ -64,8 +66,10 @@ def get_openai_client() -> SyncOpenAI:
 def get_sparse_embedder() -> SparseTextEmbedding:
     global _sparse_embedder
     if _sparse_embedder is None:
-        _sparse_embedder = SparseTextEmbedding(
-            model_name=settings.SPLADE_MODEL,
-            cache_dir=settings.FASTEMBED_CACHE_DIR,
-        )
+        with _singleton_lock:
+            if _sparse_embedder is None:
+                _sparse_embedder = SparseTextEmbedding(
+                    model_name=settings.SPLADE_MODEL,
+                    cache_dir=settings.FASTEMBED_CACHE_DIR,
+                )
     return _sparse_embedder

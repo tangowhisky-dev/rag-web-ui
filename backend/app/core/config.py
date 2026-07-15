@@ -71,11 +71,6 @@ class Settings(BaseSettings):
     # to OPENAI_API_BASE (same server as chat/embeddings).
     OPENAI_VISION_API_BASE: Optional[str] = os.getenv("OPENAI_VISION_API_BASE") or None
 
-    # Reasoning / thinking model — used in "Thinking" answering mode.
-    # Should be a CoT/reasoning-enabled model (e.g. qwq-32b, deepseek-r1).
-    # Falls back to OPENAI_MODEL when unset.
-    REASONING_MODEL: Optional[str] = os.getenv("REASONING_MODEL") or None
-
     DENSE_EMBEDDINGS_MODEL: str = os.getenv("DENSE_EMBEDDINGS_MODEL", "local-embedding-model")
     # Dimension of the dense embedding model output. Must match DENSE_EMBEDDINGS_MODEL.
     # qwen3-embedding-0.6b = 1024, text-embedding-3-small = 1536, text-embedding-ada-002 = 1536
@@ -85,11 +80,6 @@ class Settings(BaseSettings):
     def effective_query_model(self) -> str:
         """Model to use for query rewriting and summarisation. Falls back to OPENAI_MODEL."""
         return self.QUERY_MODEL or self.OPENAI_MODEL
-
-    @property
-    def effective_reasoning_model(self) -> str:
-        """Model to use for the Thinking answering mode. Falls back to OPENAI_MODEL."""
-        return self.REASONING_MODEL or self.OPENAI_MODEL
 
     @property
     def effective_vision_api_base(self) -> str:
@@ -113,25 +103,22 @@ class Settings(BaseSettings):
     )
 
     # JSON string of retrieval config presets per query type.
-    # Each preset: use_dense, use_sparse, use_exact, dense_weight, sparse_weight, exact_weight, top_k
+    # Each preset: dense_weight, sparse_weight, exact_weight, top_k.
+    # Chat-level leg toggles were removed; all globally enabled legs now run.
     RETRIEVAL_CONFIG_PRESETS: str = json.dumps({
         "FACTUAL": {
-            "use_dense": True, "use_sparse": True, "use_exact": True,
             "dense_weight": 0.5, "sparse_weight": 0.3, "exact_weight": 0.2,
             "top_k": 10
         },
         "ENTITY_CENTRIC": {
-            "use_dense": True, "use_sparse": True, "use_exact": True,
             "dense_weight": 0.6, "sparse_weight": 0.2, "exact_weight": 0.2,
             "top_k": 10
         },
         "MULTI_PART": {
-            "use_dense": True, "use_sparse": True, "use_exact": False,
             "dense_weight": 0.5, "sparse_weight": 0.5, "exact_weight": 0.0,
             "top_k": 10
         },
         "AMBIGUOUS": {
-            "use_dense": True, "use_sparse": True, "use_exact": True,
             "dense_weight": 0.4, "sparse_weight": 0.4, "exact_weight": 0.2,
             "top_k": 15
         }
@@ -296,18 +283,11 @@ class Settings(BaseSettings):
     ).lower() == "true"
 
     # ── Autonomous Agentic Agent ──────────────────────────────────────────────
-    # Maximum retry iterations for the autonomous agent loop (supervisor → worker → critic).
-    # Each iteration re-runs the supervisor with critic feedback to adjust the plan.
+    # Maximum retry iterations for the autonomous agent loop.
     AGENT_MAX_ITERATIONS: int = int(os.getenv("AGENT_MAX_ITERATIONS", "3"))
     # Minimum quality score (0-100) for the critic to accept an answer.
-    # Below this threshold, the agent retries with adjusted strategy.
+    # Below this threshold, the answer is emitted as low-confidence.
     AGENT_QUALITY_THRESHOLD: int = int(os.getenv("AGENT_QUALITY_THRESHOLD", "70"))
-    # Enable/disable the autonomous agent mode. When false, falls back to
-    # the existing fast/thinking/agentic pipelines.
-    AGENT_ENABLED: bool = os.getenv("AGENT_ENABLED", "true").lower() == "true"
-    # Optional model override for the supervisor and critic LLM calls.
-    # Falls back to OPENAI_MODEL when unset.
-    AGENT_SUPERVISOR_MODEL: Optional[str] = os.getenv("AGENT_SUPERVISOR_MODEL") or None
 
     @property
     def graphrag_model(self) -> str:

@@ -67,19 +67,11 @@ class ChatBase(BaseModel):
 
 class ChatCreate(ChatBase):
     knowledge_base_ids: List[int]
-    use_graph_rag: bool = False
-    use_dense:     bool = True
-    use_sparse:    bool = True
-    use_exact:     bool = True
 
 
 class ChatUpdate(BaseModel):
     title: Optional[str] = None
     pinned: Optional[bool] = None
-    use_dense: Optional[bool] = None
-    use_sparse: Optional[bool] = None
-    use_exact: Optional[bool] = None
-    use_graph_rag: Optional[bool] = None
     knowledge_base_ids: Optional[List[int]] = None
 
 
@@ -114,10 +106,6 @@ class ChatResponse(ChatBase):
     id: int
     user_id: int
     folder_id: Optional[int] = None
-    use_graph_rag: bool = False
-    use_dense:     bool = True
-    use_sparse:    bool = True
-    use_exact:     bool = True
     pinned:        bool = False
     temperature:   Optional[float] = None
     model_name:    Optional[str] = None

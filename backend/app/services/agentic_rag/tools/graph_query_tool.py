@@ -16,9 +16,12 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 
+from app.services.agentic_rag.retry import with_retry_sync
+
 logger = logging.getLogger(__name__)
 
 
+@with_retry_sync(max_attempts=3)
 def graph_query_tool(
     query: str,
     kb_ids: List[int],

@@ -9,6 +9,7 @@ langchain-core>=0.3.0
 langchain-openai>=0.2.0
 langchain-text-splitters>=0.3.0
 langgraph>=0.2.0
+langgraph-checkpoint-sqlite>=1.0.0
 qdrant-client>=1.9.0
 fastembed>=0.3.0
 BCrypt==4.0.1

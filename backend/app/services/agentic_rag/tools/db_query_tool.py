@@ -23,6 +23,8 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
+from app.services.agentic_rag.retry import with_retry_sync
+
 logger = logging.getLogger(__name__)
 
 # Whitelist: only allow these column and table patterns in SELECT queries.
@@ -42,6 +44,7 @@ _DANGEROUS_RE = re.compile(
 )
 
 
+@with_retry_sync(max_attempts=3)
 def db_query_tool(
     natural_language_query: str,
     kb_ids: List[int],
