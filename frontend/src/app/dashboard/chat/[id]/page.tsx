@@ -66,6 +66,12 @@ interface Message {
   agentSteps?: AgentStep[];
   file_name?: string;  // filename of attached chat file, if any
   file_id?: number;    // chat_files.id — needed for download URL
+  // Final evaluation metrics (from answer_evaluation_node)
+  finalConfidence?: number;
+  finalConfidenceLevel?: "very_high" | "high" | "medium" | "low" | "none";
+  retrievalConfidence?: number;
+  faithfulness?: number;
+  completeness?: number;
 }
 
 interface ChatMessage {
@@ -603,16 +609,27 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     // d: done — replace client-side UUID with server-side integer messageId
     if (trimmedLine.startsWith("d:")) {
       try {
-        const payload = JSON.parse(trimmedLine.slice(2)) as { messageId?: number };
-        if (payload.messageId != null) {
-          setMessages((prev) =>
-            prev.map((message) =>
-              message.id === assistantId
-                ? { ...message, id: payload.messageId!.toString() } as Message
-                : message
-            )
-          );
-        }
+        const payload = JSON.parse(trimmedLine.slice(2)) as {
+          messageId?: number;
+          final_confidence?: number;
+          confidence_level?: string;
+          faithfulness?: number;
+          completeness?: number;
+        };
+        setMessages((prev) =>
+          prev.map((message) =>
+            message.id === assistantId
+              ? {
+                  ...message,
+                  id: payload.messageId!.toString(),
+                  finalConfidence: payload.final_confidence,
+                  finalConfidenceLevel: payload.confidence_level as Message["finalConfidenceLevel"],
+                  faithfulness: payload.faithfulness,
+                  completeness: payload.completeness,
+                }
+              : message
+          )
+        );
       } catch (e) {
         console.error("Failed to parse done event:", e);
       }

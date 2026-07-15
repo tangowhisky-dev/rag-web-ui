@@ -440,17 +440,39 @@ const CONFIDENCE_COLORS: Record<ConfidenceLevel, { bar: string; text: string; bg
   none:      { bar: "bg-[hsl(var(--confidence-none))]",      text: "text-[hsl(var(--confidence-none))]",      bg: "bg-[hsl(var(--confidence-none)/10%)]",       border: "border-[hsl(var(--confidence-none)/30%)]"      },
 };
 
+// Threshold for showing retry icon (final_confidence < 0.4)
+const RETRY_THRESHOLD = 0.4;
+
 const ConfidenceCollapsible: FC<{
   level: ConfidenceLevel;
   score?: number;
   suggestion?: string | null;
   breakdown?: Record<string, unknown>;
-}> = ({ level, score, suggestion, breakdown }) => {
+  // Final evaluation metrics
+  finalConfidence?: number;
+  finalConfidenceLevel?: ConfidenceLevel;
+  retrievalConfidence?: number;
+  faithfulness?: number;
+  completeness?: number;
+  failedLegs?: string[];
+}> = ({
+  level,
+  score,
+  suggestion,
+  breakdown,
+  finalConfidence,
+  finalConfidenceLevel,
+  retrievalConfidence,
+  faithfulness,
+  completeness,
+  failedLegs,
+}) => {
   const [open, setOpen] = useState(false);
   const cfg = CONFIDENCE_COLORS[level];
   const label = CONFIDENCE_CONFIG[level].label;
   // score is 0-100 from the DB (not 0-1 decimal)
   const pct = score !== undefined ? Math.min(100, Math.max(0, score)) : 0;
+  const showRetry = finalConfidence !== undefined && finalConfidence < RETRY_THRESHOLD;
 
   return (
     <div className={`rounded-md border ${cfg.border} ${cfg.bg} text-xs not-prose`}>
@@ -474,11 +496,77 @@ const ConfidenceCollapsible: FC<{
             style={{ width: `${pct}%` }}
           />
         </div>
+        {/* retry icon — shown when final confidence is below threshold */}
+        {showRetry && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              // Trigger retry — parent component can listen for this
+              setOpen(false);
+            }}
+            className="shrink-0 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors"
+            title="Retry with relaxed parameters"
+          >
+            <RefreshCw className="h-3 w-3" />
+          </button>
+        )}
       </button>
 
       {/* expanded body */}
       {open && (
-        <div className={`px-3 pb-2 pt-1 border-t ${cfg.border} space-y-1`}>
+        <div className={`px-3 pb-2 pt-1 border-t ${cfg.border} space-y-2`}>
+          {/* Final evaluation metrics */}
+          {(finalConfidence !== undefined || faithfulness !== undefined || completeness !== undefined) && (
+            <div className="space-y-1">
+              <p className={`text-[10px] font-semibold uppercase tracking-wide ${cfg.text} opacity-60`}>
+                Final Evaluation
+              </p>
+              <div className="space-y-1">
+                {finalConfidence !== undefined && (
+                  <div className="flex justify-between gap-4">
+                    <span className="text-zinc-500 dark:text-zinc-400">Final confidence</span>
+                    <span className={`font-medium ${cfg.text}`}>
+                      {Math.round(finalConfidence * 100)}/100 ({finalConfidenceLevel ?? level})
+                    </span>
+                  </div>
+                )}
+                {faithfulness !== undefined && (
+                  <div className="flex justify-between gap-4">
+                    <span className="text-zinc-500 dark:text-zinc-400">Faithfulness</span>
+                    <span className={`font-medium ${cfg.text}`}>{faithfulness}/100</span>
+                  </div>
+                )}
+                {completeness !== undefined && (
+                  <div className="flex justify-between gap-4">
+                    <span className="text-zinc-500 dark:text-zinc-400">Completeness</span>
+                    <span className={`font-medium ${cfg.text}`}>{completeness}/100</span>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Retrieval confidence */}
+          {retrievalConfidence !== undefined && (
+            <div className="space-y-1">
+              <p className={`text-[10px] font-semibold uppercase tracking-wide ${cfg.text} opacity-60`}>
+                Retrieval Quality
+              </p>
+              <div className="flex justify-between gap-4">
+                <span className="text-zinc-500 dark:text-zinc-400">Retrieval confidence</span>
+                <span className={`font-medium ${cfg.text}`}>{Math.round(retrievalConfidence * 100)}/100</span>
+              </div>
+            </div>
+          )}
+
+          {/* Failed legs */}
+          {failedLegs && failedLegs.length > 0 && (
+            <div className="flex items-center gap-1.5 rounded border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 px-2 py-1 text-[10px] text-amber-700 dark:text-amber-400">
+              <span>⚠</span>
+              <span>Retrieval leg{failedLegs.length > 1 ? "s" : ""} failed: {failedLegs.map(l => l).join(", ")}</span>
+            </div>
+          )}
+
           {suggestion && (
             <p className={`${cfg.text} opacity-80`}>{suggestion}</p>
           )}
@@ -598,6 +686,12 @@ export const Answer: FC<{
   synthesisMode?: boolean;
   isStreaming?: boolean;
   onDelete?: (id: string) => void;
+  // Final evaluation metrics (from answer_evaluation_node)
+  finalConfidence?: number;
+  finalConfidenceLevel?: "very_high" | "high" | "medium" | "low" | "none";
+  retrievalConfidence?: number;
+  faithfulness?: number;
+  completeness?: number;
 }> = ({ messageId, chatId, markdown, citations = [], rewrittenQuery, retrievedContext, confidence, confidenceScore, confidenceBreakdown, suggestion, failedLegs, queryClassification, toolTrace, agentSteps, taskList, synthesisMode, isStreaming = false, onDelete }) => {
   const [citationInfoMap, setCitationInfoMap] = useState<
     Record<string, CitationInfo>
@@ -1086,6 +1180,12 @@ export const Answer: FC<{
                 score={confidenceScore}
                 suggestion={suggestion}
                 breakdown={confidenceBreakdown}
+                finalConfidence={finalConfidence}
+                finalConfidenceLevel={finalConfidenceLevel}
+                retrievalConfidence={retrievalConfidence}
+                faithfulness={faithfulness}
+                completeness={completeness}
+                failedLegs={failedLegs}
               />
             )}
             {generateAnswerLatencyMs !== null && (
