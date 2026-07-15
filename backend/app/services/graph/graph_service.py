@@ -558,27 +558,40 @@ def expand_docs_via_graph(
         driver = _get_driver()
         collections = [f"kb_{kb_id}" for kb_id in kb_ids]
 
-        # Traverse the graph: found_chunk → entity → entity → connected_chunk
+        # Build dynamic path pattern for GRAPHRAG_RETRIEVAL_HOPS hops.
+        # 1 hop: (c)<-[:FROM_CHUNK]-(e)-[:FROM_CHUNK]->(c2)
+        # 2 hops: (c)<-[:FROM_CHUNK]-(e1)-[r1]-(e2)-[:FROM_CHUNK]->(c2)
+        # N hops: chain of N entity nodes with N-1 relationships
+        hops = max(1, settings.GRAPHRAG_RETRIEVAL_HOPS)
+        if hops == 1:
+            path_pattern = "(c)<-[:FROM_CHUNK]-(e)-[:FROM_CHUNK]->(c2)"
+        else:
+            parts = ["(c)<-[:FROM_CHUNK]-(e1)"]
+            for i in range(2, hops + 1):
+                parts.append(f"-[r{i - 1}]-(e{i})")
+            parts.append(f"-[:FROM_CHUNK]->(c2)")
+            path_pattern = " ".join(parts)
+
+        # Traverse from seed chunks via entity relationships to connected chunks.
         # Return qdrant_point_id + qdrant_collection of chunks NOT already seen.
         with driver.session() as session:
             result = session.run(
-                """
+                f"""
                 MATCH (c:Chunk)
                 WHERE c.qdrant_point_id IN $seen_ids
                   AND c.qdrant_collection IN $collections
-                MATCH (c)<-[:FROM_CHUNK]-(e)-[r]-(e2)-[:FROM_CHUNK]->(c2:Chunk)
+                MATCH {path_pattern}
                 WHERE c2.qdrant_point_id IS NOT NULL
                   AND NOT c2.qdrant_point_id IN $seen_ids
                   AND c2.qdrant_collection IN $collections
                 RETURN DISTINCT c2.qdrant_point_id AS point_id,
                                 c2.qdrant_collection AS collection
-                LIMIT 40
+                LIMIT $limit
                 """,
                 seen_ids=list(seen_point_ids),
                 collections=collections,
+                limit=max(1, settings.GRAPHRAG_RETRIEVAL_LIMIT),
             )
-            expansion_targets = [(r["point_id"], r["collection"]) for r in result]
-
         if not expansion_targets:
             logger.debug("GraphService.expand: no graph-connected chunks found beyond current result set")
             return []

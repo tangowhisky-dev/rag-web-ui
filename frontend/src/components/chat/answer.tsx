@@ -444,7 +444,7 @@ const CONFIDENCE_COLORS: Record<ConfidenceLevel, { bar: string; text: string; bg
 const RETRY_THRESHOLD = 0.4;
 
 const ConfidenceCollapsible: FC<{
-  level: ConfidenceLevel;
+  level?: ConfidenceLevel;
   score?: number;
   suggestion?: string | null;
   // Final evaluation metrics
@@ -467,7 +467,7 @@ const ConfidenceCollapsible: FC<{
 
   // Collapsed form: use final confidence if available, fall back to retrieval confidence
   const displayConfidence = finalConfidence !== undefined ? finalConfidence : (score !== undefined ? score / 100 : 0);
-  const displayLevel = finalConfidenceLevel ?? level;
+  const displayLevel = finalConfidenceLevel ?? level ?? "medium";
   const displayPct = Math.min(100, Math.max(0, Math.round(displayConfidence * 100)));
   const cfg = CONFIDENCE_COLORS[displayLevel];
   const label = CONFIDENCE_CONFIG[displayLevel].label;
@@ -1160,9 +1160,9 @@ export const Answer: FC<{
 
           {/* Right: confidence + speed */}
           <div className="flex-1 min-w-0 max-w-xs flex flex-col gap-1.5">
-            {confidence && confidence !== "none" && (
+            {((confidence && confidence !== "none") || finalConfidence !== undefined) && (
               <ConfidenceCollapsible
-                level={confidence}
+                level={confidence ?? "medium"}
                 score={confidenceScore}
                 suggestion={suggestion}
                 finalConfidence={finalConfidence}

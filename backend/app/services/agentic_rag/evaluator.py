@@ -5,7 +5,6 @@ Returns structured quality metrics that can be displayed in the UI.
 """
 
 from __future__ import annotations
-
 import json
 import logging
 import re
@@ -57,13 +56,35 @@ class AnswerEvaluation:
 
 
 def _parse_evaluation_response(raw: str) -> AnswerEvaluation:
-    """Parse the LLM evaluation response into an AnswerEvaluation object."""
-    try:
-        m = re.search(r'\{.*\}', raw, re.DOTALL)
-        if not m:
-            return _default_evaluation(f"Failed to parse evaluation: {raw[:100]}")
+    """Parse the LLM evaluation response into an AnswerEvaluation object.
 
-        data = json.loads(m.group(0))
+    Handles common LLM output issues: markdown fences, trailing text,
+    truncation at max_tokens, and malformed JSON.
+    """
+    try:
+        text = raw.strip()
+
+        # Strip markdown code fences if present
+        if text.startswith("```"):
+            lines = text.splitlines()
+            lines = lines[1:] if lines else lines
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+
+        # Extract JSON object from response
+        start = text.find("{")
+        if start < 0:
+            raise ValueError("No JSON object found")
+
+        # Try the full {…} block first, then progressively shorter suffixes
+        end = text.rfind("}")
+        if end > start:
+            text = text[start : end + 1]
+        else:
+            raise ValueError("No closing brace found")
+
+        data = _try_json_loads(text)
         return AnswerEvaluation(
             faithfulness=int(data.get("faithfulness", 50)),
             completeness=int(data.get("completeness", 50)),
@@ -73,8 +94,61 @@ def _parse_evaluation_response(raw: str) -> AnswerEvaluation:
             raw_response=raw,
         )
     except Exception as exc:
-        logger.warning("[EVAL] parse failed: %s", exc)
+        logger.warning("[EVAL] parse failed: %s | response=%r", exc, raw[:500])
         return _default_evaluation(f"Parse error: {exc}")
+
+
+def _try_json_loads(text: str) -> dict:
+    """Attempt to parse JSON, with progressive repair for truncated/malformed output.
+
+    LLM responses often fail initial parsing due to:
+    - Truncation at max_tokens boundary
+    - Trailing text after the JSON object
+    - Unescaped special characters
+
+    Strategy: try the full text first, then progressively strip content
+    from the end until parsing succeeds.
+    """
+    # Fast path: try direct parse
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Strategy 1: Walk from the end, trimming trailing content.
+    # Use coarser steps first, then finer steps near the closing brace.
+    max_len = len(text)
+    for cut in range(max_len - 1, 0, -2):
+        candidate = text[:cut].rstrip()
+        if not candidate.endswith("}"):
+            continue
+        try:
+            return json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # Strategy 2: Find the innermost {…} block (heavily truncated case)
+    inner_start = text.rfind("{")
+    inner_end = text.rfind("}")
+    if inner_end > inner_start:
+        candidate = text[inner_start : inner_end + 1]
+        try:
+            return json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # Strategy 3: Strip to the outermost {…} block
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        candidate = text[start : end + 1]
+        try:
+            return json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # Give up — let the caller handle the exception
+    raise ValueError(f"Could not parse JSON from {len(text)}-char response")
 
 
 def _default_evaluation(error: str = "") -> AnswerEvaluation:
@@ -133,7 +207,7 @@ Evaluate the quality of this answer based on the retrieved context.
                 {"role": "system", "content": EVALUATION_SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
-            max_tokens=200,
+            max_tokens=1000,
             temperature=0,
             stream=False,
             extra_body={"thinking": {"type": "disabled"}},

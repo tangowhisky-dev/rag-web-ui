@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+import asyncio
 from typing import Any, AsyncGenerator, List, Optional
 
 from langchain_core.messages import HumanMessage, AIMessage
@@ -100,159 +101,181 @@ async def run_agentic_rag(
         return tasks
 
     try:
-        async for event in graph.astream_events(initial_state, config=config, version="v2"):
-            event_type = event.get("event", "")
-            name = event.get("name", "")
-            data = event.get("data", {})
+        # ── LangGraph v3: concurrent projections ──────────────────────
+        # stream.messages  → AsyncChatModelStream (iterate to get dict chunks)
+        # stream.subgraphs → subgraph lifecycle (agent_subgraph start/done)
+        # stream.values    → state snapshots (dict)
+        # stream.output    → final state after completion
+        stream = await graph.astream_events(initial_state, config=config, version="v3")
 
-            # ── Task list: emit after classify_query to show subtasks ────
-            if event_type == "on_chain_end" and name == "classify_query":
-                output = data.get("output", {}) or {}
-                subtasks = output.get("subtasks", [])
-                if isinstance(subtasks, list) and len(subtasks) > 1:
-                    _task_texts = subtasks
-                    _completed_subtasks = 0
-                    yield {"event": "task_list", "tasks": _make_task_list(_task_texts, 0)}
+        q = asyncio.Queue()
+        all_docs: List[dict] = []
+        interrupted = False
 
-            # ── Task list: update as each agent_subgraph (subtask) finishes ─
-            if event_type == "on_chain_end" and name == "agent_subgraph" and _task_texts:
-                _completed_subtasks = min(_completed_subtasks + 1, len(_task_texts))
-                yield {"event": "task_list", "tasks": _make_task_list(_task_texts, _completed_subtasks)}
+        async def _tok():
+            """Read LLM token deltas from the generating node only."""
+            async for msg_proj in stream.messages:
+                if msg_proj.node != "generating":
+                    continue
+                async for chunk in msg_proj:
+                    if isinstance(chunk, dict) and chunk.get('event') == 'content-block-delta':
+                        delta = chunk.get('delta', {})
+                        if delta.get('type') == 'text-delta':
+                            text = delta.get('text', '')
+                            if text:
+                                await q.put({"event": "token", "content": text})
 
-            # ── Clarification interrupt: only check when classify_query ends ─
-            # (aget_state is expensive; no need to call it for every node end)
-            if event_type == "on_chain_end" and name == "classify_query" and not interrupted:
-                try:
-                    graph_state = await graph.aget_state(config)
-                    if (
-                        hasattr(graph_state, "next")
-                        and graph_state.next
-                        and "request_clarification" in graph_state.next
-                    ):
-                        interrupted = True
-                        logger.info("[GRAPH] interrupted for clarification")
-                        msgs = getattr(graph_state, "values", {}).get("messages", [])
-                        clarification_msg = msgs[-1].content if msgs else "Please provide clarification."
-                        yield {"event": "progress", "phase": "clarification", "message": clarification_msg}
-                except Exception:
-                    pass
+        async def _sub():
+            """Read subgraph lifecycle events."""
+            nonlocal _completed_subtasks
+            async for sub in stream.subgraphs:
+                status = getattr(sub, 'status', '')
+                gname = getattr(sub, 'graph_name', '')
+                if gname == 'agent_subgraph':
+                    await q.put({"event": "agent_step", "node": "agent_subgraph", "status": "active" if status == "started" else "done", "latency_ms": 0})
+                    if status == "started" and _task_texts:
+                        _completed_subtasks = 0
+                        await q.put({"event": "task_list", "tasks": _make_task_list(_task_texts, 0)})
+                    elif status == "done" and _task_texts:
+                        _completed_subtasks = min(_completed_subtasks + 1, len(_task_texts))
+                        await q.put({"event": "task_list", "tasks": _make_task_list(_task_texts, _completed_subtasks)})
 
-            # ── Agent step events (node start / finish) ───────────────
-            _STEP_NODES = frozenset((
-                "load_historical_memory", "summarize_history",
-                "rewrite_query", "classify_query", "request_clarification",
-                "rewrite_subtask_query",
-                "dense_retrieval", "sparse_retrieval", "exact_retrieval",
-                "merge", "sufficiency_check", "graph_expansion",
-                "reranking", "adaptive_reranking", "collect_context",
-                "prepare_final_context", "generating", "chart_validation",
-                "answer_evaluation", "finalize_answer",
-            ))
-            if name in _STEP_NODES:
-                if event_type == "on_chain_start":
-                    yield {"event": "agent_step", "node": name, "status": "active", "latency_ms": 0}
-                elif event_type == "on_chain_end":
-                    yield {"event": "agent_step", "node": name, "status": "done", "latency_ms": 0}
+        async def _val():
+            """Read state snapshots from stream.values."""
+            async for snapshot in stream.values:
+                if not isinstance(snapshot, dict):
+                    continue
+                rd = snapshot.get("retrieved_docs", [])
+                if rd:
+                    all_docs.extend(rd)
+                    conf = snapshot.get("retrieval_confidence", 0.0)
+                    synthesis = len(snapshot.get("subtask_answers", [])) > 1
+                    await q.put({
+                        "event": "context",
+                        "docs": all_docs,
+                        "confidence": "high" if conf > 0.7 else "medium" if conf > 0.3 else "low",
+                        "score": int(conf * 100),
+                        "synthesis_mode": synthesis,
+                    })
 
-            # ── LLM token streaming ───────────────────────────────────
-            # LangChain 1.x emits on_chat_model_stream (not on_llm_stream).
-            # Content lives in data["chunk"].content; handle both str and list.
-            if event_type == "on_chat_model_stream":
-                chunk = data.get("chunk")
-                raw = getattr(chunk, "content", "") if chunk else ""
-                if isinstance(raw, list):
-                    # Some models return [{"type": "text", "text": "..."}]
-                    content = "".join(
-                        b.get("text", "") if isinstance(b, dict) else str(b)
-                        for b in raw
-                    )
-                else:
-                    content = raw or ""
-                if content:
-                    yield {"event": "token", "content": content}
+        async def _raw():
+            """Read raw lifecycle protocol events."""
+            nonlocal interrupted
+            async for event in stream:
+                method = event.get("method", "")
+                ns = event.get("params", {}).get("namespace", [])
+                pd = event.get("params", {}).get("data", {})
+                name = ns[0] if ns else ""
+                if method == "lifecycle":
+                    et = pd.get("event", "") if isinstance(pd, dict) else ""
+                    _SN = frozenset((
+                        "load_historical_memory","summarize_history",
+                        "rewrite_query","classify_query","request_clarification",
+                        "rewrite_subtask_query",
+                        "dense_retrieval","sparse_retrieval","exact_retrieval",
+                        "merge","sufficiency_check","graph_expansion",
+                        "reranking","adaptive_reranking","collect_context",
+                        "prepare_final_context","generating","chart_validation",
+                        "answer_evaluation","finalize_answer",
+                    ))
+                    if name in _SN:
+                        await q.put({"event": "agent_step", "node": name, "status": "active" if et == "started" else "done", "latency_ms": 0})
+                    if name == "classify_query" and et == "ended":
+                        out = pd.get("output", {}) if isinstance(pd, dict) else {}
+                        if isinstance(out, dict):
+                            subtasks = out.get("subtasks", [])
+                            if isinstance(subtasks, list) and len(subtasks) > 1:
+                                _task_texts.extend(subtasks)
+                                await q.put({"event": "task_list", "tasks": _make_task_list(_task_texts, 0)})
+                        if not interrupted:
+                            try:
+                                gs = await graph.aget_state(config)
+                                if hasattr(gs, "next") and gs.next and "request_clarification" in gs.next:
+                                    interrupted = True
+                                    msgs = getattr(gs, "values", {}).get("messages", [])
+                                    mc = msgs[-1].content if msgs else "Please provide clarification."
+                                    if isinstance(mc, list):
+                                        mc = str(mc)
+                                    await q.put({"event": "progress", "phase": "clarification", "message": mc})
+                            except Exception:
+                                pass
 
-        # ── Extract final state from the graph ──────────────────────
-        final_state = await graph.aget_state(config)
-        if isinstance(final_state, dict):
-            state = final_state.get("values", final_state) if isinstance(final_state.get("values"), dict) else final_state
-        else:
-            # StateSnapshot (from aget_state) has a .values attribute that
-            # is a dict of all state fields.
-            state = getattr(final_state, "values", {})
-            if not isinstance(state, dict):
-                state = {}
-
-        # ── Emit retrieved context (docs + confidence) ───────────────
-        retrieved_docs = state.get("retrieved_docs", [])
-        if retrieved_docs:
-            all_docs.extend(retrieved_docs)
-        conf = state.get("retrieval_confidence", 0.0)
-        conf_level = "high" if conf > 0.7 else ("medium" if conf > 0.3 else "low")
-        is_synthesis = len(state.get("subtask_answers", [])) > 1
-        if all_docs:
-            yield {
-                "event": "context",
-                "docs": all_docs,
-                "confidence": conf_level,
-                "score": int(conf * 100),
-                "synthesis_mode": is_synthesis,
+        async def _out():
+            """Read final state and emit done/evaluation."""
+            nonlocal all_docs
+            fs = await stream.output()
+            st = fs if isinstance(fs, dict) else getattr(fs, "values", {})
+            if not isinstance(st, dict):
+                st = {}
+            fa_raw = st.get("final_answer") or st.get("answer", "")
+            # Convert list content (multimodal messages) to string
+            if isinstance(fa_raw, list):
+                fa = "".join(
+                    part.get("text", "") if isinstance(part, dict) and part.get("type") == "text" else ""
+                    for part in fa_raw
+                )
+            else:
+                fa = str(fa_raw) if fa_raw else ""
+            # Handle list-type final_answer (from chat messages)
+            if isinstance(fa, list):
+                fa = ''.join(
+                    p.get('text', '') if isinstance(p, dict) else str(p)
+                    for p in fa
+                )
+            elif not isinstance(fa, str):
+                fa = str(fa) if fa else ""
+            conf = st.get("retrieval_confidence", 0.0)
+            usage = {
+                "promptTokens": 0, "completionTokens": 0,
+                "final_confidence": st.get("final_confidence", 0.0),
+                "confidence_level": st.get("confidence_level", "none"),
+                "faithfulness": st.get("faithfulness", 0),
+                "completeness": st.get("completeness", 0),
             }
+            if fa and not all_docs:
+                await q.put({"event": "token", "content": fa})
+            if settings.ANSWER_QUALITY_GRADING_ENABLED and fa and all_docs:
+                try:
+                    ct = format_context_string(all_docs, st.get("file_markdown"))
+                    cle = "very_high" if conf > 0.8 else "high" if conf > 0.6 else "medium" if conf > 0.3 else "low"
+                    ev = await evaluate_answer(query=st.get("original_query", ""), answer=fa, context_preview=ct, confidence_level=cle)
+                    usage["evaluation"] = {
+                        "faithfulness": ev.faithfulness, "completeness": ev.completeness,
+                        "citation_quality": ev.citation_quality, "confidence_match": ev.confidence_match, "flags": ev.flags,
+                    }
+                    await q.put({"event": "evaluation", "faithfulness": ev.faithfulness, "completeness": ev.completeness, "citation_quality": ev.citation_quality, "confidence_match": ev.confidence_match, "flags": ev.flags})
+                    logger.info("[EVAL] answer_quality=%s", summarize_evaluation(ev))
+                except Exception as exc:
+                    logger.warning("[EVAL] evaluation skipped: %s", exc)
+            await q.put({"event": "done", "full_response": fa, "usage": usage})
 
-        # ── Final answer ─────────────────────────────────────────────
-        final_answer = state.get("final_answer") or state.get("answer", "")
-        usage = {
-            "promptTokens": 0,
-            "completionTokens": 0,
-            "final_confidence": state.get("final_confidence", 0.0),
-            "confidence_level": state.get("confidence_level", "none"),
-            "faithfulness": state.get("faithfulness", 0),
-            "completeness": state.get("completeness", 0),
-        }
+        # Launch all projections concurrently
+        t1 = asyncio.create_task(_tok())
+        t2 = asyncio.create_task(_sub())
+        t3 = asyncio.create_task(_val())
+        t4 = asyncio.create_task(_raw())
+        t5 = asyncio.create_task(_out())
 
-        # If nothing was streamed (e.g., no docs or generation disabled) but
-        # a final answer exists, emit it as a single token.
-        if final_answer and not all_docs:
-            yield {"event": "token", "content": final_answer}
-
-        # ── Optional post-hoc answer quality evaluation ────────────────
-        # Note: evaluation is now done inside the graph via answer_evaluation_node.
-        # This block is kept for legacy external evaluation (e.g. eval endpoint).
-        if settings.ANSWER_QUALITY_GRADING_ENABLED and final_answer and all_docs:
+        # Drain queue: yield items as they arrive from any projection
+        tasks = [t1, t2, t3, t4, t5]
+        while tasks:
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            tasks = [t for t in tasks if t not in done]
+            while not q.empty():
+                try:
+                    item = q.get_nowait()
+                    if item:
+                        yield item
+                except asyncio.QueueEmpty:
+                    break
+        # Final drain after all tasks done
+        while not q.empty():
             try:
-                from .evaluator import evaluate_answer, summarize_evaluation
-                from .utils import format_context_string
-                context_text = format_context_string(all_docs, state.get("file_markdown"))
-                conf_level_eval = (
-                    "very_high" if conf > 0.8 else
-                    "high"      if conf > 0.6 else
-                    "medium"    if conf > 0.3 else "low"
-                )
-                evaluation = await evaluate_answer(
-                    query=state.get("original_query", ""),
-                    answer=final_answer,
-                    context_preview=context_text,
-                    confidence_level=conf_level_eval,
-                )
-                usage["evaluation"] = {
-                    "faithfulness": evaluation.faithfulness,
-                    "completeness": evaluation.completeness,
-                    "citation_quality": evaluation.citation_quality,
-                    "confidence_match": evaluation.confidence_match,
-                    "flags": evaluation.flags,
-                }
-                yield {
-                    "event": "evaluation",
-                    "faithfulness": evaluation.faithfulness,
-                    "completeness": evaluation.completeness,
-                    "citation_quality": evaluation.citation_quality,
-                    "confidence_match": evaluation.confidence_match,
-                    "flags": evaluation.flags,
-                }
-                logger.info("[EVAL] answer_quality=%s", summarize_evaluation(evaluation))
-            except Exception as exc:
-                logger.warning("[EVAL] evaluation skipped: %s", exc)
-
-        yield {"event": "done", "full_response": final_answer, "usage": usage}
+                item = q.get_nowait()
+                if item:
+                    yield item
+            except asyncio.QueueEmpty:
+                break
 
     except Exception as exc:
         logger.error("[GRAPH] pipeline failed: %s", exc, exc_info=True)

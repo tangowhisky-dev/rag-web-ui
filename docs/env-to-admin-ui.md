@@ -119,7 +119,7 @@ These parameters are **per-organisation** — each org in a multi-tenant setup c
 | # | .env Variable | Current Default | Suggested Admin UI | Notes |
 |---|---------------|-----------------|--------------------|-------|
 | 1 | `GRAPHRAG_ENABLED` | `true` | **GraphRAG** tab | Enable/disable graph extraction |
-| 2 | `GRAPHRAG_RETRIEVAL_HOPS` | `2` | **GraphRAG** tab | Relationship hops |
+| 2 | `GRAPHRAG_RETRIEVAL_HOPS` | `1` | **GraphRAG** tab | Relationship hops |
 | 3 | `GRAPHRAG_MAX_CHUNKS` | `0` | **GraphRAG** tab | Max chunks per doc for graph extraction (0 = no limit) |
 | 4 | `NEO4J_LLM_CONTEXT` | `24000` | **GraphRAG** tab | Context window budget for graph LLM |
 

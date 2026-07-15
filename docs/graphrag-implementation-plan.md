@@ -73,7 +73,7 @@ GRAPHRAG_LLM=qwen/qwen3.5-4b
 GRAPHRAG_MAX_CHUNKS=300
 
 # Hop limit for entity traversal at query time
-GRAPHRAG_RETRIEVAL_HOPS=2
+GRAPHRAG_RETRIEVAL_HOPS=1
 
 # Per-retrieval enable/disable toggle (separate from GRAPHRAG_ENABLED)
 RETRIEVAL_GRAPH_ENABLED=true

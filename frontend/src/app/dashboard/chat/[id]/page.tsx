@@ -738,7 +738,8 @@ function ChatPageInner({ params }: { params: { id: string } }) {
           hasTokenLines = true;
         }
       }
-      if (hasTokenLines) await flushToBrowser();
+      // Always flush so UI updates progressively between agent steps
+      await flushToBrowser();
     }
 
     if (buffer.trim()) {
@@ -1065,6 +1066,10 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                           synthesisMode={message.synthesisMode}
                           isStreaming={isLoading && message.id === lastAssistantId}
                           onDelete={(id) => setMessages((prev) => prev.filter((m) => m.id !== id))}
+                          finalConfidence={message.finalConfidence}
+                          finalConfidenceLevel={message.finalConfidenceLevel}
+                          faithfulness={message.faithfulness}
+                          completeness={message.completeness}
                         />
                       )}
                     </div>

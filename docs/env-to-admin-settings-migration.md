@@ -72,7 +72,7 @@ The project already has a partial precedent: `OrgLLMConfig` (stored in the `org_
 | 54 | `GRAPHRAG_ENABLED` | bool | `true` | App-wide (UI) |
 | 55 | `GRAPHRAG_LLM` | str | `None` | App-wide (UI) |
 | 56 | `RETRIEVAL_GRAPH_ENABLED` | bool | `true` | App-wide (UI) |
-| 57 | `GRAPHRAG_RETRIEVAL_HOPS` | int | `2` | App-wide (UI) |
+| 57 | `GRAPHRAG_RETRIEVAL_HOPS` | int | `1` | App-wide (UI) |
 | 58 | `GRAPHRAG_MAX_CHUNKS` | int | `0` | App-wide (UI) |
 | 59 | `NEO4J_LLM_CONTEXT` | int | `12000` | App-wide (UI) |
 | 60 | `ENTITY_AWARE_ENABLED` | bool | `true` | App-wide (UI) |

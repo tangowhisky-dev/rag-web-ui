@@ -73,3 +73,19 @@ def get_sparse_embedder() -> SparseTextEmbedding:
                     cache_dir=settings.FASTEMBED_CACHE_DIR,
                 )
     return _sparse_embedder
+
+
+def preload_sparse_embedder() -> None:
+    """Eagerly load the SPLADE sparse embedder at app startup.
+
+    Safe to call even if the embedder was already loaded (lazy path).
+    On failure, logs a warning but does not raise — the lazy path
+    will still attempt to load on first use.
+    """
+    try:
+        get_sparse_embedder()
+        logger.info("Sparse embedder loaded: %s", settings.SPLADE_MODEL)
+    except Exception as exc:
+        logger.warning("Sparse embedder preload failed (will retry on first use): %s", exc)
+
+

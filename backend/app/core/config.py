@@ -148,6 +148,13 @@ class Settings(BaseSettings):
     # Set to 0.0 to disable filtering.
     RETRIEVAL_MIN_RRF_SCORE: float = float(os.getenv("RETRIEVAL_MIN_RRF_SCORE", "0.005"))
 
+    # Minimum score per retrieval leg. Docs below their leg's threshold are
+    # dropped before merge — prevents clearly irrelevant results from consuming
+    # cross-encoder compute and polluting the LLM context. Set to 0.0 to disable.
+    DENSE_MIN_SCORE: float = float(os.getenv("DENSE_MIN_SCORE", "0.5"))
+    EXACT_MIN_SCORE: float = float(os.getenv("EXACT_MIN_SCORE", "5.0"))
+    SPARSE_MIN_SCORE: float = float(os.getenv("SPARSE_MIN_SCORE", "5.0"))
+
     # ── Cross-encoder reranker ───────────────────────────────────────────────────
     # When enabled, the top-K RRF candidates are re-scored by a dedicated
     # cross-encoder model and re-ordered by relevance score before being passed
@@ -232,7 +239,8 @@ class Settings(BaseSettings):
     RETRIEVAL_GRAPH_ENABLED: bool = os.getenv("RETRIEVAL_GRAPH_ENABLED", "true").lower() == "true"
 
     # Number of graph hops to traverse from seed nodes at query time.
-    GRAPHRAG_RETRIEVAL_HOPS: int = int(os.getenv("GRAPHRAG_RETRIEVAL_HOPS", "2"))
+    GRAPHRAG_RETRIEVAL_HOPS: int = int(os.getenv("GRAPHRAG_RETRIEVAL_HOPS", "1"))
+    GRAPHRAG_RETRIEVAL_LIMIT: int = int(os.getenv("GRAPHRAG_RETRIEVAL_LIMIT", "20"))
 
     # Maximum number of chunks to run graph extraction on per document.
     # Chunks beyond this limit are skipped for graph extraction but still

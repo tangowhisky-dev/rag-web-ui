@@ -4,9 +4,10 @@ Two-level architecture:
   Main graph:  START → summarize_history → rewrite → classify → [clarification | Send(agent, ...)]
                → prepare_final_context → generate → [chart_validation →] answer_evaluation
                → finalize_answer → END
-  Agent subgraph: START → rewrite_subtask_query → dense → sparse → exact → merge
-                        → sufficiency_check → [graph_expansion →] reranking
-                        → adaptive_reranking → collect_context → END
+  Agent subgraph: START → rewrite_subtask_query → exact → sparse → dense
+                        → merge → neo4j_expansion → reranking(-inf) → filter(-2.0)
+                        → sufficiency_check → [adaptive_reranking(-5.0)]
+                        → collect_context → END
 
 Subagents are retrieval-only: they return ranked contexts. The main orchestrator
 aggregates all subtask contexts and generates/validates the final answer once.
@@ -37,14 +38,15 @@ from .nodes import (
     sparse_retrieval_node,
     exact_retrieval_node,
     merge_node,
+    neo4j_expansion_node,
     reranking_node,
-    graph_expansion_node,
+    filter_node,
+    sufficiency_check_node,
+    adaptive_reranking_node,
     collect_context_node,
     prepare_final_context_node,
     finalize_answer_node,
-    sufficiency_check_node,
     generating_node,
-    adaptive_reranking_node,
     chart_validation_node,
     summarize_history_node,
     answer_evaluation_node,
@@ -56,33 +58,26 @@ from .nodes import (
 # ---------------------------------------------------------------------------
 
 def route_after_classify(state: AgentState) -> list[Send] | str:
-    """Decide which path to take after classification.
-    
-    Returns a list of Send objects for parallel independent subtask fan-out,
-    a list of sequential Send objects for dependent subtasks, or a string
-    for simple queries / clarification.
-    """
+    """Decide which path to take after classification."""
     if not state.get("question_is_clear", True):
         return "request_clarification"
-    
+
     subtasks = state.get("subtasks", [])
     subtask_independence = state.get("subtask_independence", [True] * len(subtasks))
-    
+
     if len(subtasks) > 1:
-        # Separate independent vs dependent subtasks
         independent_subtasks = []
         dependent_subtasks = []
-        
+
         for i, subtask in enumerate(subtasks):
             is_independent = subtask_independence[i] if i < len(subtask_independence) else True
             if is_independent:
                 independent_subtasks.append(subtask)
             else:
                 dependent_subtasks.append(subtask)
-        
+
         sends = []
-        
-        # Independent subtasks: parallel fan-out via Send()
+
         for subtask in independent_subtasks:
             sends.append(Send("agent_subgraph", {
                 "original_query": subtask,
@@ -92,10 +87,8 @@ def route_after_classify(state: AgentState) -> list[Send] | str:
                 "is_complex": False,
                 "current_subtask_index": 0,
             }))
-        
-        # Dependent subtasks: sequential execution via explicit Send chaining
+
         if len(dependent_subtasks) > 1:
-            # Chain dependent subtasks sequentially through the agent subgraph
             sends.append(Send("agent_subgraph", {
                 "original_query": " ".join(dependent_subtasks),
                 "rewritten_query": " ".join(dependent_subtasks),
@@ -105,7 +98,6 @@ def route_after_classify(state: AgentState) -> list[Send] | str:
                 "current_subtask_index": 0,
             }))
         elif dependent_subtasks:
-            # Single dependent subtask
             sends.append(Send("agent_subgraph", {
                 "original_query": dependent_subtasks[0],
                 "rewritten_query": dependent_subtasks[0],
@@ -114,18 +106,17 @@ def route_after_classify(state: AgentState) -> list[Send] | str:
                 "is_complex": False,
                 "current_subtask_index": 0,
             }))
-        
+
         return sends if sends else "agent_subgraph"
-    
-    # Simple query: route through full agent_subgraph pipeline
+
     return "agent_subgraph"
 
 
 def route_after_sufficiency(state: AgentState) -> str:
     """Route based on sufficiency check result."""
-    if state.get("needs_graph_expansion", False):
-        return "graph_expansion"
-    return "adaptive_reranking"
+    if state.get("needs_adaptive_reranking", False):
+        return "adaptive_reranking"
+    return "collect_context"
 
 
 def route_after_generating(state: AgentState) -> str:
@@ -136,12 +127,7 @@ def route_after_generating(state: AgentState) -> str:
 
 
 def route_after_chart_validation(state: AgentState) -> str:
-    """Route after chart validation in the main orchestrator.
-
-    Valid chart JSON proceeds to answer evaluation. Invalid JSON is sent
-    back to generation for up to 3 retries; after that it proceeds as
-    low-confidence.
-    """
+    """Route after chart validation in the main orchestrator."""
     if not state.get("is_chart_query", False):
         return "answer_evaluation"
 
@@ -151,11 +137,6 @@ def route_after_chart_validation(state: AgentState) -> str:
     if valid or retries >= 3:
         return "answer_evaluation"
     return "generating"
-
-
-def route_after_adaptive_reranking(state: AgentState) -> str:
-    """Route after adaptive reranking: collect context and end subagent."""
-    return "collect_context"
 
 
 # ---------------------------------------------------------------------------
@@ -172,25 +153,26 @@ def build_agent_subgraph(
 ) -> StateGraph:
     """Build and return the agent subgraph (not yet compiled).
 
-    Sequential pipeline per subtask (retrieval-only):
+    Simplified pipeline per subtask (retrieval-only):
       rewrite_subtask_query
         → exact_retrieval → sparse_retrieval → dense_retrieval
-        → merge → reranking → sufficiency_check
-        → [graph_expansion → reranking → sufficiency_check]
-        → adaptive_reranking → collect_context → END
+        → merge → neo4j_expansion → reranking(-inf) → filter(-2.0)
+        → sufficiency_check → [adaptive_reranking(-5.0)]
+        → collect_context → END
+
+    All 4 legs run first, merge, then one reranking pass scores everything.
+    Filter applies the standard threshold. If sufficiency fails, adaptive
+    re-filters with the lower threshold (no re-running retrieval or reranker).
 
     The main orchestrator then consumes all subtask_contexts to generate,
     validate, and finalize the final answer.
-
-    All db/kb parameters are injected via functools.partial so LangGraph
-    only sees (state, config) at each node.
     """
     builder = StateGraph(AgentState)
 
     # ── Subtask rewrite ─────────────────────────────────────────────────
     builder.add_node("rewrite_subtask_query", rewrite_subtask_query_node)
 
-    # ── Retrieval legs (sequential, each handles its own retry) ─────────
+    # ── Retrieval legs (sequential) ─────────────────────────────────────
     builder.add_node(
         "dense_retrieval",
         partial(dense_retrieval_node, db=db, kb_ids=kb_ids,
@@ -209,46 +191,37 @@ def build_agent_subgraph(
 
     # ── Post-retrieval pipeline ──────────────────────────────────────────
     builder.add_node("merge", partial(merge_node, file_markdown=file_markdown))
-    builder.add_node("sufficiency_check", sufficiency_check_node)
     builder.add_node(
-        "graph_expansion",
-        partial(graph_expansion_node, db=db, kb_ids=kb_ids,
+        "neo4j_expansion",
+        partial(neo4j_expansion_node, db=db, kb_ids=kb_ids,
                 org_id=org_id, file_markdown=file_markdown),
     )
-    # reranking_node is sync and needs no db injection
     builder.add_node("reranking", reranking_node)
-    builder.add_node(
-        "adaptive_reranking",
-        partial(adaptive_reranking_node, db=db, kb_ids=kb_ids,
-                org_id=org_id, file_markdown=file_markdown),
-    )
+    builder.add_node("filter", filter_node)
+    builder.add_node("sufficiency_check", sufficiency_check_node)
+    builder.add_node("adaptive_reranking", adaptive_reranking_node)
 
     # ── Subgraph output ─────────────────────────────────────────────────
     builder.add_node("collect_context", collect_context_node)
 
     # ── Edges ────────────────────────────────────────────────────────────
-    # Retrieval: sequential so all three legs always run and feed merge
     builder.add_edge(START, "rewrite_subtask_query")
     builder.add_edge("rewrite_subtask_query", "exact_retrieval")
     builder.add_edge("exact_retrieval", "sparse_retrieval")
     builder.add_edge("sparse_retrieval", "dense_retrieval")
     builder.add_edge("dense_retrieval", "merge")
-    builder.add_edge("merge", "reranking")
-
-    # Reranker is the single authoritative ranking step; confidence is computed
-    # from reranker scores. If retrieval is insufficient, expand via Neo4j and
-    # rerank again; otherwise collect the context and end the subagent.
-    builder.add_edge("reranking", "sufficiency_check")
+    builder.add_edge("merge", "neo4j_expansion")
+    builder.add_edge("neo4j_expansion", "reranking")
+    builder.add_edge("reranking", "filter")
+    builder.add_edge("filter", "sufficiency_check")
     builder.add_conditional_edges(
         "sufficiency_check",
         route_after_sufficiency,
         {
-            "graph_expansion": "graph_expansion",
             "adaptive_reranking": "adaptive_reranking",
+            "collect_context": "collect_context",
         },
     )
-    builder.add_edge("graph_expansion", "reranking")
-
     builder.add_edge("adaptive_reranking", "collect_context")
     builder.add_edge("collect_context", END)
 
@@ -266,11 +239,9 @@ def build_main_graph(
     file_markdown: Optional[str] = None,
     api_base: Optional[str] = None,
     generate_answer: bool = True,
+    query_model: Optional[str] = None,
 ) -> Any:
-    """Build and compile the main LangGraph StateGraph.
-
-    Returns the compiled graph ready for execution.
-    """
+    """Build and compile the main LangGraph StateGraph."""
     builder = StateGraph(AgentState)
 
     # --- Nodes ---
@@ -353,13 +324,9 @@ def build_main_graph(
 
     # Answer evaluation → finalize (no automatic retry)
     builder.add_edge("answer_evaluation", "finalize_answer")
-
     builder.add_edge("finalize_answer", END)
 
     # Compile with an InMemorySaver checkpointer.
-    # AsyncSqliteSaver.from_conn_string() returns an async context manager,
-    # but build_main_graph is synchronous. Using InMemorySaver avoids the
-    # complexity of managing an async connection here.
     from langgraph.checkpoint.memory import InMemorySaver
     checkpointer = InMemorySaver()
 

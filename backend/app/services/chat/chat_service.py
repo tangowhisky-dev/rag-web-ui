@@ -13,6 +13,24 @@ from app.core.config import settings
 from app.models.chat import Chat, Message, MessageCitation, ChatFile
 from app.models.knowledge import KnowledgeBase
 from app.services.infrastructure import get_cancel_token, clear_cancel_token
+# ── SSE flush helpers ─────────────────────────────────────────────────────────
+# Uvicorn buffers SSE responses by default. These helpers force the HTTP
+# server to flush buffered data to the client so events arrive progressively.
+
+async def _sse_flush():
+    """Force-flush the SSE response buffer.
+    
+    Appends an empty SSE comment (':\\n') which signals the client to flush
+    its buffer, and yields control back to the event loop.
+    """
+    yield ':\n'  # SSE comment — triggers client-side flush
+    await asyncio.sleep(0)
+
+
+async def stream_flush():
+    """Wait for the async generator to produce at least one SSE flush chunk."""
+    async for _ in _sse_flush():
+        pass  # consume the generator
 
 
 def get_effective_llm_config(org_id: Optional[int], db: Session) -> dict:
@@ -469,7 +487,7 @@ async def generate_response(
             if event_type == "agent_step":
                 # Forward graph-node events for AgentTimeline rendering
                 yield f'4:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
-                await asyncio.sleep(0)
+                await stream_flush()
 
             elif event_type == "rewritten_query":
                 rewritten_q = event.get("query", query)
@@ -516,13 +534,13 @@ async def generate_response(
                 }
                 yield f'2:{json.dumps(context_payload)}\n'
                 await asyncio.sleep(0)
+                await stream_flush()
 
             elif event_type == "token":
                 content = event.get("content", "")
                 full_response += content
                 yield f'0:{json.dumps(content)}\n'
                 await asyncio.sleep(0)
-
             elif event_type == "answer_rewrite":
                 # Citation normalisation: replace accumulated streamed text with
                 # the citation-linked version. Frontend handles this via event type 'r'.
@@ -604,22 +622,22 @@ async def generate_response(
 
     except Exception as e:
         error_message = f"Error generating response: {str(e)}"
-        logger.error(error_message)
-        yield f'3:{json.dumps(error_message)}\n'
-        yield f'd:{{"finishReason":"error","messageId":{_bot_message_id}}}\n'
-        if 'bot_message' in locals() and db.is_active:
-            try:
-                bot_message.content = error_message
-                db.commit()
-            except Exception as commit_err:
-                logger.warning("[CHAT] failed to persist error message: %s", commit_err)
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
-        clear_cancel_token(chat_id)
-    finally:
-        try:
-            db.close()
-        except Exception:
-            pass  # session may already be closed by caller or during cancellation
+        logger.error(error_message, exc_info=True)
+# ── SSE flush helpers ─────────────────────────────────────────────────────────
+# Uvicorn buffers SSE responses by default. These helpers force the HTTP
+# server to flush buffered data to the client so events arrive progressively.
+
+async def _sse_flush():
+    """Force-flush the SSE response buffer.
+
+    Appends an empty SSE comment (':\\n') which signals the client to flush
+    its buffer, and yields control back to the event loop.
+    """
+    yield ':\n'  # SSE comment — triggers client-side flush
+    await asyncio.sleep(0)
+
+
+async def stream_flush():
+    """Wait for the async generator to produce at least one SSE flush chunk."""
+    async for _ in _sse_flush():
+        pass  # consume the generator

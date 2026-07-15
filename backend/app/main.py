@@ -11,6 +11,8 @@ from app.models.organisation import Organisation
 from app.models.user import User, UserRole
 from app.services.datastore_watcher import DataStoreWatcher
 from app.services.discovery import StartupRecoveryService
+from app.services.retrieval.reranker import preload_cross_encoder
+from app.services.infrastructure.utils import preload_sparse_embedder
 from fastapi import FastAPI
 
 logging.basicConfig(
@@ -129,6 +131,18 @@ async def lifespan(app: FastAPI):
 
     # Initialize local file storage
     init_storage()
+
+    # Pre-load ML models so the first request doesn't pay the cold-start penalty.
+    # Each preload is resilient to failure — the lazy path will retry on first use.
+    try:
+        preload_cross_encoder()
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Cross-encoder preload failed: %s", exc)
+
+    try:
+        preload_sparse_embedder()
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Sparse embedder preload failed: %s", exc)
 
     # Start the startup recovery service FIRST
     try:

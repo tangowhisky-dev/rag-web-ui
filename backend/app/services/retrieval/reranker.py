@@ -16,7 +16,7 @@ Score distribution (empirical, ms-marco-MiniLM-L-12-v2):
   Scores are bimodal — relevant chunks cluster 1–10, irrelevant cluster -5 to -11.
   There is almost no middle ground. 0.0 is a reliable cutoff for this model.
 
-Integration point: called in hybrid_search_with_legs() after RRF merge,
+Integration point: called after neo4j_expansion node ,
 and in chat_history_retrieval_node() for prior-answer scoring.
 """
 
@@ -104,7 +104,7 @@ def rerank(
 
     for rank, (score, doc) in enumerate(scored):
         snippet = doc.page_content[:80].replace("\n", " ")
-        logger.info("  reranker[%d] score=%.4f text=%r", rank, score, snippet)
+        # logger.info("  reranker[%d] score=%.4f text=%r", rank, score, snippet)
 
     result = []
     for score, doc in scored:
@@ -118,3 +118,16 @@ def rerank(
         len(result), len(scored), score_threshold,
     )
     return result
+
+def preload_cross_encoder() -> None:
+    """Eagerly load the cross-encoder reranker at app startup.
+
+    Safe to call even if the model was already loaded (lazy path).
+    On failure, logs a warning but does not raise — the lazy path
+    will still attempt to load on first use.
+    """
+    try:
+        _get_cross_encoder()
+        logger.info("Cross-encoder reranker loaded: %s", settings.RERANKER_MODEL)
+    except Exception as exc:
+        logger.warning("Cross-encoder preload failed (will retry on first use): %s", exc)

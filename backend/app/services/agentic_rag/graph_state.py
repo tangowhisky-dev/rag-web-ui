@@ -67,15 +67,18 @@ class AgentState(MessagesState):
     # can each write their own leg results without LangGraph throwing
     # "Can receive only one value per step".
     leg_results: Annotated[dict, lambda a, b: {**a, **b}] = {}
-    failed_legs: List[str] = []  # Legs that failed (for confidence messages)
+    failed_legs: Annotated[List[str], accumulate] = []  # Legs that failed (for confidence messages)
     leg_doc_counts: Annotated[dict, lambda a, b: {**a, **b}] = {}  # {leg_name: count} for sufficiency check
     
     # ── Memory state ────────────────────────────────────────────────────
     historical_memory_docs: Annotated[List[dict], accumulate] = []
 
     # ── Merged retrieval state ──────────────────────────────────────────
-    retrieved_docs: Annotated[List[dict], accumulate] = []
-    retrieved_contexts: Annotated[List[str], accumulate] = []
+    # All scored docs (with _reranker_score) — used by adaptive reranking.
+    all_scored_docs: Annotated[List[dict], _last_value] = []
+    # Filtered docs after applying threshold — used for generation.
+    retrieved_docs: Annotated[List[dict], _last_value] = []
+    retrieved_contexts: Annotated[List[str], _last_value] = []
     retrieval_keys: Annotated[set, set_union] = set()  # Track what we've already retrieved
     # Annotated with last-value reducer so parallel subgraphs can each write
     # without LangGraph throwing "Can receive only one value per step".
@@ -98,6 +101,7 @@ class AgentState(MessagesState):
     # Annotated with last-value reducer so parallel subgraphs can each write
     # without LangGraph throwing "Can receive only one value per step".
     adaptive_reran: Annotated[bool, _last_value] = False
+    adaptive_rerunning: Annotated[bool, _last_value] = False  # True only when adaptive actually expanded
     answer_evaluation_attempts: Annotated[int, _last_value] = 0
     graph_expansion_done: Annotated[bool, _last_value] = False
 

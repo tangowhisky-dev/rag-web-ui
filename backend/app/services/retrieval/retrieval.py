@@ -202,7 +202,10 @@ def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], candi
 
     result: Dict[str, _Candidate] = {}
     rank = 0
-    
+    min_score = settings.DENSE_MIN_SCORE
+    if min_score > 0.0:
+        logger.info("[DENSE] applying min_cosine=%.2f", min_score)
+
     # Search KB collections
     for kb_id in kb_ids:
         logger.info("[DENSE] qdrant query | collection=kb_%d | using=dense | limit=%d", kb_id, candidates)
@@ -218,7 +221,12 @@ def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], candi
             logger.warning("dense_search: Qdrant query failed for kb_%d: %s", kb_id, e)
             continue
         logger.info("[DENSE] qdrant response | kb_%d | hits=%d", kb_id, len(hits))
+        filtered = 0
         for hit in hits:
+            score = getattr(hit, 'score', -1)
+            if min_score > 0.0 and score < min_score:
+                filtered += 1
+                continue
             text = (hit.payload or {}).get("chunk_text", "")
             h = content_hash(text)
             if h not in result:
@@ -227,8 +235,10 @@ def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], candi
                     content_hash=h,
                     dense_rank=rank,
                 )
-                logger.debug("[DENSE]   rank=%d score=%.4f text=%r", rank, getattr(hit, 'score', -1), text[:80])
+                logger.debug("[DENSE]   rank=%d score=%.4f text=%r", rank, score, text[:80])
                 rank += 1
+        if filtered:
+            logger.info("[DENSE] kb_%d | returned=%d | filtered_by_score=%d", kb_id, len(result), filtered)
     
     # Search DataStore collections
     for ds_id in datastore_ids:
@@ -244,8 +254,12 @@ def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], candi
         except Exception as e:
             logger.warning("dense_search: Qdrant query failed for ds_%d: %s", ds_id, e)
             continue
-        logger.info("[DENSE] qdrant response | ds_%d | hits=%d", ds_id, len(hits))
+        filtered = 0
         for hit in hits:
+            score = getattr(hit, 'score', -1)
+            if min_score > 0.0 and score < min_score:
+                filtered += 1
+                continue
             text = (hit.payload or {}).get("chunk_text", "")
             h = content_hash(text)
             if h not in result:
@@ -254,8 +268,10 @@ def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], candi
                     content_hash=h,
                     dense_rank=rank,
                 )
-                logger.debug("[DENSE]   rank=%d score=%.4f text=%r", rank, getattr(hit, 'score', -1), text[:80])
+                logger.debug("[DENSE]   rank=%d score=%.4f text=%r", rank, score, text[:80])
                 rank += 1
+        if filtered:
+            logger.info("[DENSE] ds_%d | returned=%d | filtered_by_score=%d", ds_id, len(result), filtered)
     logger.info("[DENSE] unique candidates=%d", len(result))
     return result
 
@@ -279,7 +295,9 @@ def _sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], cand
 
     result: Dict[str, _Candidate] = {}
     rank = 0
-    
+    min_score = settings.SPARSE_MIN_SCORE
+    if min_score > -float("inf"):
+        logger.info("[SPARSE] applying min_score=%.2f", min_score)
     # Search KB collections
     for kb_id in kb_ids:
         logger.info("[SPARSE] qdrant query | collection=kb_%d | using=sparse | limit=%d", kb_id, candidates)
@@ -294,8 +312,12 @@ def _sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], cand
         except Exception as e:
             logger.warning("sparse_search: Qdrant query failed for kb_%d: %s", kb_id, e)
             continue
-        logger.info("[SPARSE] qdrant response | kb_%d | hits=%d", kb_id, len(hits))
+        filtered = 0
         for hit in hits:
+            score = getattr(hit, 'score', -1)
+            if min_score > -float("inf") and score < min_score:
+                filtered += 1
+                continue
             text = (hit.payload or {}).get("chunk_text", "")
             h = content_hash(text)
             if h not in result:
@@ -304,8 +326,10 @@ def _sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], cand
                     content_hash=h,
                     sparse_rank=rank,
                 )
-                logger.debug("[SPARSE]   rank=%d score=%.4f text=%r", rank, getattr(hit, 'score', -1), text[:80])
+                logger.debug("[SPARSE]   rank=%d score=%.4f text=%r", rank, score, text[:80])
                 rank += 1
+        if filtered:
+            logger.info("[SPARSE] kb_%d | returned=%d | filtered_by_score=%d", kb_id, len(result), filtered)
     
     # Search DataStore collections
     for ds_id in datastore_ids:
@@ -322,7 +346,12 @@ def _sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], cand
             logger.warning("sparse_search: Qdrant query failed for ds_%d: %s", ds_id, e)
             continue
         logger.info("[SPARSE] qdrant response | ds_%d | hits=%d", ds_id, len(hits))
+        filtered = 0
         for hit in hits:
+            score = getattr(hit, 'score', -1)
+            if min_score > -float("inf") and score < min_score:
+                filtered += 1
+                continue
             text = (hit.payload or {}).get("chunk_text", "")
             h = content_hash(text)
             if h not in result:
@@ -331,8 +360,10 @@ def _sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], cand
                     content_hash=h,
                     sparse_rank=rank,
                 )
-                logger.debug("[SPARSE]   rank=%d score=%.4f text=%r", rank, getattr(hit, 'score', -1), text[:80])
+                logger.debug("[SPARSE]   rank=%d score=%.4f text=%r", rank, score, text[:80])
                 rank += 1
+        if filtered:
+            logger.info("[SPARSE] ds_%d | returned=%d | filtered_by_score=%d", ds_id, len(result), filtered)
     logger.info("[SPARSE] unique candidates=%d", len(result))
     return result
 
@@ -423,10 +454,15 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
     logger.info("[EXACT] MySQL FTS response | rows=%d (kb=%d, ds=%d)", len(all_rows), len(kb_rows), len(ds_rows))
     if all_rows:
         for i, row in enumerate(all_rows[:5]):
-            logger.info("  exact[%d] fts_score=%.4f text=%r", i, row.fts_score, (row.chunk_text or "")[:80])
+            logger.debug("  exact[%d] fts_score=%.4f text=%r", i, row.fts_score, (row.chunk_text or "")[:80])
 
+    min_score = settings.EXACT_MIN_SCORE
     result: Dict[str, _Candidate] = {}
+    filtered = 0
     for rank, row in enumerate(all_rows):
+        if min_score > 0.0 and (row.fts_score or 0) < min_score:
+            filtered += 1
+            continue
         chunk_text = row.chunk_text or ""
         h = content_hash(chunk_text)
         if h not in result:
@@ -448,6 +484,8 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
                 content_hash=h,
                 exact_rank=rank,
             )
+    if filtered:
+        logger.info("[EXACT] returned=%d | filtered_by_score=%d (min=%.2f)", len(result), filtered, min_score)
     return result
 
 
