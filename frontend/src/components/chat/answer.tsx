@@ -447,7 +447,6 @@ const ConfidenceCollapsible: FC<{
   level: ConfidenceLevel;
   score?: number;
   suggestion?: string | null;
-  breakdown?: Record<string, unknown>;
   // Final evaluation metrics
   finalConfidence?: number;
   finalConfidenceLevel?: ConfidenceLevel;
@@ -458,7 +457,6 @@ const ConfidenceCollapsible: FC<{
   level,
   score,
   suggestion,
-  breakdown,
   finalConfidence,
   finalConfidenceLevel,
   faithfulness,
@@ -466,10 +464,13 @@ const ConfidenceCollapsible: FC<{
   failedLegs,
 }) => {
   const [open, setOpen] = useState(false);
-  const cfg = CONFIDENCE_COLORS[level];
-  const label = CONFIDENCE_CONFIG[level].label;
-  // score is 0-100 from the DB (not 0-1 decimal)
-  const pct = score !== undefined ? Math.min(100, Math.max(0, score)) : 0;
+
+  // Collapsed form: use final confidence if available, fall back to retrieval confidence
+  const displayConfidence = finalConfidence !== undefined ? finalConfidence : (score !== undefined ? score / 100 : 0);
+  const displayLevel = finalConfidenceLevel ?? level;
+  const displayPct = Math.min(100, Math.max(0, Math.round(displayConfidence * 100)));
+  const cfg = CONFIDENCE_COLORS[displayLevel];
+  const label = CONFIDENCE_CONFIG[displayLevel].label;
   const showRetry = finalConfidence !== undefined && finalConfidence < RETRY_THRESHOLD;
 
   return (
@@ -485,13 +486,13 @@ const ConfidenceCollapsible: FC<{
           <ChevronRight className={`h-3 w-3 shrink-0 ${cfg.text}`} />
         )}
         <span className={`font-medium shrink-0 ${cfg.text}`}>
-          Confidence: {label}{score !== undefined ? ` · ${score}/100` : ""}
+          Confidence: {label}{displayPct > 0 ? ` · ${displayPct}/100` : ""}
         </span>
         {/* inline progress bar */}
         <div className="flex-1 h-1.5 rounded-full bg-zinc-200 dark:bg-zinc-700 overflow-hidden">
           <div
             className={`h-full rounded-full transition-all ${cfg.bar}`}
-            style={{ width: `${pct}%` }}
+            style={{ width: `${displayPct}%` }}
           />
         </div>
         {/* retry icon — shown when final confidence is below threshold */}
@@ -567,18 +568,6 @@ const ConfidenceCollapsible: FC<{
 
           {suggestion && (
             <p className={`${cfg.text} opacity-80`}>{suggestion}</p>
-          )}
-          {breakdown && Object.keys(breakdown).length > 0 && (
-            <div className="space-y-0.5">
-              {Object.entries(breakdown)
-                .filter(([k]) => !["mode", "total", "failed_legs", "enabled_legs", "producing_legs"].includes(k))
-                .map(([k, v]) => (
-                  <div key={k} className="flex justify-between gap-4">
-                    <span className="text-zinc-500 dark:text-zinc-400">{k.replace(/_/g, " ")}</span>
-                    <span className={`font-medium ${cfg.text}`}>{String(v)}</span>
-                  </div>
-                ))}
-            </div>
           )}
         </div>
       )}
@@ -1176,7 +1165,6 @@ export const Answer: FC<{
                 level={confidence}
                 score={confidenceScore}
                 suggestion={suggestion}
-                breakdown={confidenceBreakdown}
                 finalConfidence={finalConfidence}
                 finalConfidenceLevel={finalConfidenceLevel}
                 faithfulness={faithfulness}
