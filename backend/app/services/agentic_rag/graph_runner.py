@@ -200,14 +200,23 @@ async def run_agentic_rag(
 
         # ── Final answer ─────────────────────────────────────────────
         final_answer = state.get("final_answer") or state.get("answer", "")
-        usage = {"promptTokens": 0, "completionTokens": 0}
+        usage = {
+            "promptTokens": 0,
+            "completionTokens": 0,
+            "final_confidence": state.get("final_confidence", 0.0),
+            "confidence_level": state.get("confidence_level", "none"),
+            "faithfulness": state.get("faithfulness", 0),
+            "completeness": state.get("completeness", 0),
+        }
 
         # If nothing was streamed (e.g., no docs or generation disabled) but
         # a final answer exists, emit it as a single token.
         if final_answer and not all_docs:
             yield {"event": "token", "content": final_answer}
 
-        # ── Optional post-hoc answer quality evaluation ───────────────
+        # ── Optional post-hoc answer quality evaluation ────────────────
+        # Note: evaluation is now done inside the graph via answer_evaluation_node.
+        # This block is kept for legacy external evaluation (e.g. eval endpoint).
         if settings.ANSWER_QUALITY_GRADING_ENABLED and final_answer and all_docs:
             try:
                 from .evaluator import evaluate_answer, summarize_evaluation

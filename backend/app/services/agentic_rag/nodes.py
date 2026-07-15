@@ -808,26 +808,39 @@ async def answer_evaluation_node(
     state: AgentState,
     llm: ChatOpenAI | None = None,
 ) -> dict:
-    """Evaluate final answer quality and decide whether to retry."""
+    """Evaluate final answer quality and compute final confidence score.
+
+    Final confidence is a weighted combination of:
+    - retrieval_confidence (40%): quality of retrieved documents
+    - faithfulness (30%): how well answer is supported by context
+    - completeness (30%): how thoroughly answer addresses the query
+
+    No automatic retry — the UI decides whether to retry based on confidence.
+    """
     from .evaluator import evaluate_answer
     from .utils import format_context_string
 
     answer = state.get("answer", "")
     query = state.get("original_query", "")
     docs = state.get("retrieved_docs", [])
+    retrieval_conf = state.get("retrieval_confidence", 0.0)
 
     if not answer or not docs:
+        # No retrieval — confidence is low
         return {
             "answer_evaluation_attempts": state.get("answer_evaluation_attempts", 0) + 1,
+            "final_confidence": 0.0,
+            "confidence_level": "none",
+            "faithfulness": 0,
+            "completeness": 0,
             "needs_retry": False,
         }
 
     context_text = format_context_string(docs, state.get("file_markdown"))
-    conf = state.get("retrieval_confidence", 0.0)
     conf_level = (
-        "very_high" if conf > 0.8 else
-        "high" if conf > 0.6 else
-        "medium" if conf > 0.3 else "low"
+        "very_high" if retrieval_conf > 0.8 else
+        "high" if retrieval_conf > 0.6 else
+        "medium" if retrieval_conf > 0.3 else "low"
     )
 
     try:
@@ -837,15 +850,38 @@ async def answer_evaluation_node(
             context_preview=context_text,
             confidence_level=conf_level,
         )
-        # Retry if faithfulness or completeness is poor.
-        needs_retry = evaluation.faithfulness < 60 or evaluation.completeness < 60
+        faithfulness = evaluation.faithfulness
+        completeness = evaluation.completeness
     except Exception as exc:
         logger.warning("[ANSWER_EVALUATION] failed: %s", exc)
-        needs_retry = False
+        # Fallback: use retrieval confidence only
+        faithfulness = 50
+        completeness = 50
+
+    # Compute final confidence as weighted combination
+    # retrieval_confidence: 0-1, convert to 0-100 for weighting
+    retrieval_score = retrieval_conf * 100
+    final_confidence = (
+        0.4 * retrieval_score +
+        0.3 * faithfulness +
+        0.3 * completeness
+    )
+    final_confidence = round(final_confidence / 100.0, 3)  # normalize back to 0-1
+
+    # Determine confidence level based on final score
+    confidence_level = (
+        "very_high" if final_confidence > 0.8 else
+        "high" if final_confidence > 0.6 else
+        "medium" if final_confidence > 0.3 else "low" if final_confidence > 0 else "none"
+    )
 
     return {
         "answer_evaluation_attempts": state.get("answer_evaluation_attempts", 0) + 1,
-        "needs_retry": needs_retry,
+        "final_confidence": final_confidence,
+        "confidence_level": confidence_level,
+        "faithfulness": faithfulness,
+        "completeness": completeness,
+        "needs_retry": False,  # No automatic retry — user decides
     }
 
 

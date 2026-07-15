@@ -135,20 +135,6 @@ def route_after_generating(state: AgentState) -> str:
     return "answer_evaluation"
 
 
-def route_after_answer_evaluation(state: AgentState) -> str:
-    """Route based on final answer evaluation result.
-
-    Retries generation up to 2 evaluation cycles. After the retry budget is
-    exhausted the answer is finalized as low-confidence.
-    """
-    attempts = state.get("answer_evaluation_attempts", 0)
-    if state.get("needs_retry", False) and attempts < 2:
-        return "generating"  # Regenerate with the same context
-    if state.get("is_chart_query", False):
-        return "chart_validation"
-    return "finalize_answer"
-
-
 def route_after_chart_validation(state: AgentState) -> str:
     """Route after chart validation in the main orchestrator.
 
@@ -365,16 +351,8 @@ def build_main_graph(
         },
     )
 
-    # Answer evaluation → regenerate (limited) or finalize
-    builder.add_conditional_edges(
-        "answer_evaluation",
-        route_after_answer_evaluation,
-        {
-            "generating": "generating",
-            "chart_validation": "chart_validation",
-            "finalize_answer": "finalize_answer",
-        },
-    )
+    # Answer evaluation → finalize (no automatic retry)
+    builder.add_edge("answer_evaluation", "finalize_answer")
 
     builder.add_edge("finalize_answer", END)
 

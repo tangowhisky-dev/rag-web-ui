@@ -99,7 +99,6 @@ class AgentState(MessagesState):
     # without LangGraph throwing "Can receive only one value per step".
     adaptive_reran: Annotated[bool, _last_value] = False
     answer_evaluation_attempts: Annotated[int, _last_value] = 0
-    needs_retry: Annotated[bool, _last_value] = False
     graph_expansion_done: Annotated[bool, _last_value] = False
 
     # ── Subtask context state ───────────────────────────────────────────
@@ -110,7 +109,14 @@ class AgentState(MessagesState):
     # ── Synthesis state ─────────────────────────────────────────────────
     subtask_answers: Annotated[List[dict], accumulate] = []  # legacy field, kept for compatibility
     final_answer: str = ""
-    final_confidence: str = ""
+
+    # ── Final evaluation state ─────────────────────────────────────────
+    # Computed by answer_evaluation_node — no automatic retry, UI decides
+    final_confidence: Annotated[float, _last_value] = 0.0
+    confidence_level: str = "none"
+    faithfulness: int = 0
+    completeness: int = 0
+    needs_retry: bool = False  # Always False — user-initiated retry only
 
     # ── Configuration ───────────────────────────────────────────────────
     kb_ids: List[int] = []
