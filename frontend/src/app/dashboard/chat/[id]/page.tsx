@@ -1063,6 +1063,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                           toolTrace={message.id === lastAssistantId ? message.toolTrace : undefined}
                           agentSteps={message.id === lastAssistantId ? message.agentSteps : undefined}
                           taskList={message.id === lastAssistantId && isLoading ? taskList : undefined}
+                          progressMessages={message.id === lastAssistantId && isLoading ? progressMessages : undefined}
                           synthesisMode={message.synthesisMode}
                           isStreaming={isLoading && message.id === lastAssistantId}
                           onDelete={(id) => setMessages((prev) => prev.filter((m) => m.id !== id))}

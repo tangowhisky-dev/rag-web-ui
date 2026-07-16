@@ -6,10 +6,12 @@ import asyncio
 import json
 import logging
 import re
-from typing import Any, List, Optional
+from contextlib import contextmanager
+from typing import Any, Generator, List, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_openai import ChatOpenAI
+from langgraph.config import get_stream_writer
 
 from app.core.config import settings
 
@@ -30,6 +32,18 @@ from .schemas import QueryAnalysis
 from .utils import estimate_messages_tokens, strip_reasoning_tags, format_context_string
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _agent_step(name: str) -> Generator[None, None, None]:
+    """Emit agent_step active/done lifecycle events around a node."""
+    writer = get_stream_writer()
+    writer({"event": "agent_step", "node": name, "status": "active", "latency_ms": 0})
+    try:
+        yield
+    finally:
+        writer({"event": "agent_step", "node": name, "status": "done", "latency_ms": 0})
+
 
 _ANSWER_SYSTEM_PROMPT = append_chart_instructions("""\
 You are a helpful assistant. Answer the user's question using ONLY the provided context.
@@ -77,17 +91,23 @@ async def rewrite_query_node(
     """Rewrite query using chat history."""
     from .utils import rewrite_query as _rewrite_query
 
-    messages = state.get("messages", [])
-    query = state.get("original_query", "")
-    rewritten = _rewrite_query(
-        query=query,
-        recent_history=messages,
-        api_base=api_base,
-        query_model=settings.effective_query_model,
-        openai_api_key=settings.OPENAI_API_KEY,
-        openai_api_base=settings.OPENAI_API_BASE,
-    )
-    return {"rewritten_query": rewritten}
+    with _agent_step("rewrite_query"):
+        messages = state.get("messages", [])
+        query = state.get("original_query", "")
+        rewritten = _rewrite_query(
+            query=query,
+            recent_history=messages,
+            api_base=api_base,
+            query_model=settings.effective_query_model,
+            openai_api_key=settings.OPENAI_API_KEY,
+            openai_api_base=settings.OPENAI_API_BASE,
+        )
+
+        # Stream the rewritten query so the UI can display it immediately.
+        writer = get_stream_writer()
+        writer({"event": "rewritten_query", "query": rewritten})
+
+        return {"rewritten_query": rewritten}
 
 
 # ---------------------------------------------------------------------------
@@ -123,13 +143,26 @@ async def classify_query_node(
         is_clear = True
         questions = [rewritten]
 
-    subtasks = questions if len(questions) > 1 else [rewritten]
+    with _agent_step("classify_query"):
+        subtasks = questions if len(questions) > 1 else [rewritten]
 
-    return {
-        "question_is_clear": is_clear,
-        "subtasks": subtasks,
-        "is_complex": len(subtasks) > 1,
-    }
+        # Emit explicit task_list event for multi-subtask queries so the runner
+        # doesn't have to reverse-engineer it from state updates.
+        if len(subtasks) > 1:
+            writer = get_stream_writer()
+            writer({
+                "event": "task_list",
+                "tasks": [
+                    {"id": i, "text": text, "status": "pending"}
+                    for i, text in enumerate(subtasks)
+                ],
+            })
+
+        return {
+            "question_is_clear": is_clear,
+            "subtasks": subtasks,
+            "is_complex": len(subtasks) > 1,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -150,9 +183,13 @@ def request_clarification_node(state: AgentState) -> dict:
     else:
         clarification_msg = f"I need more information to understand your question: '{pending}'"
 
-    return {
-        "messages": [AIMessage(content=clarification_msg, name="clarification")],
-    }
+    with _agent_step("request_clarification"):
+        writer = get_stream_writer()
+        writer({"event": "progress", "phase": "clarification", "message": clarification_msg})
+
+        return {
+            "messages": [AIMessage(content=clarification_msg, name="clarification")],
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -171,37 +208,38 @@ async def neo4j_expansion_node(
     org_id = org_id if org_id is not None else state.get("org_id")
     file_markdown = file_markdown or state.get("file_markdown")
 
-    docs = state.get("retrieved_docs", [])
-    if not docs:
-        return {"graph_docs": [], "graph_expansion_done": True}
+    with _agent_step("neo4j_expansion"):
+        docs = state.get("retrieved_docs", [])
+        if not docs:
+            return {"graph_docs": [], "graph_expansion_done": True}
 
-    try:
-        from langchain_core.documents import Document as LangchainDocument
-        from app.services.graph import expand_docs_via_graph
+        try:
+            from langchain_core.documents import Document as LangchainDocument
+            from app.services.graph import expand_docs_via_graph
 
-        lc_docs = [
-            LangchainDocument(page_content=d.get("page_content", ""), metadata=d.get("metadata", {}))
-            for d in docs
-        ]
-        loop = asyncio.get_event_loop()
-        expanded = await loop.run_in_executor(None, lambda: expand_docs_via_graph(lc_docs, kb_ids))
-        existing_hashes = {content_hash(d.page_content) for d in lc_docs}
-        new_docs = [
-            _serialise_doc(d)
-            for d in expanded
-            if content_hash(d.page_content) not in existing_hashes
-        ]
-    except Exception as exc:
-        logger.warning("[NEO4J_EXPANSION] failed: %s", exc)
-        new_docs = []
+            lc_docs = [
+                LangchainDocument(page_content=d.get("page_content", ""), metadata=d.get("metadata", {}))
+                for d in docs
+            ]
+            loop = asyncio.get_event_loop()
+            expanded = await loop.run_in_executor(None, lambda: expand_docs_via_graph(lc_docs, kb_ids))
+            existing_hashes = {content_hash(d.page_content) for d in lc_docs}
+            new_docs = [
+                _serialise_doc(d)
+                for d in expanded
+                if content_hash(d.page_content) not in existing_hashes
+            ]
+        except Exception as exc:
+            logger.warning("[NEO4J_EXPANSION] failed: %s", exc)
+            new_docs = []
 
-    merged = docs + new_docs
+        merged = docs + new_docs
 
-    return {
-        "graph_docs": new_docs,
-        "retrieved_docs": merged,
-        "graph_expansion_done": True,
-    }
+        return {
+            "graph_docs": new_docs,
+            "retrieved_docs": merged,
+            "graph_expansion_done": True,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -219,33 +257,34 @@ def reranking_node(
     query = state.get("rewritten_query", state.get("original_query", ""))
     docs = state.get("retrieved_docs", [])
 
-    if not docs:
+    with _agent_step("reranking"):
+        if not docs:
+            return {
+                "retrieved_docs": [],
+                "all_scored_docs": [],
+                "retrieval_confidence": 0.0,
+            }
+
+        try:
+            from langchain_core.documents import Document as LangchainDocument
+            lc_docs = [
+                LangchainDocument(page_content=d.get("page_content", ""), metadata=d.get("metadata", {}))
+                for d in docs
+            ]
+            reranked = rerank(query=query, docs=lc_docs, score_threshold=float("-inf"))
+            serialised = [_serialise_doc(d) for d in reranked]
+        except Exception as exc:
+            logger.warning("[RERANKING] failed: %s", exc)
+            serialised = docs
+
+        conf_result = score_retrieval(serialised, {}) if serialised else None
+        conf_score = conf_result.score / 100.0 if conf_result else 0.0
+
         return {
-            "retrieved_docs": [],
-            "all_scored_docs": [],
-            "retrieval_confidence": 0.0,
+            "retrieved_docs": serialised,
+            "all_scored_docs": serialised,
+            "retrieval_confidence": conf_score,
         }
-
-    try:
-        from langchain_core.documents import Document as LangchainDocument
-        lc_docs = [
-            LangchainDocument(page_content=d.get("page_content", ""), metadata=d.get("metadata", {}))
-            for d in docs
-        ]
-        reranked = rerank(query=query, docs=lc_docs, score_threshold=float("-inf"))
-        serialised = [_serialise_doc(d) for d in reranked]
-    except Exception as exc:
-        logger.warning("[RERANKING] failed: %s", exc)
-        serialised = docs
-
-    conf_result = score_retrieval(serialised, {}) if serialised else None
-    conf_score = conf_result.score / 100.0 if conf_result else 0.0
-
-    return {
-        "retrieved_docs": serialised,
-        "all_scored_docs": serialised,
-        "retrieval_confidence": conf_score,
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -258,26 +297,27 @@ def filter_node(state: AgentState) -> dict:
     Keeps only docs whose _reranker_score >= threshold.
     Unscored docs (graph expansion without score) are excluded.
     """
-    docs = state.get("all_scored_docs", [])
-    if not docs:
-        return {"retrieved_docs": []}
+    with _agent_step("filter"):
+        docs = state.get("all_scored_docs", [])
+        if not docs:
+            return {"retrieved_docs": []}
 
-    threshold = settings.RERANKER_SCORE_THRESHOLD
+        threshold = settings.RERANKER_SCORE_THRESHOLD
 
-    filtered = [
-        d for d in docs
-        if d.get("metadata", {}).get("_reranker_score", -float("inf")) >= threshold
-    ]
-    filtered.sort(
-        key=lambda d: d.get("metadata", {}).get("_reranker_score", -float("inf")),
-        reverse=True,
-    )
+        filtered = [
+            d for d in docs
+            if d.get("metadata", {}).get("_reranker_score", -float("inf")) >= threshold
+        ]
+        filtered.sort(
+            key=lambda d: d.get("metadata", {}).get("_reranker_score", -float("inf")),
+            reverse=True,
+        )
 
-    logger.info("[FILTER] threshold=%.2f | input=%d | passed=%d", threshold, len(docs), len(filtered))
+        logger.info("[FILTER] threshold=%.2f | input=%d | passed=%d", threshold, len(docs), len(filtered))
 
-    return {
-        "retrieved_docs": filtered,
-    }
+        return {
+            "retrieved_docs": filtered,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -313,11 +353,12 @@ def sufficiency_check_node(state: AgentState) -> dict:
     else:
         message = f"Retrieval insufficient: confidence={conf_score:.2f}, docs={doc_count}, checking adaptive reranking"
 
-    return {
-        "sufficiency_met": sufficiency_met,
-        "sufficiency_message": message,
-        "needs_adaptive_reranking": needs_adaptive,
-    }
+    with _agent_step("sufficiency_check"):
+        return {
+            "sufficiency_met": sufficiency_met,
+            "sufficiency_message": message,
+            "needs_adaptive_reranking": needs_adaptive,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -330,32 +371,33 @@ def adaptive_reranking_node(state: AgentState) -> dict:
     Since all docs already have _reranker_score from the initial run,
     this just re-filters with ADAPTIVE_RETRIEVAL_RERANKER_THRESHOLD (-5.0).
     """
-    all_docs = state.get("all_scored_docs", [])
-    if not all_docs:
-        return {"adaptive_rerunning": False, "adaptive_reran": True}
+    with _agent_step("adaptive_reranking"):
+        all_docs = state.get("all_scored_docs", [])
+        if not all_docs:
+            return {"adaptive_rerunning": False, "adaptive_reran": True}
 
-    threshold = settings.ADAPTIVE_RETRIEVAL_RERANKER_THRESHOLD
+        threshold = settings.ADAPTIVE_RETRIEVAL_RERANKER_THRESHOLD
 
-    filtered = [
-        d for d in all_docs
-        if d.get("metadata", {}).get("_reranker_score", -float("inf")) >= threshold
-    ]
-    filtered.sort(
-        key=lambda d: d.get("metadata", {}).get("_reranker_score", -float("inf")),
-        reverse=True,
-    )
+        filtered = [
+            d for d in all_docs
+            if d.get("metadata", {}).get("_reranker_score", -float("inf")) >= threshold
+        ]
+        filtered.sort(
+            key=lambda d: d.get("metadata", {}).get("_reranker_score", -float("inf")),
+            reverse=True,
+        )
 
-    logger.info("[ADAPTIVE_FILTER] threshold=%.2f | input=%d | passed=%d", threshold, len(all_docs), len(filtered))
+        logger.info("[ADAPTIVE_FILTER] threshold=%.2f | input=%d | passed=%d", threshold, len(all_docs), len(filtered))
 
-    conf_result = score_retrieval(filtered, {}) if filtered else None
-    new_conf = conf_result.score / 100.0 if conf_result else 0.0
+        conf_result = score_retrieval(filtered, {}) if filtered else None
+        new_conf = conf_result.score / 100.0 if conf_result else 0.0
 
-    return {
-        "adaptive_rerunning": True,
-        "adaptive_reran": True,
-        "retrieved_docs": filtered,
-        "retrieval_confidence": new_conf,
-    }
+        return {
+            "adaptive_rerunning": True,
+            "adaptive_reran": True,
+            "retrieved_docs": filtered,
+            "retrieval_confidence": new_conf,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -367,50 +409,64 @@ async def generating_node(
     llm: ChatOpenAI | None = None,
     api_base: Optional[str] = None,
 ) -> dict:
-    """Generate answer using retrieved context."""
-    llm_instance = llm or _get_llm(streaming=True)
+    """Generate answer using retrieved context.
 
-    retrieved_docs = state.get("retrieved_docs", [])
-    original_query = state.get("original_query", "")
-    file_markdown = state.get("file_markdown")
+    Streams tokens to the client in real-time via LangGraph's stream writer so
+    the answer appears word-by-word in the UI. The final accumulated answer is
+    still returned in state for downstream nodes and persistence.
+    """
+    with _agent_step("generating"):
+        llm_instance = llm or _get_llm(streaming=True)
+        writer = get_stream_writer()
 
-    if not retrieved_docs:
-        response = await llm_instance.ainvoke([
-            {"role": "system", "content": (
-                "You are a helpful assistant. The user asked a question but no "
-                "relevant documents were found in the knowledge base. Answer from "
-                "your general knowledge, but clearly state that no documents were found."
-            )},
-            {"role": "user", "content": original_query},
-        ])
-        answer = getattr(response, "content", "") or ""
-        return {"answer": answer, "is_chart_query": False}
+        retrieved_docs = state.get("retrieved_docs", [])
+        original_query = state.get("original_query", "")
+        file_markdown = state.get("file_markdown")
 
-    context_text = format_context_string(retrieved_docs, file_markdown)
+        if not retrieved_docs:
+            messages = [
+                {"role": "system", "content": (
+                    "You are a helpful assistant. The user asked a question but no "
+                    "relevant documents were found in the knowledge base. Answer from "
+                    "your general knowledge, but clearly state that no documents were found."
+                )},
+                {"role": "user", "content": original_query},
+            ]
+        else:
+            context_text = format_context_string(retrieved_docs, file_markdown)
+            messages = [
+                {"role": "system", "content": _ANSWER_SYSTEM_PROMPT},
+                {"role": "user", "content": f"Query: {original_query}\n\nContext:\n{context_text}"},
+            ]
 
-    messages = [
-        {"role": "system", "content": _ANSWER_SYSTEM_PROMPT},
-        {"role": "user", "content": f"Query: {original_query}\n\nContext:\n{context_text}"},
-    ]
-
-    answer = ""
-    async for chunk in llm_instance.astream(messages):
-        chunk_text = getattr(chunk, "content", "") or ""
-        if isinstance(chunk_text, list):
-            chunk_text = "".join(
-                part.get("text", "") if isinstance(part, dict) else str(part)
-                for part in chunk_text
-            )
-        answer += chunk_text
+        answer = ""
+        usage_metadata: Optional[dict] = None
+        # stream_usage=True asks OpenAI-compatible endpoints to emit token usage
+        # on the final streaming chunk. This is the only reliable way to get usage
+        # when streaming through v3.
+        async for chunk in llm_instance.astream(messages, stream_usage=True):
+            chunk_text = getattr(chunk, "content", "") or ""
+            if isinstance(chunk_text, list):
+                chunk_text = "".join(
+                    part.get("text", "") if isinstance(part, dict) else str(part)
+                    for part in chunk_text
+                )
+            if chunk_text:
+                answer += chunk_text
+                writer({"event": "token", "content": chunk_text})
+            if getattr(chunk, "usage_metadata", None):
+                usage_metadata = chunk.usage_metadata
 
     is_chart = bool(re.search(r"\b(chart|graph|plot|visuali[zs]|trend|distribution)\b", original_query.lower()))
 
-    return {
+    result: dict = {
         "answer": answer,
         "is_chart_query": is_chart,
         "thinking_chunks": [],
     }
-
+    if usage_metadata:
+        result["answer_usage"] = usage_metadata
+    return result
 
 # ---------------------------------------------------------------------------
 # Node: chart_validation (conditional, if charts detected)
@@ -418,51 +474,52 @@ async def generating_node(
 
 def chart_validation_node(state: AgentState) -> dict:
     """Validate chart-related queries and add chart context."""
-    is_chart = state.get("is_chart_query", False)
+    with _agent_step("chart_validation"):
+        is_chart = state.get("is_chart_query", False)
 
-    if not is_chart:
-        return {"chart_validated": False, "chart_data": None}
+        if not is_chart:
+            return {"chart_validated": False, "chart_data": None}
 
-    retries = state.get("chart_retries", 0)
+        retries = state.get("chart_retries", 0)
 
-    answer = state.get("answer", "")
-    if not answer:
-        retrieved_docs = state.get("retrieved_docs", [])
-        has_enough_context = len(retrieved_docs) >= 2
-        chart_data = {
-            "is_chart_query": True,
-            "valid": has_enough_context,
-            "has_context": has_enough_context,
-            "doc_count": len(retrieved_docs),
-            "validation_message": (
-                "Chart query validated — sufficient context available"
-                if has_enough_context
-                else "Chart query validated — limited context available, may need clarification"
-            ),
-        }
-        return {"chart_validated": True, "chart_data": chart_data}
+        answer = state.get("answer", "")
+        if not answer:
+            retrieved_docs = state.get("retrieved_docs", [])
+            has_enough_context = len(retrieved_docs) >= 2
+            chart_data = {
+                "is_chart_query": True,
+                "valid": has_enough_context,
+                "has_context": has_enough_context,
+                "doc_count": len(retrieved_docs),
+                "validation_message": (
+                    "Chart query validated — sufficient context available"
+                    if has_enough_context
+                    else "Chart query validated — limited context available, may need clarification"
+                ),
+            }
+            return {"chart_validated": True, "chart_data": chart_data}
 
-    valid, message = validate_echarts_json(answer)
-    if valid:
+        valid, message = validate_echarts_json(answer)
+        if valid:
+            return {
+                "chart_validated": True,
+                "chart_data": {
+                    "valid": True,
+                    "validation_message": message,
+                },
+            }
+
+        if retries < 3:
+            return {
+                "chart_validated": False,
+                "chart_data": {"valid": False, "validation_message": message},
+                "chart_retries": retries + 1,
+            }
+
         return {
             "chart_validated": True,
-            "chart_data": {
-                "valid": True,
-                "validation_message": message,
-            },
-        }
-
-    if retries < 3:
-        return {
-            "chart_validated": False,
             "chart_data": {"valid": False, "validation_message": message},
-            "chart_retries": retries + 1,
         }
-
-    return {
-        "chart_validated": True,
-        "chart_data": {"valid": False, "validation_message": message},
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -497,25 +554,26 @@ async def load_historical_memory_node(
     db: Any,
 ) -> dict:
     """Load relevant past assistant messages as historical memory docs."""
-    chat_id = state.get("chat_id")
-    if not chat_id:
-        return {"historical_memory_docs": []}
+    with _agent_step("load_historical_memory"):
+        chat_id = state.get("chat_id")
+        if not chat_id:
+            return {"historical_memory_docs": []}
 
-    from app.services.chat import retrieve_historical_memory
+        from app.services.chat import retrieve_historical_memory
 
-    try:
-        docs = retrieve_historical_memory(
-            chat_id=chat_id,
-            query=state.get("original_query", ""),
-            db=db,
-            top_k=settings.HISTORICAL_MEMORY_TOP_K,
-            score_threshold=settings.HISTORICAL_MEMORY_SCORE_THRESHOLD,
-        )
-    except Exception as exc:
-        logger.warning("[LOAD_HISTORICAL_MEMORY] failed: %s", exc)
-        docs = []
+        try:
+            docs = retrieve_historical_memory(
+                chat_id=chat_id,
+                query=state.get("original_query", ""),
+                db=db,
+                top_k=settings.HISTORICAL_MEMORY_TOP_K,
+                score_threshold=settings.HISTORICAL_MEMORY_SCORE_THRESHOLD,
+            )
+        except Exception as exc:
+            logger.warning("[LOAD_HISTORICAL_MEMORY] failed: %s", exc)
+            docs = []
 
-    return {"historical_memory_docs": docs}
+        return {"historical_memory_docs": docs}
 
 
 # ---------------------------------------------------------------------------
@@ -527,31 +585,32 @@ async def summarize_history_node(
     llm: ChatOpenAI | None = None,
 ) -> dict:
     """Reduce conversation history using rolling summaries."""
-    messages = state.get("messages", [])
-    plain_msgs = [m for m in messages if not getattr(m, "tool_calls", None)]
-    keep_count = 4
-    older = plain_msgs[:-keep_count] if len(plain_msgs) > keep_count else []
-    if not older:
-        return {}
+    with _agent_step("summarize_history"):
+        messages = state.get("messages", [])
+        plain_msgs = [m for m in messages if not getattr(m, "tool_calls", None)]
+        keep_count = 4
+        older = plain_msgs[:-keep_count] if len(plain_msgs) > keep_count else []
+        if not older:
+            return {}
 
-    existing_summary = state.get("existing_summary", "").strip()
-    conversation = f"Existing summary:\n{existing_summary or '(none)'}\n\n"
-    conversation += "New messages:\n" + "\n".join(
-        f"{'User' if isinstance(m, HumanMessage) else 'Assistant'}: {m.content[:200]}"
-        for m in older
-    )
+        existing_summary = state.get("existing_summary", "").strip()
+        conversation = f"Existing summary:\n{existing_summary or '(none)'}\n\n"
+        conversation += "New messages:\n" + "\n".join(
+            f"{'User' if isinstance(m, HumanMessage) else 'Assistant'}: {m.content[:200]}"
+            for m in older
+        )
 
-    llm_instance = llm or _get_llm(streaming=False)
-    response = await llm_instance.ainvoke([
-        {"role": "system", "content": (
-            "You are a conversation summarizer. Provide a concise summary of key facts, "
-            "decisions, and context. Max 200 words."
-        )},
-        {"role": "user", "content": conversation},
-    ])
+        llm_instance = llm or _get_llm(streaming=False)
+        response = await llm_instance.ainvoke([
+            {"role": "system", "content": (
+                "You are a conversation summarizer. Provide a concise summary of key facts, "
+                "decisions, and context. Max 200 words."
+            )},
+            {"role": "user", "content": conversation},
+        ])
 
-    summary = response.content.strip() if hasattr(response, "content") else str(response)
-    return {"existing_summary": summary}
+        summary = response.content.strip() if hasattr(response, "content") else str(response)
+        return {"existing_summary": summary}
 
 
 # ---------------------------------------------------------------------------
@@ -563,21 +622,22 @@ async def rewrite_subtask_query_node(
     api_base: Optional[str] = None,
 ) -> dict:
     """Rewrite a subtask query into a self-contained search query."""
-    from .utils import rewrite_query as _rewrite_query
+    with _agent_step("rewrite_subtask_query"):
+        from .utils import rewrite_query as _rewrite_query
 
-    subtasks = state.get("subtasks", [])
-    idx = state.get("current_subtask_index", 0)
-    subtask = subtasks[idx] if 0 <= idx < len(subtasks) else state.get("original_query", "")
+        subtasks = state.get("subtasks", [])
+        idx = state.get("current_subtask_index", 0)
+        subtask = subtasks[idx] if 0 <= idx < len(subtasks) else state.get("original_query", "")
 
-    rewritten = _rewrite_query(
-        query=subtask,
-        recent_history=[],
-        api_base=api_base,
-        query_model=settings.effective_query_model,
-        openai_api_key=settings.OPENAI_API_KEY,
-        openai_api_base=settings.OPENAI_API_BASE,
-    )
-    return {"rewritten_query": rewritten}
+        rewritten = _rewrite_query(
+            query=subtask,
+            recent_history=[],
+            api_base=api_base,
+            query_model=settings.effective_query_model,
+            openai_api_key=settings.OPENAI_API_KEY,
+            openai_api_base=settings.OPENAI_API_BASE,
+        )
+        return {"rewritten_query": rewritten}
 
 
 # ---------------------------------------------------------------------------
@@ -592,29 +652,33 @@ async def dense_retrieval_node(
     file_markdown: str | None = None,
 ) -> dict:
     """Run the dense retrieval leg for the current subtask."""
-    kb_ids = kb_ids or state.get("kb_ids", [])
-    org_id = org_id if org_id is not None else state.get("org_id")
-    file_markdown = file_markdown or state.get("file_markdown")
+    with _agent_step("dense_retrieval"):
+        kb_ids = kb_ids or state.get("kb_ids", [])
+        org_id = org_id if org_id is not None else state.get("org_id")
+        file_markdown = file_markdown or state.get("file_markdown")
 
-    query = state.get("rewritten_query", state.get("original_query", ""))
-    datastore_ids = get_effective_datastore_ids(kb_ids, org_id, db) if db else []
+        query = state.get("rewritten_query", state.get("original_query", ""))
+        datastore_ids = get_effective_datastore_ids(kb_ids, org_id, db) if db else []
 
-    try:
-        docs = dense_search_docs(query=query, kb_ids=kb_ids, datastore_ids=datastore_ids)
-        failed = False
-    except Exception as exc:
-        logger.warning("[DENSE_RETRIEVAL] failed: %s", exc)
-        docs = []
-        failed = True
+        writer = get_stream_writer()
+        writer({"event": "progress", "phase": "dense_retrieval", "message": "Running dense vector retrieval..."})
 
-    serialised = [_serialise_doc(d) for d in docs]
+        try:
+            docs = dense_search_docs(query=query, kb_ids=kb_ids, datastore_ids=datastore_ids)
+            failed = False
+        except Exception as exc:
+            logger.warning("[DENSE_RETRIEVAL] failed: %s", exc)
+            docs = []
+            failed = True
 
-    return {
-        "dense_docs": serialised,
-        "leg_results": {"dense": {"status": "failed" if failed else "ok", "count": len(serialised)}},
-        "failed_legs": ["dense"] if failed else [],
-        "leg_doc_counts": {"dense": len(serialised)},
-    }
+        serialised = [_serialise_doc(d) for d in docs]
+
+        return {
+            "dense_docs": serialised,
+            "leg_results": {"dense": {"status": "failed" if failed else "ok", "count": len(serialised)}},
+            "failed_legs": ["dense"] if failed else [],
+            "leg_doc_counts": {"dense": len(serialised)},
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -629,29 +693,33 @@ async def sparse_retrieval_node(
     file_markdown: str | None = None,
 ) -> dict:
     """Run the sparse retrieval leg for the current subtask."""
-    kb_ids = kb_ids or state.get("kb_ids", [])
-    org_id = org_id if org_id is not None else state.get("org_id")
-    file_markdown = file_markdown or state.get("file_markdown")
+    with _agent_step("sparse_retrieval"):
+        kb_ids = kb_ids or state.get("kb_ids", [])
+        org_id = org_id if org_id is not None else state.get("org_id")
+        file_markdown = file_markdown or state.get("file_markdown")
 
-    query = state.get("rewritten_query", state.get("original_query", ""))
-    datastore_ids = get_effective_datastore_ids(kb_ids, org_id, db) if db else []
+        query = state.get("rewritten_query", state.get("original_query", ""))
+        datastore_ids = get_effective_datastore_ids(kb_ids, org_id, db) if db else []
 
-    try:
-        docs = sparse_search_docs(query=query, kb_ids=kb_ids, datastore_ids=datastore_ids)
-        failed = False
-    except Exception as exc:
-        logger.warning("[SPARSE_RETRIEVAL] failed: %s", exc)
-        docs = []
-        failed = True
+        writer = get_stream_writer()
+        writer({"event": "progress", "phase": "sparse_retrieval", "message": "Running sparse keyword retrieval..."})
 
-    serialised = [_serialise_doc(d) for d in docs]
+        try:
+            docs = sparse_search_docs(query=query, kb_ids=kb_ids, datastore_ids=datastore_ids)
+            failed = False
+        except Exception as exc:
+            logger.warning("[SPARSE_RETRIEVAL] failed: %s", exc)
+            docs = []
+            failed = True
 
-    return {
-        "sparse_docs": serialised,
-        "leg_results": {"sparse": {"status": "failed" if failed else "ok", "count": len(serialised)}},
-        "failed_legs": ["sparse"] if failed else [],
-        "leg_doc_counts": {"sparse": len(serialised)},
-    }
+        serialised = [_serialise_doc(d) for d in docs]
+
+        return {
+            "sparse_docs": serialised,
+            "leg_results": {"sparse": {"status": "failed" if failed else "ok", "count": len(serialised)}},
+            "failed_legs": ["sparse"] if failed else [],
+            "leg_doc_counts": {"sparse": len(serialised)},
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -666,29 +734,33 @@ async def exact_retrieval_node(
     file_markdown: str | None = None,
 ) -> dict:
     """Run the exact (MySQL FTS) retrieval leg for the current subtask."""
-    kb_ids = kb_ids or state.get("kb_ids", [])
-    org_id = org_id if org_id is not None else state.get("org_id")
-    file_markdown = file_markdown or state.get("file_markdown")
+    with _agent_step("exact_retrieval"):
+        kb_ids = kb_ids or state.get("kb_ids", [])
+        org_id = org_id if org_id is not None else state.get("org_id")
+        file_markdown = file_markdown or state.get("file_markdown")
 
-    query = state.get("rewritten_query", state.get("original_query", ""))
-    datastore_ids = get_effective_datastore_ids(kb_ids, org_id, db) if db else []
+        query = state.get("rewritten_query", state.get("original_query", ""))
+        datastore_ids = get_effective_datastore_ids(kb_ids, org_id, db) if db else []
 
-    try:
-        docs = exact_search_docs(query=query, kb_ids=kb_ids, datastore_ids=datastore_ids, db=db)
-        failed = False
-    except Exception as exc:
-        logger.warning("[EXACT_RETRIEVAL] failed: %s", exc)
-        docs = []
-        failed = True
+        writer = get_stream_writer()
+        writer({"event": "progress", "phase": "exact_retrieval", "message": "Running exact full-text retrieval..."})
 
-    serialised = [_serialise_doc(d) for d in docs]
+        try:
+            docs = exact_search_docs(query=query, kb_ids=kb_ids, datastore_ids=datastore_ids, db=db)
+            failed = False
+        except Exception as exc:
+            logger.warning("[EXACT_RETRIEVAL] failed: %s", exc)
+            docs = []
+            failed = True
 
-    return {
-        "exact_docs": serialised,
-        "leg_results": {"exact": {"status": "failed" if failed else "ok", "count": len(serialised)}},
-        "failed_legs": ["exact"] if failed else [],
-        "leg_doc_counts": {"exact": len(serialised)},
-    }
+        serialised = [_serialise_doc(d) for d in docs]
+
+        return {
+            "exact_docs": serialised,
+            "leg_results": {"exact": {"status": "failed" if failed else "ok", "count": len(serialised)}},
+            "failed_legs": ["exact"] if failed else [],
+            "leg_doc_counts": {"exact": len(serialised)},
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -700,19 +772,25 @@ def merge_node(
     file_markdown: str | None = None,
 ) -> dict:
     """Merge per-leg retrieval results into a single deduplicated doc list."""
-    file_markdown = file_markdown or state.get("file_markdown")
+    with _agent_step("merge"):
+        file_markdown = file_markdown or state.get("file_markdown")
 
-    leg_docs = {
-        "dense": state.get("dense_docs", []),
-        "sparse": state.get("sparse_docs", []),
-        "exact": state.get("exact_docs", []),
-    }
+        leg_docs = {
+            "dense": state.get("dense_docs", []),
+            "sparse": state.get("sparse_docs", []),
+            "exact": state.get("exact_docs", []),
+        }
 
-    merged = _merge_docs(leg_docs)
+        merged = _merge_docs(leg_docs)
 
-    return {
-        "retrieved_docs": merged,
-    }
+        # Stream the merged candidate docs as they become available.
+        if merged:
+            writer = get_stream_writer()
+            writer({"event": "context", "docs": merged})
+
+        return {
+            "retrieved_docs": merged,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -721,18 +799,19 @@ def merge_node(
 
 def collect_context_node(state: AgentState) -> dict:
     """Collect a subagent's retrieved context and add it to subtask_contexts."""
-    return {
-        "subtask_contexts": [{
-            "question": state.get("original_query", ""),
-            "rewritten_query": state.get("rewritten_query", ""),
-            "retrieved_docs": state.get("retrieved_docs", []),
-            "retrieved_contexts": state.get("retrieved_contexts", []),
-            "retrieval_confidence": state.get("retrieval_confidence", 0.0),
-            "leg_results": state.get("leg_results", {}),
-            "failed_legs": state.get("failed_legs", []),
-            "all_scored_docs": state.get("all_scored_docs", []),
-        }],
-    }
+    with _agent_step("collect_context"):
+        return {
+            "subtask_contexts": [{
+                "question": state.get("original_query", ""),
+                "rewritten_query": state.get("rewritten_query", ""),
+                "retrieved_docs": state.get("retrieved_docs", []),
+                "retrieved_contexts": state.get("retrieved_contexts", []),
+                "retrieval_confidence": state.get("retrieval_confidence", 0.0),
+                "leg_results": state.get("leg_results", {}),
+                "failed_legs": state.get("failed_legs", []),
+                "all_scored_docs": state.get("all_scored_docs", []),
+            }],
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -790,15 +869,28 @@ def prepare_final_context_node(state: AgentState) -> dict:
             len(all_docs), len(all_scored),
         )
 
-    avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
+    with _agent_step("prepare_final_context"):
+        avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
 
-    return {
-        "retrieved_docs": all_docs,
-        "all_scored_docs": all_scored,
-        "retrieved_contexts": all_contexts,
-        "retrieval_confidence": avg_conf,
-        "is_complex": is_complex,
-    }
+        # Stream the final aggregated context so the UI can show citations before
+        # generation starts.
+        if all_docs:
+            writer = get_stream_writer()
+            writer({
+                "event": "context",
+                "docs": all_docs,
+                "confidence": "high" if avg_conf > 0.7 else "medium" if avg_conf > 0.3 else "low",
+                "score": int(avg_conf * 100),
+                "synthesis_mode": is_complex,
+            })
+
+        return {
+            "retrieved_docs": all_docs,
+            "all_scored_docs": all_scored,
+            "retrieved_contexts": all_contexts,
+            "retrieval_confidence": avg_conf,
+            "is_complex": is_complex,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -807,11 +899,12 @@ def prepare_final_context_node(state: AgentState) -> dict:
 
 def finalize_answer_node(state: AgentState) -> dict:
     """Promote the generated answer to final_answer."""
-    answer = state.get("answer", "")
-    return {
-        "final_answer": answer,
-        "messages": [AIMessage(content=answer)] if answer else [],
-    }
+    with _agent_step("finalize_answer"):
+        answer = state.get("answer", "")
+        return {
+            "final_answer": answer,
+            "messages": [AIMessage(content=answer)] if answer else [],
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -823,66 +916,67 @@ async def answer_evaluation_node(
     llm: ChatOpenAI | None = None,
 ) -> dict:
     """Evaluate final answer quality and compute final confidence score."""
-    from .evaluator import evaluate_answer
+    with _agent_step("answer_evaluation"):
+        from .evaluator import evaluate_answer
 
-    answer = state.get("answer", "")
-    query = state.get("original_query", "")
-    docs = state.get("retrieved_docs", [])
-    retrieval_conf = state.get("retrieval_confidence", 0.0)
+        answer = state.get("answer", "")
+        query = state.get("original_query", "")
+        docs = state.get("retrieved_docs", [])
+        retrieval_conf = state.get("retrieval_confidence", 0.0)
 
-    if not answer or not docs:
+        if not answer or not docs:
+            return {
+                "answer_evaluation_attempts": state.get("answer_evaluation_attempts", 0) + 1,
+                "final_confidence": 0.0,
+                "confidence_level": "none",
+                "faithfulness": 0,
+                "completeness": 0,
+                "needs_retry": False,
+            }
+
+        context_text = format_context_string(docs, state.get("file_markdown"))
+        conf_level = (
+            "very_high" if retrieval_conf > 0.8 else
+            "high" if retrieval_conf > 0.6 else
+            "medium" if retrieval_conf > 0.3 else "low"
+        )
+
+        try:
+            evaluation = await evaluate_answer(
+                query=query,
+                answer=answer,
+                context_preview=context_text,
+                confidence_level=conf_level,
+            )
+            faithfulness = evaluation.faithfulness
+            completeness = evaluation.completeness
+        except Exception as exc:
+            logger.warning("[ANSWER_EVALUATION] failed: %s", exc)
+            faithfulness = 50
+            completeness = 50
+
+        retrieval_score = retrieval_conf * 100
+        final_confidence = (
+            0.4 * retrieval_score +
+            0.3 * faithfulness +
+            0.3 * completeness
+        )
+        final_confidence = round(final_confidence / 100.0, 3)
+
+        confidence_level = (
+            "very_high" if final_confidence > 0.8 else
+            "high" if final_confidence > 0.6 else
+            "medium" if final_confidence > 0.3 else "low" if final_confidence > 0 else "none"
+        )
+
         return {
             "answer_evaluation_attempts": state.get("answer_evaluation_attempts", 0) + 1,
-            "final_confidence": 0.0,
-            "confidence_level": "none",
-            "faithfulness": 0,
-            "completeness": 0,
+            "final_confidence": final_confidence,
+            "confidence_level": confidence_level,
+            "faithfulness": faithfulness,
+            "completeness": completeness,
             "needs_retry": False,
         }
-
-    context_text = format_context_string(docs, state.get("file_markdown"))
-    conf_level = (
-        "very_high" if retrieval_conf > 0.8 else
-        "high" if retrieval_conf > 0.6 else
-        "medium" if retrieval_conf > 0.3 else "low"
-    )
-
-    try:
-        evaluation = await evaluate_answer(
-            query=query,
-            answer=answer,
-            context_preview=context_text,
-            confidence_level=conf_level,
-        )
-        faithfulness = evaluation.faithfulness
-        completeness = evaluation.completeness
-    except Exception as exc:
-        logger.warning("[ANSWER_EVALUATION] failed: %s", exc)
-        faithfulness = 50
-        completeness = 50
-
-    retrieval_score = retrieval_conf * 100
-    final_confidence = (
-        0.4 * retrieval_score +
-        0.3 * faithfulness +
-        0.3 * completeness
-    )
-    final_confidence = round(final_confidence / 100.0, 3)
-
-    confidence_level = (
-        "very_high" if final_confidence > 0.8 else
-        "high" if final_confidence > 0.6 else
-        "medium" if final_confidence > 0.3 else "low" if final_confidence > 0 else "none"
-    )
-
-    return {
-        "answer_evaluation_attempts": state.get("answer_evaluation_attempts", 0) + 1,
-        "final_confidence": final_confidence,
-        "confidence_level": confidence_level,
-        "faithfulness": faithfulness,
-        "completeness": completeness,
-        "needs_retry": False,
-    }
 
 
 # ---------------------------------------------------------------------------

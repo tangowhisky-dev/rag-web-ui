@@ -92,6 +92,7 @@ class AgentState(MessagesState):
 
     # ── Generation state ────────────────────────────────────────────────
     answer: str = ""
+    answer_usage: Optional[dict] = None  # Token usage captured during streaming
     thinking_chunks: List[str] = []
     is_chart_query: bool = False
     chart_data: Optional[Any] = None

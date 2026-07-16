@@ -517,46 +517,29 @@ const ConfidenceCollapsible: FC<{
           {/* Final evaluation metrics */}
           {(finalConfidence !== undefined || faithfulness !== undefined || completeness !== undefined) && (
             <div className="space-y-1">
-              <p className={`text-[10px] font-semibold uppercase tracking-wide ${cfg.text} opacity-60`}>
-                Final Evaluation
-              </p>
-              <div className="space-y-1">
-                {finalConfidence !== undefined && (
-                  <div className="flex justify-between gap-4">
-                    <span className="text-zinc-500 dark:text-zinc-400">Final confidence</span>
-                    <span className={`font-medium ${cfg.text}`}>
-                      {Math.round(finalConfidence * 100)}/100 ({finalConfidenceLevel ?? level})
-                    </span>
-                  </div>
-                )}
-                {faithfulness !== undefined && (
-                  <div className="flex justify-between gap-4">
-                    <span className="text-zinc-500 dark:text-zinc-400">Faithfulness</span>
-                    <span className={`font-medium ${cfg.text}`}>{faithfulness}/100</span>
-                  </div>
-                )}
-                {completeness !== undefined && (
-                  <div className="flex justify-between gap-4">
-                    <span className="text-zinc-500 dark:text-zinc-400">Completeness</span>
-                    <span className={`font-medium ${cfg.text}`}>{completeness}/100</span>
-                  </div>
-                )}
-              </div>
+              {faithfulness !== undefined && (
+                <div className="flex justify-between gap-4">
+                  <span className="text-zinc-500 dark:text-zinc-400">Faithfulness</span>
+                  <span className={`font-medium ${cfg.text}`}>{faithfulness}/100</span>
+                </div>
+              )}
+              {completeness !== undefined && (
+                <div className="flex justify-between gap-4">
+                  <span className="text-zinc-500 dark:text-zinc-400">Completeness</span>
+                  <span className={`font-medium ${cfg.text}`}>{completeness}/100</span>
+                </div>
+              )}
+              {score !== undefined && (
+                <div className="flex justify-between gap-4">
+                  <span className="text-zinc-500 dark:text-zinc-400">Retrieval confidence</span>
+                  <span className={`font-medium ${cfg.text}`}>{score}/100</span>
+                </div>
+              )}
             </div>
           )}
 
           {/* Retrieval confidence */}
-          {score !== undefined && (
-            <div className="space-y-1">
-              <p className={`text-[10px] font-semibold uppercase tracking-wide ${cfg.text} opacity-60`}>
-                Retrieval Quality
-              </p>
-              <div className="flex justify-between gap-4">
-                <span className="text-zinc-500 dark:text-zinc-400">Retrieval confidence</span>
-                <span className={`font-medium ${cfg.text}`}>{score}/100</span>
-              </div>
-            </div>
-          )}
+          
 
           {/* Failed legs */}
           {failedLegs && failedLegs.length > 0 && (
@@ -670,6 +653,7 @@ export const Answer: FC<{
   toolTrace?: ToolTraceEntry[];
   agentSteps?: Array<{ node: string; latency_ms: number; status: string; [key: string]: unknown }>;
   taskList?: Array<{ id: number; text: string; status: string }>;
+  progressMessages?: Array<{ phase: string; message: string; details?: Record<string, unknown> }>;
   synthesisMode?: boolean;
   isStreaming?: boolean;
   onDelete?: (id: string) => void;
@@ -678,7 +662,7 @@ export const Answer: FC<{
   finalConfidenceLevel?: "very_high" | "high" | "medium" | "low" | "none";
   faithfulness?: number;
   completeness?: number;
-}> = ({ messageId, chatId, markdown, citations = [], rewrittenQuery, retrievedContext, confidence, confidenceScore, confidenceBreakdown, suggestion, failedLegs, queryClassification, toolTrace, agentSteps, taskList, synthesisMode, isStreaming = false, onDelete, finalConfidence, finalConfidenceLevel, faithfulness, completeness }) => {
+}> = ({ messageId, chatId, markdown, citations = [], rewrittenQuery, retrievedContext, confidence, confidenceScore, confidenceBreakdown, suggestion, failedLegs, queryClassification, toolTrace, agentSteps, taskList, progressMessages, synthesisMode, isStreaming = false, onDelete, finalConfidence, finalConfidenceLevel, faithfulness, completeness }) => {
   const [citationInfoMap, setCitationInfoMap] = useState<
     Record<string, CitationInfo>
   >({});
@@ -1071,6 +1055,17 @@ export const Answer: FC<{
       )}
       {/* AgentTimeline: transient progress badges only */}
       <AgentTimeline agentSteps={filteredAgentSteps} isStreaming={isStreaming} />
+      {/* Phase-based progress messages — shown during streaming */}
+      {progressMessages && progressMessages.length > 0 && (
+        <div className="mb-2 space-y-1 not-prose">
+          {progressMessages.map((pm, i) => (
+            <div key={i} className="flex items-center gap-2 text-[12px] text-muted-foreground">
+              <span className="h-1.5 w-1.5 rounded-full bg-blue-400 shrink-0" />
+              <span>{pm.message}</span>
+            </div>
+          ))}
+        </div>
+      )}
       {confidence === "none" && suggestion && (
         <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 mb-2">
           <span className="mt-0.5 shrink-0">⚠</span>
@@ -1099,6 +1094,9 @@ export const Answer: FC<{
         >
           {parsedContent.answerText}
         </Markdown>
+      )}
+      {isStreaming && (
+        <span className="inline-block w-2 h-4 ml-0.5 align-middle bg-foreground/80 animate-pulse" aria-hidden="true" />
       )}
 
       {/* ── Bottom bar: actions left, confidence right ─────────────────────── */}

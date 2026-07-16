@@ -533,14 +533,21 @@ async def generate_response(
                     for k, v in event.items() if k != "event"
                 }
                 yield f'2:{json.dumps(context_payload)}\n'
-                await asyncio.sleep(0)
-                await stream_flush()
+                yield ':\n'
 
             elif event_type == "token":
                 content = event.get("content", "")
-                full_response += content
+                if isinstance(content, str):
+                    full_response += content
+                elif isinstance(content, list):
+                    for chunk in content:
+                        if isinstance(chunk, str):
+                            full_response += chunk
+                        elif isinstance(chunk, dict) and "text" in chunk:
+                            full_response += chunk["text"]
+                logger.info("[CHAT SSE] yield token %r", content)
                 yield f'0:{json.dumps(content)}\n'
-                await asyncio.sleep(0)
+                yield ':\n'  # SSE flush comment — force chunk to leave backend buffer
             elif event_type == "answer_rewrite":
                 # Citation normalisation: replace accumulated streamed text with
                 # the citation-linked version. Frontend handles this via event type 'r'.

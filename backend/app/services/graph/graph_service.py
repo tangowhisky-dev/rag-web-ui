@@ -592,6 +592,9 @@ def expand_docs_via_graph(
                 collections=collections,
                 limit=max(1, settings.GRAPHRAG_RETRIEVAL_LIMIT),
             )
+            expansion_targets = [
+                (rec["point_id"], rec["collection"]) for rec in result
+            ]
         if not expansion_targets:
             logger.debug("GraphService.expand: no graph-connected chunks found beyond current result set")
             return []

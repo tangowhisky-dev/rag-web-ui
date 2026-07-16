@@ -7,10 +7,9 @@ Streams SSE events (p:/t:/th:/0:/1:/2:/3:/4:/d:) in real-time.
 
 from __future__ import annotations
 
-import json
+import asyncio
 import logging
 import time
-import asyncio
 from typing import Any, AsyncGenerator, List, Optional
 
 from langchain_core.messages import HumanMessage, AIMessage
@@ -19,8 +18,23 @@ from app.core.config import settings
 
 from .graph import build_main_graph
 from .graph_state import AgentState
+from .streaming import AgenticRAGTransformer
+from .evaluator import evaluate_answer
+from .utils import format_context_string
 
 logger = logging.getLogger(__name__)
+
+
+def _final_answer_to_string(fa_raw: Any) -> str:
+    """Normalize final_answer (string, list of dicts, or other) to a string."""
+    if isinstance(fa_raw, list):
+        return "".join(
+            part.get("text", "")
+            if isinstance(part, dict) and part.get("type") == "text"
+            else str(part)
+            for part in fa_raw
+        )
+    return str(fa_raw) if fa_raw else ""
 
 
 async def run_agentic_rag(
@@ -41,9 +55,10 @@ async def run_agentic_rag(
 
     The compiled graph owns the routing logic; this runner only:
     1. Builds the initial state from history
-    2. Executes the graph via astream_events to stream tokens
+    2. Executes the graph via astream_events(..., version="v3") with a custom
+       stream transformer that consumes the raw protocol stream
     3. Handles interrupt() pauses for clarification
-    4. Extracts the final state to emit context, done, and usage events
+    4. Extracts the final state to emit context, done, evaluation, and usage events
     """
     t0 = time.monotonic()
 
@@ -81,201 +96,142 @@ async def run_agentic_rag(
         "configurable": {"thread_id": str(chat_id) if chat_id else None},
     }
 
-    all_docs: List[dict] = []
-    interrupted = False
-
-    # ── Task list tracking (for complex queries with subtasks) ───────────
-    _task_texts: List[str] = []
-    _completed_subtasks: int = 0
-
-    def _make_task_list(texts: List[str], done_count: int) -> List[dict]:
-        tasks = []
-        for i, text in enumerate(texts):
-            if i < done_count:
-                status = "done"
-            elif i == done_count:
-                status = "active"
-            else:
-                status = "pending"
-            tasks.append({"id": i, "text": text, "status": status})
-        return tasks
-
     try:
-        # ── LangGraph v3: concurrent projections ──────────────────────
-        # stream.messages  → AsyncChatModelStream (iterate to get dict chunks)
-        # stream.subgraphs → subgraph lifecycle (agent_subgraph start/done)
-        # stream.values    → state snapshots (dict)
-        # stream.output    → final state after completion
-        stream = await graph.astream_events(initial_state, config=config, version="v3")
+        stream = await graph.astream_events(
+            initial_state,
+            config=config,
+            version="v3",
+            transformers=[AgenticRAGTransformer],
+        )
 
-        q = asyncio.Queue()
-        all_docs: List[dict] = []
-        interrupted = False
+        # The transformer instance is exposed on stream.extensions["agentic"]
+        # because init() returns {"agentic": self}.
+        transformer = stream.extensions["agentic"]
+        events_channel = stream.extensions["events"]
 
-        async def _tok():
-            """Read LLM token deltas from the generating node only."""
-            async for msg_proj in stream.messages:
-                if msg_proj.node != "generating":
-                    continue
-                async for chunk in msg_proj:
-                    if isinstance(chunk, dict) and chunk.get('event') == 'content-block-delta':
-                        delta = chunk.get('delta', {})
-                        if delta.get('type') == 'text-delta':
-                            text = delta.get('text', '')
-                            if text:
-                                await q.put({"event": "token", "content": text})
+        # The raw protocol stream must be consumed to drive the transformer,
+        # but we only care about the transformed "events" channel. Run raw
+        # consumption in a background task and yield from the events channel.
+        async def _drain_raw() -> None:
+            async for _ in stream:
+                pass
 
-        async def _sub():
-            """Read subgraph lifecycle events."""
-            nonlocal _completed_subtasks
-            async for sub in stream.subgraphs:
-                status = getattr(sub, 'status', '')
-                gname = getattr(sub, 'graph_name', '')
-                if gname == 'agent_subgraph':
-                    await q.put({"event": "agent_step", "node": "agent_subgraph", "status": "active" if status == "started" else "done", "latency_ms": 0})
-                    if status == "started" and _task_texts:
-                        _completed_subtasks = 0
-                        await q.put({"event": "task_list", "tasks": _make_task_list(_task_texts, 0)})
-                    elif status == "done" and _task_texts:
-                        _completed_subtasks = min(_completed_subtasks + 1, len(_task_texts))
-                        await q.put({"event": "task_list", "tasks": _make_task_list(_task_texts, _completed_subtasks)})
+        raw_task = asyncio.create_task(_drain_raw())
 
-        async def _val():
-            """Read state snapshots from stream.values."""
-            async for snapshot in stream.values:
-                if not isinstance(snapshot, dict):
-                    continue
-                rd = snapshot.get("retrieved_docs", [])
-                if rd:
-                    all_docs.extend(rd)
-                    conf = snapshot.get("retrieval_confidence", 0.0)
-                    synthesis = len(snapshot.get("subtask_answers", [])) > 1
-                    await q.put({
-                        "event": "context",
-                        "docs": all_docs,
-                        "confidence": "high" if conf > 0.7 else "medium" if conf > 0.3 else "low",
-                        "score": int(conf * 100),
-                        "synthesis_mode": synthesis,
-                    })
+        try:
+            async for event in events_channel:
+                if event:
+                    yield event
+        finally:
+            # Ensure the raw stream finishes even if the consumer cancels early.
+            if not raw_task.done():
+                raw_task.cancel()
+                try:
+                    await raw_task
+                except asyncio.CancelledError:
+                    pass
 
-        async def _raw():
-            """Read raw lifecycle protocol events."""
-            nonlocal interrupted
-            async for event in stream:
-                method = event.get("method", "")
-                ns = event.get("params", {}).get("namespace", [])
-                pd = event.get("params", {}).get("data", {})
-                name = ns[0] if ns else ""
-                if method == "lifecycle":
-                    et = pd.get("event", "") if isinstance(pd, dict) else ""
-                    _SN = frozenset((
-                        "load_historical_memory","summarize_history",
-                        "rewrite_query","classify_query","request_clarification",
-                        "rewrite_subtask_query",
-                        "dense_retrieval","sparse_retrieval","exact_retrieval",
-                        "merge","sufficiency_check","graph_expansion",
-                        "reranking","adaptive_reranking","collect_context",
-                        "prepare_final_context","generating","chart_validation",
-                        "answer_evaluation","finalize_answer",
-                    ))
-                    if name in _SN:
-                        await q.put({"event": "agent_step", "node": name, "status": "active" if et == "started" else "done", "latency_ms": 0})
-                    if name == "classify_query" and et == "ended":
-                        out = pd.get("output", {}) if isinstance(pd, dict) else {}
-                        if isinstance(out, dict):
-                            subtasks = out.get("subtasks", [])
-                            if isinstance(subtasks, list) and len(subtasks) > 1:
-                                _task_texts.extend(subtasks)
-                                await q.put({"event": "task_list", "tasks": _make_task_list(_task_texts, 0)})
-                        if not interrupted:
-                            try:
-                                gs = await graph.aget_state(config)
-                                if hasattr(gs, "next") and gs.next and "request_clarification" in gs.next:
-                                    interrupted = True
-                                    msgs = getattr(gs, "values", {}).get("messages", [])
-                                    mc = msgs[-1].content if msgs else "Please provide clarification."
-                                    if isinstance(mc, list):
-                                        mc = str(mc)
-                                    await q.put({"event": "progress", "phase": "clarification", "message": mc})
-                            except Exception:
-                                pass
+        # Final state from the run
+        final_output = await stream.output()
+        final_state: dict = (
+            final_output
+            if isinstance(final_output, dict)
+            else getattr(final_output, "values", {}) or {}
+        )
 
-        async def _out():
-            """Read final state and emit done/evaluation."""
-            nonlocal all_docs
-            fs = await stream.output()
-            st = fs if isinstance(fs, dict) else getattr(fs, "values", {})
-            if not isinstance(st, dict):
-                st = {}
-            fa_raw = st.get("final_answer") or st.get("answer", "")
-            # Convert list content (multimodal messages) to string
-            if isinstance(fa_raw, list):
-                fa = "".join(
-                    part.get("text", "") if isinstance(part, dict) and part.get("type") == "text" else ""
-                    for part in fa_raw
-                )
-            else:
-                fa = str(fa_raw) if fa_raw else ""
-            # Handle list-type final_answer (from chat messages)
-            if isinstance(fa, list):
-                fa = ''.join(
-                    p.get('text', '') if isinstance(p, dict) else str(p)
-                    for p in fa
-                )
-            elif not isinstance(fa, str):
-                fa = str(fa) if fa else ""
-            conf = st.get("retrieval_confidence", 0.0)
-            usage = {
-                "promptTokens": 0, "completionTokens": 0,
-                "final_confidence": st.get("final_confidence", 0.0),
-                "confidence_level": st.get("confidence_level", "none"),
-                "faithfulness": st.get("faithfulness", 0),
-                "completeness": st.get("completeness", 0),
+        fa_raw = final_state.get("final_answer") or final_state.get("answer", "")
+        final_answer = _final_answer_to_string(fa_raw)
+
+        # Aggregate retrieved docs from final state; fall back to the docs the
+        # transformer already streamed, in case the graph state reducer doesn't
+        # surface them in the root final state.
+        retrieved_docs = final_state.get("retrieved_docs", [])
+        all_docs = retrieved_docs if isinstance(retrieved_docs, list) else []
+        if not all_docs and transformer is not None and transformer._all_docs:
+            all_docs = transformer._all_docs
+        conf = final_state.get("retrieval_confidence", 0.0)
+
+        # Usage is collected by the transformer from message-finish events.
+        # OpenAI-compatible endpoints often omit usage in streaming mode, so we
+        # fall back to usage_metadata attached to the final AIMessage.
+        input_tokens = getattr(transformer, "_input_tokens", 0) if transformer is not None else 0
+        completion_tokens = getattr(transformer, "_output_tokens", 0) if transformer is not None else 0
+        if input_tokens == 0 and completion_tokens == 0:
+            # Fallback 1: usage captured during generation streaming.
+            answer_usage = final_state.get("answer_usage")
+            if isinstance(answer_usage, dict):
+                input_tokens = answer_usage.get("input_tokens", 0) or 0
+                completion_tokens = answer_usage.get("output_tokens", 0) or 0
+            # Fallback 2: usage attached to final state messages.
+            if input_tokens == 0 and completion_tokens == 0:
+                for msg in final_state.get("messages", []):
+                    usage = getattr(msg, "usage_metadata", None)
+                    if isinstance(usage, dict):
+                        input_tokens += usage.get("input_tokens", 0) or 0
+                        completion_tokens += usage.get("output_tokens", 0) or 0
+
+        # Emit final context event if docs exist and transformer didn't already.
+        if all_docs and (transformer is None or not transformer._all_docs):
+            yield {
+                "event": "context",
+                "docs": all_docs,
+                "confidence": "high" if conf > 0.7 else "medium" if conf > 0.3 else "low",
+                "score": int(conf * 100),
+                "synthesis_mode": len(final_state.get("subtask_contexts", [])) > 1,
             }
-            if fa and not all_docs:
-                await q.put({"event": "token", "content": fa})
-            if settings.ANSWER_QUALITY_GRADING_ENABLED and fa and all_docs:
-                try:
-                    ct = format_context_string(all_docs, st.get("file_markdown"))
-                    cle = "very_high" if conf > 0.8 else "high" if conf > 0.6 else "medium" if conf > 0.3 else "low"
-                    ev = await evaluate_answer(query=st.get("original_query", ""), answer=fa, context_preview=ct, confidence_level=cle)
-                    usage["evaluation"] = {
-                        "faithfulness": ev.faithfulness, "completeness": ev.completeness,
-                        "citation_quality": ev.citation_quality, "confidence_match": ev.confidence_match, "flags": ev.flags,
-                    }
-                    await q.put({"event": "evaluation", "faithfulness": ev.faithfulness, "completeness": ev.completeness, "citation_quality": ev.citation_quality, "confidence_match": ev.confidence_match, "flags": ev.flags})
-                    logger.info("[EVAL] answer_quality=%s", summarize_evaluation(ev))
-                except Exception as exc:
-                    logger.warning("[EVAL] evaluation skipped: %s", exc)
-            await q.put({"event": "done", "full_response": fa, "usage": usage})
 
-        # Launch all projections concurrently
-        t1 = asyncio.create_task(_tok())
-        t2 = asyncio.create_task(_sub())
-        t3 = asyncio.create_task(_val())
-        t4 = asyncio.create_task(_raw())
-        t5 = asyncio.create_task(_out())
+        # If there is no final answer and no docs, stream whatever we have as a token
+        if final_answer and not all_docs:
+            yield {"event": "token", "content": final_answer}
 
-        # Drain queue: yield items as they arrive from any projection
-        tasks = [t1, t2, t3, t4, t5]
-        while tasks:
-            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-            tasks = [t for t in tasks if t not in done]
-            while not q.empty():
-                try:
-                    item = q.get_nowait()
-                    if item:
-                        yield item
-                except asyncio.QueueEmpty:
-                    break
-        # Final drain after all tasks done
-        while not q.empty():
+        # Answer quality evaluation
+        usage: dict[str, Any] = {
+            "promptTokens": input_tokens,
+            "completionTokens": completion_tokens,
+            "final_confidence": final_state.get("final_confidence", 0.0),
+            "confidence_level": final_state.get("confidence_level", "none"),
+            "faithfulness": final_state.get("faithfulness", 0),
+            "completeness": final_state.get("completeness", 0),
+        }
+
+        if settings.ANSWER_QUALITY_GRADING_ENABLED and final_answer and all_docs:
             try:
-                item = q.get_nowait()
-                if item:
-                    yield item
-            except asyncio.QueueEmpty:
-                break
+                ct = format_context_string(all_docs, final_state.get("file_markdown"))
+                cle = (
+                    "very_high"
+                    if conf > 0.8
+                    else "high" if conf > 0.6 else "medium" if conf > 0.3 else "low"
+                )
+                ev = await evaluate_answer(
+                    query=final_state.get("original_query", ""),
+                    answer=final_answer,
+                    context_preview=ct,
+                    confidence_level=cle,
+                )
+                usage["evaluation"] = {
+                    "faithfulness": ev.faithfulness,
+                    "completeness": ev.completeness,
+                    "citation_quality": ev.citation_quality,
+                    "confidence_match": ev.confidence_match,
+                    "flags": ev.flags,
+                }
+                yield {
+                    "event": "evaluation",
+                    "faithfulness": ev.faithfulness,
+                    "completeness": ev.completeness,
+                    "citation_quality": ev.citation_quality,
+                    "confidence_match": ev.confidence_match,
+                    "flags": ev.flags,
+                }
+                logger.info(
+                    "[EVAL] faithfulness=%s completeness=%s citation_quality=%s confidence_match=%s flags=%s",
+                    ev.faithfulness, ev.completeness, ev.citation_quality,
+                    ev.confidence_match, ev.flags,
+                )
+            except Exception as exc:
+                logger.warning("[EVAL] evaluation skipped: %s", exc)
+
+        yield {"event": "done", "full_response": final_answer, "usage": usage}
 
     except Exception as exc:
         logger.error("[GRAPH] pipeline failed: %s", exc, exc_info=True)

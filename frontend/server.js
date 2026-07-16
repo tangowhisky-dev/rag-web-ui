@@ -57,7 +57,11 @@ app.prepare().then(() => {
             // Disable Nagle algorithm so each write is flushed immediately
             if (res.socket) res.socket.setNoDelay(true);
 
-            proxyRes.on("data", (chunk) => res.write(chunk));
+            proxyRes.on("data", (chunk) => {
+              const ts = new Date().toISOString();
+              console.error(`[stream-proxy] chunk @ ${ts} size=${chunk.length}`);
+              res.write(chunk);
+            });
             proxyRes.on("end", () => res.end());
             proxyRes.on("error", () => res.end());
           }
