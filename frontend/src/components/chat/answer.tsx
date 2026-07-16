@@ -8,8 +8,8 @@ import React, {
   ClassAttributes,
 } from "react";
 import { AnchorHTMLAttributes } from "react";
-import { ChevronDown, ChevronRight, Brain, Search, BookOpen, Share2, Copy, Trash2, FileText, FileImage, FileType, RefreshCw } from "lucide-react";
-import { AgentTimeline } from "./agent-timeline";
+import { Copy, Trash2, FileText, FileImage, FileType, RefreshCw, Brain } from "lucide-react";
+import { AgenticProgress, AgentStepEvent } from "./agentic-progress";
 import {
   Popover,
   PopoverContent,
@@ -54,154 +54,10 @@ const useDebouncedValue = <T,>(value: T, delay: number): T => {
   return debouncedValue;
 };
 
-const ThinkBlock: FC<{ content: string; isComplete: boolean }> = ({
-  content,
-  isComplete,
-}) => {
-  const [isExpanded, setIsExpanded] = useState(!isComplete);
-  const [elapsedMs, setElapsedMs] = useState(0);
-  const startTimeRef = useRef<number>(Date.now());
-  const finalMsRef = useRef<number | null>(null);
-  const contentRef = useRef<HTMLDivElement>(null);
-
-  // Single effect: run interval while thinking, freeze + collapse when done.
-  // We never call setElapsedMs synchronously inside the completion branch to
-  // avoid triggering the "Maximum update depth exceeded" cascade.
-  useEffect(() => {
-    if (isComplete) {
-      // Record final elapsed time into a ref (no setState = no re-render loop)
-      if (finalMsRef.current === null) {
-        finalMsRef.current = Date.now() - startTimeRef.current;
-      }
-      const timer = setTimeout(() => setIsExpanded(false), 1500);
-      return () => clearTimeout(timer);
-    }
-    // Tick every 100 ms while the model is still thinking
-    const interval = setInterval(() => {
-      setElapsedMs(Date.now() - startTimeRef.current);
-    }, 100);
-    return () => clearInterval(interval);
-  }, [isComplete]);
-
-  // Auto-scroll to bottom as content streams in
-  useEffect(() => {
-    if (!isComplete && isExpanded && contentRef.current) {
-      contentRef.current.scrollTop = contentRef.current.scrollHeight;
-    }
-  }, [content, isComplete, isExpanded]);
-
-  const displayMs = finalMsRef.current ?? elapsedMs;
-  const seconds = displayMs / 1000;
-  const label = isComplete
-    ? seconds < 1
-      ? "Thought for less than a second"
-      : `Thought for ${seconds.toFixed(1)} seconds`
-    : `Thinking... (${seconds.toFixed(1)}s)`;
-
-  return (
-    <div className="my-2 rounded-md border border-gray-100 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/40 w-full">
-      <button
-        onClick={() => setIsExpanded(!isExpanded)}
-        className="flex items-center gap-1.5 w-full px-3 py-1.5 text-left rounded-t-md hover:bg-gray-100 dark:hover:bg-gray-700/40 transition-colors group"
-      >
-        {isExpanded ? (
-          <ChevronDown className="h-3 w-3 text-gray-400 shrink-0" />
-        ) : (
-          <ChevronRight className="h-3 w-3 text-gray-400 shrink-0" />
-        )}
-        <Brain className={`h-3 w-3 shrink-0 ${isComplete ? "text-gray-400" : "text-blue-400 animate-pulse"}`} />
-        <span className="text-xs text-gray-400 font-medium select-none">
-          {label}
-        </span>
-      </button>
-      {isExpanded && (
-        <div
-          ref={contentRef}
-          className="px-3 pb-2 pt-1 max-h-48 overflow-y-auto overflow-x-hidden border-t border-gray-100 dark:border-gray-700"
-        >
-          <pre className="text-[11px] leading-[1.45] text-gray-400 dark:text-gray-500 whitespace-pre-wrap break-words font-sans m-0">
-            {content}
-          </pre>
-        </div>
-      )}
-    </div>
-  );
-};
-
 interface ContextDoc {
   page_content: string;
   metadata: Record<string, any>;
 }
-
-const RewrittenQueryBlock: FC<{ query: string }> = ({ query }) => {
-  const [isExpanded, setIsExpanded] = useState(true);
-
-  useEffect(() => {
-    const timer = setTimeout(() => setIsExpanded(false), 1500);
-    return () => clearTimeout(timer);
-  }, []);
-
-  return (
-    <div className="my-2 rounded-md border border-gray-100 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/40 w-full">
-      <button
-        onClick={() => setIsExpanded(!isExpanded)}
-        className="flex items-center gap-1.5 w-full px-3 py-1.5 text-left rounded-t-md hover:bg-gray-100 dark:hover:bg-gray-700/40 transition-colors"
-      >
-        {isExpanded ? (
-          <ChevronDown className="h-3 w-3 text-gray-400 shrink-0" />
-        ) : (
-          <ChevronRight className="h-3 w-3 text-gray-400 shrink-0" />
-        )}
-        <Search className="h-3 w-3 shrink-0 text-gray-400" />
-        <span className="text-xs text-gray-400 font-medium select-none">
-          Rewritten Query
-        </span>
-      </button>
-      {isExpanded && (
-        <div className="px-3 pb-2 pt-1 border-t border-gray-100 dark:border-gray-700">
-          <p className="text-[11px] leading-[1.45] text-gray-400 dark:text-gray-500 whitespace-pre-wrap break-words font-sans m-0">
-            {query}
-          </p>
-        </div>
-      )}
-    </div>
-  );
-};
-
-const RetrievedContextBlock: FC<{ docs: ContextDoc[] }> = ({ docs }) => {
-  const [isExpanded, setIsExpanded] = useState(false);
-
-  return (
-    <div className="my-2 rounded-md border border-gray-100 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/40 w-full">
-      <button
-        onClick={() => setIsExpanded(!isExpanded)}
-        className="flex items-center gap-1.5 w-full px-3 py-1.5 text-left rounded-t-md hover:bg-gray-100 dark:hover:bg-gray-700/40 transition-colors"
-      >
-        {isExpanded ? (
-          <ChevronDown className="h-3 w-3 text-gray-400 shrink-0" />
-        ) : (
-          <ChevronRight className="h-3 w-3 text-gray-400 shrink-0" />
-        )}
-        <BookOpen className="h-3 w-3 shrink-0 text-gray-400" />
-        <span className="text-xs text-gray-400 font-medium select-none">
-          Retrieved {docs.length} context{docs.length !== 1 ? "s" : ""}
-        </span>
-      </button>
-      {isExpanded && (
-        <div className="px-3 pb-2 pt-1 max-h-64 overflow-y-auto border-t border-gray-100 dark:border-gray-700 space-y-2">
-          {docs.map((doc, i) => (
-            <div key={i} className="text-[11px] leading-[1.45] text-gray-400 dark:text-gray-500 font-sans">
-              <span className="font-semibold text-gray-500 dark:text-gray-400">[{i + 1}] </span>
-              {doc.page_content.length > 300
-                ? doc.page_content.slice(0, 300) + "..."
-                : doc.page_content}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-};
 
 interface Citation {
   id: number;
@@ -231,383 +87,10 @@ interface DocumentInfo {
   knowledge_base: KnowledgeBaseInfo;
 }
 
-const RetrievedGraphBlock: FC<{ docs: ContextDoc[] }> = ({ docs }) => {
-  const [isExpanded, setIsExpanded] = useState(false);
-
-  return (
-    <div className="my-2 rounded-md border border-purple-100 dark:border-purple-900/40 bg-purple-50/50 dark:bg-purple-900/10 w-full">
-      <button
-        onClick={() => setIsExpanded(!isExpanded)}
-        className="flex items-center gap-1.5 w-full px-3 py-1.5 text-left rounded-t-md hover:bg-purple-100/60 dark:hover:bg-purple-900/20 transition-colors"
-      >
-        {isExpanded ? (
-          <ChevronDown className="h-3 w-3 text-purple-400 shrink-0" />
-        ) : (
-          <ChevronRight className="h-3 w-3 text-purple-400 shrink-0" />
-        )}
-        <Share2 className="h-3 w-3 shrink-0 text-purple-400" />
-        <span className="text-xs text-purple-500 dark:text-purple-400 font-medium select-none">
-          Retrieved Graph Knowledge
-        </span>
-        <span className="ml-auto text-[10px] text-purple-400 dark:text-purple-500 font-normal select-none">
-          {docs.length} node{docs.length !== 1 ? "s" : ""}
-        </span>
-      </button>
-      {isExpanded && (
-        <div className="px-3 pb-2 pt-1 max-h-64 overflow-y-auto border-t border-purple-100 dark:border-purple-900/40 space-y-2">
-          {docs.map((doc, i) => (
-            <div key={i} className="text-[11px] leading-[1.45] text-purple-700 dark:text-purple-300 font-sans">
-              <span className="font-semibold text-purple-500 dark:text-purple-400">[G{i + 1}] </span>
-              <span className="whitespace-pre-wrap">
-                {cleanChunkText(doc.page_content).length > 400
-                  ? cleanChunkText(doc.page_content).slice(0, 400) + "…"
-                  : cleanChunkText(doc.page_content)}
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-};
-
 interface CitationInfo {
   knowledge_base: KnowledgeBaseInfo;
   document: DocumentInfo;
 }
-
-// ── Query Classification badge ─────────────────────────────────────────────
-
-interface QueryClassification {
-  type: string;
-  confidence: number;
-  latency_ms: number;
-  fallback: boolean;
-}
-
-const QUERY_TYPE_COLORS: Record<string, { bg: string; text: string; border: string }> = {
-  FACTUAL:        { bg: "bg-[hsl(var(--query-factual)/10%)]", text: "text-[hsl(var(--query-factual-foreground))]", border: "border-[hsl(var(--query-factual)/30%)]" },
-  ENTITY_CENTRIC: { bg: "bg-[hsl(var(--query-entity)/10%)]",  text: "text-[hsl(var(--query-entity-foreground))]",  border: "border-[hsl(var(--query-entity)/30%)]"  },
-  MULTI_PART:     { bg: "bg-[hsl(var(--query-multi)/10%)]",   text: "text-[hsl(var(--query-multi-foreground))]",   border: "border-[hsl(var(--query-multi)/30%)]"   },
-  AMBIGUOUS:      { bg: "bg-muted/50",                       text: "text-muted-foreground",                      border: "border-border"                          },
-};
-
-const QueryClassificationBlock: FC<{ classification: QueryClassification; synthesisMode?: boolean }> = ({
-  classification,
-  synthesisMode,
-}) => {
-  const colors = QUERY_TYPE_COLORS[classification.type] ?? QUERY_TYPE_COLORS["AMBIGUOUS"];
-  const pct = Math.round(classification.confidence * 100);
-
-  return (
-    <div className={`flex items-center gap-2 rounded-md border ${colors.border} ${colors.bg} px-2.5 py-1 text-[11px] not-prose`}>
-      <span className={`font-semibold tracking-wide ${colors.text}`}>
-        {classification.type.replace("_", " ")}
-      </span>
-      <span className={`opacity-70 ${colors.text}`}>·</span>
-      <span className={`${colors.text} opacity-80`}>{pct}% confidence</span>
-      <span className={`opacity-70 ${colors.text}`}>·</span>
-      <span className={`${colors.text} opacity-70`}>{Math.round(classification.latency_ms)}ms</span>
-      {classification.fallback && (
-        <>
-          <span className={`opacity-70 ${colors.text}`}>·</span>
-          <span className="text-amber-600 dark:text-amber-400 opacity-90">fallback</span>
-        </>
-      )}
-      {synthesisMode && (
-        <>
-          <span className={`opacity-70 ${colors.text}`}>·</span>
-          <span className="text-emerald-600 dark:text-emerald-400 font-medium">⊕ Synthesis</span>
-        </>
-      )}
-    </div>
-  );
-};
-
-// ── Tool trace timeline ────────────────────────────────────────────────────
-
-interface ToolTraceEntry {
-  tool_name: string;
-  params?: Record<string, unknown>;
-  output?: unknown;
-  error?: string | null;
-  latency_ms: number;
-}
-
-const TOOL_ICONS: Record<string, string> = {
-  search_documents:    "🔍",
-  extract_entities:    "🏷",
-  summarize_chunks:    "📝",
-  synthesize_documents:"⊕",
-};
-
-const ToolTraceBlock: FC<{ trace: ToolTraceEntry[] }> = ({ trace }) => {
-  const [isExpanded, setIsExpanded] = useState(false);
-
-  if (trace.length === 0) return null;
-
-  return (
-    <div className="my-2 rounded-md border border-gray-100 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/40 w-full not-prose">
-      <button
-        onClick={() => setIsExpanded(!isExpanded)}
-        className="flex items-center gap-1.5 w-full px-3 py-1.5 text-left rounded-t-md hover:bg-gray-100 dark:hover:bg-gray-700/40 transition-colors"
-      >
-        {isExpanded ? (
-          <ChevronDown className="h-3 w-3 text-gray-400 shrink-0" />
-        ) : (
-          <ChevronRight className="h-3 w-3 text-gray-400 shrink-0" />
-        )}
-        <span className="text-xs text-gray-400 font-medium select-none">
-          Tool calls ({trace.length})
-        </span>
-        <span className="ml-auto text-[10px] text-gray-400 select-none">
-          {trace.reduce((s, t) => s + t.latency_ms, 0).toFixed(0)}ms total
-        </span>
-      </button>
-      {isExpanded && (
-        <div className="px-3 pb-2 pt-1 border-t border-gray-100 dark:border-gray-700 space-y-2 max-h-72 overflow-y-auto">
-          {trace.map((entry, i) => (
-            <div key={i} className="text-[11px] font-sans">
-              <div className="flex items-center gap-2">
-                <span>{TOOL_ICONS[entry.tool_name] ?? "🔧"}</span>
-                <span className="font-semibold text-gray-600 dark:text-gray-300">{entry.tool_name}</span>
-                <span className="text-gray-400">{entry.latency_ms.toFixed(0)}ms</span>
-                {entry.error ? (
-                  <span className="text-red-500 text-[10px]">✗ error</span>
-                ) : (
-                  <span className="text-emerald-500 text-[10px]">✓</span>
-                )}
-              </div>
-              {entry.error && (
-                <p className="mt-0.5 ml-5 text-red-500 dark:text-red-400">{entry.error}</p>
-              )}
-              {!entry.error && entry.output !== undefined && (
-                <pre className="mt-0.5 ml-5 text-gray-400 dark:text-gray-500 whitespace-pre-wrap break-all overflow-hidden max-h-20">
-                  {JSON.stringify(entry.output, null, 2).slice(0, 400)}
-                  {JSON.stringify(entry.output).length > 400 ? "…" : ""}
-                </pre>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-};
-
-// ── Failed legs warning ───────────────────────────────────────────────────────
-
-const FailedLegsWarning: FC<{ legs: string[] }> = ({ legs }) => {
-  if (legs.length === 0) return null;
-  const names: Record<string, string> = {
-    dense: "vector",
-    exact: "keyword",
-    graph: "graph",
-  };
-  return (
-    <div className="flex items-center gap-1.5 rounded border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 px-2.5 py-1 text-[11px] text-amber-700 dark:text-amber-400 not-prose">
-      <span>⚠</span>
-      <span>Retrieval leg{legs.length > 1 ? "s" : ""} failed: {legs.map(l => names[l] ?? l).join(", ")}</span>
-    </div>
-  );
-};
-
-
-type ConfidenceLevel = "very_high" | "high" | "medium" | "low" | "none";
-
-const CONFIDENCE_CONFIG: Record<ConfidenceLevel, {
-  steps: number;   // how many of 4 steps are filled
-  label: string;
-  stepColor: string;
-  textColor: string;
-  bgColor: string;
-  borderColor: string;
-}> = {
-  very_high: { steps: 4, label: "Very High",  stepColor: "bg-[hsl(var(--confidence-very-high))]", textColor: "text-[hsl(var(--confidence-very-high))]", bgColor: "bg-[hsl(var(--confidence-very-high)/10%)]",  borderColor: "border-[hsl(var(--confidence-very-high)/30%)]" },
-  high:      { steps: 3, label: "High",       stepColor: "bg-[hsl(var(--confidence-high))]",      textColor: "text-[hsl(var(--confidence-high))]",      bgColor: "bg-[hsl(var(--confidence-high)/10%)]",      borderColor: "border-[hsl(var(--confidence-high)/30%)]"     },
-  medium:    { steps: 2, label: "Medium",     stepColor: "bg-[hsl(var(--confidence-medium))]",    textColor: "text-[hsl(var(--confidence-medium))]",    bgColor: "bg-[hsl(var(--confidence-medium)/10%)]",    borderColor: "border-[hsl(var(--confidence-medium)/30%)]"   },
-  low:       { steps: 1, label: "Low",        stepColor: "bg-[hsl(var(--confidence-low))]",       textColor: "text-[hsl(var(--confidence-low))]",       bgColor: "bg-[hsl(var(--confidence-low)/10%)]",       borderColor: "border-[hsl(var(--confidence-low)/30%)]"      },
-  none:      { steps: 0, label: "None",       stepColor: "bg-[hsl(var(--confidence-none))]",      textColor: "text-[hsl(var(--confidence-none))]",      bgColor: "bg-[hsl(var(--confidence-none)/10%)]",      borderColor: "border-[hsl(var(--confidence-none)/30%)]"      },
-};
-
-// ── Confidence collapsible (bottom-right of each answer) ────────────────────
-
-const CONFIDENCE_COLORS: Record<ConfidenceLevel, { bar: string; text: string; bg: string; border: string }> = {
-  very_high: { bar: "bg-[hsl(var(--confidence-very-high))]", text: "text-[hsl(var(--confidence-very-high))]", bg: "bg-[hsl(var(--confidence-very-high)/10%)]", border: "border-[hsl(var(--confidence-very-high)/30%)]" },
-  high:      { bar: "bg-[hsl(var(--confidence-high))]",      text: "text-[hsl(var(--confidence-high))]",      bg: "bg-[hsl(var(--confidence-high)/10%)]",      border: "border-[hsl(var(--confidence-high)/30%)]"     },
-  medium:    { bar: "bg-[hsl(var(--confidence-medium))]",    text: "text-[hsl(var(--confidence-medium))]",    bg: "bg-[hsl(var(--confidence-medium)/10%)]",    border: "border-[hsl(var(--confidence-medium)/30%)]"   },
-  low:       { bar: "bg-[hsl(var(--confidence-low))]",       text: "text-[hsl(var(--confidence-low))]",       bg: "bg-[hsl(var(--confidence-low)/10%)]",       border: "border-[hsl(var(--confidence-low)/30%)]"      },
-  none:      { bar: "bg-[hsl(var(--confidence-none))]",      text: "text-[hsl(var(--confidence-none))]",      bg: "bg-[hsl(var(--confidence-none)/10%)]",       border: "border-[hsl(var(--confidence-none)/30%)]"      },
-};
-
-// Threshold for showing retry icon (final_confidence < 0.4)
-const RETRY_THRESHOLD = 0.4;
-
-const ConfidenceCollapsible: FC<{
-  level?: ConfidenceLevel;
-  score?: number;
-  suggestion?: string | null;
-  // Final evaluation metrics
-  finalConfidence?: number;
-  finalConfidenceLevel?: ConfidenceLevel;
-  faithfulness?: number;
-  completeness?: number;
-  failedLegs?: string[];
-}> = ({
-  level,
-  score,
-  suggestion,
-  finalConfidence,
-  finalConfidenceLevel,
-  faithfulness,
-  completeness,
-  failedLegs,
-}) => {
-  const [open, setOpen] = useState(false);
-
-  // Collapsed form: use final confidence if available, fall back to retrieval confidence
-  const displayConfidence = finalConfidence !== undefined ? finalConfidence : (score !== undefined ? score / 100 : 0);
-  const displayLevel = finalConfidenceLevel ?? level ?? "medium";
-  const displayPct = Math.min(100, Math.max(0, Math.round(displayConfidence * 100)));
-  const cfg = CONFIDENCE_COLORS[displayLevel];
-  const label = CONFIDENCE_CONFIG[displayLevel].label;
-  const showRetry = finalConfidence !== undefined && finalConfidence < RETRY_THRESHOLD;
-
-  return (
-    <div className={`rounded-md border ${cfg.border} ${cfg.bg} text-xs not-prose`}>
-      {/* collapsed header — always visible */}
-      <button
-        onClick={() => setOpen((v) => !v)}
-        className="flex items-center gap-2 w-full px-3 py-1.5 text-left"
-      >
-        {open ? (
-          <ChevronDown className={`h-3 w-3 shrink-0 ${cfg.text}`} />
-        ) : (
-          <ChevronRight className={`h-3 w-3 shrink-0 ${cfg.text}`} />
-        )}
-        <span className={`font-medium shrink-0 ${cfg.text}`}>
-          Confidence: {label}{displayPct > 0 ? ` · ${displayPct}/100` : ""}
-        </span>
-        {/* retry icon — shown when final confidence is below threshold */}
-        {showRetry && (
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              // Trigger retry — parent component can listen for this
-              setOpen(false);
-            }}
-            className="shrink-0 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors"
-            title="Retry with relaxed parameters"
-          >
-            <RefreshCw className="h-3 w-3" />
-          </button>
-        )}
-      </button>
-
-      {/* progress bar — shown below score */}
-      <div className="px-3">
-        <div className="h-1.5 rounded-full bg-zinc-200 dark:bg-zinc-700 overflow-hidden">
-          <div
-            className={`h-full rounded-full transition-all ${cfg.bar}`}
-            style={{ width: `${displayPct}%` }}
-          />
-        </div>
-      </div>
-
-      {/* expanded body */}
-      {open && (
-        <div className={`px-3 pb-2 pt-1 border-t ${cfg.border} space-y-2`}>
-          {/* Final evaluation metrics */}
-          {(finalConfidence !== undefined || faithfulness !== undefined || completeness !== undefined) && (
-            <div className="space-y-1">
-              {faithfulness !== undefined && (
-                <div className="flex justify-between gap-4">
-                  <span className="text-zinc-500 dark:text-zinc-400">Faithfulness</span>
-                  <span className={`font-medium ${cfg.text}`}>{faithfulness}/100</span>
-                </div>
-              )}
-              {completeness !== undefined && (
-                <div className="flex justify-between gap-4">
-                  <span className="text-zinc-500 dark:text-zinc-400">Completeness</span>
-                  <span className={`font-medium ${cfg.text}`}>{completeness}/100</span>
-                </div>
-              )}
-              {score !== undefined && (
-                <div className="flex justify-between gap-4">
-                  <span className="text-zinc-500 dark:text-zinc-400">Retrieval confidence</span>
-                  <span className={`font-medium ${cfg.text}`}>{score}/100</span>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Retrieval confidence */}
-
-          {/* Failed legs */}
-          {failedLegs && failedLegs.length > 0 && (
-            <div className="flex items-center gap-1.5 rounded border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 px-2 py-1 text-[10px] text-amber-700 dark:text-amber-400">
-              <span>⚠</span>
-              <span>Retrieval leg{failedLegs.length > 1 ? "s" : ""} failed: {failedLegs.map(l => l).join(", ")}</span>
-            </div>
-          )}
-
-          {suggestion && (
-            <p className={`${cfg.text} opacity-80`}>{suggestion}</p>
-          )}
-        </div>
-      )}
-    </div>
-  );
-};
-// ── SubtaskList: live TODO checklist for complex multi-subtask queries ────────
-
-interface SubtaskItem {
-  id: number;
-  text: string;
-  status: "pending" | "active" | "done";
-}
-
-const SubtaskList: FC<{ tasks: SubtaskItem[] }> = ({ tasks }) => {
-  if (!tasks.length) return null;
-
-  return (
-    <div className="not-prose mb-3 rounded-lg border border-border bg-muted/30 px-3 py-2.5 space-y-1.5">
-      <p className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground mb-2">
-        Subtasks
-      </p>
-      {tasks.map((task) => (
-        <div key={task.id} className="flex items-start gap-2">
-          <span className="mt-0.5 shrink-0 w-3.5 h-3.5 flex items-center justify-center">
-            {task.status === "done" ? (
-              <svg className="text-emerald-500" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg" width="12" height="12">
-                <circle cx="6" cy="6" r="5.5" fill="currentColor" fillOpacity="0.15" stroke="currentColor" strokeWidth="1"/>
-                <path d="M3.5 6l1.8 1.8L8.5 4.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
-              </svg>
-            ) : task.status === "active" ? (
-              <svg className="text-primary animate-spin" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg" width="12" height="12">
-                <circle cx="6" cy="6" r="4.5" stroke="currentColor" strokeOpacity="0.2" strokeWidth="1.5"/>
-                <path d="M6 1.5A4.5 4.5 0 0 1 10.5 6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
-              </svg>
-            ) : (
-              <svg className="text-muted-foreground/40" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg" width="12" height="12">
-                <circle cx="6" cy="6" r="5.5" stroke="currentColor" strokeWidth="1"/>
-              </svg>
-            )}
-          </span>
-          <span className={`text-[12px] leading-snug ${
-            task.status === "done"
-              ? "text-muted-foreground line-through decoration-muted-foreground/40"
-              : task.status === "active"
-              ? "text-foreground font-medium"
-              : "text-muted-foreground"
-          }`}>
-            {task.text}
-          </span>
-        </div>
-      ))}
-    </div>
-  );
-};
 
 // ── CodeBlock: renders mermaid/echarts fences as diagrams, others as <code> ───
 
@@ -638,6 +121,8 @@ const CodeBlock: FC<React.HTMLAttributes<HTMLElement> & { inline?: boolean }> = 
   );
 };
 
+// ── Answer Component ─────────────────────────────────────────────────────────
+
 export const Answer: FC<{
   messageId?: string;
   chatId?: string;
@@ -650,9 +135,20 @@ export const Answer: FC<{
   confidenceBreakdown?: Record<string, unknown>;
   suggestion?: string | null;
   failedLegs?: string[];
-  queryClassification?: QueryClassification;
-  toolTrace?: ToolTraceEntry[];
-  agentSteps?: Array<{ node: string; latency_ms: number; status: string; [key: string]: unknown }>;
+  queryClassification?: {
+    type: string;
+    confidence: number;
+    latency_ms: number;
+    fallback: boolean;
+  };
+  toolTrace?: Array<{
+    tool_name: string;
+    params?: Record<string, unknown>;
+    output?: unknown;
+    error?: string | null;
+    latency_ms: number;
+  }>;
+  agentSteps?: AgentStepEvent[];
   taskList?: Array<{ id: number; text: string; status: string }>;
   progressMessages?: Array<{ phase: string; message: string; details?: Record<string, unknown> }>;
   synthesisMode?: boolean;
@@ -673,15 +169,12 @@ export const Answer: FC<{
 
   // Keep refs so CitationLink can read the latest data without changing its
   // identity (avoiding react-markdown remounting all <a> elements every render).
-  // citationsRef tracks `citations` directly (not debounced) so CitationLink
-  // always has the latest data immediately after the 2: context event.
   const citationsRef = useRef(citations);
   const citationInfoMapRef = useRef(citationInfoMap);
   citationsRef.current = citations;
   citationInfoMapRef.current = citationInfoMap;
 
   // renderKey forces <Markdown> to remount when citations become ready.
-  // Auto-incremented by useEffect when streaming ends; also exposed as a manual button.
   const [renderKey, setRenderKey] = useState(0);
   const wasStreamingRef = useRef(false);
   useEffect(() => {
@@ -693,7 +186,7 @@ export const Answer: FC<{
     }
   }, [isStreaming]);
 
-  // Extract generate_answer latency from agentSteps (emitted by backend)
+  // Extract generate_answer latency from agentSteps
   const generateAnswerLatencyMs = useMemo(() => {
     if (!agentSteps?.length) return null;
     const doneStep = agentSteps.find(
@@ -702,16 +195,13 @@ export const Answer: FC<{
     return doneStep?.latency_ms ?? null;
   }, [agentSteps]);
 
-  // Filter out generate_answer from agentSteps — we display its latency inline instead
+  // Filter out generate_answer from agentSteps — we display its latency inline
   const filteredAgentSteps = useMemo(() => {
     if (!agentSteps?.length) return undefined;
     return agentSteps.filter((s) => s.node !== "generate_answer");
   }, [agentSteps]);
 
   const parsedContent = useMemo(() => {
-      // Two reasoning formats:
-      //   OpenAI/DeepSeek/Qwen: <think>content</think>  <reasoning>...</reasoning>
-      //   Gemma channel style:   <|channel>thought<|channel> ... <|channel|>
       let thinkContent: string | null = null;
       let isThinkingComplete = false;
       let answerText = markdown;
@@ -743,54 +233,58 @@ export const Answer: FC<{
         }
       }
 
-      // 2. Gemma channel-style (full block): <|channel>thought ... <channel|>
-          if (thinkContent === null) {
-            const channelMatch = markdown.match(
-              new RegExp(
-                `([\\s\\S]*?)<\\s*\\|channel\\s*>thought([\\s\\S]*?)<\\s*channel\\s*\\|>([\\s\\S]*)$`,
-              ),
-            );
-            if (channelMatch) {
-              const preamble = channelMatch[1];
-              thinkContent = channelMatch[2].trim();
-              const afterThink = channelMatch[3].trim();
-              answerText = preamble ? `${preamble.trim()}\n\n${afterThink}`.trim() : afterThink;
-              isThinkingComplete = true;
-            }
-            // Channel open: <|channel>thought... (no closing yet)
-            if (thinkContent === null) {
-              const channelOpenMatch = markdown.match(
-                new RegExp(
-                  `([\\s\\S]*?)<\\s*\\|channel\\s*>thought([\\s\\S]*)$`,
-                ),
-              );
-              if (channelOpenMatch) {
-                const preamble = channelOpenMatch[1];
-                thinkContent = channelOpenMatch[2];
-                answerText = preamble.trim();
-                isThinkingComplete = false;
-              }
-            }
+      // 2. Gemma channel-style
+      if (thinkContent === null) {
+        const channelMatch = markdown.match(
+          new RegExp(
+            `([\\s\\S]*?)<\\s*\\|channel\\s*>thought([\\s\\S]*?)<\\s*channel\\s*\\|>([\\s\\S]*)$`,
+          ),
+        );
+        if (channelMatch) {
+          const preamble = channelMatch[1];
+          thinkContent = channelMatch[2].trim();
+          const afterThink = channelMatch[3].trim();
+          answerText = preamble ? `${preamble.trim()}\n\n${afterThink}`.trim() : afterThink;
+          isThinkingComplete = true;
+        }
+        if (thinkContent === null) {
+          const channelOpenMatch = markdown.match(
+            new RegExp(
+              `([\\s\\S]*?)<\\s*\\|channel\\s*>thought([\\s\\S]*)$`,
+            ),
+          );
+          if (channelOpenMatch) {
+            const preamble = channelOpenMatch[1];
+            thinkContent = channelOpenMatch[2];
+            answerText = preamble.trim();
+            isThinkingComplete = false;
           }
+        }
+      }
 
-          return { thinkContent, isThinkingComplete, answerText };
-        }, [markdown]);
+      return { thinkContent, isThinkingComplete, answerText };
+    }, [markdown]);
 
   useEffect(() => {
     const fetchCitationInfo = async () => {
       const infoMap: Record<string, CitationInfo> = {};
 
       for (const citation of debouncedCitations) {
-        const { kb_id, document_id } = citation;
-        if (!kb_id || !document_id) continue;
+        // During streaming, kb_id/document_id are nested in citation.metadata.
+        // After reload via API, they are flattened to the top level.
+        const top = citation as Record<string, any>;
+        const meta = (citation.metadata as Record<string, any>) || {};
+        const effectiveKbId = top.kb_id ?? top.kb_id ?? meta.kb_id;
+        const effectiveDocId = top.document_id ?? top.document_id ?? meta.document_id;
+        if (!effectiveKbId || !effectiveDocId) continue;
 
-        const key = `${kb_id}-${document_id}`;
+        const key = `${effectiveKbId}-${effectiveDocId}`;
         if (infoMap[key]) continue;
 
         try {
           const [kb, doc] = await Promise.all([
-            api.get(`/api/knowledge-base/${kb_id}`),
-            api.get(`/api/knowledge-base/${kb_id}/documents/${document_id}`),
+            api.get(`/api/knowledge-base/${effectiveKbId}`),
+            api.get(`/api/knowledge-base/${effectiveKbId}/documents/${effectiveDocId}`),
           ]);
 
           infoMap[key] = {
@@ -818,9 +312,6 @@ export const Answer: FC<{
   }, [debouncedCitations]);
 
   // Stable component reference — never recreated, reads current data from refs.
-  // This prevents react-markdown from unmounting/remounting all <a> elements
-  // whenever citationInfoMap or debouncedCitations change, which was causing
-  // Radix Popover state cascades and "Maximum update depth exceeded".
   const CitationLink = useCallback(
     (
       props: ClassAttributes<HTMLAnchorElement> &
@@ -835,9 +326,15 @@ export const Answer: FC<{
         return <a>[{props.href}]</a>;
       }
 
+      // During streaming, kb_id/document_id are nested in metadata.
+      // After reload via API, they are flattened to top level.
+      const top = citation as Record<string, any>;
+      const meta = (citation.metadata as Record<string, any>) || {};
+      const effectiveKbId = top.kb_id ?? meta.kb_id;
+      const effectiveDocId = top.document_id ?? meta.document_id;
       const citationInfo =
         citationInfoMapRef.current[
-          `${citation.kb_id}-${citation.document_id}`
+          `${effectiveKbId}-${effectiveDocId}`
         ];
 
       return (
@@ -857,7 +354,6 @@ export const Answer: FC<{
             collisionPadding={12}
             className="max-w-2xl w-[calc(100vw-100px)] p-0 rounded-lg shadow-lg overflow-hidden"
           >
-            {/* Scrollable inner body — capped height so it never overflows viewport */}
             <div className="text-sm space-y-3 max-h-[min(70vh,520px)] overflow-y-auto p-4" style={{ scrollbarGutter: "stable" }}>
               {citationInfo && (
                 <div className="flex items-center gap-2 text-xs font-medium text-foreground bg-muted p-2 rounded">
@@ -897,7 +393,7 @@ export const Answer: FC<{
                     <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded uppercase tracking-wide ${
                       citation.retrieval_leg === "dense"
                         ? "bg-blue-100 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300"
-                        : citation.retrieval_leg === "sparse" || citation.retrieval_leg === "sparse"
+                        : citation.retrieval_leg === "sparse"
                         ? "bg-purple-100 dark:bg-purple-950/60 text-purple-700 dark:text-purple-300"
                         : citation.retrieval_leg === "exact"
                         ? "bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300"
@@ -955,7 +451,6 @@ export const Answer: FC<{
                     {['kb_id', 'data_store_id', 'document_id', 'file_name', 'chunk_index', '_legs', '_reranker_score', 'qdrant_point_id']
                       .filter(k => k in citation && (citation as any)[k] !== undefined && (citation as any)[k] !== null)
                       .map(key => {
-                        // Translate internal leg names to user-friendly labels
                         const legNames: Record<string, string> = {
                           dense: "vector",
                           exact: "keyword",
@@ -990,9 +485,6 @@ export const Answer: FC<{
 
   // Memoize the components object so react-markdown never sees a new reference
   const markdownComponents = useMemo(() => ({ a: CitationLink, code: CodeBlock }), [CitationLink]);
-
-  // citationInfoMap is read via citationInfoMapRef inside CitationLink (ref-based,
-  // always current). No key-based remount needed — it would destroy open Popovers.
 
   // ── Action handlers ────────────────────────────────────────────────────────
   const [copied, setCopied] = useState(false);
@@ -1054,25 +546,17 @@ export const Answer: FC<{
       {taskList && taskList.length > 1 && (
         <SubtaskList tasks={taskList as SubtaskItem[]} />
       )}
-      {/* AgentTimeline: transient progress badges only */}
-      <AgentTimeline agentSteps={filteredAgentSteps} isStreaming={isStreaming} />
-      {/* Phase-based progress messages — shown during streaming */}
-      {progressMessages && progressMessages.length > 0 && (
-        <div className="mb-2 space-y-1 not-prose">
-          {progressMessages.map((pm, i) => (
-            <div key={i} className="flex items-center gap-2 text-[12px] text-muted-foreground">
-              <span className="h-1.5 w-1.5 rounded-full bg-blue-400 shrink-0" />
-              <span>{pm.message}</span>
-            </div>
-          ))}
-        </div>
-      )}
+      {/* Agentic progress — transient, grey, fades between phases */}
+      <AgenticProgress agentSteps={filteredAgentSteps} isStreaming={isStreaming} />
+
+      {/* Confidence warning (no confidence) */}
       {confidence === "none" && suggestion && (
         <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 mb-2">
           <span className="mt-0.5 shrink-0">⚠</span>
           <span>{suggestion}</span>
         </div>
       )}
+      
       {!markdown && (
         <div className="flex flex-col gap-2 mt-2">
           <Skeleton className="max-w-sm h-4 bg-zinc-200" />
@@ -1080,12 +564,14 @@ export const Answer: FC<{
           <Skeleton className="max-w-2xl h-4 bg-zinc-200" />
         </div>
       )}
+      
       {parsedContent.thinkContent !== null && (
         <ThinkBlock
           content={parsedContent.thinkContent}
           isComplete={parsedContent.isThinkingComplete}
         />
       )}
+      
       {parsedContent.answerText && (
         <Markdown
           key={`${citations.length > 0 ? "with-citations" : "no-citations"}-${renderKey}`}
@@ -1096,6 +582,7 @@ export const Answer: FC<{
           {parsedContent.answerText}
         </Markdown>
       )}
+      
       {isStreaming && (
         <span className="inline-block w-2 h-4 ml-0.5 align-middle bg-foreground/80 animate-pulse" aria-hidden="true" />
       )}
@@ -1177,6 +664,270 @@ export const Answer: FC<{
               </span>
             )}
           </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ── SubtaskList: live TODO checklist for complex multi-subtask queries ────────
+
+interface SubtaskItem {
+  id: number;
+  text: string;
+  status: "pending" | "active" | "done";
+}
+
+const SubtaskList: FC<{ tasks: SubtaskItem[] }> = ({ tasks }) => {
+  if (!tasks.length) return null;
+
+  return (
+    <div className="not-prose mb-0 px-0 space-y-0">
+      <p className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground mb-0">
+        Subtasks
+      </p>
+      {tasks.map((task) => (
+        <div key={task.id} className="flex items-start gap-2">
+          <span className="mt-0.5 shrink-0 w-3.5 h-3.5 flex items-center justify-center">
+            {task.status === "done" ? (
+              <svg className="text-emerald-500" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg" width="12" height="12">
+                <circle cx="6" cy="6" r="5.5" fill="currentColor" fillOpacity="0.15" stroke="currentColor" strokeWidth="1"/>
+                <path d="M3.5 6l1.8 1.8L8.5 4.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+            ) : task.status === "active" ? (
+              <svg className="text-primary animate-spin" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg" width="12" height="12">
+                <circle cx="6" cy="6" r="4.5" stroke="currentColor" strokeOpacity="0.2" strokeWidth="1.5"/>
+                <path d="M6 1.5A4.5 4.5 0 0 1 10.5 6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+              </svg>
+            ) : (
+              <svg className="text-muted-foreground/40" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg" width="12" height="12">
+                <circle cx="6" cy="6" r="5.5" stroke="currentColor" strokeWidth="1"/>
+              </svg>
+            )}
+          </span>
+          <span className={`text-[12px] leading-snug ${
+            task.status === "done"
+              ? "text-muted-foreground line-through decoration-muted-foreground/40"
+              : task.status === "active"
+              ? "text-foreground font-medium"
+              : "text-muted-foreground"
+          }`}>
+            {task.text}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+};
+
+// ── ThinkBlock: reasoning model chain-of-thought ─────────────────────────────
+
+const ThinkBlock: FC<{ content: string; isComplete: boolean }> = ({
+  content,
+  isComplete,
+}) => {
+  const [isExpanded, setIsExpanded] = useState(!isComplete);
+  const [elapsedMs, setElapsedMs] = useState(0);
+  const startTimeRef = useRef<number>(Date.now());
+  const finalMsRef = useRef<number | null>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (isComplete) {
+      if (finalMsRef.current === null) {
+        finalMsRef.current = Date.now() - startTimeRef.current;
+      }
+      const timer = setTimeout(() => setIsExpanded(false), 1500);
+      return () => clearTimeout(timer);
+    }
+    const interval = setInterval(() => {
+      setElapsedMs(Date.now() - startTimeRef.current);
+    }, 100);
+    return () => clearInterval(interval);
+  }, [isComplete]);
+
+  useEffect(() => {
+    if (!isComplete && isExpanded && contentRef.current) {
+      contentRef.current.scrollTop = contentRef.current.scrollHeight;
+    }
+  }, [content, isComplete, isExpanded]);
+
+  const displayMs = finalMsRef.current ?? elapsedMs;
+  const seconds = displayMs / 1000;
+  const label = isComplete
+    ? seconds < 1
+      ? "Thought for less than a second"
+      : `Thought for ${seconds.toFixed(1)} seconds`
+    : `Thinking... (${seconds.toFixed(1)}s)`;
+
+  return (
+    <div className="my-2 rounded-md border border-gray-100 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/40 w-full">
+      <button
+        onClick={() => setIsExpanded(!isExpanded)}
+        className="flex items-center gap-1.5 w-full px-3 py-1.5 text-left rounded-t-md hover:bg-gray-100 dark:hover:bg-gray-700/40 transition-colors group"
+      >
+        {isExpanded ? (
+          <svg className="h-3 w-3 text-gray-400 shrink-0" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+        ) : (
+          <svg className="h-3 w-3 text-gray-400 shrink-0" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M4.5 3L7.5 6L4.5 9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+        )}
+        <Brain className={`h-3 w-3 shrink-0 ${isComplete ? "text-gray-400" : "text-blue-400 animate-pulse"}`} />
+        <span className="text-xs text-gray-400 font-medium select-none">
+          {label}
+        </span>
+      </button>
+      {isExpanded && (
+        <div
+          ref={contentRef}
+          className="px-3 pb-2 pt-1 max-h-48 overflow-y-auto overflow-x-hidden border-t border-gray-100 dark:border-gray-700"
+        >
+          <pre className="text-[11px] leading-[1.45] text-gray-400 dark:text-gray-500 whitespace-pre-wrap break-words font-sans m-0">
+            {content}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ── ConfidenceCollapsible: final evaluation metrics ──────────────────────────
+
+type ConfidenceLevel = "very_high" | "high" | "medium" | "low" | "none";
+
+const CONFIDENCE_CONFIG: Record<ConfidenceLevel, {
+  steps: number;
+  label: string;
+  stepColor: string;
+  textColor: string;
+  bgColor: string;
+  borderColor: string;
+}> = {
+  very_high: { steps: 4, label: "Very High",  stepColor: "bg-[hsl(var(--confidence-very-high))]", textColor: "text-[hsl(var(--confidence-very-high))]", bgColor: "bg-[hsl(var(--confidence-very-high)/10%)]",  borderColor: "border-[hsl(var(--confidence-very-high)/30%)]" },
+  high:      { steps: 3, label: "High",       stepColor: "bg-[hsl(var(--confidence-high))]",      textColor: "text-[hsl(var(--confidence-high))]",      bgColor: "bg-[hsl(var(--confidence-high)/10%)]",      borderColor: "border-[hsl(var(--confidence-high)/30%)]"     },
+  medium:    { steps: 2, label: "Medium",     stepColor: "bg-[hsl(var(--confidence-medium))]",    textColor: "text-[hsl(var(--confidence-medium))]",    bgColor: "bg-[hsl(var(--confidence-medium)/10%)]",    borderColor: "border-[hsl(var(--confidence-medium)/30%)]"   },
+  low:       { steps: 1, label: "Low",        stepColor: "bg-[hsl(var(--confidence-low))]",       textColor: "text-[hsl(var(--confidence-low))]",       bgColor: "bg-[hsl(var(--confidence-low)/10%)]",       borderColor: "border-[hsl(var(--confidence-low)/30%)]"      },
+  none:      { steps: 0, label: "None",       stepColor: "bg-[hsl(var(--confidence-none))]",      textColor: "text-[hsl(var(--confidence-none))]",      bgColor: "bg-[hsl(var(--confidence-none)/10%)]",      borderColor: "border-[hsl(var(--confidence-none)/30%)]"      },
+};
+
+const CONFIDENCE_COLORS: Record<ConfidenceLevel, { bar: string; text: string; bg: string; border: string }> = {
+  very_high: { bar: "bg-[hsl(var(--confidence-very-high))]", text: "text-[hsl(var(--confidence-very-high))]", bg: "bg-[hsl(var(--confidence-very-high)/10%)]", border: "border-[hsl(var(--confidence-very-high)/30%)]" },
+  high:      { bar: "bg-[hsl(var(--confidence-high))]",      text: "text-[hsl(var(--confidence-high))]",      bg: "bg-[hsl(var(--confidence-high)/10%)]",      border: "border-[hsl(var(--confidence-high)/30%)]"     },
+  medium:    { bar: "bg-[hsl(var(--confidence-medium))]",    text: "text-[hsl(var(--confidence-medium))]",    bg: "bg-[hsl(var(--confidence-medium)/10%)]",    border: "border-[hsl(var(--confidence-medium)/30%)]"   },
+  low:       { bar: "bg-[hsl(var(--confidence-low))]",       text: "text-[hsl(var(--confidence-low))]",       bg: "bg-[hsl(var(--confidence-low)/10%)]",       border: "border-[hsl(var(--confidence-low)/30%)]"      },
+  none:      { bar: "bg-[hsl(var(--confidence-none))]",      text: "text-[hsl(var(--confidence-none))]",      bg: "bg-[hsl(var(--confidence-none)/10%)]",       border: "border-[hsl(var(--confidence-none)/30%)]"      },
+};
+
+const RETRY_THRESHOLD = 0.4;
+
+const ConfidenceCollapsible: FC<{
+  level?: ConfidenceLevel;
+  score?: number;
+  suggestion?: string | null;
+  finalConfidence?: number;
+  finalConfidenceLevel?: ConfidenceLevel;
+  faithfulness?: number;
+  completeness?: number;
+  failedLegs?: string[];
+}> = ({
+  level,
+  score,
+  suggestion,
+  finalConfidence,
+  finalConfidenceLevel,
+  faithfulness,
+  completeness,
+  failedLegs,
+}) => {
+  const [open, setOpen] = useState(false);
+
+  const displayConfidence = finalConfidence !== undefined ? finalConfidence : (score !== undefined ? score / 100 : 0);
+  const displayLevel = finalConfidenceLevel ?? level ?? "medium";
+  const displayPct = Math.min(100, Math.max(0, Math.round(displayConfidence * 100)));
+  const cfg = CONFIDENCE_COLORS[displayLevel];
+  const label = CONFIDENCE_CONFIG[displayLevel].label;
+  const showRetry = finalConfidence !== undefined && finalConfidence < RETRY_THRESHOLD;
+
+  return (
+    <div className={`rounded-md border ${cfg.border} ${cfg.bg} text-xs not-prose`}>
+      {/* collapsed header */}
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-2 w-full px-3 py-1.5 text-left"
+      >
+        {open ? (
+          <svg className="h-3 w-3 shrink-0" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+        ) : (
+          <svg className="h-3 w-3 shrink-0" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M4.5 3L7.5 6L4.5 9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+        )}
+        <span className={`font-medium shrink-0 ${cfg.text}`}>
+          Confidence: {label}{displayPct > 0 ? ` · ${displayPct}/100` : ""}
+        </span>
+        {showRetry && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              setOpen(false);
+            }}
+            className="shrink-0 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors"
+            title="Retry with relaxed parameters"
+          >
+            <RefreshCw className="h-3 w-3" />
+          </button>
+        )}
+      </button>
+
+      {/* progress bar */}
+      <div className="px-3">
+        <div className="h-1.5 rounded-full bg-zinc-200 dark:bg-zinc-700 overflow-hidden">
+          <div
+            className={`h-full rounded-full transition-all ${cfg.bar}`}
+            style={{ width: `${displayPct}%` }}
+          />
+        </div>
+      </div>
+
+      {/* expanded body */}
+      {open && (
+        <div className={`px-3 pb-2 pt-1 border-t ${cfg.border} space-y-2`}>
+          {(finalConfidence !== undefined || faithfulness !== undefined || completeness !== undefined) && (
+            <div className="space-y-1">
+              {faithfulness !== undefined && (
+                <div className="flex justify-between gap-4">
+                  <span className="text-zinc-500 dark:text-zinc-400">Faithfulness</span>
+                  <span className={`font-medium ${cfg.text}`}>{faithfulness}/100</span>
+                </div>
+              )}
+              {completeness !== undefined && (
+                <div className="flex justify-between gap-4">
+                  <span className="text-zinc-500 dark:text-zinc-400">Completeness</span>
+                  <span className={`font-medium ${cfg.text}`}>{completeness}/100</span>
+                </div>
+              )}
+              {score !== undefined && (
+                <div className="flex justify-between gap-4">
+                  <span className="text-zinc-500 dark:text-zinc-400">Retrieval confidence</span>
+                  <span className={`font-medium ${cfg.text}`}>{score}/100</span>
+                </div>
+              )}
+            </div>
+          )}
+          {failedLegs && failedLegs.length > 0 && (
+            <div className="flex items-center gap-1.5 rounded border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 px-2 py-1 text-[10px] text-amber-700 dark:text-amber-400">
+              <span>⚠</span>
+              <span>Retrieval leg{failedLegs.length > 1 ? "s" : ""} failed: {failedLegs.map(l => l).join(", ")}</span>
+            </div>
+          )}
+          {suggestion && (
+            <p className={`${cfg.text} opacity-80`}>{suggestion}</p>
+          )}
         </div>
       )}
     </div>

@@ -450,6 +450,11 @@ async def generate_response(
         _confidence_score: int | None = None
         _confidence_breakdown: dict | None = None
         _confidence_suggestion: str | None = None
+        # Final answer evaluation from the done event
+        _final_confidence: float | None = None
+        _final_confidence_level: str | None = None
+        _faithfulness: int | None = None
+        _completeness: int | None = None
 
         # Cache the message ID so the error handler can reference it even if
         # the bot_message instance becomes detached.
@@ -557,6 +562,11 @@ async def generate_response(
 
             elif event_type == "done":
                 usage = event.get("usage", {"promptTokens": 0, "completionTokens": 0})
+                # Capture final answer evaluation metrics for persistence
+                _final_confidence = usage.get("final_confidence")
+                _final_confidence_level = usage.get("confidence_level")
+                _faithfulness = usage.get("faithfulness")
+                _completeness = usage.get("completeness")
                 yield f'd:{json.dumps({"finishReason": "stop", "usage": usage, "messageId": _bot_message_id})}\n'
                 await asyncio.sleep(0)
 
@@ -598,11 +608,21 @@ async def generate_response(
         if _confidence_breakdown is not None:
             bot_message.confidence_breakdown = json.dumps(_confidence_breakdown)
 
+        # Persist final answer evaluation metrics
+        if _final_confidence is not None:
+            bot_message.final_confidence = _final_confidence
+        if _final_confidence_level is not None:
+            bot_message.final_confidence_level = _final_confidence_level
+        if _faithfulness is not None:
+            bot_message.faithfulness = _faithfulness
+        if _completeness is not None:
+            bot_message.completeness = _completeness
+
         try:
             db.commit()
             logger.info(
-                "[CHAT] confidence persisted | chat_id=%d | level=%s score=%s",
-                chat_id, _confidence_level, _confidence_score,
+                "[CHAT] confidence persisted | chat_id=%d | level=%s score=%s final=%.3f",
+                chat_id, _confidence_level, _confidence_score, _final_confidence or 0,
             )
         except Exception as commit_err:
             logger.warning("[CHAT] failed to persist confidence: %s", commit_err)
@@ -611,6 +631,31 @@ async def generate_response(
             except Exception:
                 pass
         clear_cancel_token(chat_id)
+
+        # ── Persist buffered citations to message_citations table ──────────
+        if buffered_citations:
+            try:
+                for msg_id, document_id, chunk_index, citation_index, metadata in buffered_citations:
+                    db.add(
+                        MessageCitation(
+                            message_id=msg_id,
+                            document_id=document_id,
+                            chunk_index=chunk_index,
+                            citation_index=citation_index,
+                            citation_metadata=metadata,
+                        )
+                    )
+                db.commit()
+                logger.info(
+                    "[CHAT] citations persisted | chat_id=%d | count=%d",
+                    chat_id, len(buffered_citations),
+                )
+            except Exception as cit_err:
+                logger.warning("[CHAT] failed to persist citations: %s", cit_err)
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
 
         # ── Post-turn: schedule summary update (fire-and-forget) ──────────
         def _log_task_error(task: asyncio.Task) -> None:

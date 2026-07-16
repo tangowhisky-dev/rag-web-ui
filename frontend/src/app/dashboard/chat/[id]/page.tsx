@@ -82,6 +82,10 @@ interface ChatMessage {
   confidence_level?: string;
   confidence_score?: number;
   confidence_breakdown?: string;
+  final_confidence?: number;
+  final_confidence_level?: string;
+  faithfulness?: number;
+  completeness?: number;
   file_name?: string;
   file_id?: number;
   citations?: Citation[];
@@ -270,6 +274,10 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       confidenceBreakdown: msg.confidence_breakdown
         ? JSON.parse(msg.confidence_breakdown)
         : undefined,
+      finalConfidence: msg.final_confidence ?? undefined,
+      finalConfidenceLevel: msg.final_confidence_level as Message["finalConfidenceLevel"] | undefined,
+      faithfulness: msg.faithfulness ?? undefined,
+      completeness: msg.completeness ?? undefined,
       file_name: msg.file_name ?? undefined,
       file_id: msg.file_id ?? undefined,
     };
@@ -474,11 +482,21 @@ function ChatPageInner({ params }: { params: { id: string } }) {
         };
         // Backend fast_pipeline sends "docs"; rag_graph sends "context"
         const rawDocs = payload.docs ?? payload.context ?? [];
-        const citations: Citation[] = rawDocs.map((doc, index) => ({
-          id: index + 1,
-          text: doc.page_content,
-          metadata: doc.metadata,
-        }));
+        const citations: Citation[] = rawDocs.map((doc, index) => {
+          // Flatten metadata fields to top-level so CitationLink can read
+          // them directly (works during streaming AND on reload via API).
+          const c: Record<string, any> = {
+            id: index + 1,
+            text: doc.page_content,
+            metadata: doc.metadata,
+          };
+          if (doc.metadata) {
+            Object.keys(doc.metadata).forEach((k) => {
+              c[k] = doc.metadata[k];
+            });
+          }
+          return c as Citation;
+        });
         // Normalize confidence level: backend sends uppercase (HIGH/MEDIUM/LOW),
         // frontend type uses lowercase. Map backend values → frontend enum.
         const rawConfidence = payload.confidence?.toLowerCase() as Message["confidence"] | undefined;
@@ -1062,7 +1080,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                           queryClassification={message.id === lastAssistantId ? message.queryClassification : undefined}
                           toolTrace={message.id === lastAssistantId ? message.toolTrace : undefined}
                           agentSteps={message.id === lastAssistantId ? message.agentSteps : undefined}
-                          taskList={message.id === lastAssistantId && isLoading ? taskList : undefined}
+                          taskList={message.id === lastAssistantId ? taskList : undefined}
                           progressMessages={message.id === lastAssistantId && isLoading ? progressMessages : undefined}
                           synthesisMode={message.synthesisMode}
                           isStreaming={isLoading && message.id === lastAssistantId}

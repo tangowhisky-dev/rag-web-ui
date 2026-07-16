@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { api, ApiError } from "@/lib/api";
+import { useChatContext } from "@/contexts/chat-context";
 import { useToast } from "@/components/ui/use-toast";
 import { Plus } from "lucide-react";
 
@@ -22,6 +23,7 @@ export default function NewChatPage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const { toast } = useToast();
+  const { addChat } = useChatContext();
 
   useEffect(() => {
     fetchKnowledgeBases();
@@ -49,6 +51,13 @@ export default function NewChatPage() {
       const data = await api.post("/api/chat", {
         title,
         knowledge_base_ids: [selectedKB],
+      });
+      addChat({
+        id: data.id,
+        title: data.title,
+        created_at: new Date().toISOString(),
+        pinned: false,
+        folder_id: null,
       });
       router.push(`/dashboard/chat/${data.id}`);
     } catch (error) {

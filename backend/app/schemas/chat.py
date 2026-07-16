@@ -49,6 +49,11 @@ class MessageResponse(MessageBase):
     confidence_level: Optional[str] = None
     confidence_score: Optional[int] = None
     confidence_breakdown: Optional[str] = None  # JSON string, parsed by frontend
+    # Final answer evaluation (from answer_evaluation_node)
+    final_confidence: Optional[float] = None
+    final_confidence_level: Optional[str] = None
+    faithfulness: Optional[int] = None
+    completeness: Optional[int] = None
     rewritten_query: Optional[str] = None
     query_classification: Optional[QueryClassification] = None
     file_name: Optional[str] = None  # filename if a chat file was attached to this message

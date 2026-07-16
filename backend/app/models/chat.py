@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, Boolean, Table, BigInteger, Text, DateTime
+from sqlalchemy import Column, Integer, String, ForeignKey, Boolean, Table, BigInteger, Text, DateTime, Float
 from sqlalchemy.dialects.mysql import LONGTEXT, JSON
 from sqlalchemy.orm import relationship
 from app.models.base import Base, TimestampMixin
@@ -81,6 +81,11 @@ class Message(Base, TimestampMixin):
     confidence_level = Column(String(20), nullable=True)
     confidence_score = Column(Integer, nullable=True)
     confidence_breakdown = Column(LONGTEXT, nullable=True)  # JSON string
+    # Final answer evaluation (from answer_evaluation_node)
+    final_confidence = Column(Float, nullable=True)
+    final_confidence_level = Column(String(20), nullable=True)
+    faithfulness = Column(Integer, nullable=True)
+    completeness = Column(Integer, nullable=True)
     rewritten_query = Column(LONGTEXT, nullable=True)  # standalone retrieval query after rewrite
 
     # Relationships
