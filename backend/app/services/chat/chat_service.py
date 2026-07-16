@@ -545,7 +545,7 @@ async def generate_response(
                             full_response += chunk
                         elif isinstance(chunk, dict) and "text" in chunk:
                             full_response += chunk["text"]
-                logger.info("[CHAT SSE] yield token %r", content)
+                logger.debug("[CHAT SSE] yield token %r", content)
                 yield f'0:{json.dumps(content)}\n'
                 yield ':\n'  # SSE flush comment — force chunk to leave backend buffer
             elif event_type == "answer_rewrite":
@@ -630,6 +630,19 @@ async def generate_response(
     except Exception as e:
         error_message = f"Error generating response: {str(e)}"
         logger.error(error_message, exc_info=True)
+        yield f'3:{json.dumps(error_message)}\n'
+        yield f'd:{{"finishReason":"error","messageId":{_bot_message_id}}}\n'
+        if 'bot_message' in locals() and db.is_active:
+            try:
+                bot_message.content = error_message
+                db.commit()
+            except Exception as commit_err:
+                logger.warning("[CHAT] failed to persist error message: %s", commit_err)
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+        clear_cancel_token(chat_id)
 # ── SSE flush helpers ─────────────────────────────────────────────────────────
 # Uvicorn buffers SSE responses by default. These helpers force the HTTP
 # server to flush buffered data to the client so events arrive progressively.

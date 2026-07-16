@@ -488,13 +488,6 @@ const ConfidenceCollapsible: FC<{
         <span className={`font-medium shrink-0 ${cfg.text}`}>
           Confidence: {label}{displayPct > 0 ? ` · ${displayPct}/100` : ""}
         </span>
-        {/* inline progress bar */}
-        <div className="flex-1 h-1.5 rounded-full bg-zinc-200 dark:bg-zinc-700 overflow-hidden">
-          <div
-            className={`h-full rounded-full transition-all ${cfg.bar}`}
-            style={{ width: `${displayPct}%` }}
-          />
-        </div>
         {/* retry icon — shown when final confidence is below threshold */}
         {showRetry && (
           <button
@@ -510,6 +503,16 @@ const ConfidenceCollapsible: FC<{
           </button>
         )}
       </button>
+
+      {/* progress bar — shown below score */}
+      <div className="px-3">
+        <div className="h-1.5 rounded-full bg-zinc-200 dark:bg-zinc-700 overflow-hidden">
+          <div
+            className={`h-full rounded-full transition-all ${cfg.bar}`}
+            style={{ width: `${displayPct}%` }}
+          />
+        </div>
+      </div>
 
       {/* expanded body */}
       {open && (
@@ -539,7 +542,6 @@ const ConfidenceCollapsible: FC<{
           )}
 
           {/* Retrieval confidence */}
-          
 
           {/* Failed legs */}
           {failedLegs && failedLegs.length > 0 && (
@@ -557,7 +559,6 @@ const ConfidenceCollapsible: FC<{
     </div>
   );
 };
-
 // ── SubtaskList: live TODO checklist for complex multi-subtask queries ────────
 
 interface SubtaskItem {
@@ -1158,9 +1159,9 @@ export const Answer: FC<{
 
           {/* Right: confidence + speed */}
           <div className="flex-1 min-w-0 max-w-xs flex flex-col gap-1.5">
-            {((confidence && confidence !== "none") || finalConfidence !== undefined) && (
+            {finalConfidence !== undefined && (
               <ConfidenceCollapsible
-                level={confidence ?? "medium"}
+                level={finalConfidenceLevel}
                 score={confidenceScore}
                 suggestion={suggestion}
                 finalConfidence={finalConfidence}

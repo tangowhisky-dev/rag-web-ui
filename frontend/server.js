@@ -59,7 +59,7 @@ app.prepare().then(() => {
 
             proxyRes.on("data", (chunk) => {
               const ts = new Date().toISOString();
-              console.error(`[stream-proxy] chunk @ ${ts} size=${chunk.length}`);
+              // console.error(`[stream-proxy] chunk @ ${ts} size=${chunk.length}`);
               res.write(chunk);
             });
             proxyRes.on("end", () => res.end());
