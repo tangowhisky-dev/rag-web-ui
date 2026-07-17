@@ -444,9 +444,15 @@ async def adaptive_reranking_node(state: AgentState, db: Any = None) -> dict:
 # ---------------------------------------------------------------------------
 
 def _build_generation_messages(state: AgentState) -> list[dict]:
-    """Build the LLM message list, injecting memory and recent history."""
+    """Build the LLM message list from checkpoint history plus retrieved context.
+
+    We no longer manually extract recent turns with ``select_recent_history``.
+    The Redis checkpointer accumulates the full conversation in
+    ``state["messages"]`` (including the current user query), so we pass it
+    through directly. This matches the official LangGraph pattern and prevents
+    history pollution from duplicate/truncated injection.
+    """
     retrieved_docs = state.get("retrieved_docs", [])
-    original_query = state.get("original_query", "")
     file_markdown = state.get("file_markdown")
     mem_docs = state.get("historical_memory_docs", [])
 
@@ -455,33 +461,38 @@ def _build_generation_messages(state: AgentState) -> list[dict]:
     system_parts = [_ANSWER_SYSTEM_PROMPT]
     if memory_text:
         system_parts.append(f"RELEVANT PAST CONTEXT:\n{memory_text}")
-    system_content = "\n\n".join(system_parts)
 
-    messages: list[dict] = [{"role": "system", "content": system_content}]
-
-    # Include recent conversation turns (excluding the current query) so the
-    # model can answer follow-ups like "elaborate on that" or "compare with the
-    # previous one" without guessing.
-    recent_history = select_recent_history(state.get("messages", []), max_pairs=2)
-    for m in recent_history:
-        if isinstance(m, HumanMessage):
-            messages.append({"role": "user", "content": str(m.content)})
-        elif isinstance(m, AIMessage):
-            messages.append({"role": "assistant", "content": str(m.content)[:400]})
-
-    if not retrieved_docs:
-        no_docs_msg = (
+    if retrieved_docs:
+        context_text = format_context_string(retrieved_docs, file_markdown)
+        system_parts.append(f"CONTEXT:\n{context_text}")
+    else:
+        system_parts.append(
             "The user asked a question but no relevant documents were found in the "
             "knowledge base. Answer from your general knowledge, but clearly state that "
             "no documents were found."
         )
-        messages.append({"role": "user", "content": f"Query: {original_query}\n\n{no_docs_msg}"})
-    else:
-        context_text = format_context_string(retrieved_docs, file_markdown)
-        messages.append({
-            "role": "user",
-            "content": f"Query: {original_query}\n\nContext:\n{context_text}",
-        })
+
+    messages: list[dict] = [{"role": "system", "content": "\n\n".join(system_parts)}]
+
+    # Append the checkpoint-managed conversation history. The current user query
+    # is already the last message in this list.
+    # Truncate previous assistant answers so a long prior response cannot
+    # dominate or poison the current answer; user queries are kept intact.
+    for m in state.get("messages", []):
+        if isinstance(m, HumanMessage):
+            messages.append({"role": "user", "content": str(m.content)})
+        elif isinstance(m, AIMessage):
+            content = str(m.content)
+            if len(content) > 200:
+                content = content[:200] + "…"
+            messages.append({"role": "assistant", "content": content})
+        elif isinstance(m, dict):
+            role = m.get("role")
+            content = m.get("content")
+            if role and content is not None:
+                if role == "assistant" and len(str(content)) > 200:
+                    content = str(content)[:200] + "…"
+                messages.append({"role": role, "content": str(content)})
 
     return messages
 
@@ -529,6 +540,9 @@ async def generating_node(
         "answer": answer,
         "is_chart_query": is_chart,
         "thinking_chunks": [],
+        # Write the assistant turn back into the checkpoint-managed message
+        # history so future turns see the full conversation via the checkpointer.
+        "messages": [AIMessage(content=answer)] if answer else [],
     }
     if usage_metadata:
         result["answer_usage"] = usage_metadata
@@ -640,37 +654,41 @@ async def load_historical_memory_node(
 
         try:
             memory = await get_redis_memory()
+            # Retrieve a larger candidate pool than we need; the cross-encoder
+            # will filter for strict relevance below.
             docs = await memory.search_memory(
                 query=query,
                 user_id=user_id,
                 chat_id=chat_id,
-                limit=settings.HISTORICAL_MEMORY_TOP_K,
+                limit=settings.HISTORICAL_MEMORY_TOP_K * 3,
             )
+
+            # Rerank memory candidates with the cross-encoder so only turns that
+            # actually help answer the current query are injected. Semantic search
+            # alone can return topically similar but query-irrelevant history.
+            # Use the stricter HISTORICAL_MEMORY_SCORE_THRESHOLD (default 2.0)
+            # instead of the generic KB threshold (-2.0).
+            if docs:
+                from langchain_core.documents import Document as LangchainDocument
+
+                lc_docs = [
+                    LangchainDocument(
+                        page_content=d.get("page_content", ""),
+                        metadata=d.get("metadata", {}),
+                    )
+                    for d in docs
+                ]
+                reranked = rerank(
+                    query=query,
+                    docs=lc_docs,
+                    score_threshold=settings.HISTORICAL_MEMORY_SCORE_THRESHOLD,
+                )
+                docs = [_serialise_doc(d) for d in reranked[: settings.HISTORICAL_MEMORY_TOP_K]]
         except Exception as exc:
             logger.warning("[LOAD_HISTORICAL_MEMORY] failed: %s", exc)
             docs = []
 
         return {"historical_memory_docs": docs}
-
-
-# ---------------------------------------------------------------------------
-# Node: summarize_history
-# ---------------------------------------------------------------------------
-
-async def summarize_history_node(
-    state: AgentState,
-    llm: ChatOpenAI | None = None,
-) -> dict:
-    """No-op placeholder: historical context now lives in Redis checkpoint/store.
-
-    The durable Redis checkpointer persists the full thread state, and the
-    Redis store surfaces semantically relevant past turns. A rolling text
-    summary in graph state is no longer needed, but the node is retained so
-    existing graph wiring and timeline UI events remain unchanged.
-    """
-    _ = llm
-    with _agent_step("summarize_history"):
-        return {}
 
 
 # ---------------------------------------------------------------------------

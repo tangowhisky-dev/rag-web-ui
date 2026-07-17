@@ -5,7 +5,6 @@ import { useEffect, useState, useRef } from "react";
 const NODE_PHASE: Record<string, string> = {
   // Phase 1: Retrieving memories & re-writing query
   load_historical_memory: "Retrieving memories & re-writing query …",
-  summarize_history: "Retrieving memories & re-writing query …",
   rewrite_query: "Retrieving memories & re-writing query …",
   classify_query: "Retrieving memories & re-writing query …",
 

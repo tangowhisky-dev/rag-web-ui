@@ -1,10 +1,10 @@
 """Compiled LangGraph StateGraph for the agentic RAG pipeline.
 
 Two-level architecture:
-  Main graph:  START → summarize_history → rewrite → classify → [clarification | Send(agent, ...)]
+  Main graph:  START → load_historical_memory → rewrite → classify → [clarification | Send(agent, ...)]
                → prepare_final_context → generate → [chart_validation →] answer_evaluation
                → finalize_answer → END
-  Agent subgraph: START → rewrite_subtask_query → exact → sparse → dense
+  Agent subgraph: START → rewrite_subtask_query → load_subtask_memory → exact → sparse → dense
                         → merge → neo4j_expansion → reranking(-inf) → filter(-2.0)
                         → sufficiency_check → [adaptive_reranking(-5.0)]
                         → collect_context → END
@@ -49,7 +49,6 @@ from .nodes import (
     finalize_answer_node,
     generating_node,
     chart_validation_node,
-    summarize_history_node,
     answer_evaluation_node,
     save_memory_node,
 )
@@ -295,7 +294,6 @@ def build_main_graph(
 
     # --- Nodes ---
     builder.add_node("load_historical_memory", partial(load_historical_memory_node, db=db))
-    builder.add_node("summarize_history", summarize_history_node)
     builder.add_node("rewrite_query", rewrite_query_node)
     builder.add_node("classify_query", classify_query_node)
     builder.add_node("request_clarification", request_clarification_node)
@@ -331,8 +329,7 @@ def build_main_graph(
 
     # --- Edges ---
     builder.add_edge(START, "load_historical_memory")
-    builder.add_edge("load_historical_memory", "summarize_history")
-    builder.add_edge("summarize_history", "rewrite_query")
+    builder.add_edge("load_historical_memory", "rewrite_query")
     builder.add_edge("rewrite_query", "classify_query")
 
     # Conditional routing after classification (Send for parallel subtasks)

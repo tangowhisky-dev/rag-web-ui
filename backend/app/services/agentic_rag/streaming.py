@@ -21,7 +21,6 @@ TRACKED_NODES = frozenset(
     (
         "load_historical_memory",
         "load_subtask_memory",
-        "summarize_history",
         "rewrite_query",
         "classify_query",
         "request_clarification",

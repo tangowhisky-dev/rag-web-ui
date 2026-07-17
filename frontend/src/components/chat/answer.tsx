@@ -540,6 +540,19 @@ export const Answer: FC<{
     );
   }
 
+  // Normalize model citation output: the model sometimes outputs
+  // `[citation](N)` or `[citation](N)(N)` instead of `[N](N)`.
+  // This ensures react-markdown renders a proper link with the number as text,
+  // and removes the duplicate `(N)` plain-text suffix.
+  const normalizedMarkdown = useMemo(() => {
+    let text = parsedContent.answerText;
+    // Case 1: [citation](N)(N) — replace the whole pattern with [N](N)
+    text = text.replace(/\[citation\]\((\d+)\)\((\d+)\)/g, "[$1]($1)");
+    // Case 2: [citation](N) — replace with [N](N)
+    text = text.replace(/\[citation\]\((\d+)\)/g, "[$1]($1)");
+    return text;
+  }, [parsedContent.answerText]);
+
   return (
     <div className="prose prose-sm max-w-full">
       {/* Subtask checklist — shown during streaming for complex multi-part queries */}
@@ -579,7 +592,7 @@ export const Answer: FC<{
           rehypePlugins={[rehypeHighlight, [rehypeKatex, { throwOnError: false }]]}
           components={markdownComponents}
         >
-          {parsedContent.answerText}
+          {normalizedMarkdown}
         </Markdown>
       )}
       
