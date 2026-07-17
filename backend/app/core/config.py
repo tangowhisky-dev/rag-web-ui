@@ -134,6 +134,15 @@ class Settings(BaseSettings):
     QDRANT_PORT: int = int(os.getenv("QDRANT_PORT", "6333"))
     QDRANT_GRPC_PORT: int = int(os.getenv("QDRANT_GRPC_PORT", "6334"))
 
+    # Redis Stack — LangGraph short-term (checkpointer) + long-term (store) memory
+    REDIS_URL: str = os.getenv("REDIS_URL", "redis://redis:6379/0")
+    REDIS_HOST: str = os.getenv("REDIS_HOST", "redis")
+    REDIS_PORT: int = int(os.getenv("REDIS_PORT", "6379"))
+    REDIS_INSIGHT_PORT: int = int(os.getenv("REDIS_INSIGHT_PORT", "8001"))
+    MEMORY_ENABLED: bool = os.getenv("MEMORY_ENABLED", "true").lower() == "true"
+    # Embedding model used for the Redis long-term memory store. Defaults to DENSE_EMBEDDINGS_MODEL.
+    MEMORY_EMBEDDING_MODEL: Optional[str] = os.getenv("MEMORY_EMBEDDING_MODEL") or None
+
     # SPLADE sparse embedding model (FastEmbed / ONNX — CPU-optimised)
     SPLADE_MODEL: str = os.getenv("SPLADE_MODEL", "prithivida/Splade_PP_en_v1")
     # Directory where FastEmbed caches downloaded ONNX models.

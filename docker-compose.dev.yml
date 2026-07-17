@@ -25,6 +25,7 @@ services:
       - db
       - qdrant
       - neo4j
+      - redis
     restart: on-failure
     deploy:
       restart_policy:
@@ -116,6 +117,21 @@ services:
       test: ["CMD", "wget", "-qO-", "http://localhost:7474"]
       interval: 10s
       timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis/redis-stack:7.4.0-v8
+    ports:
+      - "6380:6379"
+      - "8002:8001"
+    volumes:
+      - ./docker-data/redis:/data
+    networks:
+      - app_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
       retries: 10
 
   adminer:

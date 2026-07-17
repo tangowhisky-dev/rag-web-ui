@@ -43,6 +43,7 @@ async def run_agentic_rag(
     api_base: Optional[str] = None,
     query_model: Optional[str] = None,
     org_id: Optional[int] = None,
+    user_id: Optional[int] = None,
     generate_answer: bool = True,
 ) -> AsyncGenerator[dict, None]:
     """Single autonomous agentic agent via LangGraph StateGraph.
@@ -62,6 +63,7 @@ async def run_agentic_rag(
         api_base=api_base,
         org_id=org_id,
         chat_id=chat_id,
+        user_id=user_id,
         generate_answer=generate_answer,
     ):
         yield event

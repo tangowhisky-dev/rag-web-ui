@@ -245,6 +245,7 @@ async def _rewrite_query(
     recent_history: List,  # LangChain message objects
     api_base: Optional[str] = None,
     query_model: Optional[str] = None,
+    conversation_summary: str = "",
 ) -> str:
     """Rewrite query into a self-contained search query using chat history.
 
@@ -255,6 +256,7 @@ async def _rewrite_query(
     return _rewrite_query_impl(
         query=query,
         recent_history=recent_history,
+        conversation_summary=conversation_summary,
         api_base=api_base,
         query_model=query_model,
         openai_api_key=settings.OPENAI_API_KEY,
@@ -355,6 +357,7 @@ async def generate_response(
     api_base: Optional[str] = None,
     query_model: Optional[str] = None,
     org_id: Optional[int] = None,
+    user_id: Optional[int] = None,
 ) -> AsyncGenerator[str, None]:
     """
     Stream a chat response for the given query.
@@ -479,6 +482,7 @@ async def generate_response(
             api_base=api_base,
             query_model=query_model,
             org_id=org_id,
+            user_id=user_id,
         )
 
         async for event in stream_iter:

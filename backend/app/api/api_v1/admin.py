@@ -17,6 +17,7 @@ from app.models.knowledge import KnowledgeBase, ProcessingTask
 from app.schemas.user import UserAdminCreate, UserAdminUpdate, UserResponse, UserDeleteResponse, PasswordChange
 from app.models.user import User, UserRole
 from app.core.security import get_password_hash
+from app.services.agentic_rag.redis_memory import delete_user_redis_sync
 
 org_router = APIRouter()
 
@@ -492,7 +493,10 @@ def delete_user(
         raise HTTPException(status_code=404, detail="User not found")
 
     username = user.username
+    chat_ids = [chat.id for chat in user.chats]
     db.delete(user)
     db.commit()
+    # Clean up Redis checkpoints and long-term memory for this user and their chats
+    delete_user_redis_sync(user_id, chat_ids)
     logger.info("[ADMIN] user_deleted id=%s username=%s", user_id, username)
     return UserDeleteResponse(id=user.id, username=username, email=user.email)

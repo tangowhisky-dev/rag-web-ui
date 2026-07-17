@@ -28,21 +28,48 @@ from app.services.prompts.loader import append_chart_instructions
 from app.services.retrieval.reranker import _get_cross_encoder
 
 from .graph_state import AgentState
+from .redis_memory import get_redis_memory
 from .schemas import QueryAnalysis
 from .utils import estimate_messages_tokens, strip_reasoning_tags, format_context_string
 
 logger = logging.getLogger(__name__)
 
 
+def select_recent_history(messages: list, max_pairs: int = 3) -> list:
+    """Return up to ``max_pairs`` of recent user/assistant turns.
+
+    The last message is assumed to be the current user query and is excluded.
+    """
+    from langchain_core.messages import HumanMessage, AIMessage
+
+    history: list = []
+    # Skip the final message (current query).
+    for m in messages[:-1]:
+        if isinstance(m, HumanMessage):
+            history.append(HumanMessage(content=m.content))
+        elif isinstance(m, AIMessage):
+            history.append(AIMessage(content=m.content[:400]))
+    # Keep the most recent max_pairs * 2 messages.
+    return history[-(max_pairs * 2):]
+
+
 @contextmanager
 def _agent_step(name: str) -> Generator[None, None, None]:
-    """Emit agent_step active/done lifecycle events around a node."""
-    writer = get_stream_writer()
-    writer({"event": "agent_step", "node": name, "status": "active", "latency_ms": 0})
+    """Emit agent_step active/done lifecycle events around a node.
+
+    No-op when called outside a LangGraph runnable context (e.g. unit tests).
+    """
+    try:
+        writer = get_stream_writer()
+    except RuntimeError:
+        writer = None
+    if writer is not None:
+        writer({"event": "agent_step", "node": name, "status": "active", "latency_ms": 0})
     try:
         yield
     finally:
-        writer({"event": "agent_step", "node": name, "status": "done", "latency_ms": 0})
+        if writer is not None:
+            writer({"event": "agent_step", "node": name, "status": "done", "latency_ms": 0})
 
 
 _ANSWER_SYSTEM_PROMPT = append_chart_instructions("""\
@@ -88,15 +115,19 @@ async def rewrite_query_node(
     state: AgentState,
     api_base: Optional[str] = None,
 ) -> dict:
-    """Rewrite query using chat history."""
+    """Rewrite query using chat history and rolling conversation summary."""
     from .utils import rewrite_query as _rewrite_query
 
     with _agent_step("rewrite_query"):
         messages = state.get("messages", [])
         query = state.get("original_query", "")
+        summary = state.get("existing_summary", "")
+        recent_history = select_recent_history(messages, max_pairs=3)
+
         rewritten = _rewrite_query(
             query=query,
-            recent_history=messages,
+            recent_history=recent_history,
+            conversation_summary=summary,
             api_base=api_base,
             query_model=settings.effective_query_model,
             openai_api_key=settings.OPENAI_API_KEY,
@@ -365,7 +396,7 @@ def sufficiency_check_node(state: AgentState) -> dict:
 # Node: adaptive_reranking (re-filter with lower threshold)
 # ---------------------------------------------------------------------------
 
-def adaptive_reranking_node(state: AgentState) -> dict:
+async def adaptive_reranking_node(state: AgentState, db: Any = None) -> dict:
     """Adaptive reranking: re-filter all_scored_docs with lower threshold.
 
     Since all docs already have _reranker_score from the initial run,
@@ -404,40 +435,73 @@ def adaptive_reranking_node(state: AgentState) -> dict:
 # Node: generating (actual LLM answer generation)
 # ---------------------------------------------------------------------------
 
+def _build_generation_messages(state: AgentState) -> list[dict]:
+    """Build the LLM message list, injecting memory, summary, and history."""
+    retrieved_docs = state.get("retrieved_docs", [])
+    original_query = state.get("original_query", "")
+    file_markdown = state.get("file_markdown")
+    summary = state.get("existing_summary", "")
+    mem_docs = state.get("historical_memory_docs", [])
+
+    memory_text = ""
+    if mem_docs:
+        parts = [d.get("page_content", "") for d in mem_docs if d.get("page_content")]
+        memory_text = "\n\n".join(parts)
+
+    system_parts = [_ANSWER_SYSTEM_PROMPT]
+    if summary:
+        system_parts.append(f"CONVERSATION SUMMARY:\n{summary}")
+    if memory_text:
+        system_parts.append(f"RELEVANT PAST CONTEXT:\n{memory_text}")
+    system_content = "\n\n".join(system_parts)
+
+    messages: list[dict] = [{"role": "system", "content": system_content}]
+
+    # Include recent conversation turns (excluding the current query) so the
+    # model can answer follow-ups like "elaborate on that" or "compare with the
+    # previous one" without guessing.
+    recent_history = select_recent_history(state.get("messages", []), max_pairs=2)
+    for m in recent_history:
+        if isinstance(m, HumanMessage):
+            messages.append({"role": "user", "content": str(m.content)})
+        elif isinstance(m, AIMessage):
+            messages.append({"role": "assistant", "content": str(m.content)[:400]})
+
+    if not retrieved_docs:
+        no_docs_msg = (
+            "The user asked a question but no relevant documents were found in the "
+            "knowledge base. Answer from your general knowledge, but clearly state that "
+            "no documents were found."
+        )
+        messages.append({"role": "user", "content": f"Query: {original_query}\n\n{no_docs_msg}"})
+    else:
+        context_text = format_context_string(retrieved_docs, file_markdown)
+        messages.append({
+            "role": "user",
+            "content": f"Query: {original_query}\n\nContext:\n{context_text}",
+        })
+
+    return messages
+
+
 async def generating_node(
     state: AgentState,
     llm: ChatOpenAI | None = None,
     api_base: Optional[str] = None,
 ) -> dict:
-    """Generate answer using retrieved context.
+    """Generate answer using retrieved context and conversation memory.
 
     Streams tokens to the client in real-time via LangGraph's stream writer so
     the answer appears word-by-word in the UI. The final accumulated answer is
     still returned in state for downstream nodes and persistence.
     """
+    _ = api_base  # kept for API compatibility
     with _agent_step("generating"):
         llm_instance = llm or _get_llm(streaming=True)
         writer = get_stream_writer()
 
-        retrieved_docs = state.get("retrieved_docs", [])
+        messages = _build_generation_messages(state)
         original_query = state.get("original_query", "")
-        file_markdown = state.get("file_markdown")
-
-        if not retrieved_docs:
-            messages = [
-                {"role": "system", "content": (
-                    "You are a helpful assistant. The user asked a question but no "
-                    "relevant documents were found in the knowledge base. Answer from "
-                    "your general knowledge, but clearly state that no documents were found."
-                )},
-                {"role": "user", "content": original_query},
-            ]
-        else:
-            context_text = format_context_string(retrieved_docs, file_markdown)
-            messages = [
-                {"role": "system", "content": _ANSWER_SYSTEM_PROMPT},
-                {"role": "user", "content": f"Query: {original_query}\n\nContext:\n{context_text}"},
-            ]
 
         answer = ""
         usage_metadata: Optional[dict] = None
@@ -553,21 +617,26 @@ async def load_historical_memory_node(
     state: AgentState,
     db: Any,
 ) -> dict:
-    """Load relevant past assistant messages as historical memory docs."""
+    """Load relevant past turns from the Redis long-term memory store."""
+    _ = db  # kept for API compatibility
     with _agent_step("load_historical_memory"):
+        user_id = state.get("user_id")
         chat_id = state.get("chat_id")
-        if not chat_id:
+        query = state.get("original_query", "")
+
+        if not query or (not user_id and not chat_id):
             return {"historical_memory_docs": []}
 
-        from app.services.chat import retrieve_historical_memory
+        if not settings.MEMORY_ENABLED:
+            return {"historical_memory_docs": []}
 
         try:
-            docs = retrieve_historical_memory(
+            memory = await get_redis_memory()
+            docs = await memory.search_memory(
+                query=query,
+                user_id=user_id,
                 chat_id=chat_id,
-                query=state.get("original_query", ""),
-                db=db,
-                top_k=settings.HISTORICAL_MEMORY_TOP_K,
-                score_threshold=settings.HISTORICAL_MEMORY_SCORE_THRESHOLD,
+                limit=settings.HISTORICAL_MEMORY_TOP_K,
             )
         except Exception as exc:
             logger.warning("[LOAD_HISTORICAL_MEMORY] failed: %s", exc)
@@ -629,9 +698,16 @@ async def rewrite_subtask_query_node(
         idx = state.get("current_subtask_index", 0)
         subtask = subtasks[idx] if 0 <= idx < len(subtasks) else state.get("original_query", "")
 
+        # Carry conversation context so subtasks can resolve references like
+        # "the second option" or "the previous paper".
+        messages = state.get("messages", [])
+        summary = state.get("existing_summary", "")
+        recent_history = select_recent_history(messages, max_pairs=2)
+
         rewritten = _rewrite_query(
             query=subtask,
-            recent_history=[],
+            recent_history=recent_history,
+            conversation_summary=summary,
             api_base=api_base,
             query_model=settings.effective_query_model,
             openai_api_key=settings.OPENAI_API_KEY,
@@ -905,6 +981,34 @@ def finalize_answer_node(state: AgentState) -> dict:
             "final_answer": answer,
             "messages": [AIMessage(content=answer)] if answer else [],
         }
+
+
+async def save_memory_node(state: AgentState) -> dict:
+    """Persist the completed turn to Redis long-term memory."""
+    if not settings.MEMORY_ENABLED:
+        return {}
+
+    with _agent_step("save_memory"):
+        answer = state.get("final_answer") or state.get("answer", "")
+        query = state.get("original_query", "")
+        user_id = state.get("user_id")
+        chat_id = state.get("chat_id")
+
+        if not answer or not query:
+            return {}
+
+        try:
+            memory = await get_redis_memory()
+            await memory.save_turn(
+                query=query,
+                answer=answer,
+                user_id=user_id,
+                chat_id=chat_id,
+            )
+        except Exception as exc:
+            logger.warning("[SAVE_MEMORY] failed: %s", exc)
+
+    return {}
 
 
 # ---------------------------------------------------------------------------

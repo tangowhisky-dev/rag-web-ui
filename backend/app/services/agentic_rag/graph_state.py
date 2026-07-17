@@ -126,6 +126,8 @@ class AgentState(MessagesState):
     # ── Configuration ───────────────────────────────────────────────────
     kb_ids: List[int] = []
     org_id: Optional[int] = None
+    chat_id: Annotated[Optional[int], _last_value] = None
+    user_id: Annotated[Optional[int], _last_value] = None
     file_markdown: Optional[str] = None
     existing_summary: str = ""
     generate_answer: bool = True  # If False, skip LLM generation (retrieval-only mode)

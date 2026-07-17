@@ -50,12 +50,20 @@ from .nodes import (
     chart_validation_node,
     summarize_history_node,
     answer_evaluation_node,
+    save_memory_node,
 )
 
 
 # ---------------------------------------------------------------------------
 # Routing / edge functions
 # ---------------------------------------------------------------------------
+
+def _trim_history_for_subgraph(state: AgentState) -> list:
+    """Return the last few conversation turns to carry into subagents."""
+    from .nodes import select_recent_history
+
+    return select_recent_history(state.get("messages", []), max_pairs=2)
+
 
 def route_after_classify(state: AgentState) -> list[Send] | str:
     """Decide which path to take after classification."""
@@ -64,6 +72,10 @@ def route_after_classify(state: AgentState) -> list[Send] | str:
 
     subtasks = state.get("subtasks", [])
     subtask_independence = state.get("subtask_independence", [True] * len(subtasks))
+
+    # Carry a trimmed view of the conversation so subtask rewrites can resolve
+    # pronouns and references to earlier turns.
+    subgraph_history = _trim_history_for_subgraph(state)
 
     if len(subtasks) > 1:
         independent_subtasks = []
@@ -82,7 +94,7 @@ def route_after_classify(state: AgentState) -> list[Send] | str:
             sends.append(Send("agent_subgraph", {
                 "original_query": subtask,
                 "rewritten_query": subtask,
-                "messages": [],
+                "messages": subgraph_history,
                 "subtasks": [subtask],
                 "is_complex": False,
                 "current_subtask_index": 0,
@@ -92,7 +104,7 @@ def route_after_classify(state: AgentState) -> list[Send] | str:
             sends.append(Send("agent_subgraph", {
                 "original_query": " ".join(dependent_subtasks),
                 "rewritten_query": " ".join(dependent_subtasks),
-                "messages": [],
+                "messages": subgraph_history,
                 "subtasks": dependent_subtasks,
                 "is_complex": True,
                 "current_subtask_index": 0,
@@ -101,7 +113,7 @@ def route_after_classify(state: AgentState) -> list[Send] | str:
             sends.append(Send("agent_subgraph", {
                 "original_query": dependent_subtasks[0],
                 "rewritten_query": dependent_subtasks[0],
-                "messages": [],
+                "messages": subgraph_history,
                 "subtasks": dependent_subtasks,
                 "is_complex": False,
                 "current_subtask_index": 0,
@@ -137,6 +149,13 @@ def route_after_chart_validation(state: AgentState) -> str:
     if valid or retries >= 3:
         return "answer_evaluation"
     return "generating"
+
+
+def route_after_answer_evaluation(state: AgentState) -> str:
+    """Cap automatic answer-evaluation retries at two attempts."""
+    if state.get("needs_retry", False) and state.get("answer_evaluation_attempts", 0) < 2:
+        return "generating"
+    return "finalize_answer"
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +259,8 @@ def build_main_graph(
     api_base: Optional[str] = None,
     generate_answer: bool = True,
     query_model: Optional[str] = None,
+    checkpointer: Any = None,
+    store: Any = None,
 ) -> Any:
     """Build and compile the main LangGraph StateGraph."""
     builder = StateGraph(AgentState)
@@ -278,6 +299,7 @@ def build_main_graph(
     )
     builder.add_node("chart_validation", chart_validation_node)
     builder.add_node("finalize_answer", finalize_answer_node)
+    builder.add_node("save_memory", save_memory_node)
 
     # --- Edges ---
     builder.add_edge(START, "load_historical_memory")
@@ -322,15 +344,20 @@ def build_main_graph(
         },
     )
 
-    # Answer evaluation → finalize (no automatic retry)
-    builder.add_edge("answer_evaluation", "finalize_answer")
-    builder.add_edge("finalize_answer", END)
-
-    # Compile with an InMemorySaver checkpointer.
-    from langgraph.checkpoint.memory import InMemorySaver
-    checkpointer = InMemorySaver()
+    # Answer evaluation → finalize (with retry cap) → save to long-term memory → END
+    builder.add_conditional_edges(
+        "answer_evaluation",
+        route_after_answer_evaluation,
+        {
+            "generating": "generating",
+            "finalize_answer": "finalize_answer",
+        },
+    )
+    builder.add_edge("finalize_answer", "save_memory")
+    builder.add_edge("save_memory", END)
 
     return builder.compile(
         checkpointer=checkpointer,
+        store=store,
         interrupt_before=["request_clarification"],
     )

@@ -26,6 +26,7 @@ from app.services.chat import generate_response, get_effective_llm_config
 from app.services.infrastructure import set_cancel_token
 from app.services.ingestion import SUPPORTED_EXTENSIONS
 from app.services.ingestion import MAX_FILE_SIZE, _convert_to_markdown
+from app.services.agentic_rag.redis_memory import delete_chat_redis_sync
 
 logger = logging.getLogger(__name__)
 
@@ -407,6 +408,7 @@ async def create_message(
             api_base=llm_cfg["api_base"],
             query_model=llm_cfg["query_model"],
             org_id=current_user.org_id,
+            user_id=current_user.id,
         ):
             yield chunk
 
@@ -420,6 +422,7 @@ async def create_message(
             "X-Accel-Buffering": "no",
         },
     )
+
 
 @router.post("/{chat_id}/messages/with-file")
 async def create_message_with_file(
@@ -498,6 +501,7 @@ async def create_message_with_file(
             api_base=llm_cfg["api_base"],
             query_model=llm_cfg["query_model"],
             org_id=current_user.org_id,
+            user_id=current_user.id,
         ):
             yield chunk
 
@@ -681,6 +685,8 @@ def delete_chat(
     db.commit()
     # Clean up ephemeral uploaded files for this chat
     delete_ephemeral_chat_files(chat_id)
+    # Clean up Redis checkpoints and long-term memory for this chat
+    delete_chat_redis_sync(chat_id)
     return {"status": "success"}
 
 @router.patch("/messages/{message_id}", response_model=MessageResponse)

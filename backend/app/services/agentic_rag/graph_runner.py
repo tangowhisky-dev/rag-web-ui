@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import uuid
 from typing import Any, AsyncGenerator, List, Optional
 
 from langchain_core.messages import HumanMessage, AIMessage
@@ -18,6 +19,7 @@ from app.core.config import settings
 
 from .graph import build_main_graph
 from .graph_state import AgentState
+from .redis_memory import get_redis_memory
 from .streaming import AgenticRAGTransformer
 from .evaluator import evaluate_answer
 from .utils import format_context_string
@@ -49,6 +51,7 @@ async def run_agentic_rag(
     api_base: Optional[str] = None,
     org_id: Optional[int] = None,
     chat_id: Optional[int] = None,
+    user_id: Optional[int] = None,
     generate_answer: bool = True,
 ) -> AsyncGenerator[dict, None]:
     """Run the agentic RAG pipeline using a compiled LangGraph StateGraph.
@@ -62,14 +65,27 @@ async def run_agentic_rag(
     """
     t0 = time.monotonic()
 
-    # Build initial messages from history
-    messages: list = []
-    for m in recent_lc_history:
-        if isinstance(m, HumanMessage):
-            messages.append(HumanMessage(content=m.content))
-        elif isinstance(m, AIMessage):
-            messages.append(AIMessage(content=m.content[:400]))
-    messages.append(HumanMessage(content=query))
+    # The durable Redis checkpointer is the source of truth for thread state.
+    # If no checkpoint exists for this chat yet (e.g. first message after
+    # deployment), seed the thread with the recent history the frontend sent us.
+    memory = await get_redis_memory()
+    thread_id = f"chat-{chat_id}" if chat_id else f"anon-{uuid.uuid4().hex}"
+    config = {"configurable": {"thread_id": thread_id}}
+
+    messages: list = [HumanMessage(content=query)]
+    try:
+        existing_tuple = await memory.checkpointer.aget_tuple(config)
+        if existing_tuple is None and recent_lc_history:
+            seeded: list = []
+            for m in recent_lc_history:
+                if isinstance(m, HumanMessage):
+                    seeded.append(HumanMessage(content=m.content))
+                elif isinstance(m, AIMessage):
+                    seeded.append(AIMessage(content=m.content[:400]))
+            messages = seeded + messages
+            logger.info("[GRAPH] seeded thread=%s with %d history messages", thread_id, len(seeded))
+    except Exception as exc:
+        logger.warning("[GRAPH] failed to probe checkpoint for thread=%s: %s", thread_id, exc)
 
     initial_state: AgentState = AgentState(
         messages=messages,
@@ -77,11 +93,13 @@ async def run_agentic_rag(
         existing_summary=existing_summary or "",
         kb_ids=kb_ids,
         org_id=org_id,
+        chat_id=chat_id,
+        user_id=user_id,
         file_markdown=file_markdown,
         generate_answer=generate_answer,
     )
 
-    # Build the compiled graph
+    # Build the compiled graph with the shared Redis checkpointer + store.
     graph = build_main_graph(
         db=db,
         kb_ids=kb_ids,
@@ -89,12 +107,9 @@ async def run_agentic_rag(
         file_markdown=file_markdown,
         api_base=api_base,
         generate_answer=generate_answer,
+        checkpointer=memory.checkpointer,
+        store=memory.store,
     )
-
-    # Config — thread_id enables checkpointing per chat
-    config = {
-        "configurable": {"thread_id": str(chat_id) if chat_id else None},
-    }
 
     try:
         stream = await graph.astream_events(
@@ -232,6 +247,10 @@ async def run_agentic_rag(
                 logger.warning("[EVAL] evaluation skipped: %s", exc)
 
         yield {"event": "done", "full_response": final_answer, "usage": usage}
+
+        # The completed turn is persisted to long-term memory by the
+        # "save_memory" node inside the compiled graph, so we do not duplicate
+        # the write here.
 
     except Exception as exc:
         logger.error("[GRAPH] pipeline failed: %s", exc, exc_info=True)

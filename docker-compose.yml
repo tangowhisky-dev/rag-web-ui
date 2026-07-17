@@ -20,6 +20,8 @@ services:
         condition: service_started
       neo4j:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: on-failure
     deploy:
       restart_policy:
@@ -35,6 +37,21 @@ services:
       - BACKEND_URL=http://backend:8000
     networks:
       - app_network
+
+  redis:
+    image: redis/redis-stack:7.4.0-v8
+    ports:
+      - "6380:6379"
+      - "8002:8001"
+    volumes:
+      - ./docker-data/redis:/data
+    networks:
+      - app_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   db:
     image: mysql:8.4
