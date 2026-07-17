@@ -15,7 +15,7 @@ function generateId(): string {
 import { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback } from "react";
 
 import { useRouter } from "next/navigation";
-import { Copy, Trash2, Lightbulb } from "lucide-react";
+import { Copy, Trash2, Lightbulb, ChevronDown } from "lucide-react";
 import { useChatContext } from "@/contexts/chat-context";
 import ChatSettings from "@/components/chat/chat-settings";
 import type { ChatPatch } from "@/components/chat/chat-settings";
@@ -157,6 +157,10 @@ function ChatPageInner({ params }: { params: { id: string } }) {
   const topSentinelRef = useRef<HTMLDivElement>(null);
   // Stores scrollHeight before prepending older messages so we can restore position
   const pendingScrollAdjustRef = useRef<number | null>(null);
+  // Track whether user is actively scrolled to the bottom
+  const [isAtBottom, setIsAtBottom] = useState(true);
+  // Whether auto-scroll is locked (user scrolled up during generation)
+  const [autoScrollLocked, setAutoScrollLocked] = useState(false);
 
   // Poll file status until ready or error
   const startPolling = (fileId: number) => {
@@ -250,6 +254,38 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isInitialLoad]);
+
+  // Track scroll position and auto-scroll during streaming
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+
+    const nearBottom = () => {
+      const threshold = 80;
+      return container.scrollHeight - container.scrollTop - container.clientHeight <= threshold;
+    };
+
+    const onScroll = () => {
+      const atBottom = nearBottom();
+      setIsAtBottom(atBottom);
+      if (!atBottom) {
+        setAutoScrollLocked(true);
+      } else if (atBottom && autoScrollLocked) {
+        setAutoScrollLocked(false);
+      }
+    };
+
+    container.addEventListener("scroll", onScroll, { passive: true });
+    return () => container.removeEventListener("scroll", onScroll);
+  }, [autoScrollLocked]);
+
+  // Auto-scroll during streaming while not locked
+  useEffect(() => {
+    if (!isLoading || autoScrollLocked) return;
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    container.scrollTop = container.scrollHeight;
+  }, [messages, isLoading, autoScrollLocked, progressMessages, taskList, thinkingContent]);
 
   // ── Message formatter (shared by initial load and paginated load) ───────────
   const formatMessage = useCallback((msg: ChatMessage): Message => {
@@ -803,6 +839,8 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     setUploadedFile(null);
     setFileError("");
     setIsLoading(true);
+    setAutoScrollLocked(false);
+    setIsAtBottom(true);
     setMessages((prev) => [...prev, userMessage, assistantMessage]);
     setTimeout(scrollToBottom, 0);
 
@@ -1173,7 +1211,17 @@ function ChatPageInner({ params }: { params: { id: string } }) {
 
         {/* Floating input bar */}
         <div className="absolute bottom-0 left-0 right-0 z-10 pb-4 pt-2 px-4">
-          <div className="max-w-3xl mx-auto">
+          <div className="max-w-3xl mx-auto relative">
+            {/* Scroll-to-bottom button */}
+            {!isAtBottom && (
+              <button
+                onClick={scrollToBottom}
+                aria-label="Scroll to bottom"
+                className="absolute -top-12 left-1/2 -translate-x-1/2 h-9 w-9 rounded-full border border-border bg-background/80 backdrop-blur-sm shadow-md flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+              >
+                <ChevronDown className="h-5 w-5" />
+              </button>
+            )}
             <InputBar
               value={input}
               onChange={setInput}

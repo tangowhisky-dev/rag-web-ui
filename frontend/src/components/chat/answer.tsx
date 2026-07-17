@@ -438,7 +438,7 @@ export const Answer: FC<{
                 </Markdown>
               </div>
               <Divider />
-              {['kb_id', 'data_store_id', 'document_id', 'file_name', 'chunk_index', '_legs', '_reranker_score', 'qdrant_point_id']
+              {['kb_id', 'data_store_id', 'document_id', 'chunk_index', '_legs', '_reranker_score', 'qdrant_point_id']
                 .some(k => k in citation && (citation as any)[k] !== undefined && (citation as any)[k] !== null) && (
                 <details className="text-xs group">
                   <summary className="cursor-pointer select-none list-none flex items-center gap-1 text-muted-foreground hover:text-foreground transition-colors py-0.5">
@@ -448,7 +448,7 @@ export const Answer: FC<{
                     Debug Info
                   </summary>
                   <div className="mt-1.5 bg-muted text-muted-foreground p-2 rounded space-y-1">
-                    {['kb_id', 'data_store_id', 'document_id', 'file_name', 'chunk_index', '_legs', '_reranker_score', 'qdrant_point_id']
+                    {['kb_id', 'data_store_id', 'document_id', 'chunk_index', '_legs', '_reranker_score', 'qdrant_point_id']
                       .filter(k => k in citation && (citation as any)[k] !== undefined && (citation as any)[k] !== null)
                       .map(key => {
                         const legNames: Record<string, string> = {
