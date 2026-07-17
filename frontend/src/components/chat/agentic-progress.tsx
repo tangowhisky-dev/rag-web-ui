@@ -101,26 +101,13 @@ export const AgenticProgress = ({ agentSteps, isStreaming }: AgenticProgressProp
 
   if (phases.length === 0) return null;
 
+  const currentPhase = phases[phases.length - 1];
+
   return (
-    <div className="space-y-0">
-      {phases.map((phase, i) => {
-        // Last phase is current (active), previous ones are fading
-        const isActive = i === phases.length - 1;
-        return (
-          <div
-            key={`${phase}-${i}`}
-            className={`transition-all duration-500 ${
-              isActive
-                ? "opacity-100"
-                : "opacity-0 -translate-y-1"
-            }`}
-          >
-            <span className="text-[12px] text-zinc-500 dark:text-zinc-400 leading-tight">
-              {phase}
-            </span>
-          </div>
-        );
-      })}
+    <div>
+      <span className="text-[12px] text-zinc-500 dark:text-zinc-400 leading-tight">
+        {currentPhase}
+      </span>
     </div>
   );
 };

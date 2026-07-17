@@ -116,6 +116,26 @@ h3[data-stat] {
   font-variant-numeric: tabular-nums;
 }
 
+/* Prose heading overrides — ensure markdown headings render visibly */
+.prose h1,
+.prose h2,
+.prose h3,
+.prose h4,
+.prose h5,
+.prose h6 {
+  font-weight: 600;
+  color: hsl(var(--foreground));
+  margin-top: 1.25em;
+  margin-bottom: 0.5em;
+}
+
+.prose h1 { font-size: 1.5em; }
+.prose h2 { font-size: 1.25em; }
+.prose h3 { font-size: 1.125em; }
+.prose h4 { font-size: 1em; }
+.prose h5 { font-size: 0.875em; }
+.prose h6 { font-size: 0.85em; }
+
 /* ── Skeleton cursor ────────────────────────────────────────────── */
 
 @keyframes skeleton-pulse {
