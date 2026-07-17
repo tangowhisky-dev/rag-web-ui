@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 TRACKED_NODES = frozenset(
     (
         "load_historical_memory",
+        "load_subtask_memory",
         "summarize_history",
         "rewrite_query",
         "classify_query",
@@ -152,7 +153,7 @@ class AgenticRAGTransformer(StreamTransformer):
 
         # Subgraph updates (retrieval happens inside agent_subgraph).
         # We stream context as soon as retrieved_docs are produced there.
-        logger.info("[STREAM] subgraph update namespace=%s data_keys=%s", namespace, list(data.keys()))
+        logger.debug("[STREAM] subgraph update namespace=%s data_keys=%s", namespace, list(data.keys()))
         for node_name, node_update in data.items():
             if not isinstance(node_update, dict):
                 continue

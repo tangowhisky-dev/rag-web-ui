@@ -124,13 +124,15 @@ class AgentState(MessagesState):
     needs_retry: bool = False  # Always False — user-initiated retry only
 
     # ── Configuration ───────────────────────────────────────────────────
-    kb_ids: List[int] = []
-    org_id: Optional[int] = None
+    # All configuration keys use _last_value because parallel Send() branches
+    # pass the same values into each agent_subgraph invocation; without an
+    # Annotated reducer LangGraph rejects concurrent writes to the same key.
+    kb_ids: Annotated[List[int], _last_value] = []
+    org_id: Annotated[Optional[int], _last_value] = None
     chat_id: Annotated[Optional[int], _last_value] = None
     user_id: Annotated[Optional[int], _last_value] = None
-    file_markdown: Optional[str] = None
-    existing_summary: str = ""
-    generate_answer: bool = True  # If False, skip LLM generation (retrieval-only mode)
+    file_markdown: Annotated[Optional[str], _last_value] = None
+    generate_answer: Annotated[bool, _last_value] = True  # If False, skip LLM generation (retrieval-only mode)
 
     # ── Metadata ────────────────────────────────────────────────────────
     latency_ms: int = 0

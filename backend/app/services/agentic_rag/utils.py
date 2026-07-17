@@ -49,7 +49,7 @@ def format_context_string(docs: list[dict], file_markdown: str | None = None) ->
 def rewrite_query(
     query: str,
     recent_history: list,
-    conversation_summary: str = "",
+    memory_context: str = "",
     api_base: str | None = None,
     query_model: str | None = None,
     openai_api_key: str = "",
@@ -57,35 +57,36 @@ def rewrite_query(
 ) -> str:
     """Rewrite *query* into a self-contained search query using chat history.
 
-    Shared by ``rewrite_query_node`` (nodes.py) and ``_rewrite_query``
-    (chat_service.py).  Returns the original query on failure or when the
-    model echoes an answer instead of rewriting.
+    Uses the recent conversation turns plus any relevant long-term memory
+    context (from the Redis store) to resolve pronouns and references.
+    Returns the original query on failure or when the model echoes an answer
+    instead of rewriting.
     """
-    if not recent_history:
+    if not recent_history and not memory_context:
         return query
 
-    summary_section = ""
-    if conversation_summary:
-        summary_section = (
-            "\n\nConversation summary (older context):\n"
-            f"{conversation_summary}\n\n"
-            "Use this summary to resolve references that go beyond the recent messages."
+    memory_section = ""
+    if memory_context:
+        memory_section = (
+            "\n\nRelevant past context (older conversation turns):\n"
+            f"{memory_context}\n\n"
+            "Use this past context to resolve references that go beyond the recent messages."
         )
 
     system_msg = (
         "You are a search query rewriter for a document retrieval system. "
         "Your ONLY job is to rewrite the user's latest message into a self-contained search query "
         "that can be sent to a vector database. "
-        "Use the chat history and any provided conversation summary solely to resolve pronouns and references — "
+        "Use the recent chat history and any relevant past context solely to resolve pronouns and references — "
         "never to answer, evaluate, or judge the question.\n\n"
         "Rules:\n"
         "1. Output a standalone question or keyword phrase — nothing else.\n"
-        "2. Resolve pronouns and references from history/summary "
+        "2. Resolve pronouns and references from history or past context "
         "(e.g. 'it' → the specific topic discussed).\n"
         "3. Do NOT answer the question. Do NOT say whether information exists or not.\n"
         "4. Do NOT add information not needed to resolve an ambiguous reference.\n"
         "5. Keep the output short — one sentence or a keyword phrase, maximum 30 words.\n"
-        f"{summary_section}\n\n"
+        f"{memory_section}\n\n"
         "Examples:\n"
         "History: [user: tell me about Linux, assistant: Linux is an open-source OS...]\n"
         "Query: 'any other worthwhile OS you like to mention?'\n"

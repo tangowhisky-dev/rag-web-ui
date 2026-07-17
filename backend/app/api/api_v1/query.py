@@ -101,8 +101,6 @@ async def query(
         kb_ids=body.kb_ids,
         db=db,
         chat_id=transient_chat_id,
-        recent_lc_history=[],
-        existing_summary=None,
         generate_answer=body.generate_answer,
     ):
         if event.get("event") == "context":

@@ -34,6 +34,7 @@ from .nodes import (
     classify_query_node,
     request_clarification_node,
     load_historical_memory_node,
+    load_subtask_memory_node,
     dense_retrieval_node,
     sparse_retrieval_node,
     exact_retrieval_node,
@@ -65,6 +66,18 @@ def _trim_history_for_subgraph(state: AgentState) -> list:
     return select_recent_history(state.get("messages", []), max_pairs=2)
 
 
+def _subgraph_send_kwargs(state: AgentState) -> dict:
+    """Return the shared context every subgraph invocation should receive."""
+    return {
+        "chat_id": state.get("chat_id"),
+        "user_id": state.get("user_id"),
+        "kb_ids": state.get("kb_ids", []),
+        "org_id": state.get("org_id"),
+        "file_markdown": state.get("file_markdown"),
+        "historical_memory_docs": state.get("historical_memory_docs", []),
+    }
+
+
 def route_after_classify(state: AgentState) -> list[Send] | str:
     """Decide which path to take after classification."""
     if not state.get("question_is_clear", True):
@@ -76,6 +89,7 @@ def route_after_classify(state: AgentState) -> list[Send] | str:
     # Carry a trimmed view of the conversation so subtask rewrites can resolve
     # pronouns and references to earlier turns.
     subgraph_history = _trim_history_for_subgraph(state)
+    shared_kwargs = _subgraph_send_kwargs(state)
 
     if len(subtasks) > 1:
         independent_subtasks = []
@@ -92,6 +106,7 @@ def route_after_classify(state: AgentState) -> list[Send] | str:
 
         for subtask in independent_subtasks:
             sends.append(Send("agent_subgraph", {
+                **shared_kwargs,
                 "original_query": subtask,
                 "rewritten_query": subtask,
                 "messages": subgraph_history,
@@ -102,6 +117,7 @@ def route_after_classify(state: AgentState) -> list[Send] | str:
 
         if len(dependent_subtasks) > 1:
             sends.append(Send("agent_subgraph", {
+                **shared_kwargs,
                 "original_query": " ".join(dependent_subtasks),
                 "rewritten_query": " ".join(dependent_subtasks),
                 "messages": subgraph_history,
@@ -111,6 +127,7 @@ def route_after_classify(state: AgentState) -> list[Send] | str:
             }))
         elif dependent_subtasks:
             sends.append(Send("agent_subgraph", {
+                **shared_kwargs,
                 "original_query": dependent_subtasks[0],
                 "rewritten_query": dependent_subtasks[0],
                 "messages": subgraph_history,
@@ -121,7 +138,16 @@ def route_after_classify(state: AgentState) -> list[Send] | str:
 
         return sends if sends else "agent_subgraph"
 
-    return "agent_subgraph"
+    # Single subtask still gets the shared identifiers and memory seed.
+    return Send("agent_subgraph", {
+        **shared_kwargs,
+        "original_query": subtasks[0] if subtasks else state.get("original_query", ""),
+        "rewritten_query": state.get("rewritten_query", state.get("original_query", "")),
+        "messages": subgraph_history,
+        "subtasks": subtasks or [state.get("original_query", "")],
+        "is_complex": False,
+        "current_subtask_index": 0,
+    })
 
 
 def route_after_sufficiency(state: AgentState) -> str:
@@ -173,7 +199,7 @@ def build_agent_subgraph(
     """Build and return the agent subgraph (not yet compiled).
 
     Simplified pipeline per subtask (retrieval-only):
-      rewrite_subtask_query
+      rewrite_subtask_query → load_subtask_memory
         → exact_retrieval → sparse_retrieval → dense_retrieval
         → merge → neo4j_expansion → reranking(-inf) → filter(-2.0)
         → sufficiency_check → [adaptive_reranking(-5.0)]
@@ -188,8 +214,9 @@ def build_agent_subgraph(
     """
     builder = StateGraph(AgentState)
 
-    # ── Subtask rewrite ─────────────────────────────────────────────────
+    # ── Subtask rewrite + memory ────────────────────────────────────────
     builder.add_node("rewrite_subtask_query", rewrite_subtask_query_node)
+    builder.add_node("load_subtask_memory", partial(load_subtask_memory_node, db=db))
 
     # ── Retrieval legs (sequential) ─────────────────────────────────────
     builder.add_node(
@@ -225,7 +252,8 @@ def build_agent_subgraph(
 
     # ── Edges ────────────────────────────────────────────────────────────
     builder.add_edge(START, "rewrite_subtask_query")
-    builder.add_edge("rewrite_subtask_query", "exact_retrieval")
+    builder.add_edge("rewrite_subtask_query", "load_subtask_memory")
+    builder.add_edge("load_subtask_memory", "exact_retrieval")
     builder.add_edge("exact_retrieval", "sparse_retrieval")
     builder.add_edge("sparse_retrieval", "dense_retrieval")
     builder.add_edge("dense_retrieval", "merge")

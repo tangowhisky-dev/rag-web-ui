@@ -111,23 +111,31 @@ def _get_llm(
 # Node: rewrite_query
 # ---------------------------------------------------------------------------
 
+def _build_memory_context(mem_docs: list[dict]) -> str:
+    """Build a concise context string from historical memory docs for rewriting."""
+    parts = [d.get("page_content", "").strip() for d in mem_docs if d.get("page_content")]
+    if not parts:
+        return ""
+    return "\n\n".join(parts[: settings.HISTORICAL_MEMORY_TOP_K])
+
+
 async def rewrite_query_node(
     state: AgentState,
     api_base: Optional[str] = None,
 ) -> dict:
-    """Rewrite query using chat history and rolling conversation summary."""
+    """Rewrite query using recent checkpoint history and Redis memory docs."""
     from .utils import rewrite_query as _rewrite_query
 
     with _agent_step("rewrite_query"):
         messages = state.get("messages", [])
         query = state.get("original_query", "")
-        summary = state.get("existing_summary", "")
+        mem_docs = state.get("historical_memory_docs", [])
         recent_history = select_recent_history(messages, max_pairs=3)
 
         rewritten = _rewrite_query(
             query=query,
             recent_history=recent_history,
-            conversation_summary=summary,
+            memory_context=_build_memory_context(mem_docs),
             api_base=api_base,
             query_model=settings.effective_query_model,
             openai_api_key=settings.OPENAI_API_KEY,
@@ -436,21 +444,15 @@ async def adaptive_reranking_node(state: AgentState, db: Any = None) -> dict:
 # ---------------------------------------------------------------------------
 
 def _build_generation_messages(state: AgentState) -> list[dict]:
-    """Build the LLM message list, injecting memory, summary, and history."""
+    """Build the LLM message list, injecting memory and recent history."""
     retrieved_docs = state.get("retrieved_docs", [])
     original_query = state.get("original_query", "")
     file_markdown = state.get("file_markdown")
-    summary = state.get("existing_summary", "")
     mem_docs = state.get("historical_memory_docs", [])
 
-    memory_text = ""
-    if mem_docs:
-        parts = [d.get("page_content", "") for d in mem_docs if d.get("page_content")]
-        memory_text = "\n\n".join(parts)
+    memory_text = _build_memory_context(mem_docs)
 
     system_parts = [_ANSWER_SYSTEM_PROMPT]
-    if summary:
-        system_parts.append(f"CONVERSATION SUMMARY:\n{summary}")
     if memory_text:
         system_parts.append(f"RELEVANT PAST CONTEXT:\n{memory_text}")
     system_content = "\n\n".join(system_parts)
@@ -616,13 +618,19 @@ def _merge_docs(
 async def load_historical_memory_node(
     state: AgentState,
     db: Any,
+    query_override: str | None = None,
 ) -> dict:
-    """Load relevant past turns from the Redis long-term memory store."""
+    """Load relevant past turns from the Redis long-term memory store.
+
+    If *query_override* is provided it is used as the search query instead of
+    ``state["original_query"]``. This lets subagents search memory with their
+    rewritten subtask query rather than the parent query.
+    """
     _ = db  # kept for API compatibility
     with _agent_step("load_historical_memory"):
         user_id = state.get("user_id")
         chat_id = state.get("chat_id")
-        query = state.get("original_query", "")
+        query = query_override or state.get("original_query", "")
 
         if not query or (not user_id and not chat_id):
             return {"historical_memory_docs": []}
@@ -653,33 +661,16 @@ async def summarize_history_node(
     state: AgentState,
     llm: ChatOpenAI | None = None,
 ) -> dict:
-    """Reduce conversation history using rolling summaries."""
+    """No-op placeholder: historical context now lives in Redis checkpoint/store.
+
+    The durable Redis checkpointer persists the full thread state, and the
+    Redis store surfaces semantically relevant past turns. A rolling text
+    summary in graph state is no longer needed, but the node is retained so
+    existing graph wiring and timeline UI events remain unchanged.
+    """
+    _ = llm
     with _agent_step("summarize_history"):
-        messages = state.get("messages", [])
-        plain_msgs = [m for m in messages if not getattr(m, "tool_calls", None)]
-        keep_count = 4
-        older = plain_msgs[:-keep_count] if len(plain_msgs) > keep_count else []
-        if not older:
-            return {}
-
-        existing_summary = state.get("existing_summary", "").strip()
-        conversation = f"Existing summary:\n{existing_summary or '(none)'}\n\n"
-        conversation += "New messages:\n" + "\n".join(
-            f"{'User' if isinstance(m, HumanMessage) else 'Assistant'}: {m.content[:200]}"
-            for m in older
-        )
-
-        llm_instance = llm or _get_llm(streaming=False)
-        response = await llm_instance.ainvoke([
-            {"role": "system", "content": (
-                "You are a conversation summarizer. Provide a concise summary of key facts, "
-                "decisions, and context. Max 200 words."
-            )},
-            {"role": "user", "content": conversation},
-        ])
-
-        summary = response.content.strip() if hasattr(response, "content") else str(response)
-        return {"existing_summary": summary}
+        return {}
 
 
 # ---------------------------------------------------------------------------
@@ -701,19 +692,33 @@ async def rewrite_subtask_query_node(
         # Carry conversation context so subtasks can resolve references like
         # "the second option" or "the previous paper".
         messages = state.get("messages", [])
-        summary = state.get("existing_summary", "")
+        mem_docs = state.get("historical_memory_docs", [])
         recent_history = select_recent_history(messages, max_pairs=2)
 
         rewritten = _rewrite_query(
             query=subtask,
             recent_history=recent_history,
-            conversation_summary=summary,
+            memory_context=_build_memory_context(mem_docs),
             api_base=api_base,
             query_model=settings.effective_query_model,
             openai_api_key=settings.OPENAI_API_KEY,
             openai_api_base=settings.OPENAI_API_BASE,
         )
         return {"rewritten_query": rewritten}
+
+
+async def load_subtask_memory_node(
+    state: AgentState,
+    db: Any,
+) -> dict:
+    """Load subtask-specific historical memory using the rewritten subtask query."""
+    _ = db
+    rewritten = state.get("rewritten_query", state.get("original_query", ""))
+    return await load_historical_memory_node(
+        state,
+        db,
+        query_override=rewritten,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -886,6 +891,7 @@ def collect_context_node(state: AgentState) -> dict:
                 "leg_results": state.get("leg_results", {}),
                 "failed_legs": state.get("failed_legs", []),
                 "all_scored_docs": state.get("all_scored_docs", []),
+                "historical_memory_docs": state.get("historical_memory_docs", []),
             }],
         }
 
@@ -907,13 +913,24 @@ def prepare_final_context_node(state: AgentState) -> dict:
     all_docs: list[dict] = []
     all_scored: list[dict] = []
     all_contexts: list[str] = []
+    all_memory_docs: list[dict] = []
     confidences: list[float] = []
 
     seen_hashes: set[str] = set()
     doc_deduped = 0
     scored_deduped = 0
+    memory_deduped = 0
 
     for ctx in contexts:
+        for doc in ctx.get("historical_memory_docs", []):
+            h = doc.get("metadata", {}).get("content_hash") or content_hash(
+                doc.get("page_content", "")
+            )
+            if h not in seen_hashes:
+                seen_hashes.add(h)
+                all_memory_docs.append(doc)
+            else:
+                memory_deduped += 1
         for doc in ctx.get("retrieved_docs", []):
             h = doc.get("metadata", {}).get("content_hash") or content_hash(
                 doc.get("page_content", "")
@@ -936,13 +953,13 @@ def prepare_final_context_node(state: AgentState) -> dict:
         confidences.append(ctx.get("retrieval_confidence", 0.0))
 
     is_complex = len(contexts) > 1
-    if is_complex and (doc_deduped or scored_deduped):
+    if is_complex and (doc_deduped or scored_deduped or memory_deduped):
         logger.info(
             "[DEDUP] complex query: %d subtasks | "
-            "retrieved_deduped=%d | scored_deduped=%d | "
-            "final_retrieved=%d | final_scored=%d",
-            len(contexts), doc_deduped, scored_deduped,
-            len(all_docs), len(all_scored),
+            "retrieved_deduped=%d | scored_deduped=%d | memory_deduped=%d | "
+            "final_retrieved=%d | final_scored=%d | final_memory=%d",
+            len(contexts), doc_deduped, scored_deduped, memory_deduped,
+            len(all_docs), len(all_scored), len(all_memory_docs),
         )
 
     with _agent_step("prepare_final_context"):
@@ -966,6 +983,7 @@ def prepare_final_context_node(state: AgentState) -> dict:
             "retrieved_contexts": all_contexts,
             "retrieval_confidence": avg_conf,
             "is_complex": is_complex,
+            "historical_memory_docs": all_memory_docs,
         }
 
 

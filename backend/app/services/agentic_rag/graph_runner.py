@@ -43,8 +43,6 @@ async def run_agentic_rag(
     query: str,
     kb_ids: List[int],
     db: Any,
-    recent_lc_history: list,
-    existing_summary: Optional[str] = None,
     file_markdown: Optional[str] = None,
     temperature: float = 0.0,
     model_name: Optional[str] = None,
@@ -65,32 +63,18 @@ async def run_agentic_rag(
     """
     t0 = time.monotonic()
 
-    # The durable Redis checkpointer is the source of truth for thread state.
-    # If no checkpoint exists for this chat yet (e.g. first message after
-    # deployment), seed the thread with the recent history the frontend sent us.
+    # The durable Redis checkpointer is the single source of truth for thread
+    # state. All prior turns are loaded from the checkpoint; we only append the
+    # current user query here.
     memory = await get_redis_memory()
     thread_id = f"chat-{chat_id}" if chat_id else f"anon-{uuid.uuid4().hex}"
     config = {"configurable": {"thread_id": thread_id}}
 
     messages: list = [HumanMessage(content=query)]
-    try:
-        existing_tuple = await memory.checkpointer.aget_tuple(config)
-        if existing_tuple is None and recent_lc_history:
-            seeded: list = []
-            for m in recent_lc_history:
-                if isinstance(m, HumanMessage):
-                    seeded.append(HumanMessage(content=m.content))
-                elif isinstance(m, AIMessage):
-                    seeded.append(AIMessage(content=m.content[:400]))
-            messages = seeded + messages
-            logger.info("[GRAPH] seeded thread=%s with %d history messages", thread_id, len(seeded))
-    except Exception as exc:
-        logger.warning("[GRAPH] failed to probe checkpoint for thread=%s: %s", thread_id, exc)
 
     initial_state: AgentState = AgentState(
         messages=messages,
         original_query=query,
-        existing_summary=existing_summary or "",
         kb_ids=kb_ids,
         org_id=org_id,
         chat_id=chat_id,

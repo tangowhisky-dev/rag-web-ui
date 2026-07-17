@@ -60,11 +60,6 @@ def get_effective_llm_config(org_id: Optional[int], db: Session) -> dict:
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-# Number of most-recent full user/assistant turn-pairs to include verbatim.
-# 3 pairs = 6 messages (3 human + 3 assistant).
-_SLIDING_WINDOW_PAIRS = 3
-_SLIDING_WINDOW_MESSAGES = _SLIDING_WINDOW_PAIRS * 2  # 6
-
 _IDENTITY_PATTERNS = re.compile(
     r"^\s*(who\s+are\s+you|what\s+are\s+you|introduce\s+yourself|tell\s+me\s+about\s+yourself|"
     r"what\s+is\s+your\s+name|what('s| is)\s+your\s+purpose|what\s+can\s+you\s+do)\s*\??\s*$",
@@ -93,151 +88,6 @@ def _strip_think(text: str) -> str:
     return strip_reasoning_tags(text)
 
 
-# ── Summary ───────────────────────────────────────────────────────────────────
-
-async def _summarise_older_messages(
-    messages_to_summarise: List[dict],
-    existing_summary: str | None,
-    chat_id: int,
-) -> str:
-    """
-    Produce (or update) a rolling summary that covers all dialogue *outside*
-    the sliding window.
-
-    If an existing summary exists, it is passed in and the new batch of
-    messages is folded into it — so the summary is always cumulative.
-    """
-    # Build a plain-text transcript of the messages being summarised
-    transcript_lines = []
-    for m in messages_to_summarise:
-        role = "User" if m["role"] == "user" else "Assistant"
-        # Strip the base64 context prefix that assistant messages contain
-        content = m["content"]
-        if "__LLM_RESPONSE__" in content:
-            content = content.split("__LLM_RESPONSE__")[-1]
-        transcript_lines.append(f"{role}: {content.strip()}")
-    transcript = "\n".join(transcript_lines)
-
-    if existing_summary:
-        system_prompt = (
-            "You are a precise dialogue summariser. "
-            "You will be given a running summary of an earlier part of a conversation "
-            "and a new batch of exchanges to fold into it.\n\n"
-            "Rules:\n"
-            "- Produce a single, compact summary that covers everything: the existing summary PLUS the new exchanges.\n"
-            "- Preserve every fact, decision, preference, and piece of information the user provided or the assistant stated.\n"
-            "- Capture questions asked and answers given — especially facts extracted from documents.\n"
-            "- Keep it dense but readable — use short bullet points or tightly written prose.\n"
-            "- Do NOT omit details; losing information defeats the purpose.\n"
-            "- Output ONLY the updated summary — no preamble, no labels, no extra text."
-        )
-        user_prompt = (
-            f"EXISTING SUMMARY:\n{existing_summary}\n\n"
-            f"NEW EXCHANGES TO FOLD IN:\n{transcript}"
-        )
-    else:
-        system_prompt = (
-            "You are a precise dialogue summariser. "
-            "You will be given a conversation transcript to summarise.\n\n"
-            "Rules:\n"
-            "- Produce a compact summary that captures every significant fact, question, answer, and decision.\n"
-            "- Include what documents or topics were discussed and what was found.\n"
-            "- Keep it dense but readable — use short bullet points or tightly written prose.\n"
-            "- Do NOT omit details; losing information defeats the purpose.\n"
-            "- Output ONLY the summary — no preamble, no labels, no extra text."
-        )
-        user_prompt = f"CONVERSATION TRANSCRIPT:\n{transcript}"
-
-    logger.info("[SUMMARY] chat_id=%d | summarising %d messages | has_existing=%s",
-                chat_id, len(messages_to_summarise), bool(existing_summary))
-
-    client = AsyncOpenAI(
-        api_key=settings.OPENAI_API_KEY,
-        base_url=settings.OPENAI_API_BASE,
-    )
-    response = await client.chat.completions.create(
-        model=settings.effective_query_model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0,
-        stream=False,
-    )
-    summary = _strip_think(response.choices[0].message.content or "")
-    logger.info("[SUMMARY] chat_id=%d | summary_length=%d chars", chat_id, len(summary))
-    return summary
-
-
-async def _maybe_update_summary(
-    chat_id: int,
-    all_prior_messages: List[dict],
-    existing_summary: str | None,
-) -> None:
-    """
-    Called as a fire-and-forget background task after the response stream
-    completes. Checks whether there are messages beyond the sliding window
-    and, if so, summarises them and persists the result.
-
-    Uses a fresh DB session so it doesn't interfere with the main request.
-    """
-    from app.db.session import SessionLocal
-
-    # Messages outside the window are everything except the last N
-    # (window) + the pair just completed (2 more = current user + bot turn).
-    # At call time all_prior_messages already includes only historical turns
-    # (not the current one) — the current pair gets appended here.
-    # Actually: all_prior_messages is the full history BEFORE the current turn.
-    # The current turn was just committed. We need to reload from DB.
-    db = SessionLocal()
-    try:
-        chat = db.query(Chat).filter(Chat.id == chat_id).first()
-        if not chat:
-            return
-
-        # Full ordered message list from DB (just committed, so current turn is included)
-        db_messages = (
-            db.query(Message)
-            .filter(Message.chat_id == chat_id)
-            .order_by(Message.id)
-            .all()
-        )
-
-        # Convert to plain dicts, excluding empty bot placeholders
-        all_msgs = [
-            {"role": m.role, "content": m.content}
-            for m in db_messages
-            if m.content.strip()
-        ]
-
-        total = len(all_msgs)
-        if total == 0:
-            return
-
-        # Build incrementally: if a summary already exists it covers everything
-        # up to the previous turn, so only fold in the latest turn (last 2 msgs).
-        # On first call (no existing summary) summarise the full history.
-        messages_to_summarise = all_msgs[-2:] if existing_summary else all_msgs
-
-        summary = await _summarise_older_messages(
-            messages_to_summarise=messages_to_summarise,
-            existing_summary=existing_summary,
-            chat_id=chat_id,
-        )
-
-        chat.history_summary = summary
-        db.commit()
-        logger.info("[SUMMARY] chat_id=%d | summary persisted (%d chars)", chat_id, len(summary))
-
-    except Exception as e:
-        logger.error("[SUMMARY] chat_id=%d | error: %s", chat_id, e)
-    finally:
-        try:
-            db.close()
-        except Exception:
-            pass  # session may already be closed
-
-
 # ── Query rewrite ──────────────────────────────────────────────────────────────
 
 async def _rewrite_query(
@@ -245,7 +95,7 @@ async def _rewrite_query(
     recent_history: List,  # LangChain message objects
     api_base: Optional[str] = None,
     query_model: Optional[str] = None,
-    conversation_summary: str = "",
+    memory_context: str = "",
 ) -> str:
     """Rewrite query into a self-contained search query using chat history.
 
@@ -256,7 +106,7 @@ async def _rewrite_query(
     return _rewrite_query_impl(
         query=query,
         recent_history=recent_history,
-        conversation_summary=conversation_summary,
+        memory_context=memory_context,
         api_base=api_base,
         query_model=query_model,
         openai_api_key=settings.OPENAI_API_KEY,
@@ -424,26 +274,13 @@ async def generate_response(
             db.commit()
             return
 
-        # ── Load chat-level state (existing summary) ───────────────────────
-        chat = db.query(Chat).filter(Chat.id == chat_id).first()
-        existing_summary: str | None = chat.history_summary if chat else None
-
-        # ── Build sliding window from prior messages ───────────────────────
+        # The Redis/LangGraph checkpointer is the single source of truth for
+        # conversation history. We no longer pass a sliding window or MySQL
+        # rolling summary into the graph.
         prior_messages = messages["messages"][:-1]
-        window_messages = prior_messages[-_SLIDING_WINDOW_MESSAGES:]
 
-        recent_lc_history = []
-        for m in window_messages:
-            if m["role"] == "user":
-                recent_lc_history.append(HumanMessage(content=m["content"]))
-            elif m["role"] == "assistant":
-                content = m["content"]
-                if "__LLM_RESPONSE__" in content:
-                    content = content.split("__LLM_RESPONSE__")[-1]
-                recent_lc_history.append(AIMessage(content=content))
-
-        logger.info("[CHAT] sliding_window=%d msgs | has_summary=%s",
-                    len(window_messages), bool(existing_summary))
+        logger.info("[CHAT] prior_messages=%d | delegating history to Redis checkpoint",
+                    len(prior_messages))
 
         full_response = ""
         rewritten_q = display_query or query
@@ -474,8 +311,6 @@ async def generate_response(
             db=db,
             chat_id=chat_id,
             knowledge_base_ids=knowledge_base_ids,
-            recent_lc_history=recent_lc_history,
-            existing_summary=existing_summary,
             temperature=temperature,
             model_name=model_name,
             display_query=display_query,
@@ -662,20 +497,6 @@ async def generate_response(
                     pass
 
         # ── Post-turn: schedule summary update (fire-and-forget) ──────────
-        def _log_task_error(task: asyncio.Task) -> None:
-            exc = task.exception()
-            if exc:
-                logger.error("[SUMMARY] background task raised: %s", exc)
-
-        task = asyncio.create_task(
-            _maybe_update_summary(
-                chat_id=chat_id,
-                all_prior_messages=prior_messages,
-                existing_summary=existing_summary,
-            )
-        )
-        task.add_done_callback(_log_task_error)
-
     except Exception as e:
         error_message = f"Error generating response: {str(e)}"
         logger.error(error_message, exc_info=True)
