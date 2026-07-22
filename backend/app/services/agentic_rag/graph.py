@@ -1,7 +1,7 @@
 """Compiled LangGraph StateGraph for the agentic RAG pipeline.
 
 Two-level architecture:
-  Main graph:  START → load_historical_memory → rewrite → classify → [clarification | Send(agent, ...)]
+  Main graph:  START → rewrite → classify → [clarification | Send(agent, ...)]
                → prepare_final_context → generate → [chart_validation →] answer_evaluation
                → finalize_answer → END
   Agent subgraph: START → rewrite_subtask_query → load_subtask_memory → exact → sparse → dense
@@ -33,7 +33,6 @@ from .nodes import (
     rewrite_subtask_query_node,
     classify_query_node,
     request_clarification_node,
-    load_historical_memory_node,
     load_subtask_memory_node,
     dense_retrieval_node,
     sparse_retrieval_node,
@@ -73,7 +72,6 @@ def _subgraph_send_kwargs(state: AgentState) -> dict:
         "kb_ids": state.get("kb_ids", []),
         "org_id": state.get("org_id"),
         "file_markdown": state.get("file_markdown"),
-        "historical_memory_docs": state.get("historical_memory_docs", []),
     }
 
 
@@ -177,9 +175,7 @@ def route_after_chart_validation(state: AgentState) -> str:
 
 
 def route_after_answer_evaluation(state: AgentState) -> str:
-    """Cap automatic answer-evaluation retries at two attempts."""
-    if state.get("needs_retry", False) and state.get("answer_evaluation_attempts", 0) < 2:
-        return "generating"
+    """Always proceed to finalize_answer. Retry is manual only."""
     return "finalize_answer"
 
 
@@ -293,7 +289,6 @@ def build_main_graph(
     builder = StateGraph(AgentState)
 
     # --- Nodes ---
-    builder.add_node("load_historical_memory", partial(load_historical_memory_node, db=db))
     builder.add_node("rewrite_query", rewrite_query_node)
     builder.add_node("classify_query", classify_query_node)
     builder.add_node("request_clarification", request_clarification_node)
@@ -328,8 +323,7 @@ def build_main_graph(
     builder.add_node("save_memory", save_memory_node)
 
     # --- Edges ---
-    builder.add_edge(START, "load_historical_memory")
-    builder.add_edge("load_historical_memory", "rewrite_query")
+    builder.add_edge(START, "rewrite_query")
     builder.add_edge("rewrite_query", "classify_query")
 
     # Conditional routing after classification (Send for parallel subtasks)
@@ -369,14 +363,11 @@ def build_main_graph(
         },
     )
 
-    # Answer evaluation → finalize (with retry cap) → save to long-term memory → END
+    # Answer evaluation → finalize → save to long-term memory → END
     builder.add_conditional_edges(
         "answer_evaluation",
         route_after_answer_evaluation,
-        {
-            "generating": "generating",
-            "finalize_answer": "finalize_answer",
-        },
+        {"finalize_answer": "finalize_answer"},
     )
     builder.add_edge("finalize_answer", "save_memory")
     builder.add_edge("save_memory", END)

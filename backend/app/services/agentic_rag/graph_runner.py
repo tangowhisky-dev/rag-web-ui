@@ -1,7 +1,7 @@
 """LangGraph-based pipeline runner — the single pipeline implementation.
 
 Uses compiled LangGraph StateGraph for execution.
-Routes through nodes: load_historical_memory → rewrite → classify → [Send(agent, ...)] → synthesize.
+Routes through nodes: rewrite → classify → [Send(agent, ...)] → synthesize.
 Streams SSE events (p:/t:/th:/0:/1:/2:/3:/4:/d:) in real-time.
 """
 

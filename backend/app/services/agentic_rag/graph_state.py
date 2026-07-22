@@ -71,6 +71,8 @@ class AgentState(MessagesState):
     leg_doc_counts: Annotated[dict, lambda a, b: {**a, **b}] = {}  # {leg_name: count} for sufficiency check
     
     # ── Memory state ────────────────────────────────────────────────────
+    # (kept for compatibility; historical memory removed in favor of
+    #  checkpoint-managed conversation flow)
     historical_memory_docs: Annotated[List[dict], accumulate] = []
 
     # ── Merged retrieval state ──────────────────────────────────────────
@@ -115,13 +117,12 @@ class AgentState(MessagesState):
     subtask_answers: Annotated[List[dict], accumulate] = []  # legacy field, kept for compatibility
     final_answer: str = ""
 
-    # ── Final evaluation state ─────────────────────────────────────────
+    # ── Final evaluation state ──────────────────────────────────────────
     # Computed by answer_evaluation_node — no automatic retry, UI decides
     final_confidence: Annotated[float, _last_value] = 0.0
     confidence_level: str = "none"
     faithfulness: int = 0
     completeness: int = 0
-    needs_retry: bool = False  # Always False — user-initiated retry only
 
     # ── Configuration ───────────────────────────────────────────────────
     # All configuration keys use _last_value because parallel Send() branches

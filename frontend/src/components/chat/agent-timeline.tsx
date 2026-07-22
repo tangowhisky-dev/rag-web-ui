@@ -52,8 +52,6 @@ const NODE_META: Record<string, { label: string; activeLabel?: string; icon: Tim
   generating:            { label: "Generating answer…",      activeLabel: "Generating answer…", icon: "wrench" },
   answer_evaluation:     { label: "Evaluating answer…",      activeLabel: "Evaluating answer…", icon: "check" },
   finalize_answer:       { label: "Finalizing answer…",      activeLabel: "Finalizing answer…", icon: "wrench" },
-  // Legacy pipeline nodes (for compatibility)
-  load_historical_memory:{ label: "Loading history…",        activeLabel: "Loading history…", icon: "book" },
   request_clarification: { label: "Requesting clarification…", activeLabel: "Requesting clarification…", icon: "share" },
   context_router:        { label: "Routing sources…",        activeLabel: "Routing sources…", icon: "share" },
   complex_query:         { label: "Analyzing complexity…",   activeLabel: "Analyzing complexity…", icon: "wrench" },

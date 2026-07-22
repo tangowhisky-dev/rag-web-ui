@@ -19,7 +19,6 @@ logger = logging.getLogger(__name__)
 # the last segment of the namespace path.
 TRACKED_NODES = frozenset(
     (
-        "load_historical_memory",
         "load_subtask_memory",
         "rewrite_query",
         "classify_query",

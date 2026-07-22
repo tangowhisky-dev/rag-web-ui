@@ -60,9 +60,6 @@ class AnswerEvaluation(BaseModel):
         le=100,
         description="How accurate and properly formatted the citations are (0-100).",
     )
-    needs_retry: bool = Field(
-        description="True if the answer should be regenerated after retrying retrieval.",
-    )
     issues: List[str] = Field(
         default_factory=list,
         description="List of specific quality issues found, or empty if none.",

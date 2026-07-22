@@ -111,31 +111,22 @@ def _get_llm(
 # Node: rewrite_query
 # ---------------------------------------------------------------------------
 
-def _build_memory_context(mem_docs: list[dict]) -> str:
-    """Build a concise context string from historical memory docs for rewriting."""
-    parts = [d.get("page_content", "").strip() for d in mem_docs if d.get("page_content")]
-    if not parts:
-        return ""
-    return "\n\n".join(parts[: settings.HISTORICAL_MEMORY_TOP_K])
-
-
 async def rewrite_query_node(
     state: AgentState,
     api_base: Optional[str] = None,
 ) -> dict:
-    """Rewrite query using recent checkpoint history and Redis memory docs."""
+    """Rewrite query using recent checkpoint history."""
     from .utils import rewrite_query as _rewrite_query
 
     with _agent_step("rewrite_query"):
         messages = state.get("messages", [])
         query = state.get("original_query", "")
-        mem_docs = state.get("historical_memory_docs", [])
         recent_history = select_recent_history(messages, max_pairs=3)
 
         rewritten = _rewrite_query(
             query=query,
             recent_history=recent_history,
-            memory_context=_build_memory_context(mem_docs),
+            memory_context="",
             api_base=api_base,
             query_model=settings.effective_query_model,
             openai_api_key=settings.OPENAI_API_KEY,
@@ -370,20 +361,11 @@ def sufficiency_check_node(state: AgentState) -> dict:
     """
     conf_score = state.get("retrieval_confidence", 0.0)
     doc_count = len(state.get("retrieved_docs", []))
-    leg_results = state.get("leg_results", {})
 
     confidence_met = conf_score > 0.3
     docs_met = doc_count >= 3
 
     sufficiency_met = confidence_met and docs_met
-
-    if leg_results:
-        dense_count = leg_results.get("dense", {}).get("count", 0)
-        sparse_count = leg_results.get("sparse", {}).get("count", 0)
-        exact_count = leg_results.get("exact", {}).get("count", 0)
-
-        if dense_count > 0 or sparse_count > 0 or exact_count > 0:
-            sufficiency_met = True
 
     needs_adaptive = not sufficiency_met
 
@@ -446,7 +428,6 @@ async def adaptive_reranking_node(state: AgentState, db: Any = None) -> dict:
 def _build_generation_messages(state: AgentState) -> list[dict]:
     """Build the LLM message list from checkpoint history plus retrieved context.
 
-    We no longer manually extract recent turns with ``select_recent_history``.
     The Redis checkpointer accumulates the full conversation in
     ``state["messages"]`` (including the current user query), so we pass it
     through directly. This matches the official LangGraph pattern and prevents
@@ -454,13 +435,8 @@ def _build_generation_messages(state: AgentState) -> list[dict]:
     """
     retrieved_docs = state.get("retrieved_docs", [])
     file_markdown = state.get("file_markdown")
-    mem_docs = state.get("historical_memory_docs", [])
-
-    memory_text = _build_memory_context(mem_docs)
 
     system_parts = [_ANSWER_SYSTEM_PROMPT]
-    if memory_text:
-        system_parts.append(f"RELEVANT PAST CONTEXT:\n{memory_text}")
 
     if retrieved_docs:
         context_text = format_context_string(retrieved_docs, file_markdown)
@@ -475,23 +451,17 @@ def _build_generation_messages(state: AgentState) -> list[dict]:
     messages: list[dict] = [{"role": "system", "content": "\n\n".join(system_parts)}]
 
     # Append the checkpoint-managed conversation history. The current user query
-    # is already the last message in this list.
-    # Truncate previous assistant answers so a long prior response cannot
-    # dominate or poison the current answer; user queries are kept intact.
+    # is already the last message in this list. Pass all messages through
+    # untruncated — the checkpointer keeps context bounded.
     for m in state.get("messages", []):
         if isinstance(m, HumanMessage):
             messages.append({"role": "user", "content": str(m.content)})
         elif isinstance(m, AIMessage):
-            content = str(m.content)
-            if len(content) > 200:
-                content = content[:200] + "…"
-            messages.append({"role": "assistant", "content": content})
+            messages.append({"role": "assistant", "content": str(m.content)})
         elif isinstance(m, dict):
             role = m.get("role")
             content = m.get("content")
             if role and content is not None:
-                if role == "assistant" and len(str(content)) > 200:
-                    content = str(content)[:200] + "…"
                 messages.append({"role": role, "content": str(content)})
 
     return messages
@@ -625,70 +595,7 @@ def _merge_docs(
     return merged
 
 
-# ---------------------------------------------------------------------------
-# Node: load_historical_memory
-# ---------------------------------------------------------------------------
 
-async def load_historical_memory_node(
-    state: AgentState,
-    db: Any,
-    query_override: str | None = None,
-) -> dict:
-    """Load relevant past turns from the Redis long-term memory store.
-
-    If *query_override* is provided it is used as the search query instead of
-    ``state["original_query"]``. This lets subagents search memory with their
-    rewritten subtask query rather than the parent query.
-    """
-    _ = db  # kept for API compatibility
-    with _agent_step("load_historical_memory"):
-        user_id = state.get("user_id")
-        chat_id = state.get("chat_id")
-        query = query_override or state.get("original_query", "")
-
-        if not query or (not user_id and not chat_id):
-            return {"historical_memory_docs": []}
-
-        if not settings.MEMORY_ENABLED:
-            return {"historical_memory_docs": []}
-
-        try:
-            memory = await get_redis_memory()
-            # Retrieve a larger candidate pool than we need; the cross-encoder
-            # will filter for strict relevance below.
-            docs = await memory.search_memory(
-                query=query,
-                user_id=user_id,
-                chat_id=chat_id,
-                limit=settings.HISTORICAL_MEMORY_TOP_K * 3,
-            )
-
-            # Rerank memory candidates with the cross-encoder so only turns that
-            # actually help answer the current query are injected. Semantic search
-            # alone can return topically similar but query-irrelevant history.
-            # Use the stricter HISTORICAL_MEMORY_SCORE_THRESHOLD (default 2.0)
-            # instead of the generic KB threshold (-2.0).
-            if docs:
-                from langchain_core.documents import Document as LangchainDocument
-
-                lc_docs = [
-                    LangchainDocument(
-                        page_content=d.get("page_content", ""),
-                        metadata=d.get("metadata", {}),
-                    )
-                    for d in docs
-                ]
-                reranked = rerank(
-                    query=query,
-                    docs=lc_docs,
-                    score_threshold=settings.HISTORICAL_MEMORY_SCORE_THRESHOLD,
-                )
-                docs = [_serialise_doc(d) for d in reranked[: settings.HISTORICAL_MEMORY_TOP_K]]
-        except Exception as exc:
-            logger.warning("[LOAD_HISTORICAL_MEMORY] failed: %s", exc)
-            docs = []
-
-        return {"historical_memory_docs": docs}
 
 
 # ---------------------------------------------------------------------------
@@ -729,14 +636,10 @@ async def load_subtask_memory_node(
     state: AgentState,
     db: Any,
 ) -> dict:
-    """Load subtask-specific historical memory using the rewritten subtask query."""
+    """No-op — historical memory removed. The checkpointer provides full conversation flow."""
+    _ = state
     _ = db
-    rewritten = state.get("rewritten_query", state.get("original_query", ""))
-    return await load_historical_memory_node(
-        state,
-        db,
-        query_override=rewritten,
-    )
+    return {}
 
 
 # ---------------------------------------------------------------------------
@@ -1071,7 +974,6 @@ async def answer_evaluation_node(
                 "confidence_level": "none",
                 "faithfulness": 0,
                 "completeness": 0,
-                "needs_retry": False,
             }
 
         context_text = format_context_string(docs, state.get("file_markdown"))
@@ -1115,7 +1017,6 @@ async def answer_evaluation_node(
             "confidence_level": confidence_level,
             "faithfulness": faithfulness,
             "completeness": completeness,
-            "needs_retry": False,
         }
 
 

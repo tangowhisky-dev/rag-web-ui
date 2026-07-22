@@ -16,17 +16,9 @@ RUN apt-get update && apt-get install -y \
 # Copy requirements file
 COPY requirements.txt .
 
-# Install CPU-only torch before requirements.txt so sentence-transformers
-# doesn't pull the full CUDA stack (~2GB of nvidia/triton wheels).
-# Cache mount keeps downloaded wheels across rebuilds.
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install \
-        torch torchvision --index-url https://download.pytorch.org/whl/cpu
-
 # Install Python packages
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements.txt \
-        --extra-index-url https://download.pytorch.org/whl/cpu
+    pip install -r requirements.txt
 
 # Copy entrypoint script first
 COPY entrypoint.sh .

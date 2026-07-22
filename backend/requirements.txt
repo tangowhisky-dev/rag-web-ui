@@ -25,8 +25,7 @@ openai>=1.30.0
 email-validator
 markitdown[all]>=0.1.0
 markitdown-ocr>=0.1.0
-# sentence-transformers removed: reranker migrated to fastembed ONNX (TextCrossEncoder)
-# torch and torchvision no longer needed as direct dependencies
+
 pyarrow>=14.0.0
 neo4j>=5.26
 neo4j-graphrag[qdrant]>=1.8.0
