@@ -306,6 +306,26 @@ class Settings(BaseSettings):
     # Below this threshold, the answer is emitted as low-confidence.
     AGENT_QUALITY_THRESHOLD: int = int(os.getenv("AGENT_QUALITY_THRESHOLD", "70"))
 
+    # ── Conversation Compaction ────────────────────────────────────────────
+    # Enable/disable automatic conversation compaction for long sessions.
+    # When enabled, older conversation messages are summarized into a
+    # structured checkpoint so the LLM retains session continuity without
+    # exceeding its context window.
+    COMPACTION_ENABLED: bool = os.getenv("COMPACTION_ENABLED", "true").lower() == "true"
+    # Number of messages (user + assistant turns) after which compaction
+    # triggers. Set to 0 to disable compaction.
+    COMPACTION_HISTORY_THRESHOLD: int = int(os.getenv("COMPACTION_HISTORY_THRESHOLD", "20"))
+    # Number of recent messages to keep after compaction. Older messages
+    # are summarized into a structured checkpoint.
+    COMPACTION_KEEP_RECENT: int = int(os.getenv("COMPACTION_KEEP_RECENT", "10"))
+    # Maximum characters for the compaction summary. Longer summaries
+    # preserve more detail but consume more context tokens.
+    COMPACTION_SUMMARY_MAX_CHARS: int = int(os.getenv("COMPACTION_SUMMARY_MAX_CHARS", "2000"))
+    # Max chars to include per assistant response in generation messages.
+    # Prevents context poisoning from very long previous answers while
+    # still letting the model reference its own prior output.
+    COMPACTION_ASSISTANT_MAX_CHARS: int = int(os.getenv("COMPACTION_ASSISTANT_MAX_CHARS", "600"))
+
     @property
     def graphrag_model(self) -> str:
         """Model to use for entity/relationship extraction. Falls back to OPENAI_MODEL."""

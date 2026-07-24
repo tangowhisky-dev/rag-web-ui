@@ -24,13 +24,22 @@ from app.services.retrieval import (
     sparse_search_docs,
     exact_search_docs,
 )
-from app.services.prompts.loader import append_chart_instructions
 from app.services.retrieval.reranker import _get_cross_encoder
 
 from .graph_state import AgentState
+from .prompts import (
+    ANSWER_SYSTEM_PROMPT_BASE,
+    CHAT_ONLY_SYSTEM_PROMPT,
+    CHAT_ONLY_SYSTEM_PROMPT_BASE,
+    CLASSIFY_SYSTEM_PROMPT,
+    COMPACTION_SYSTEM_PROMPT,
+    COMPACTION_USER_PROMPT,
+    EVALUATION_SYSTEM_PROMPT,
+    RETRIEVED_CONTEXT_TEMPLATE,
+)
 from .redis_memory import get_redis_memory
 from .schemas import QueryAnalysis
-from .utils import estimate_messages_tokens, strip_reasoning_tags, format_context_string
+from .utils import estimate_context_tokens, strip_reasoning_tags, format_context_string
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +62,101 @@ def select_recent_history(messages: list, max_pairs: int = 3) -> list:
     return history[-(max_pairs * 2):]
 
 
+# ---------------------------------------------------------------------------
+# Compaction / Summarization Node
+# ---------------------------------------------------------------------------
+
+def _messages_to_conversation_text(messages: list) -> str:
+    """Convert LangChain messages to a readable conversation text for summarization."""
+    parts = []
+    for m in messages:
+        if isinstance(m, HumanMessage):
+            content = str(m.content)
+            if len(content) > 500:
+                content = content[:500] + "..."
+            parts.append(f"User: {content}")
+        elif isinstance(m, AIMessage):
+            content = str(m.content)
+            if len(content) > 800:
+                content = content[:800] + "..."
+            parts.append(f"Assistant: {content}")
+    return "\n\n".join(parts)
+
+
+async def compaction_node(state: AgentState) -> dict:
+    """Compact conversation history when it grows too long.
+
+    When the number of messages exceeds COMPACTION_HISTORY_THRESHOLD,
+    summarize older messages into a structured checkpoint. The checkpoint
+    preserves RAG-specific context (topics covered, documents retrieved,
+    key findings) so the model can continue the conversation fluently.
+
+    This node runs after rewrite_query but before classification/routing,
+    so the query rewriter still sees full history.
+    """
+    if not settings.COMPACTION_ENABLED:
+        return {"compaction_summary": None, "compaction_triggered": False}
+
+    threshold = settings.COMPACTION_HISTORY_THRESHOLD
+    keep_recent = settings.COMPACTION_KEEP_RECENT
+    max_summary_chars = settings.COMPACTION_SUMMARY_MAX_CHARS
+
+    messages = state.get("messages", [])
+    if len(messages) <= threshold:
+        return {"compaction_summary": None, "compaction_triggered": False}
+
+    # Split: keep recent messages, summarize older ones
+    recent_messages = messages[-keep_recent:]
+    old_messages = messages[:len(messages) - keep_recent]
+
+    if not old_messages:
+        return {"compaction_summary": None, "compaction_triggered": False}
+
+    logger.info(
+        "[COMPACTION] triggered | total_msgs=%d | recent=%d | summarizing=%d",
+        len(messages), len(recent_messages), len(old_messages),
+    )
+
+    # Build conversation text from old messages
+    conversation_text = _messages_to_conversation_text(old_messages)
+
+    # Build the prompt
+    user_prompt = COMPACTION_USER_PROMPT.format(conversation=conversation_text)
+
+    # Call LLM for summarization
+    try:
+        llm = _get_llm(
+            model_name=settings.effective_query_model,  # Use query model for cheaper summarization
+            temperature=0.0,
+            streaming=False,
+        )
+
+        response = llm.invoke([
+            {"role": "system", "content": COMPACTION_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ])
+
+        summary = str(response.content).strip()
+
+        # Truncate summary if too long
+        if len(summary) > max_summary_chars:
+            summary = summary[:max_summary_chars] + "\n\n[...summary truncated for space]"
+
+        logger.info(
+            "[COMPACTION] summary generated | chars=%d",
+            len(summary),
+        )
+
+        return {
+            "compaction_summary": summary,
+            "compaction_triggered": True,
+        }
+
+    except Exception as exc:
+        logger.warning("[COMPACTION] failed: %s — continuing without summary", exc)
+        return {"compaction_summary": None, "compaction_triggered": False}
+
+
 @contextmanager
 def _agent_step(name: str) -> Generator[None, None, None]:
     """Emit agent_step active/done lifecycle events around a node.
@@ -72,25 +176,10 @@ def _agent_step(name: str) -> Generator[None, None, None]:
             writer({"event": "agent_step", "node": name, "status": "done", "latency_ms": 0})
 
 
-_ANSWER_SYSTEM_PROMPT = append_chart_instructions("""\
-You are a helpful assistant. Answer the user's question using ONLY the provided context.
-If the context is insufficient, say so clearly.
+# ── Answer Generation ──────────────────────────────────────────────────────
+# ANSWER_SYSTEM_PROMPT_BASE, RETRIEVED_CONTEXT_TEMPLATE,
+# CHAT_ONLY_SYSTEM_PROMPT_BASE, CHAT_ONLY_SYSTEM_PROMPT imported from prompts.py
 
-FORMATTING RULES:
-- Use ### headers to divide multi-part answers (e.g., "### 1. Definition", "### 2. How It Works").
-- Use numbered lists for sequential steps or algorithms.
-- Use bullet points with **bold terms** for features, attributes, or comparisons.
-- Use inline code for variable names, identifiers, and technical terms (e.g., `wait()`, `Available[j]`).
-- For simple single-concept questions, plain prose is fine - do not force structure.
-
-CITATION RULES:
-When you use information from a chunk, cite it as a markdown link with ONLY the number as both text and href:
-  Example: process scheduling [1](1) involves saving the CPU state [2](2).
-The number must match the [KB-N] label of the chunk you are citing.
-Do NOT invent citations. Only cite chunks you actually used.
-
-IMPORTANT: Do NOT repeat the user's question in your answer. Just provide the answer directly.
-""")
 
 def _get_llm(
     model_name: Optional[str] = None,
@@ -140,14 +229,55 @@ async def rewrite_query_node(
         return {"rewritten_query": rewritten}
 
 
+def _enrich_query(subtask: str, dependencies: list[int], prior_contexts: dict[int, str]) -> str:
+    """Enrich a subtask query with context from its dependencies.
+
+    For each dependency index, append the prior subtask's context so the
+    model can resolve references like "that" or "the second one".
+    """
+    query = subtask
+    for dep_idx in sorted(dependencies):
+        if dep_idx in prior_contexts:
+            ctx = prior_contexts[dep_idx][:500]  # cap per-reference
+            query += f"\n\n[Reference to previous subtask {dep_idx}:\n{ctx}]"
+    return query
+
+
 # ---------------------------------------------------------------------------
-# Node: classify_query (LLM-based classification)
+# Node: enrich_subtask_query (lightweight enrichment, no LLM call)
 # ---------------------------------------------------------------------------
+
+def enrich_subtask_query_node(state: AgentState) -> dict:
+    """Enrich the rewritten query with context from dependency subtasks.
+
+    This replaces the old rewrite_subtask_query_node for the sequential loop.
+    No LLM call — just text injection so dependent subtasks can resolve
+    references like "the second one" or "that".
+    """
+    subtasks = state.get("subtasks", [])
+    idx = state.get("current_subtask_index", 0)
+    subtask = subtasks[idx] if 0 <= idx < len(subtasks) else state.get("original_query", "")
+
+    dependencies = state.get("subtask_dependencies", [])[idx] if idx < len(state.get("subtask_dependencies", [])) else []
+    prior_contexts = state.get("subtask_contexts", [])
+    dep_context = {}
+    for i, ctx in enumerate(prior_contexts):
+        contexts = ctx.get("retrieved_contexts", [])
+        dep_context[i] = "\n\n".join(contexts) if contexts else ""
+
+    enriched = _enrich_query(subtask, dependencies, dep_context)
+
+    return {"rewritten_query": enriched}
+
+
+# ── Query Classification ───────────────────────────────────────────────────
+# CLASSIFY_SYSTEM_PROMPT imported from prompts.py
+
 
 async def classify_query_node(
     state: AgentState,
 ) -> dict:
-    """Classify query using structured LLM output."""
+    """Classify query using structured LLM output with per-subtask routing."""
     rewritten = state.get("rewritten_query", "")
     query = state.get("original_query", "")
 
@@ -156,25 +286,50 @@ async def classify_query_node(
         llm_structured = llm.with_structured_output(QueryAnalysis)
 
         response = llm_structured.invoke([
-            {"role": "system", "content": (
-                "You are a query classifier. Analyze the user's question and respond with structured data.\n\n"
-                "Rules:\n"
-                "- is_clear: true if the question is clear and answerable from documents.\n"
-                "- questions: list of self-contained questions extracted from the query (1 if simple, 2-5 if complex).\n"
-                "- clarification_needed: explanation of missing info, or empty string if clear.\n"
-                "Output ONLY a JSON object with keys: is_clear, questions, clarification_needed."
-            )},
+            {"role": "system", "content": CLASSIFY_SYSTEM_PROMPT},
             {"role": "user", "content": rewritten},
         ])
         is_clear = getattr(response, "is_clear", True)
         questions = getattr(response, "questions", [rewritten]) or [rewritten]
+        clarification_needed = getattr(response, "clarification_needed", "")
+        raw_deps = getattr(response, "subtask_dependencies", None)
+        subtask_deps = raw_deps if raw_deps is not None else [[] for _ in questions]
+
+        # Extract per-subtask routing flags
+        subtask_routing = getattr(response, "subtask_routing", [])
+        if len(subtask_routing) != len(questions):
+            # LLM didn't return per-subtask routing — fall back to global flags
+            logger.warning(
+                "[CLASSIFY] subtask_routing length %d != questions length %d, falling back to global",
+                len(subtask_routing),
+                len(questions),
+            )
+            gr = getattr(response, "needs_retrieval", True)
+            gc = getattr(response, "needs_file_content", False)
+            gm = getattr(response, "needs_file_metadata", False)
+            subtask_routing = [
+                {"needs_retrieval": gr, "needs_file_content": gc, "needs_file_metadata": gm}
+                for _ in questions
+            ]
     except Exception as exc:
         logger.warning("[CLASSIFY] structured classification failed: %s - using fallback", exc)
         is_clear = True
         questions = [rewritten]
+        clarification_needed = ""
+        subtask_deps = [[] for _ in questions]
+        subtask_routing = [
+            {"needs_retrieval": True, "needs_file_content": False, "needs_file_metadata": False}
+            for _ in questions
+        ]
 
     with _agent_step("classify_query"):
         subtasks = questions if len(questions) > 1 else [rewritten]
+        # Align dependencies and routing with subtasks list
+        subtask_deps = subtask_deps[:len(subtasks)] if len(subtask_deps) == len(subtasks) else [[] for _ in subtasks]
+        subtask_routing = subtask_routing[:len(subtasks)] if len(subtask_routing) == len(subtasks) else [
+            {"needs_retrieval": True, "needs_file_content": False, "needs_file_metadata": False}
+            for _ in subtasks
+        ]
 
         # Emit explicit task_list event for multi-subtask queries so the runner
         # doesn't have to reverse-engineer it from state updates.
@@ -188,10 +343,27 @@ async def classify_query_node(
                 ],
             })
 
+        # Compute legacy global flags for backward compatibility (first subtask wins)
+        if subtask_routing:
+            first_routing = subtask_routing[0]
+            needs_retrieval = getattr(first_routing, "needs_retrieval", True)
+            needs_file_content = getattr(first_routing, "needs_file_content", False)
+            needs_file_metadata = getattr(first_routing, "needs_file_metadata", False)
+        else:
+            needs_retrieval = True
+            needs_file_content = False
+            needs_file_metadata = False
+
         return {
             "question_is_clear": is_clear,
+            "clarification_needed": clarification_needed,
             "subtasks": subtasks,
             "is_complex": len(subtasks) > 1,
+            "needs_retrieval": needs_retrieval,
+            "needs_file_content": needs_file_content,
+            "needs_file_metadata": needs_file_metadata,
+            "subtask_dependencies": subtask_deps,
+            "subtask_routing": subtask_routing,  # NEW: per-subtask routing
         }
 
 
@@ -423,46 +595,253 @@ async def adaptive_reranking_node(state: AgentState, db: Any = None) -> dict:
 
 # ---------------------------------------------------------------------------
 # Node: generating (actual LLM answer generation)
-# ---------------------------------------------------------------------------
+# CHAT_ONLY_SYSTEM_PROMPT_BASE, CHAT_ONLY_SYSTEM_PROMPT imported from prompts.py
+
 
 def _build_generation_messages(state: AgentState) -> list[dict]:
-    """Build the LLM message list from checkpoint history plus retrieved context.
+    """Build the LLM message list from bounded history plus retrieved context.
 
-    The Redis checkpointer accumulates the full conversation in
-    ``state["messages"]`` (including the current user query), so we pass it
-    through directly. This matches the official LangGraph pattern and prevents
-    history pollution from duplicate/truncated injection.
+    The Redis checkpointer accumulates the full conversation. We pass:
+    - The compaction summary (if present) — structured checkpoint of older turns
+    - Recent user/assistant pairs from the checkpoint (assistant capped at
+      COMPACTION_ASSISTANT_MAX_CHARS to prevent context poisoning while
+      preserving conversational continuity)
+    - The current query
+
+    This lets the model reference its own prior answers ("as I mentioned above")
+    while keeping the context window bounded.
+
+    Routing-aware:
+    - needs_retrieval=True: document context injected into system prompt
+    - needs_retrieval=False: chat-only mode, no document context
+    - needs_file_content=True: file content injected as user message
+    - needs_file_metadata=True: file names/descriptions injected as user message
     """
     retrieved_docs = state.get("retrieved_docs", [])
     file_markdown = state.get("file_markdown")
+    compaction_summary = state.get("compaction_summary")
+    needs_retrieval = state.get("needs_retrieval", True)
+    needs_file_content = state.get("needs_file_content", False)
+    needs_file_metadata = state.get("needs_file_metadata", False)
 
-    system_parts = [_ANSWER_SYSTEM_PROMPT]
+    # ── System messages ──────────────────────────────────────────────────
+    # Static behavioral instructions (first system message, never changes)
+    # followed by a dynamic context message (second system message, per-query).
+    #
+    # This pattern is preferred in production RAG: the model's behavior
+    # instructions stay constant while retrieved context changes per query,
+    # enabling better token caching and clearer separation of concerns.
+    system_messages: list[dict] = [{"role": "system", "content": ANSWER_SYSTEM_PROMPT_BASE}]
 
-    if retrieved_docs:
+    if needs_retrieval and retrieved_docs:
         context_text = format_context_string(retrieved_docs, file_markdown)
-        system_parts.append(f"CONTEXT:\n{context_text}")
+        system_messages.append({
+            "role": "system",
+            "content": RETRIEVED_CONTEXT_TEMPLATE.format(retrieved_context=context_text),
+        })
+    elif needs_retrieval:
+        # Retrieval was requested but no docs found
+        system_messages.append({
+            "role": "system",
+            "content": RETRIEVED_CONTEXT_TEMPLATE.format(
+                retrieved_context="The user asked a question but no relevant documents were found in the knowledge base. Answer from your general knowledge, but clearly state that no documents were found."
+            ),
+        })
     else:
-        system_parts.append(
-            "The user asked a question but no relevant documents were found in the "
-            "knowledge base. Answer from your general knowledge, but clearly state that "
-            "no documents were found."
+        # Chat-only mode: split into base + context
+        file_context_parts = []
+        if needs_file_content and file_markdown:
+            file_context_parts.append(
+                f"Attached file content:\n{file_markdown}"
+            )
+        if needs_file_metadata and file_markdown:
+            file_context_parts.append(
+                "Attached file content is available above."
+            )
+        if not file_context_parts:
+            file_context_parts.append("No attached files.")
+        system_messages.append({
+            "role": "system",
+            "content": CHAT_ONLY_SYSTEM_PROMPT.format(
+                file_context="\n\n".join(file_context_parts)
+            ),
+        })
+
+    # ── Compaction summary — injected as a third system message ──────────
+    # When present, tell the model the summary is the authoritative view of
+    # earlier turns. Putting it in system (not user) means the model treats
+    # it as an instruction to follow, not just another piece of context to
+    # weigh against the raw messages below.
+    if compaction_summary:
+        system_messages.append({
+            "role": "system",
+            "content": (
+                "# Conversation Checkpoint\n"
+                "Previous conversation summary (for context, do NOT repeat this):\n"
+                "<conversation_checkpoint>\n"
+                f"{compaction_summary}\n"
+                "</conversation_checkpoint>\n\n"
+                "Use this summary as the authoritative view of earlier turns. "
+                "Do NOT revisit details that are already covered in the summary."
+            ),
+        })
+
+    # ── Merge all system messages into one (TGI only supports a single
+    #    system message slot). ─────────────────────────────────────────────
+    if len(system_messages) > 1:
+        system_messages = [
+            {"role": "system", "content": "\n\n".join(s["content"] for s in system_messages)}
+        ]
+
+    # ── Merge all system messages into one (TGI only supports a single
+    #    system message slot). ─────────────────────────────────────────────
+    if len(system_messages) > 1:
+        system_messages = [
+            {"role": "system", "content": "\n\n".join(s["content"] for s in system_messages)}
+        ]
+
+    messages: list[dict] = system_messages
+
+    # ── Compaction summary also injected as user message — NOPE, removed.
+    # The model now sees it in the system prompt where it is treated as an
+    # instruction, not as peer context. Keeping it as both system + user
+    # creates the exact duplication problem we are trying to avoid.
+
+    # ── File content from subtask context ────────────────────────────────
+    # When subtasks run the file_context_subgraph, their captured file
+    # content is available here via prepare_final_context's file_contents.
+    file_contents = state.get("file_contents", [])
+    if file_contents:
+        for i, fc in enumerate(file_contents):
+            messages.append({
+                "role": "user",
+                "content": f"[Subtask {i + 1} — File Content]\n{fc}",
+            })
+    # ── File content injection (legacy path) ─────────────────────────────
+    elif needs_file_content and file_markdown:
+        messages.append({
+            "role": "user",
+            "content": f"Attached file content:\n{file_markdown}",
+        })
+    elif needs_file_metadata and file_markdown:
+        messages.append({
+            "role": "user",
+            "content": "An attached file is available in the conversation.",
+        })
+
+    # ── Conversation history (bounded by context budget) ─────────────────
+    # Compaction splits messages into old (summarized) + recent.
+    # When compaction is off, budget-driven selection picks the most recent
+    # messages that fit within available context window.
+    compaction_summary = state.get("compaction_summary")
+    compaction_triggered = state.get("compaction_triggered", False)
+
+    # ── Filter state.messages: only real conversation turns, no system/context ─
+    # The MessagesState reducer can accumulate system messages that leaked in
+    # from prior _build_generation_messages() calls. Also deduplicate by
+    # content so the same query doesn't appear twice.
+    from langchain_core.messages import HumanMessage, AIMessage
+
+    seen_content: set[str] = set()
+    clean_messages: list = []
+    for m in state.get("messages", []):
+        if isinstance(m, dict):
+            role = m.get("role", "")
+            if role not in ("user", "assistant"):
+                continue
+            clean_messages.append(m)
+        elif isinstance(m, (HumanMessage, AIMessage)):
+            content = str(m.content).strip()
+            if content in seen_content:
+                continue  # skip duplicates
+            seen_content.add(content)
+            clean_messages.append(m)
+        else:
+            continue
+
+    if compaction_triggered:
+        # Compaction already defined the split. Include only the recent ones
+        # (the old ones are covered by the summary).
+        keep_recent = settings.COMPACTION_KEEP_RECENT
+        prior_messages = clean_messages[-keep_recent:]
+    else:
+        # No compaction — estimate budget and pick the most recent messages.
+        # Reserve ~25% of the context window for system prompt, file content,
+        # and retrieved docs. Walk backwards from the end to keep only the
+        # most recent messages that fit.
+        estimated_doc_chars = sum(
+            estimate_context_tokens(str(d.get("page_content", ""))) * 4
+            for d in retrieved_docs
+        )
+        # Account for file contents from subtasks in budget estimation
+        estimated_file_chars = sum(
+            estimate_context_tokens(fc) * 4 for fc in file_contents
+        )
+        estimated_sys_chars = 1500  # system prompt + file context + user message formatting
+        estimated_summary_chars = (
+            estimate_context_tokens(compaction_summary) * 4 if compaction_summary else 0
+        )
+        available_chars = max(
+            0,
+            int(
+                settings.OPENAI_MODEL_CONTEXT_SIZE
+                - estimated_doc_chars
+                - estimated_file_chars
+                - estimated_sys_chars
+                - estimated_summary_chars
+                - 500  # headroom
+            ),
         )
 
-    messages: list[dict] = [{"role": "system", "content": "\n\n".join(system_parts)}]
+        prior_messages = []
+        current_chars = 0
+        # Use clean_messages (filtered/deduplicated) instead of raw state.messages.
+        # This prevents system messages and duplicates from leaking into the prompt.
+        for m in reversed(clean_messages[:-1]):  # walk backwards, skip current query
+            if current_chars > available_chars:
+                break
+            content = str(m.content)
+            if isinstance(m, HumanMessage):
+                prior_messages.insert(0, m)
+                current_chars += len(content)
+            elif isinstance(m, AIMessage):
+                prior_messages.insert(0, m)
+                current_chars += len(content)
+            elif isinstance(m, dict):
+                content = str(m.get("content", ""))
+                prior_messages.insert(0, m)
+                current_chars += len(content)
 
-    # Append the checkpoint-managed conversation history. The current user query
-    # is already the last message in this list. Pass all messages through
-    # untruncated — the checkpointer keeps context bounded.
-    for m in state.get("messages", []):
+    # ── Emit the history ─────────────────────────────────────────────────
+    for m in prior_messages:
         if isinstance(m, HumanMessage):
             messages.append({"role": "user", "content": str(m.content)})
         elif isinstance(m, AIMessage):
-            messages.append({"role": "assistant", "content": str(m.content)})
+            messages.append({
+                "role": "assistant",
+                "content": str(m.content),
+            })
         elif isinstance(m, dict):
             role = m.get("role")
-            content = m.get("content")
-            if role and content is not None:
-                messages.append({"role": role, "content": str(content)})
+            content = str(m.get("content", ""))
+            if role == "user":
+                messages.append({"role": "user", "content": content})
+            elif role == "assistant":
+                messages.append({"role": "assistant", "content": content})
+
+    # Always append the current user query (last message in state)
+    current = state.get("messages", [])[-1] if state.get("messages") else None
+    if current is not None:
+        if isinstance(current, HumanMessage):
+            messages.append({"role": "user", "content": str(current.content)})
+        elif isinstance(current, AIMessage):
+            messages.append({"role": "assistant", "content": str(current.content)})
+        elif isinstance(current, dict):
+            role = current.get("role")
+            content = str(current.get("content", ""))
+            if role and content:
+                entry = {"role": role, "content": content}
+                messages.append(entry)
 
     return messages
 
@@ -484,6 +863,11 @@ async def generating_node(
         writer = get_stream_writer()
 
         messages = _build_generation_messages(state)
+        logger.info("[GENERATING] messages=%d | last_user=%s", len(messages), messages[-1].get("content", "") if messages else "")
+        # print complete messages for debugging
+        for i, msg in enumerate(messages):
+            logger.info("[GENERATING] message %d: role=%s | content=%s", i, msg.get("role"), msg.get("content", "")[:200])
+            
         original_query = state.get("original_query", "")
 
         answer = ""
@@ -510,8 +894,6 @@ async def generating_node(
         "answer": answer,
         "is_chart_query": is_chart,
         "thinking_chunks": [],
-        # Write the assistant turn back into the checkpoint-managed message
-        # history so future turns see the full conversation via the checkpointer.
         "messages": [AIMessage(content=answer)] if answer else [],
     }
     if usage_metadata:
@@ -614,16 +996,32 @@ async def rewrite_subtask_query_node(
         idx = state.get("current_subtask_index", 0)
         subtask = subtasks[idx] if 0 <= idx < len(subtasks) else state.get("original_query", "")
 
+        # Enrich with dependency context for sequential subtasks
+        dependencies = state.get("subtask_dependencies", [])[idx] if idx < len(state.get("subtask_dependencies", [])) else []
+        prior_contexts = state.get("subtask_contexts", [])
+        # Build a dict mapping dependency index → joined context string
+        dep_context = {}
+        for i, ctx in enumerate(prior_contexts):
+            contexts = ctx.get("retrieved_contexts", [])
+            dep_context[i] = "\n\n".join(contexts) if contexts else ""
+        enriched_subtask = _enrich_query(subtask, dependencies, dep_context)
+
         # Carry conversation context so subtasks can resolve references like
         # "the second option" or "the previous paper".
-        messages = state.get("messages", [])
-        mem_docs = state.get("historical_memory_docs", [])
-        recent_history = select_recent_history(messages, max_pairs=2)
+        # Use the bounded subgraph_history supplied by route_by_dependencies
+        # instead of the MessagesState ``messages`` channel to avoid subgraph
+        # state being merged back into the parent conversation.
+        subgraph_history = state.get("subgraph_history", [])
+        if subgraph_history:
+            # Already trimmed by route_by_dependencies; cap to 4 messages just in case.
+            recent_history = subgraph_history[-4:]
+        else:
+            recent_history = select_recent_history(state.get("messages", []), max_pairs=2)
 
         rewritten = _rewrite_query(
-            query=subtask,
+            query=enriched_subtask,
             recent_history=recent_history,
-            memory_context=_build_memory_context(mem_docs),
+            memory_context="",
             api_base=api_base,
             query_model=settings.effective_query_model,
             openai_api_key=settings.OPENAI_API_KEY,
@@ -800,12 +1198,42 @@ def merge_node(
 # ---------------------------------------------------------------------------
 
 def collect_context_node(state: AgentState) -> dict:
-    """Collect a subagent's retrieved context and add it to subtask_contexts."""
+    """Collect a subagent's retrieved context and add it to subtask_contexts.
+
+    Records a ``context_source`` field so prepare_final_context can distinguish
+    between different kinds of context:
+    - ``"retrieval"``  — docs from vector/sparse/exact/neo4j search (agent_subgraph)
+    - ``"file"``       — uploaded file content (file_context_subgraph)
+    - ``"chat"``       — pure conversation follow-up (chat_subgraph)
+
+    For file-context subtasks, the file_markdown is captured here so that
+    prepare_final_context can merge it into the generation context.
+    """
     with _agent_step("collect_context"):
+        routing = state.get("subtask_routing", [])
+        routing = routing[0] if routing else {}
+        needs_file = routing.get("needs_file_content", False) or routing.get("needs_file_metadata", False)
+        file_markdown = state.get("file_markdown")
+
+        context_source = "retrieval"
+        if needs_file:
+            context_source = "file"
+        elif not state.get("retrieved_docs") and not needs_file:
+            # Chat subgraph: no docs, no file — just conversation context
+            context_source = "chat"
+
+        # Capture file content as a context entry so prepare_final_context
+        # can merge it alongside retrieved docs.
+        file_context = None
+        if context_source == "file" and file_markdown:
+            file_context = file_markdown[:3000]  # cap to prevent overflow
+
         return {
             "subtask_contexts": [{
                 "question": state.get("original_query", ""),
                 "rewritten_query": state.get("rewritten_query", ""),
+                "context_source": context_source,  # NEW: type of context
+                "file_context": file_context,       # NEW: captured file content
                 "retrieved_docs": state.get("retrieved_docs", []),
                 "retrieved_contexts": state.get("retrieved_contexts", []),
                 "retrieval_confidence": state.get("retrieval_confidence", 0.0),
@@ -826,6 +1254,10 @@ def prepare_final_context_node(state: AgentState) -> dict:
 
     Deduplicates docs by content_hash across subtasks so the final LLM context
     contains no duplicate chunks. Tracks how many duplicates were removed.
+
+    Context sources can come from different places (retrieval, file upload,
+    chat-only follow-up). All sources are merged into a single document set
+    for the generation node.
     """
     contexts = state.get("subtask_contexts", [])
     if not contexts:
@@ -835,14 +1267,27 @@ def prepare_final_context_node(state: AgentState) -> dict:
     all_scored: list[dict] = []
     all_contexts: list[str] = []
     all_memory_docs: list[dict] = []
+    file_contents: list[str] = []
     confidences: list[float] = []
 
     seen_hashes: set[str] = set()
     doc_deduped = 0
     scored_deduped = 0
     memory_deduped = 0
+    file_deduped = 0
 
     for ctx in contexts:
+        context_source = ctx.get("context_source", "retrieval")
+
+        # Collect file context content
+        if ctx.get("file_context"):
+            h = content_hash(ctx["file_context"])
+            if h not in seen_hashes:
+                seen_hashes.add(h)
+                file_contents.append(ctx["file_context"])
+            else:
+                file_deduped += 1
+
         for doc in ctx.get("historical_memory_docs", []):
             h = doc.get("metadata", {}).get("content_hash") or content_hash(
                 doc.get("page_content", "")
@@ -874,13 +1319,15 @@ def prepare_final_context_node(state: AgentState) -> dict:
         confidences.append(ctx.get("retrieval_confidence", 0.0))
 
     is_complex = len(contexts) > 1
-    if is_complex and (doc_deduped or scored_deduped or memory_deduped):
+    if is_complex and (doc_deduped or scored_deduped or memory_deduped or file_deduped):
         logger.info(
-            "[DEDUP] complex query: %d subtasks | "
-            "retrieved_deduped=%d | scored_deduped=%d | memory_deduped=%d | "
-            "final_retrieved=%d | final_scored=%d | final_memory=%d",
+            "[DEDUP] complex query: %d subtasks, sources: "
+            "retrieved=%d scored=%d memory=%d file=%d | "
+            "final_retrieved=%d | final_scored=%d | final_memory=%d | files=%d",
             len(contexts), doc_deduped, scored_deduped, memory_deduped,
+            file_deduped,
             len(all_docs), len(all_scored), len(all_memory_docs),
+            len(file_contents),
         )
 
     with _agent_step("prepare_final_context"):
@@ -905,6 +1352,7 @@ def prepare_final_context_node(state: AgentState) -> dict:
             "retrieval_confidence": avg_conf,
             "is_complex": is_complex,
             "historical_memory_docs": all_memory_docs,
+            "file_contents": file_contents,  # NEW: captured file contexts from subtasks
         }
 
 
@@ -918,7 +1366,6 @@ def finalize_answer_node(state: AgentState) -> dict:
         answer = state.get("answer", "")
         return {
             "final_answer": answer,
-            "messages": [AIMessage(content=answer)] if answer else [],
         }
 
 
@@ -992,10 +1439,16 @@ async def answer_evaluation_node(
             )
             faithfulness = evaluation.faithfulness
             completeness = evaluation.completeness
+            citation_quality = evaluation.citation_quality
+            confidence_match = evaluation.confidence_match
+            eval_flags = evaluation.flags
         except Exception as exc:
             logger.warning("[ANSWER_EVALUATION] failed: %s", exc)
             faithfulness = 50
             completeness = 50
+            citation_quality = 50
+            confidence_match = True
+            eval_flags = ["Evaluation unavailable"]
 
         retrieval_score = retrieval_conf * 100
         final_confidence = (
@@ -1017,6 +1470,9 @@ async def answer_evaluation_node(
             "confidence_level": confidence_level,
             "faithfulness": faithfulness,
             "completeness": completeness,
+            "citation_quality": citation_quality,
+            "confidence_match": confidence_match,
+            "evaluation_flags": eval_flags,
         }
 
 

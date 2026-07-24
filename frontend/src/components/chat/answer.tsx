@@ -569,15 +569,6 @@ export const Answer: FC<{
           <span>{suggestion}</span>
         </div>
       )}
-      
-      {!markdown && (
-        <div className="flex flex-col gap-2 mt-2">
-          <Skeleton className="max-w-sm h-4 bg-zinc-200" />
-          <Skeleton className="max-w-lg h-4 bg-zinc-200" />
-          <Skeleton className="max-w-2xl h-4 bg-zinc-200" />
-        </div>
-      )}
-      
       {parsedContent.thinkContent !== null && (
         <ThinkBlock
           content={parsedContent.thinkContent}

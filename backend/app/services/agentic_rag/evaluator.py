@@ -12,36 +12,9 @@ from dataclasses import dataclass
 from typing import Any, List, Optional
 
 from app.core.config import settings
+from app.services.agentic_rag.prompts import EVALUATION_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
-
-EVALUATION_SYSTEM_PROMPT = """\
-You are an answer quality evaluator. Given a query, retrieved context, and generated answer,
-assess the quality of the answer.
-
-Rules:
-- faithfulness (0-100): What percentage of the answer is actually supported by the retrieved context?
-  - 100 = everything cited or clearly supported by context
-  - 0 = answer is mostly or entirely external knowledge
-- completeness (0-100): How thoroughly does the answer address the query?
-  - 100 = all aspects of the query are fully addressed
-  - 0 = answer misses key parts of the query
-- citation_quality (0-100): Are citations properly used and relevant?
-  - 100 = all citations are accurate and relevant
-  - 0 = no citations or fabricated citations
-- confidence_match (boolean): Does the confidence level match the answer quality?
-  - true = high quality answer with high confidence, or low quality with low confidence
-  - false = mismatch between answer quality and confidence
-
-Output ONLY a JSON object with these keys:
-{
-  "faithfulness": <0-100>,
-  "completeness": <0-100>,
-  "citation_quality": <0-100>,
-  "confidence_match": true/false,
-  "flags": [<list of issue descriptions, empty if no issues>]
-}
-"""
 
 
 @dataclass

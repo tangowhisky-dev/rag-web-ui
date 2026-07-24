@@ -21,7 +21,6 @@ from .graph import build_main_graph
 from .graph_state import AgentState
 from .redis_memory import get_redis_memory
 from .streaming import AgenticRAGTransformer
-from .evaluator import evaluate_answer
 from .utils import format_context_string
 
 logger = logging.getLogger(__name__)
@@ -60,6 +59,11 @@ async def run_agentic_rag(
        stream transformer that consumes the raw protocol stream
     3. Handles interrupt() pauses for clarification
     4. Extracts the final state to emit context, done, evaluation, and usage events
+
+    Note: ``db`` is accepted for API compatibility but NOT passed to the pipeline.
+    The retrieval functions create their own fresh sessions internally. Passing the
+    caller's ``db`` session risks corrupting the caller's ORM state if any pipeline
+    operation triggers a rollback or session invalidation.
     """
     t0 = time.monotonic()
 
@@ -84,8 +88,11 @@ async def run_agentic_rag(
     )
 
     # Build the compiled graph with the shared Redis checkpointer + store.
+    # NOTE: db is NOT passed to the pipeline — retrieval functions create their
+    # own fresh sessions internally. Passing the caller's db risks corrupting
+    # the caller's ORM state (e.g. detached bot_message after a rollback).
     graph = build_main_graph(
-        db=db,
+        db=None,
         kb_ids=kb_ids,
         org_id=org_id,
         file_markdown=file_markdown,
@@ -183,7 +190,7 @@ async def run_agentic_rag(
         if final_answer and not all_docs:
             yield {"event": "token", "content": final_answer}
 
-        # Answer quality evaluation
+        # Answer quality evaluation — already computed by answer_evaluation_node
         usage: dict[str, Any] = {
             "promptTokens": input_tokens,
             "completionTokens": completion_tokens,
@@ -191,44 +198,10 @@ async def run_agentic_rag(
             "confidence_level": final_state.get("confidence_level", "none"),
             "faithfulness": final_state.get("faithfulness", 0),
             "completeness": final_state.get("completeness", 0),
+            "citation_quality": final_state.get("citation_quality", 0),
+            "confidence_match": final_state.get("confidence_match", True),
+            "flags": final_state.get("evaluation_flags", []),
         }
-
-        if settings.ANSWER_QUALITY_GRADING_ENABLED and final_answer and all_docs:
-            try:
-                ct = format_context_string(all_docs, final_state.get("file_markdown"))
-                cle = (
-                    "very_high"
-                    if conf > 0.8
-                    else "high" if conf > 0.6 else "medium" if conf > 0.3 else "low"
-                )
-                ev = await evaluate_answer(
-                    query=final_state.get("original_query", ""),
-                    answer=final_answer,
-                    context_preview=ct,
-                    confidence_level=cle,
-                )
-                usage["evaluation"] = {
-                    "faithfulness": ev.faithfulness,
-                    "completeness": ev.completeness,
-                    "citation_quality": ev.citation_quality,
-                    "confidence_match": ev.confidence_match,
-                    "flags": ev.flags,
-                }
-                yield {
-                    "event": "evaluation",
-                    "faithfulness": ev.faithfulness,
-                    "completeness": ev.completeness,
-                    "citation_quality": ev.citation_quality,
-                    "confidence_match": ev.confidence_match,
-                    "flags": ev.flags,
-                }
-                logger.info(
-                    "[EVAL] faithfulness=%s completeness=%s citation_quality=%s confidence_match=%s flags=%s",
-                    ev.faithfulness, ev.completeness, ev.citation_quality,
-                    ev.confidence_match, ev.flags,
-                )
-            except Exception as exc:
-                logger.warning("[EVAL] evaluation skipped: %s", exc)
 
         yield {"event": "done", "full_response": final_answer, "usage": usage}
 

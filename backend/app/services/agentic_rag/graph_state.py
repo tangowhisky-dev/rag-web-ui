@@ -92,6 +92,30 @@ class AgentState(MessagesState):
     sufficiency_message: Annotated[str, _last_value] = ""
     needs_graph_expansion: Annotated[bool, _last_value] = False
 
+    # ── Compaction state ──────────────────────────────────────────────────
+    # Structured summary of older conversation turns, generated when the
+    # message history grows beyond COMPACTION_HISTORY_THRESHOLD.
+    compaction_summary: Annotated[Optional[str], _last_value] = None
+    compaction_triggered: Annotated[bool, _last_value] = False
+
+    # ── Routing state ─────────────────────────────────────────────────────
+    # Routing decision from classify_query — controls whether retrieval runs
+    # and whether file content/metadata is injected into the prompt.
+    needs_retrieval: Annotated[bool, _last_value] = True
+    needs_file_content: Annotated[bool, _last_value] = False
+    needs_file_metadata: Annotated[bool, _last_value] = False
+
+    # ── Subtask dependencies ──────────────────────────────────────────────
+    # Each entry is a list of subtask indices that subtask i depends on.
+    # Used by route_by_dependencies to choose parallel vs sequential execution.
+    subtask_dependencies: Annotated[List[List[int]], _last_value] = []
+
+    # ── Subgraph conversation history ─────────────────────────────────────
+    # Bounded history passed into subgraphs via Send().
+    # This is NOT the MessagesState ``messages`` channel, so subgraph writes
+    # do not get merged back into the parent conversation via ``add_messages``.
+    subgraph_history: Annotated[List[Any], _last_value] = []
+
     # ── Generation state ────────────────────────────────────────────────
     answer: str = ""
     answer_usage: Optional[dict] = None  # Token usage captured during streaming
@@ -103,6 +127,7 @@ class AgentState(MessagesState):
     # ── Retry budget state ──────────────────────────────────────────────
     # Annotated with last-value reducer so parallel subgraphs can each write
     # without LangGraph throwing "Can receive only one value per step".
+    needs_retry: Annotated[bool, _last_value] = False
     adaptive_reran: Annotated[bool, _last_value] = False
     adaptive_rerunning: Annotated[bool, _last_value] = False  # True only when adaptive actually expanded
     answer_evaluation_attempts: Annotated[int, _last_value] = 0
@@ -123,6 +148,9 @@ class AgentState(MessagesState):
     confidence_level: str = "none"
     faithfulness: int = 0
     completeness: int = 0
+    citation_quality: int = 0
+    confidence_match: bool = True
+    evaluation_flags: Annotated[List[str], _last_value] = []
 
     # ── Configuration ───────────────────────────────────────────────────
     # All configuration keys use _last_value because parallel Send() branches
