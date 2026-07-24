@@ -296,13 +296,12 @@ async def classify_query_node(
         subtask_deps = raw_deps if raw_deps is not None else [[] for _ in questions]
 
         # Extract per-subtask routing flags
-        subtask_routing = getattr(response, "subtask_routing", [])
-        if len(subtask_routing) != len(questions):
+        subtask_routing = getattr(response, "subtask_routing", None)
+        if subtask_routing is None or len(subtask_routing) != len(questions):
             # LLM didn't return per-subtask routing — fall back to global flags
             logger.warning(
                 "[CLASSIFY] subtask_routing length %d != questions length %d, falling back to global",
-                len(subtask_routing),
-                len(questions),
+                len(subtask_routing) if subtask_routing else 0, len(questions),
             )
             gr = getattr(response, "needs_retrieval", True)
             gc = getattr(response, "needs_file_content", False)
@@ -311,6 +310,25 @@ async def classify_query_node(
                 {"needs_retrieval": gr, "needs_file_content": gc, "needs_file_metadata": gm}
                 for _ in questions
             ]
+
+        # Sanity check: override is_clear=False for clearly factual/definitional
+        # queries. The LLM sometimes misclassifies these as unclear, which routes
+        # to request_clarification and silently kills the response.
+        query_lower = rewritten.lower()
+        factual_patterns = (
+            "explain ", "what is ", "what's ", "define ", "describe ",
+            "how does ", "how do ", "difference between ", "vs ", "versus ",
+            "means ", "what does ", "what does ", "meaning of ",
+            "tell me about ", "give me an overview of ", "overview of ",
+        )
+        is_factual = any(query_lower.startswith(p) for p in factual_patterns)
+        if is_factual and not is_clear:
+            logger.warning(
+                "[CLASSIFY] factual query misclassified as unclear — overriding is_clear=True | query=%s",
+                rewritten[:80],
+            )
+            is_clear = True
+            clarification_needed = ""
     except Exception as exc:
         logger.warning("[CLASSIFY] structured classification failed: %s - using fallback", exc)
         is_clear = True
