@@ -124,24 +124,22 @@ def test_route_after_answer_evaluation_caps_retries():
 
 # ── Adaptive reranking once per subtask ────────────────────────────────────
 
-@pytest.mark.asyncio
-async def test_adaptive_reranking_skips_if_already_reran():
+def test_adaptive_reranking_skips_if_already_reran():
     state = AgentState(
         retrieval_confidence=0.1,
         retrieved_docs=[{"page_content": "doc"}],
         adaptive_reran=True,
     )
-    result = await adaptive_reranking_node(state, db=None)
+    result = adaptive_reranking_node(state, db=None)
     assert result["adaptive_rerunning"] is False
 
 
-@pytest.mark.asyncio
-async def test_adaptive_reranking_no_op_when_confidence_high():
+def test_adaptive_reranking_no_op_when_confidence_high():
     state = AgentState(
         retrieval_confidence=0.5,
         retrieved_docs=[{"page_content": "doc"}],
         adaptive_reran=False,
     )
-    result = await adaptive_reranking_node(state, db=None)
+    result = adaptive_reranking_node(state, db=None)
     assert result["adaptive_rerunning"] is False
     assert result["adaptive_reran"] is True
