@@ -46,6 +46,59 @@ def format_context_string(docs: list[dict], file_markdown: str | None = None) ->
     return "\n\n---\n\n".join(parts)
 
 
+def normalize_citations(answer: str, docs: list) -> tuple[str, list[int]]:
+    """Validate, deduplicate, and renumber inline citations in an LLM answer.
+
+    - Parses [N](N) markdown citation links.
+    - Normalizes [citation](N) and [citation](N)(N) variants to [N](N).
+    - Removes any citation whose index is outside the provided docs range.
+    - Renumbers remaining citations 1..M by first appearance in the answer.
+    - Returns the rewritten answer and the list of original 1-based doc indices
+      in display order.
+    """
+    if not answer:
+        return answer or "", []
+
+    # Strip any existing citation markers when no docs are available.
+    if not docs:
+        cleaned = re.sub(r"\[citation\]\(\d+\)\(\d+\)", "", answer)
+        cleaned = re.sub(r"\[citation\]\(\d+\)", "", cleaned)
+        cleaned = re.sub(r"\[\d+\]\(\d+\)", "", cleaned)
+        return cleaned.strip(), []
+
+    # Normalize common malformed variants emitted by some models to [N](N).
+    answer = re.sub(r"\[citation\]\((\d+)\)\((\d+)\)", r"[\1](\1)", answer)
+    answer = re.sub(r"\[citation\]\((\d+)\)", r"[\1](\1)", answer)
+
+    max_index = len(docs)
+    valid_cited: list[int] = []
+    seen: set[int] = set()
+
+    # Collect unique valid original indices in first-appearance order.
+    for match in re.finditer(r"\[(\d+)\]\((\d+)\)", answer):
+        n = int(match.group(1))
+        # Guard against mismatched brackets like [1](2) — require both numbers equal.
+        if n != int(match.group(2)):
+            continue
+        if 1 <= n <= max_index and n not in seen:
+            valid_cited.append(n)
+            seen.add(n)
+
+    index_map = {orig: new for new, orig in enumerate(valid_cited, start=1)}
+
+    def _replace_marker(match: re.Match) -> str:
+        n = int(match.group(1))
+        m = int(match.group(2))
+        # Only rewrite well-formed [N](N); strip malformed or out-of-range markers.
+        if n == m and n in index_map:
+            new_idx = index_map[n]
+            return f"[{new_idx}]({new_idx})"
+        return ""
+
+    normalized = re.sub(r"\[(\d+)\]\((\d+)\)", _replace_marker, answer)
+    return normalized, valid_cited
+
+
 def rewrite_query(
     query: str,
     recent_history: list,

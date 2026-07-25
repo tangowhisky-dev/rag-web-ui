@@ -40,7 +40,7 @@ from .prompts import (
 )
 from .redis_memory import get_redis_memory
 from .schemas import QueryAnalysis
-from .utils import estimate_context_tokens, strip_reasoning_tags, format_context_string
+from .utils import estimate_context_tokens, strip_reasoning_tags, format_context_string, normalize_citations
 
 logger = logging.getLogger(__name__)
 
@@ -929,13 +929,19 @@ async def generating_node(
             if getattr(chunk, "usage_metadata", None):
                 usage_metadata = chunk.usage_metadata
 
+    # Normalize citations: validate against the retrieved docs, strip invalid
+    # markers, and renumber remaining citations 1..M by first appearance.
+    retrieved_docs = state.get("retrieved_docs", [])
+    normalized_answer, cited_doc_indices = normalize_citations(answer, retrieved_docs)
+
     is_chart = bool(re.search(r"\b(chart|graph|plot|visuali[zs]|trend|distribution)\b", original_query.lower()))
 
     result: dict = {
-        "answer": answer,
+        "answer": normalized_answer,
+        "cited_doc_indices": cited_doc_indices,
         "is_chart_query": is_chart,
         "thinking_chunks": [],
-        "messages": [AIMessage(content=answer)] if answer else [],
+        "messages": [AIMessage(content=normalized_answer)] if normalized_answer else [],
     }
     if usage_metadata:
         result["answer_usage"] = usage_metadata

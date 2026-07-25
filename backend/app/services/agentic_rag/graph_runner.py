@@ -196,14 +196,28 @@ async def run_agentic_rag(
                         input_tokens += usage.get("input_tokens", 0) or 0
                         completion_tokens += usage.get("output_tokens", 0) or 0
 
-        # Emit final context event if docs exist and transformer didn't already.
-        if all_docs and (transformer is None or not transformer._all_docs):
+        # Build the final citation list in display order (1..M) from the cited
+        # original doc indices and the full retrieved docs.
+        cited_doc_indices = final_state.get("cited_doc_indices", [])
+        cited_docs: list[dict] = []
+        for idx in cited_doc_indices:
+            if 1 <= idx <= len(all_docs):
+                doc = all_docs[idx - 1]
+                # Serialize to the same shape the frontend already expects.
+                doc_dict = (
+                    {"page_content": doc.page_content, "metadata": doc.metadata}
+                    if hasattr(doc, "page_content") else doc
+                )
+                cited_docs.append(doc_dict)
+
+        # Emit the answer_rewrite event with the normalized answer + cited docs.
+        # This replaces the raw streamed text in the UI and provides the exact
+        # citation list that corresponds to the [1], [2], ... markers.
+        if final_answer:
             yield {
-                "event": "context",
-                "docs": all_docs,
-                "confidence": "high" if conf > 0.7 else "medium" if conf > 0.3 else "low",
-                "score": int(conf * 100),
-                "synthesis_mode": len(final_state.get("subtask_contexts", [])) > 1,
+                "event": "answer_rewrite",
+                "content": final_answer,
+                "citations": cited_docs,
             }
 
         # If there is no final answer and no docs, stream whatever we have as a token

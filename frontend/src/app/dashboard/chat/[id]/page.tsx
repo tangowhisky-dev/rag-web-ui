@@ -43,7 +43,6 @@ interface Message {
   content: string;
   citations?: Citation[];
   rewrittenQuery?: string;
-  retrievedContext?: Array<{ page_content: string; metadata: Record<string, any> }>;
   confidence?: "very_high" | "high" | "medium" | "low" | "none";
   confidenceScore?: number;
   confidenceBreakdown?: Record<string, unknown>;
@@ -417,31 +416,6 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     );
   };
 
-  const parseContextData = (base64Part: string): {
-    citations: Citation[];
-    rewrittenQuery: string | undefined;
-    retrievedContext: Array<{ page_content: string; metadata: Record<string, any> }>;
-  } => {
-    if (!base64Part) return { citations: [], rewrittenQuery: undefined, retrievedContext: [] };
-
-    const contextData = JSON.parse(atob(base64Part.trim())) as {
-      context: Array<{ page_content: string; metadata: Record<string, any> }>;
-      rewritten_query?: string;
-    };
-
-    const citations = contextData.context.map((doc, index) => ({
-      id: index + 1,
-      text: doc.page_content,
-      metadata: doc.metadata,
-    }));
-
-    return {
-      citations,
-      rewrittenQuery: contextData.rewritten_query,
-      retrievedContext: contextData.context,
-    };
-  };
-
   const flushToBrowser = async () => {
     await new Promise<void>((resolve) => {
       requestAnimationFrame(() => {
@@ -517,30 +491,12 @@ function ChatPageInner({ params }: { params: { id: string } }) {
           }>;
           synthesis_mode?: boolean;
         };
-        // Backend fast_pipeline sends "docs"; rag_graph sends "context"
-        const rawDocs = payload.docs ?? payload.context ?? [];
-        const citations: Citation[] = rawDocs.map((doc, index) => {
-          // Flatten metadata fields to top-level so CitationLink can read
-          // them directly (works during streaming AND on reload via API).
-          const c: Record<string, any> = {
-            id: index + 1,
-            text: doc.page_content,
-            metadata: doc.metadata,
-          };
-          if (doc.metadata) {
-            Object.keys(doc.metadata).forEach((k) => {
-              c[k] = doc.metadata[k];
-            });
-          }
-          return c as Citation;
-        });
+        // 2: now carries confidence metadata only; citations arrive via r:.
         // Normalize confidence level: backend sends uppercase (HIGH/MEDIUM/LOW),
         // frontend type uses lowercase. Map backend values → frontend enum.
         const rawConfidence = payload.confidence?.toLowerCase() as Message["confidence"] | undefined;
         appendAssistantChunk(assistantId, (message) => ({
           ...message,
-          citations,
-          retrievedContext: rawDocs,
           confidence: rawConfidence,
           confidenceScore: payload.score,
           confidenceBreakdown: payload.breakdown,
@@ -562,8 +518,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
 
         if (payload.includes("__LLM_RESPONSE__")) {
           const [, initialResponseText] = payload.split("__LLM_RESPONSE__");
-          // citations/rewrittenQuery/retrievedContext already set by 1:/2: events;
-          // only apply the initial response text chunk here
+          // rewrittenQuery already set by 1: event; only apply the text chunk here
           appendAssistantChunk(assistantId, (message) => ({
             ...message,
             content: initialResponseText || message.content,
@@ -595,13 +550,32 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       return;
     }
 
-    // r: answer_rewrite — citation-normalised full answer replaces streamed tokens
+    // r: answer_rewrite — citation-normalised full answer + cited docs replaces streamed tokens
     if (trimmedLine.startsWith("r:")) {
       try {
-        const payload = JSON.parse(trimmedLine.slice(2)) as { content: string };
+        const payload = JSON.parse(trimmedLine.slice(2)) as {
+          content: string;
+          citations?: Array<{ page_content: string; metadata: Record<string, any> }>;
+        };
+        const citations: Citation[] = (payload.citations ?? []).map((doc, index) => {
+          // Flatten metadata fields to top-level so CitationLink can read
+          // them directly (works during streaming AND on reload via API).
+          const c: Record<string, any> = {
+            id: index + 1,
+            text: doc.page_content,
+            metadata: doc.metadata,
+          };
+          if (doc.metadata) {
+            Object.keys(doc.metadata).forEach((k) => {
+              c[k] = doc.metadata[k];
+            });
+          }
+          return c as Citation;
+        });
         appendAssistantChunk(assistantId, (message) => ({
           ...message,
           content: payload.content,
+          citations,
         }));
       } catch (e) {
         console.error("Failed to parse answer_rewrite event:", e);
@@ -1145,7 +1119,6 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                           markdown={message.content}
                           citations={message.citations}
                           rewrittenQuery={message.id === lastAssistantId ? message.rewrittenQuery : undefined}
-                          retrievedContext={message.id === lastAssistantId ? message.retrievedContext : undefined}
                           confidence={message.confidence}
                           confidenceScore={message.confidenceScore}
                           confidenceBreakdown={message.confidenceBreakdown}

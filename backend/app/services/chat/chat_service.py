@@ -347,35 +347,9 @@ async def generate_response(
                 _confidence_suggestion = event.get("suggestion")
                 _confidence_failed_legs = event.get("failed_legs")
 
-                # Buffer retrieved docs as citations — persisted after streaming
-                # via a fresh DB session (connection was closed before stream).
-                raw_docs = event.get("docs", [])
-                docs = [
-                    {"page_content": d.page_content, "metadata": d.metadata}
-                    if hasattr(d, "page_content") else d
-                    for d in raw_docs
-                ]
-                for idx, doc in enumerate(docs, start=1):
-                    document_id = doc.get("metadata", {}).get("document_id")
-                    chunk_index = doc.get("metadata", {}).get("chunk_index")
-                    if document_id is not None and chunk_index is not None:
-                        meta = {**(doc.get("metadata", {}) or {})}
-                        for rk in ("score", "dense_rank", "sparse_rank", "exact_rank", "retrieval_leg"):
-                            v = doc.get(rk)
-                            if v is not None:
-                                meta[rk] = v
-                        buffered_citations.append((
-                            bot_message.id, document_id, chunk_index, idx, meta,
-                        ))
-
-                # Build context payload for streaming (unchanged)
-                context_payload = {
-                    k: (
-                        [{"page_content": d.page_content, "metadata": d.metadata} if hasattr(d, "page_content") else d for d in v]
-                        if k == "docs" else v
-                    )
-                    for k, v in event.items() if k != "event"
-                }
+                # Stream confidence metadata only; docs/citations are now supplied
+                # by the answer_rewrite event after the final answer is normalized.
+                context_payload = {k: v for k, v in event.items() if k != "event"}
                 yield f'2:{json.dumps(context_payload)}\n'
                 yield ':\n'
 
@@ -396,7 +370,31 @@ async def generate_response(
                 # Citation normalisation: replace accumulated streamed text with
                 # the citation-linked version. Frontend handles this via event type 'r'.
                 full_response = event.get("content", full_response)
-                yield f'r:{json.dumps({"content": full_response})}\n'
+
+                # Buffer only the citations actually used by the normalized answer,
+                # in display order (1..M).  Each item already carries the doc's
+                # metadata from graph_runner.
+                buffered_citations = []
+                for idx, doc in enumerate(event.get("citations", []), start=1):
+                    document_id = doc.get("metadata", {}).get("document_id")
+                    chunk_index = doc.get("metadata", {}).get("chunk_index")
+                    if document_id is not None and chunk_index is not None:
+                        meta = {**(doc.get("metadata", {}) or {})}
+                        for rk in ("score", "dense_rank", "sparse_rank", "exact_rank", "retrieval_leg"):
+                            v = doc.get(rk)
+                            if v is not None:
+                                meta[rk] = v
+                        buffered_citations.append((
+                            bot_message.id, document_id, chunk_index, idx, meta,
+                        ))
+
+                # Forward normalized content + cited docs to the frontend so the
+                # citation list matches the [1], [2], ... markers exactly.
+                rewrite_payload = {
+                    "content": full_response,
+                    "citations": event.get("citations", []),
+                }
+                yield f'r:{json.dumps(rewrite_payload)}\n'
                 await asyncio.sleep(0)
 
             elif event_type == "done":

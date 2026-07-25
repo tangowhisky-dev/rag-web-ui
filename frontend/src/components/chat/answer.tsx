@@ -54,11 +54,6 @@ const useDebouncedValue = <T,>(value: T, delay: number): T => {
   return debouncedValue;
 };
 
-interface ContextDoc {
-  page_content: string;
-  metadata: Record<string, any>;
-}
-
 interface Citation {
   id: number;
   text: string;
@@ -129,7 +124,6 @@ export const Answer: FC<{
   markdown: string;
   citations?: Citation[];
   rewrittenQuery?: string;
-  retrievedContext?: ContextDoc[];
   confidence?: "very_high" | "high" | "medium" | "low" | "none";
   confidenceScore?: number;
   confidenceBreakdown?: Record<string, unknown>;
@@ -159,7 +153,7 @@ export const Answer: FC<{
   finalConfidenceLevel?: "very_high" | "high" | "medium" | "low" | "none";
   faithfulness?: number;
   completeness?: number;
-}> = ({ messageId, chatId, markdown, citations = [], rewrittenQuery, retrievedContext, confidence, confidenceScore, confidenceBreakdown, suggestion, failedLegs, queryClassification, toolTrace, agentSteps, taskList, progressMessages, synthesisMode, isStreaming = false, onDelete, finalConfidence, finalConfidenceLevel, faithfulness, completeness }) => {
+}> = ({ messageId, chatId, markdown, citations = [], rewrittenQuery, confidence, confidenceScore, confidenceBreakdown, suggestion, failedLegs, queryClassification, toolTrace, agentSteps, taskList, progressMessages, synthesisMode, isStreaming = false, onDelete, finalConfidence, finalConfidenceLevel, faithfulness, completeness }) => {
   const [citationInfoMap, setCitationInfoMap] = useState<
     Record<string, CitationInfo>
   >({});
@@ -528,7 +522,7 @@ export const Answer: FC<{
     }
   }, [messageId, chatId]);
 
-  if (!markdown && !rewrittenQuery && (!retrievedContext || retrievedContext.length === 0)) {
+  if (!markdown && !rewrittenQuery) {
     return (
       <div className="flex flex-col gap-2">
         <Skeleton className="max-w-sm h-4 bg-zinc-200" />
