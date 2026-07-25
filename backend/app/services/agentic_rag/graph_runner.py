@@ -1,7 +1,7 @@
 """LangGraph-based pipeline runner — the single pipeline implementation.
 
 Uses compiled LangGraph StateGraph for execution.
-Routes through nodes: rewrite → classify → [Send(agent, ...)] → synthesize.
+Routes through nodes: rewrite -> classify -> [Send(agent, ...)] -> synthesize.
 Streams SSE events (p:/t:/th:/0:/1:/2:/3:/4:/d:) in real-time.
 """
 
@@ -14,6 +14,7 @@ import uuid
 from typing import Any, AsyncGenerator, List, Optional
 
 from langchain_core.messages import HumanMessage, AIMessage
+from langgraph.types import Command
 
 from app.core.config import settings
 
@@ -57,7 +58,7 @@ async def run_agentic_rag(
     1. Builds the initial state from history
     2. Executes the graph via astream_events(..., version="v3") with a custom
        stream transformer that consumes the raw protocol stream
-    3. Handles interrupt() pauses for clarification
+    3. Handles interrupt() pauses for clarification (human-in-the-loop)
     4. Extracts the final state to emit context, done, evaluation, and usage events
 
     Note: ``db`` is accepted for API compatibility but NOT passed to the pipeline.
@@ -136,6 +137,25 @@ async def run_agentic_rag(
                     await raw_task
                 except asyncio.CancelledError:
                     pass
+
+        # Check if the run was interrupted (human-in-the-loop)
+        if stream.interrupted:
+            # Extract interrupt payloads for the frontend
+            interrupt_payloads = []
+            for intp in stream.interrupts:
+                interrupt_payloads.append(str(intp.value))
+            
+            logger.info(
+                "[GRAPH] interrupted for clarification | thread_id=%s | question=%s",
+                thread_id, interrupt_payloads[0][:200] if interrupt_payloads else "",
+            )
+            
+            yield {
+                "event": "interrupt",
+                "question": interrupt_payloads[0] if interrupt_payloads else "",
+                "thread_id": thread_id,
+            }
+            return
 
         # Final state from the run
         final_output = await stream.output()
@@ -219,6 +239,3 @@ async def run_agentic_rag(
         (time.monotonic() - t0) * 1000,
         query[:80],
     )
-
-
-

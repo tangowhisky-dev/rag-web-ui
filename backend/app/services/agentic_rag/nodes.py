@@ -12,6 +12,7 @@ from typing import Any, Generator, List, Optional
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 from langgraph.config import get_stream_writer
+from langgraph.types import Command, interrupt
 
 from app.core.config import settings
 
@@ -280,6 +281,7 @@ async def classify_query_node(
     """Classify query using structured LLM output with per-subtask routing."""
     rewritten = state.get("rewritten_query", "")
     query = state.get("original_query", "")
+    pending_query = ""  # Set when is_clear=False for clarification flow
 
     try:
         llm = _get_llm(streaming=False)
@@ -292,6 +294,7 @@ async def classify_query_node(
         is_clear = getattr(response, "is_clear", True)
         questions = getattr(response, "questions", [rewritten]) or [rewritten]
         clarification_needed = getattr(response, "clarification_needed", "")
+        clarification_questions = getattr(response, "clarification_questions", [])
         raw_deps = getattr(response, "subtask_dependencies", None)
         subtask_deps = raw_deps if raw_deps is not None else [[] for _ in questions]
 
@@ -329,11 +332,15 @@ async def classify_query_node(
             )
             is_clear = True
             clarification_needed = ""
+
+        # Set pending_query for clarification flow
+        pending_query = rewritten if not is_clear else ""
     except Exception as exc:
         logger.warning("[CLASSIFY] structured classification failed: %s - using fallback", exc)
         is_clear = True
         questions = [rewritten]
         clarification_needed = ""
+        clarification_questions = []
         subtask_deps = [[] for _ in questions]
         subtask_routing = [
             {"needs_retrieval": True, "needs_file_content": False, "needs_file_metadata": False}
@@ -375,6 +382,8 @@ async def classify_query_node(
         return {
             "question_is_clear": is_clear,
             "clarification_needed": clarification_needed,
+            "clarification_questions": clarification_questions,
+            "pending_query": pending_query,
             "subtasks": subtasks,
             "is_complex": len(subtasks) > 1,
             "needs_retrieval": needs_retrieval,
@@ -389,8 +398,13 @@ async def classify_query_node(
 # Node: request_clarification
 # ---------------------------------------------------------------------------
 
-def request_clarification_node(state: AgentState) -> dict:
-    """Ask the user for clarification when the query is unclear."""
+def request_clarification_node(state: AgentState) -> dict | Command:
+    """Ask the user for clarification when the query is unclear.
+
+    Pauses graph execution via interrupt() and waits for user input.
+    On resume, stores the response and routes back to classify_query
+    so the full pipeline re-runs with the clarification context.
+    """
     pending = state.get("pending_query", "")
     clarifications = state.get("clarification_questions", [])
 
@@ -403,13 +417,29 @@ def request_clarification_node(state: AgentState) -> dict:
     else:
         clarification_msg = f"I need more information to understand your question: '{pending}'"
 
+    # Emit progress event before interrupting (streaming writer works inside node)
     with _agent_step("request_clarification"):
         writer = get_stream_writer()
         writer({"event": "progress", "phase": "clarification", "message": clarification_msg})
 
-        return {
-            "messages": [AIMessage(content=clarification_msg, name="clarification")],
-        }
+    # Pause execution and wait for user response.
+    # The interrupt payload surfaces on stream.interrupts when using v3 stream_events.
+    # On resume, Command(resume=...) becomes the return value of this call.
+    user_response = interrupt(clarification_msg)
+
+    # Store the user's response and allow re-classification to proceed.
+    # Route to classify_query — the user's clarification response (e.g.
+    # "Technical" or "Computer science") is already a meaningful query.
+    # Setting rewritten_query ensures classify_query classifies the right thing
+    # instead of re-classifying the original pending_query.
+    return Command(
+        update={
+            "clarification_response": str(user_response),
+            "rewritten_query": str(user_response),
+            "question_is_clear": True,
+        },
+        goto="classify_query",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -576,7 +606,7 @@ def sufficiency_check_node(state: AgentState) -> dict:
 # Node: adaptive_reranking (re-filter with lower threshold)
 # ---------------------------------------------------------------------------
 
-async def adaptive_reranking_node(state: AgentState, db: Any = None) -> dict:
+def adaptive_reranking_node(state: Any = None, db: Any = None) -> dict:
     """Adaptive reranking: re-filter all_scored_docs with lower threshold.
 
     Since all docs already have _reranker_score from the initial run,
@@ -703,13 +733,6 @@ def _build_generation_messages(state: AgentState) -> list[dict]:
                 "Do NOT revisit details that are already covered in the summary."
             ),
         })
-
-    # ── Merge all system messages into one (TGI only supports a single
-    #    system message slot). ─────────────────────────────────────────────
-    if len(system_messages) > 1:
-        system_messages = [
-            {"role": "system", "content": "\n\n".join(s["content"] for s in system_messages)}
-        ]
 
     # ── Merge all system messages into one (TGI only supports a single
     #    system message slot). ─────────────────────────────────────────────
@@ -1253,7 +1276,6 @@ def collect_context_node(state: AgentState) -> dict:
                 "context_source": context_source,  # NEW: type of context
                 "file_context": file_context,       # NEW: captured file content
                 "retrieved_docs": state.get("retrieved_docs", []),
-                "retrieved_contexts": state.get("retrieved_contexts", []),
                 "retrieval_confidence": state.get("retrieval_confidence", 0.0),
                 "leg_results": state.get("leg_results", {}),
                 "failed_legs": state.get("failed_legs", []),
@@ -1283,7 +1305,6 @@ def prepare_final_context_node(state: AgentState) -> dict:
 
     all_docs: list[dict] = []
     all_scored: list[dict] = []
-    all_contexts: list[str] = []
     all_memory_docs: list[dict] = []
     file_contents: list[str] = []
     confidences: list[float] = []
@@ -1333,7 +1354,6 @@ def prepare_final_context_node(state: AgentState) -> dict:
                 all_scored.append(doc)
             else:
                 scored_deduped += 1
-        all_contexts.extend(ctx.get("retrieved_contexts", []))
         confidences.append(ctx.get("retrieval_confidence", 0.0))
 
     is_complex = len(contexts) > 1
@@ -1366,7 +1386,6 @@ def prepare_final_context_node(state: AgentState) -> dict:
         return {
             "retrieved_docs": all_docs,
             "all_scored_docs": all_scored,
-            "retrieved_contexts": all_contexts,
             "retrieval_confidence": avg_conf,
             "is_complex": is_complex,
             "historical_memory_docs": all_memory_docs,

@@ -39,6 +39,10 @@ class QueryAnalysis(BaseModel):
         default="",
         description="Explanation of what additional information is needed, or empty string if none.",
     )
+    clarification_questions: List[str] = Field(
+        default_factory=list,
+        description="List of 2-4 specific clarification questions for the user to answer. Only populated when is_clear=False. Questions should be concrete and answerable (e.g., 'Which domain: computer science, biology, or physics?').",
+    )
     # Per-subtask routing flags (one per question in `questions`)
     subtask_routing: List[SubtaskRouting] = Field(
         default_factory=list,

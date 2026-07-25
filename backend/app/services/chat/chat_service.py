@@ -425,6 +425,44 @@ async def generate_response(
                 yield f'th:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
                 await asyncio.sleep(0)
 
+            elif event_type == "interrupt":
+                # Human-in-the-loop clarification — pause streaming, create
+                # ClarificationRequest in DB, and signal the frontend to poll.
+                question = event.get("question", "")
+                thread_id = event.get("thread_id", "")
+
+                logger.info(
+                    "[CHAT] clarification interrupt | chat_id=%d thread_id=%s",
+                    chat_id, thread_id,
+                )
+
+                # Create ClarificationRequest in DB so frontend can poll
+                from app.models.clarification import ClarificationRequest as ClarificationRequestModel
+                clar_req = ClarificationRequestModel(
+                    chat_id=chat_id,
+                    assistant_message_id=bot_message.id,
+                    question=question,
+                    rationale="Query needs clarification from user",
+                    status="pending",
+                    attempt=1,
+                )
+                db.add(clar_req)
+                db.commit()
+                db.refresh(clar_req)
+
+                # Forward interrupt event to frontend
+                interrupt_payload = {
+                    "question": question,
+                    "clarification_id": clar_req.id,
+                    "attempt": 1,
+                    "max_attempts": 2,
+                }
+                yield f'i:{json.dumps(interrupt_payload)}\n'
+                await asyncio.sleep(0)
+
+                # Break the stream — the agent will resume after user responds
+                break
+
         logger.info("[CHAT] stream complete | response_length=%d chars", len(full_response))
 
         # ── Handle cancellation after stream ends ──────────────────────────

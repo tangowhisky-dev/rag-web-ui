@@ -55,6 +55,7 @@ class AgentState(MessagesState):
     question_is_clear: Annotated[bool, _last_value] = True
     pending_query: Annotated[str, _last_value] = ""
     clarification_questions: Annotated[List[str], _last_value] = []
+    clarification_response: Annotated[str, _last_value] = ""  # User's response to clarification
 
     # ── Per-leg retrieval state (separated for observability) ───────────
     dense_docs: Annotated[List[dict], accumulate] = []
@@ -80,7 +81,6 @@ class AgentState(MessagesState):
     all_scored_docs: Annotated[List[dict], _last_value] = []
     # Filtered docs after applying threshold — used for generation.
     retrieved_docs: Annotated[List[dict], _last_value] = []
-    retrieved_contexts: Annotated[List[str], _last_value] = []
     retrieval_keys: Annotated[set, set_union] = set()  # Track what we've already retrieved
     # Annotated with last-value reducer so parallel subgraphs can each write
     # without LangGraph throwing "Can receive only one value per step".

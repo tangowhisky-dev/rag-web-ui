@@ -64,7 +64,7 @@ class TestRouteByDependenciesSendState:
         sends = route_by_dependencies(self._make_state())
         assert isinstance(sends, list)
         assert len(sends) == 1
-        send_kwarg = sends[0].value
+        send_kwarg = sends[0].arg
         # CRITICAL: "messages" must NOT be in the Send() payload.
         assert "messages" not in send_kwarg, (
             f"Send() must not set 'messages' — got keys: {list(send_kwarg.keys())}"
@@ -87,7 +87,7 @@ class TestRouteByDependenciesSendState:
         sends = route_by_dependencies(state)
         assert isinstance(sends, list)
         for send_obj in sends:
-            send_kwarg = send_obj.value
+            send_kwarg = send_obj.arg
             assert "messages" not in send_kwarg, (
                 f"Send() must not set 'messages' in independent subtask — got keys: {list(send_kwarg.keys())}"
             )
@@ -106,7 +106,7 @@ class TestRouteByDependenciesSendState:
         sends = route_by_dependencies(state)
         assert isinstance(sends, list)
         for send_obj in sends:
-            send_kwarg = send_obj.value
+            send_kwarg = send_obj.arg
             assert "messages" not in send_kwarg, (
                 f"Send() must not set 'messages' — got keys: {list(send_kwarg.keys())}"
             )
@@ -121,7 +121,7 @@ class TestRouteByDependenciesSendState:
         )
         sends = route_by_dependencies(state)
         assert isinstance(sends, list)
-        send_kwarg = sends[0].value
+        send_kwarg = sends[0].arg
         assert "messages" not in send_kwarg
         assert "subgraph_history" in send_kwarg
 
@@ -136,7 +136,7 @@ class TestRouteByDependenciesSendState:
         )
         sends = route_by_dependencies(state)
         assert isinstance(sends, list)
-        send_kwarg = sends[0].value
+        send_kwarg = sends[0].arg
         assert "messages" not in send_kwarg
         assert "subgraph_history" in send_kwarg
 
@@ -285,7 +285,7 @@ class TestSubgraphHistoryIsolation:
             "rewritten_query": "test",
         }
         sends = route_by_dependencies(state)
-        payload_keys = list(sends[0].value.keys())
+        payload_keys = list(sends[0].arg.keys())
 
         assert "messages" not in payload_keys
         assert "subgraph_history" in payload_keys

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import tempfile
@@ -884,7 +885,8 @@ async def submit_clarification(
 
     This endpoint is called when the user responds to a clarification request.
     It updates the ClarificationRequest row with the user's response, marks it
-    as answered, and stores the response as a system message in the chat.
+    as answered, and resumes the paused LangGraph execution with
+    Command(resume=...).
     """
     # Verify chat ownership
     chat = (
@@ -916,16 +918,74 @@ async def submit_clarification(
     clarification.status = "answered"
     clarification.answered_at = datetime.now(timezone.utc)
 
-    # Store clarification response as a system message in the chat
+    # Store clarification response as a user message so the LLM sees it
+    # in the normal conversation history (same as any other user query).
     clarification_msg = Message(
-        content=f"__CLARIFICATION_RESPONSE__\n{body.response}",
-        role="system",
+        content=body.response,
+        role="user",
         chat_id=body.chat_id,
     )
 
     db.add(clarification_msg)
     db.commit()
     db.refresh(clarification)
+
+    # Resume the paused LangGraph execution.
+    # The thread_id matches what run_agentic_rag() used.
+    # Command(resume=...) becomes the return value of interrupt() inside
+    # request_clarification_node, which then routes back to classify_query.
+    from langgraph.types import Command
+    from app.services.agentic_rag.graph import build_main_graph
+    from app.services.agentic_rag.redis_memory import get_redis_memory
+    from app.services.agentic_rag.streaming import AgenticRAGTransformer
+
+    memory = await get_redis_memory()
+    thread_id = f"chat-{body.chat_id}"
+    config = {"configurable": {"thread_id": thread_id}}
+
+    try:
+        # Build the graph with the same config as the original run.
+        # We need the kb_ids and file_markdown from the chat to resume properly.
+        kb_ids = [kb.id for kb in chat.knowledge_bases]
+        graph = build_main_graph(
+            db=None,
+            kb_ids=kb_ids,
+            org_id=current_user.org_id,
+            checkpointer=memory.checkpointer,
+            store=memory.store,
+        )
+
+        # Resume the interrupted graph — the resume value becomes the
+        # return value of interrupt() in request_clarification_node.
+        # The graph will re-run from classify_query with the clarification
+        # response now in the checkpoint history.
+        resumed_stream = await graph.astream_events(
+            Command(resume=body.response),
+            config=config,
+            version="v3",
+            transformers=[AgenticRAGTransformer],
+        )
+
+        # Drain the resumed stream — this re-runs the full pipeline
+        # (rewrite -> classify -> retrieve -> generate) and waits for completion.
+        async def _drain_resumed() -> None:
+            async for _ in resumed_stream:
+                pass
+
+        asyncio.create_task(_drain_resumed())
+        # Wait for the resumed stream to complete
+        await resumed_stream.output()
+
+        logger.info(
+            "[CLARIFICATION] chat_id=%d clarification_id=%d resumed successfully | user=%d",
+            body.chat_id, clarification.id, current_user.id,
+        )
+
+    except Exception as exc:
+        logger.error(
+            "[CLARIFICATION] chat_id=%d clarification_id=%d resume failed: %s",
+            body.chat_id, clarification.id, exc, exc_info=True,
+        )
 
     logger.info(
         "[CLARIFICATION] chat_id=%d clarification_id=%d response_id=%d user=%d",
@@ -935,5 +995,5 @@ async def submit_clarification(
     return {
         "status": "received",
         "clarification_id": clarification.id,
-        "message": "Clarification response received. Agent will resume processing.",
+        "message": "Clarification response received. Agent is processing your answer.",
     }

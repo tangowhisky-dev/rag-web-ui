@@ -142,10 +142,19 @@ def route_by_dependencies(state: AgentState) -> list[Send] | str:
                 "needs_file_content": False,
                 "needs_file_metadata": False,
             }
+            # routing may be a SubtaskRouting model or a plain dict
+            if hasattr(routing, "model_dump"):
+                routing_dict = routing.model_dump()
+            else:
+                routing_dict = routing
+            needs_retrieval = routing_dict.get("needs_retrieval", True)
+            needs_file_content = routing_dict.get("needs_file_content", False)
+            needs_file_metadata = routing_dict.get("needs_file_metadata", False)
+
             node = "agent_subgraph"
-            if not routing.get("needs_retrieval", True):
+            if not needs_retrieval:
                 node = "chat_subgraph"
-            elif routing.get("needs_file_content", False) or routing.get("needs_file_metadata", False):
+            elif needs_file_content or needs_file_metadata:
                 node = "file_context_subgraph"
 
             sends.append(Send(node, {
@@ -156,9 +165,9 @@ def route_by_dependencies(state: AgentState) -> list[Send] | str:
                 "subtasks": [subtask],
                 "is_complex": False,
                 "current_subtask_index": 0,
-                "needs_retrieval": routing.get("needs_retrieval", True),
-                "needs_file_content": routing.get("needs_file_content", False),
-                "needs_file_metadata": routing.get("needs_file_metadata", False),
+                "needs_retrieval": needs_retrieval,
+                "needs_file_content": needs_file_content,
+                "needs_file_metadata": needs_file_metadata,
                 "subtask_routing": [routing],
             }))
         return sends if sends else "agent_subgraph"
@@ -486,7 +495,6 @@ def build_main_graph(
     builder.add_node("compaction", compaction_node)
     builder.add_node("classify_query", classify_query_node)
     builder.add_node("request_clarification", request_clarification_node)
-
     # Build and compile the agent subgraph (retrieval-only subagents)
     agent_builder = build_agent_subgraph(
         db=db,
@@ -554,8 +562,14 @@ def build_main_graph(
         },
     )
 
-    # Clarification loops back to rewrite
-    builder.add_edge("request_clarification", "rewrite_query")
+    # Clarification flow: classify_query → request_clarification → END
+    # request_clarification calls interrupt() which pauses the graph and saves
+    # state to the Redis checkpoint. The frontend detects the interrupt and
+    # waits for user input. When the user responds via POST /clarification,
+    # submit_clarification resumes the graph with Command(resume=...).
+    # The node then returns Command(goto="classify_query") to re-run the
+    # pipeline with the user's clarification as the new query.
+    builder.add_edge("request_clarification", END)
 
     # All subgraph branches converge at prepare_final_context
     # (collect_context runs inside each subgraph)
@@ -597,5 +611,4 @@ def build_main_graph(
     return builder.compile(
         checkpointer=checkpointer,
         store=store,
-        interrupt_before=["request_clarification"],
     )
