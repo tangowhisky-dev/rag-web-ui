@@ -457,7 +457,7 @@ async def generate_response(
                     "attempt": 1,
                     "max_attempts": 2,
                 }
-                yield f'i:{json.dumps(interrupt_payload)}\n'
+                yield f'c:{json.dumps(interrupt_payload)}\n'
                 await asyncio.sleep(0)
 
                 # Break the stream — the agent will resume after user responds

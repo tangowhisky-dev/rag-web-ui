@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import tempfile
@@ -873,20 +874,19 @@ async def get_pending_clarification(
     )
 
 
-@router.post("/clarification", response_model=dict)
+@router.post("/clarification")
 async def submit_clarification(
     *,
     db: Session = Depends(get_db),
     body: ClarificationSubmitRequest,
     current_user: User = Depends(get_current_user),
-) -> Any:
+) -> StreamingResponse:
     """
     Submit user's clarification response to an in-progress agent query.
 
-    This endpoint is called when the user responds to a clarification request.
-    It updates the ClarificationRequest row with the user's response, marks it
-    as answered, and resumes the paused LangGraph execution with
-    Command(resume=...).
+    Updates the ClarificationRequest row, stores the response as a user
+    message, then resumes the paused LangGraph execution and streams
+    the resumed events back as SSE so the frontend can render them.
     """
     # Verify chat ownership
     chat = (
@@ -930,10 +930,7 @@ async def submit_clarification(
     db.commit()
     db.refresh(clarification)
 
-    # Resume the paused LangGraph execution.
-    # The thread_id matches what run_agentic_rag() used.
-    # Command(resume=...) becomes the return value of interrupt() inside
-    # request_clarification_node, which then routes back to classify_query.
+    # Resume the paused LangGraph execution and stream it as SSE.
     from langgraph.types import Command
     from app.services.agentic_rag.graph import build_main_graph
     from app.services.agentic_rag.redis_memory import get_redis_memory
@@ -942,23 +939,21 @@ async def submit_clarification(
     memory = await get_redis_memory()
     thread_id = f"chat-{body.chat_id}"
     config = {"configurable": {"thread_id": thread_id}}
+    kb_ids = [kb.id for kb in chat.knowledge_bases]
+    graph = build_main_graph(
+        db=None,
+        kb_ids=kb_ids,
+        org_id=current_user.org_id,
+        checkpointer=memory.checkpointer,
+        store=memory.store,
+    )
 
-    try:
-        # Build the graph with the same config as the original run.
-        # We need the kb_ids and file_markdown from the chat to resume properly.
-        kb_ids = [kb.id for kb in chat.knowledge_bases]
-        graph = build_main_graph(
-            db=None,
-            kb_ids=kb_ids,
-            org_id=current_user.org_id,
-            checkpointer=memory.checkpointer,
-            store=memory.store,
-        )
+    logger.info(
+        "[CLARIFICATION] chat_id=%d clarification_id=%d resuming | user=%d",
+        body.chat_id, clarification.id, current_user.id,
+    )
 
-        # Resume the interrupted graph — the resume value becomes the
-        # return value of interrupt() in request_clarification_node.
-        # The graph will re-run from classify_query with the clarification
-        # response now in the checkpoint history.
+    async def response_stream():
         resumed_stream = await graph.astream_events(
             Command(resume=body.response),
             config=config,
@@ -966,34 +961,114 @@ async def submit_clarification(
             transformers=[AgenticRAGTransformer],
         )
 
-        # Drain the resumed stream — this re-runs the full pipeline
-        # (rewrite -> classify -> retrieve -> generate) and waits for completion.
-        async def _drain_resumed() -> None:
+        transformer = resumed_stream.extensions["events"]
+
+        async def _drain_raw() -> None:
             async for _ in resumed_stream:
                 pass
 
-        asyncio.create_task(_drain_resumed())
-        # Wait for the resumed stream to complete
-        await resumed_stream.output()
+        raw_task = asyncio.create_task(_drain_raw())
 
-        logger.info(
-            "[CLARIFICATION] chat_id=%d clarification_id=%d resumed successfully | user=%d",
-            body.chat_id, clarification.id, current_user.id,
-        )
+        def _prefix(event: dict) -> str:
+            """Map transformer event names to the SSE prefixes processStreamLine expects."""
+            name = event.get("event", "")
+            mapping = {
+                "token": "0",
+                "rewritten_query": "1",
+                "context": "2",
+                "error": "3",
+                "agent_step": "4",
+                "progress": "p",
+                "task_list": "t",
+                "thinking": "th",
+                "answer_rewrite": "r",
+            }
+            return mapping.get(name) or name
 
-    except Exception as exc:
-        logger.error(
-            "[CLARIFICATION] chat_id=%d clarification_id=%d resume failed: %s",
-            body.chat_id, clarification.id, exc, exc_info=True,
-        )
+        try:
+            async for event in transformer:
+                if event:
+                    yield f"{_prefix(event)}:{json.dumps(event)}\n"
+        finally:
+            if not raw_task.done():
+                raw_task.cancel()
+                try:
+                    await raw_task
+                except asyncio.CancelledError:
+                    pass
 
-    logger.info(
-        "[CLARIFICATION] chat_id=%d clarification_id=%d response_id=%d user=%d",
-        body.chat_id, clarification.id, clarification_msg.id, current_user.id,
+        # Check if interrupted again (re-interrupt during clarification round-trip)
+        if resumed_stream.interrupted:
+            interrupt_value = (
+                str(resumed_stream.interrupts[0].value)
+                if resumed_stream.interrupts
+                else ""
+            )
+
+            # Create a new pending request for this re-interrupt.
+            # Reuse the assistant_message_id from the original clarification
+            # (already fetched above, no need for a second DB query).
+            clar_req = ClarificationRequestModel(
+                chat_id=body.chat_id,
+                assistant_message_id=clarification.assistant_message_id,
+                question=interrupt_value,
+                rationale="Re-interrupt during clarification round-trip",
+                status="pending",
+                attempt=clarification.attempt + 1,
+            )
+            db.add(clar_req)
+            db.commit()
+            db.refresh(clar_req)
+
+            interrupt_payload = {
+                'question': interrupt_value,
+                'clarification_id': clar_req.id,
+                'attempt': clar_req.attempt,
+                'max_attempts': 2,
+            }
+            yield f"c:{json.dumps(interrupt_payload)}\n"
+            return
+
+        # Emit done event with final state
+        final_output = await resumed_stream.output()
+        final_state = final_output if isinstance(final_output, dict) else getattr(final_output, "values", {}) or {}
+
+        fa_raw = final_state.get("final_answer") or final_state.get("answer", "")
+        final_answer = fa_raw if isinstance(fa_raw, str) else "".join(
+            p.get("text", "") if isinstance(p, dict) and p.get("type") == "text" else str(p)
+            for p in fa_raw
+        ) if isinstance(fa_raw, list) else str(fa_raw)
+
+        # Collect usage from transformer
+        input_tokens = getattr(transformer, "_input_tokens", 0)
+        completion_tokens = getattr(transformer, "_output_tokens", 0)
+        if input_tokens == 0 and completion_tokens == 0:
+            answer_usage = final_state.get("answer_usage")
+            if isinstance(answer_usage, dict):
+                input_tokens = answer_usage.get("input_tokens", 0) or 0
+                completion_tokens = answer_usage.get("output_tokens", 0) or 0
+
+        done_payload = {
+            "finishReason": "stop",
+            "usage": {
+                "promptTokens": input_tokens,
+                "completionTokens": completion_tokens,
+                "final_confidence": final_state.get("final_confidence", 0.0),
+                "confidence_level": final_state.get("confidence_level", "none"),
+                "faithfulness": final_state.get("faithfulness", 0),
+                "completeness": final_state.get("completeness", 0),
+            },
+            "full_response": final_answer,
+        }
+        yield f"done:{json.dumps(done_payload)}\n"
+
+    return StreamingResponse(
+        response_stream(),
+        media_type="text/event-stream",
+        headers={
+            "x-vercel-ai-data-stream": "v1",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
-
-    return {
-        "status": "received",
-        "clarification_id": clarification.id,
-        "message": "Clarification response received. Agent is processing your answer.",
-    }

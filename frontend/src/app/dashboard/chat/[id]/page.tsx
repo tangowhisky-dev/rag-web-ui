@@ -127,6 +127,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     options: string[];
     rationale?: string;
     assistantId: string;
+    clarificationId: number;
     attempt: number;
     maxAttempts: number;
   } | null>(null);
@@ -702,12 +703,14 @@ function ChatPageInner({ params }: { params: { id: string } }) {
           rationale?: string;
           attempt?: number;
           max_attempts?: number;
+          clarification_id?: number;
         };
         setClarificationState({
           question: payload.question,
           options: payload.options || [],
           rationale: payload.rationale,
           assistantId,
+          clarificationId: payload.clarification_id ?? 0,
           attempt: payload.attempt || 1,
           maxAttempts: payload.max_attempts || 2,
         });
@@ -948,7 +951,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
   const handleClarificationResponse = async (response: string) => {
     if (!clarificationState) return;
 
-    const { assistantId } = clarificationState;
+    const { assistantId, clarificationId } = clarificationState;
 
     // Add user's clarification as a message
     const clarificationMessage: Message = {
@@ -959,12 +962,21 @@ function ChatPageInner({ params }: { params: { id: string } }) {
 
     setMessages((prev) => [...prev, clarificationMessage]);
     setClarificationState(null);
+
+    // Reset transient state — prevents stale progress/task/thinking messages
+    // from the initial stream from persisting into the resumed stream.
+    setProgressMessages([]);
+    setTaskList([]);
+    setThinkingContent(null);
     setIsLoading(true);
 
-    // Send clarification to backend
+    // Send clarification to backend and pipe the resumed SSE stream.
+    const abortController = new AbortController();
+    abortControllerRef.current = abortController;
+
     try {
       const token = localStorage.getItem("token") || "";
-      await fetch(`/api/chat/clarification`, {
+      const res = await fetch(`/api/chat/clarification`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${token}`,
@@ -972,21 +984,41 @@ function ChatPageInner({ params }: { params: { id: string } }) {
         },
         body: JSON.stringify({
           chat_id: Number(params.id),
-          message_id: Number(assistantId),
+          clarification_id: clarificationId,
           response: response,
         }),
+        signal: abortController.signal,
       });
 
-      // Resume streaming with clarified query
-      const requestMessages = messages
-        .filter((m) => m.role === "user" || m.role === "assistant")
-        .map((m) => ({
-          role: m.role,
-          content: m.content,
-        }))
-        .concat({ role: "user", content: response });
+      if (!res.ok || !res.body) {
+        throw new Error(`Clarification submission failed: ${res.status}`);
+      }
 
-      await streamFromMessages(requestMessages, assistantId);
+      // Pipe the resumed SSE stream through processStreamLine
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (line.trim()) {
+            processStreamLine(line, assistantId);
+          }
+        }
+        await flushToBrowser();
+      }
+
+      if (buffer.trim()) {
+        processStreamLine(buffer, assistantId);
+        await flushToBrowser();
+      }
     } catch (error) {
       console.error("Failed to send clarification:", error);
       toast({
@@ -994,6 +1026,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
         description: error instanceof Error ? error.message : "Failed to send clarification",
         variant: "destructive",
       });
+    } finally {
       setIsLoading(false);
     }
   };
@@ -1001,8 +1034,11 @@ function ChatPageInner({ params }: { params: { id: string } }) {
   /** Handle user skipping clarification */
   const handleClarificationSkip = () => {
     if (!clarificationState) return;
+    // Cancel the in-flight clarification stream if one is running.
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
     setClarificationState(null);
-    setIsLoading(true);
+    setIsLoading(false);
   };
 
   const processedMessages = useMemo(() => {
