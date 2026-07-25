@@ -60,9 +60,9 @@ Files attached to chat messages are processed ephemerally - they are NOT indexed
 - Token budget = 25% of `OPENAI_MODEL_CONTEXT_SIZE`
 - Files exceeding budget rejected with clear error
 
-**Mode-specific handling:**
-- **Fast/Thinking mode:** Full approved content passed to LLM (no truncation)
-- **Agentic mode:** `extract_file_sections` node uses LLM to select 3-6 most relevant sections; files ≤ 12,000 chars passed through unchanged
+**Pipeline handling:**
+- Full approved content passed to LLM (no truncation)
+- `extract_file_sections` node uses LLM to select 3-6 most relevant sections; files ≤ 12,000 chars passed through unchanged
 
 **API endpoints:**
 - `POST /api/chat/{chat_id}/files` - Upload file
@@ -414,7 +414,7 @@ For one-off queries without creating a chat session, use the stateless query end
 **Features:**
 - No chat session required
 - Specify knowledge base ID
-- Supports all answering modes
+- Uses the agentic pipeline with automatic query adaptation
 - Returns answer with citations
 - No conversation history
 

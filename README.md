@@ -16,13 +16,16 @@
 
 RAG Web UI is a self-hosted knowledge base Q&A system with multi-tenant org management. Upload your documents, then chat with them using any **OpenAI-compatible API** — works with OpenAI, LM Studio, Ollama, or any local model server.
 
-**Three answering modes:**
+**Agentic RAG pipeline:**
 
-| Mode | How it works | Best for |
-|---|---|---|
-| ⚡ Fast | Rewrite → hybrid retrieval → stream answer | Quick factual lookups |
-| 🧠 Thinking | Same pipeline, uses `REASONING_MODEL` | Deep analysis, long answers |
-| 🤖 Agentic | Full LangGraph pipeline with sub-query decomposition, draft-grade-retry loop, and keyword search fallback | Complex multi-source, ambiguous, or multi-part queries |
+The system uses a single LangGraph-based agentic pipeline that automatically adapts to query complexity:
+
+- Query rewriting with chat history context
+- LLM-based query classification (FACTUAL/ENTITY_CENTRIC/MULTI_PART/AMBIGUOUS)
+- Automatic sub-query decomposition for complex queries
+- Parallel retrieval with reinforced scoring
+- Draft-grade-retry loop with widened retrieval and keyword search fallback
+- Confidence scoring and partial-answer transparency
 
 **Retrieval:** 3-leg hybrid search (dense vector via Qdrant, sparse via SPLADE, exact via MySQL FULLTEXT) fused by Reciprocal Rank Fusion (RRF). Optional **GraphRAG** adds entity/relationship extraction into Neo4j for graph-traversal expansion.
 
@@ -70,9 +73,9 @@ Copy `.env.example` to `.env` and set these values:
 |---|---|---|---|
 | `OPENAI_API_KEY` | yes | API key for your LLM provider | `sk-...` or `lmstudio` |
 | `OPENAI_API_BASE` | yes | Base URL of OpenAI-compatible API | `https://api.openai.com/v1` |
-| `OPENAI_MODEL` | yes | Main response-generation model (Fast mode) | `gpt-4o` |
+| `OPENAI_MODEL` | yes | Main response-generation model | `gpt-4o` |
 | `QUERY_MODEL` | no | Model for query rewriting and rolling summarisation. Falls back to `OPENAI_MODEL`. | `gpt-4o-mini` |
-| `REASONING_MODEL` | no | Model for Thinking mode. Falls back to `OPENAI_MODEL` when unset. | `o3-mini` |
+| `REASONING_MODEL` | no | Reserved for reasoning/CoT support; currently unused by the active pipeline. | `o3-mini` |
 | `VISION_MODEL` | no | Multimodal model for OCR of scanned PDFs and embedded images. | `gpt-4o-mini` |
 | `OPENAI_VISION_API_BASE` | no | Base URL for vision model if on a different server. Falls back to `OPENAI_API_BASE`. | `http://host.docker.internal:11434/v1` |
 | `DENSE_EMBEDDINGS_MODEL` | yes | Embedding model name | `text-embedding-3-small` |
@@ -85,23 +88,16 @@ OPENAI_API_KEY=lmstudio
 OPENAI_API_BASE=http://host.docker.internal:1234/v1
 OPENAI_MODEL=your-chat-model
 QUERY_MODEL=your-fast-model
-REASONING_MODEL=your-reasoning-model   # optional
+# REASONING_MODEL is currently unused by the active pipeline — leave empty or remove.
+# REASONING_MODEL=your-reasoning-model
 VISION_MODEL=your-vision-model         # optional
 DENSE_EMBEDDINGS_MODEL=your-embedding-model
 DENSE_EMBEDDING_DIM=1024
 ```
 
-### Answering Modes
+### Agentic Pipeline
 
-The mode selector is visible in the chat input bar. Mode is sent with every message.
-
-| Mode | Model used | LangGraph pipeline |
-|---|---|---|
-| ⚡ Fast | `OPENAI_MODEL` | rewrite → hybrid retrieval → stream |
-| 🧠 Thinking | `REASONING_MODEL` (fallback: `OPENAI_MODEL`) | same as Fast |
-| 🤖 Agentic | `OPENAI_MODEL` | full multi-node graph (see below) |
-
-**Agentic pipeline nodes:**
+The LangGraph-based agentic pipeline automatically adapts to query complexity:
 
 ```
 rewrite_query → context_router → decompose_query → parallel_retrieval
@@ -113,9 +109,9 @@ rewrite_query → context_router → decompose_query → parallel_retrieval
 
 All steps are streamed to the UI as collapsible timeline entries in real time.
 
-### Agentic Pipeline Features
+### Pipeline Features
 
-Beyond the basic pipeline, the Agentic mode includes:
+Beyond the basic retrieval, the pipeline includes:
 
 - **Reinforced scoring** — a chunk retrieved by N sub-queries has its RRF score multiplied by N, making broadly relevant chunks rank higher
 - **Confidence scoring** — per-query confidence levels (low/medium/high) based on coverage and chunk quality
@@ -141,8 +137,8 @@ Files attached to chat messages are processed ephemerally — **not** indexed in
 3. **Upload guards:** 10 MB file size limit; token budget = 25% of `OPENAI_MODEL_CONTEXT_SIZE`. Files exceeding the token budget are rejected with a clear error message.
 4. Markdown stored in MySQL `chat_files` table.
 5. On next message, file content is injected into the pipeline.
-   - **Fast / Thinking mode:** full approved content passed to the LLM (no truncation).
-   - **Agentic mode:** `extract_file_sections` node uses the LLM to select 3–6 most relevant sections; files ≤ 12,000 chars are passed through unchanged.
+   - Full approved content passed to the LLM (no truncation)
+   - `extract_file_sections` node uses the LLM to select 3–6 most relevant sections; files ≤ 12,000 chars are passed through unchanged
 6. Prior-turn files in the same chat are re-injected for continuity.
 7. Files are deleted when the chat is deleted.
 
@@ -452,16 +448,15 @@ Login: System=MySQL, Server=`db`, User=`ragwebui`, Password=`ragwebui`, Database
 
 - Upload PDF, DOCX, PPTX, XLSX, Markdown, HTML, CSV, JSON, XML, email, EPUB, images (OCR), ZIP archives
 - Optional OCR for scanned PDFs and embedded images via `markitdown-ocr` — enabled by `VISION_MODEL`
-- **Three answering modes**: Fast ⚡ (low-latency), Thinking 🧠 (reasoning model), Agentic 🤖 (full pipeline)
 - **Agentic pipeline**: query decomposition → parallel sub-query retrieval with reinforced scoring → LLM draft-grade loop → widened retrieval retry → keyword search fallback → partial-answer transparency
-- **Agentic extras**: confidence scoring, query classification (FACTUAL/ENTITY_CENTRIC/MULTI_PART/AMBIGUOUS), tool trace, synthesis mode
+- **Pipeline extras**: confidence scoring, query classification (FACTUAL/ENTITY_CENTRIC/MULTI_PART/AMBIGUOUS), tool trace, synthesis mode
 - **3-leg hybrid retrieval**: dense vector + SPLADE sparse + MySQL FULLTEXT, fused by weighted RRF
 - **GraphRAG**: optional entity/relationship extraction into Neo4j with graph-traversal retrieval expansion
 - **Cross-encoder reranking**: retrieved candidates re-ranked by a local cross-encoder before context assembly
-- **Chat file upload**: attach any supported document; content injected directly into pipeline (not indexed); 10 MB size limit + 25% context-window token budget; smart section extraction in Agentic mode
+- **Chat file upload**: attach any supported document; content injected directly into pipeline (not indexed); 10 MB size limit + 25% context-window token budget; smart section extraction
 - **Chat features**: branching (multiple answer variants), folder organisation, message search, chat export (Markdown), message export (PDF/Word/image), pagination (infinite scroll), collapsible sidebar with localStorage persistence
 - **Streaming responses** with real-time AgentTimeline showing each pipeline step (active → done with detail on click)
-- **Clickable citations** `[N]` in all answering modes — linked to source chunk with score bar and leg badge
+- **Clickable citations** `[N]` in answers — linked to source chunk with score bar and leg badge
 - **Stop button** during generation (AbortController); partial message preserved with `*(generation stopped)*`
 - **Rate limiting** on login: 3 failed attempts trigger exponential backoff (15s → 30s → 60s → 120s → 240s → 480s → 900s)
 - **Multi-tenancy**: org-level user management, per-org LLM config, and data source assignment

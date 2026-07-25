@@ -151,9 +151,9 @@ banner is shown, since there are no results to qualify.
 
 ---
 
-## Confidence in Agentic mode
+## Confidence in the Agentic Pipeline
 
-In Agentic mode the confidence score reported in the `context` event is derived from **sub-query coverage** rather than from the 4-signal formula above:
+In the agentic pipeline the confidence score reported in the `context` event is derived from **sub-query coverage** rather than from the 4-signal formula above:
 
 ```
 confidence_score = covered_sub_queries / total_sub_queries
