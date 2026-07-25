@@ -4,7 +4,7 @@ download_assets.py — pre-download all model assets required by the backend.
 
 Currently downloads:
   1. FastEmbed SPLADE sparse-embedding model (hybrid retrieval, sparse leg)
-  2. Cross-encoder reranker model (post-RRF reranking)
+  2. FastEmbed ONNX cross-encoder reranker model (post-RRF reranking)
 
 Usage:
     python download_assets.py [options]
@@ -21,7 +21,7 @@ Defaults are read from environment variables (or .env) matching backend config:
     FASTEMBED_CACHE_DIR  (default: ./assets/fastembed)
     SPLADE_MODEL         (default: prithivida/Splade_PP_en_v1)
     RERANKER_CACHE_DIR   (default: ./assets/reranker)
-    RERANKER_MODEL       (default: cross-encoder/ms-marco-MiniLM-L-12-v2)
+    RERANKER_MODEL       (default: Xenova/ms-marco-MiniLM-L-12-v2)
 """
 
 import argparse
@@ -72,17 +72,17 @@ def download_reranker(model_name: str, cache_dir: str) -> None:
     print(f"  cache_dir  : {os.path.abspath(cache_dir)}")
 
     try:
-        from sentence_transformers import CrossEncoder
+        from fastembed.rerank.cross_encoder import TextCrossEncoder
     except ImportError:
-        print("\n[ERROR] sentence-transformers is not installed.")
-        print("        Run:  pip install sentence-transformers")
+        print("\n[ERROR] fastembed is not installed.")
+        print("        Run:  pip install fastembed")
         sys.exit(1)
 
     os.makedirs(cache_dir, exist_ok=True)
 
     print("\nDownloading / verifying model files …")
     t0 = time.time()
-    CrossEncoder(model_name, cache_folder=cache_dir)
+    TextCrossEncoder(model_name=model_name, cache_dir=cache_dir)
     elapsed = time.time() - t0
 
     print(f"Done in {elapsed:.1f}s.\n")
@@ -96,7 +96,7 @@ def main() -> None:
     default_splade_cache   = os.getenv("FASTEMBED_CACHE_DIR", os.path.join(project_root, "assets", "fastembed"))
     default_splade_model   = os.getenv("SPLADE_MODEL", "prithivida/Splade_PP_en_v1")
     default_reranker_cache = os.getenv("RERANKER_CACHE_DIR", os.path.join(project_root, "assets", "reranker"))
-    default_reranker_model = os.getenv("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-12-v2")
+    default_reranker_model = os.getenv("RERANKER_MODEL", "Xenova/ms-marco-MiniLM-L-12-v2")
 
     parser = argparse.ArgumentParser(description="Pre-download RAG-Web-UI model assets.")
     parser.add_argument("--cache-dir", default=default_splade_cache,
@@ -126,7 +126,7 @@ def main() -> None:
         step += 1
 
     if not args.skip_reranker:
-        print(f"[{step}/{total}] Cross-encoder reranker model (sentence-transformers)")
+        print(f"[{step}/{total}] Cross-encoder reranker model (FastEmbed ONNX)")
         download_reranker(model_name=args.reranker_model, cache_dir=args.reranker_cache_dir)
         step += 1
 
