@@ -1,313 +1,377 @@
-# RAG Web UI Architecture
+# RAG Web UI - Architecture Diagram
 
-## Overview
-
-A self-hosted knowledge base Q&A system with multi-tenant org management, agentic multi-step retrieval, 3-leg hybrid retrieval, and optional GraphRAG.
+## System Overview
 
 ```
-USER REQUEST → [Frontend:3000] → [Backend API:8000] → [Agentic Pipeline] → [LLM] → STREAMING RESPONSE
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              Browser / Client                                │
+│                         (Next.js 14 + TypeScript)                           │
+└──────────────────────────────┬──────────────────────────────────────────────┘
+                               │ HTTPS / SSE
+                               ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            FastAPI Backend                                   │
+│                         (Python 3.11 + LangGraph)                           │
+└──────────────────────────────┬──────────────────────────────────────────────┘
+                               │
+           ┌───────────────────┼───────────────────┐
+           │                   │                   │
+           ▼                   ▼                   ▼
+┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
+│     MySQL 8.4    │  │     Qdrant       │  │     Neo4j        │
+│  (Primary DB)    │  │  (Vector DB)     │  │   (Graph DB)     │
+│  - Users         │  │  - Dense Embeds  │  │  - Entities      │
+│  - Orgs          │  │  - Sparse Embeds │  │  - Relationships │
+│  - Chats         │  │                  │  │                  │
+│  - Knowledge     │  │                  │  │                  │
+│  - Documents     │  │                  │  │                  │
+└──────────────────┘  └──────────────────┘  └──────────────────┘
+           │                   │                   │
+           └───────────────────┼───────────────────┘
+                               │
+                               ▼
+                    ┌──────────────────┐
+                    │     Redis        │
+                    │  (Cache + State)  │
+                    │  - LangGraph     │
+                    │    Checkpoints   │
+                    │  - Response Cache│
+                    └──────────────────┘
 ```
 
----
+## Component Architecture
 
-## Answering Modes
+```mermaid
+graph TB
+    subgraph "Frontend Layer"
+        UI[Next.js App]
+        Pages[Pages: Dashboard, Chat, Knowledge, Admin]
+        Components[React Components]
+        Context[React Context State]
+        APIlib[API Client Library]
+    end
 
-### Single Agentic Pipeline (`agentic_rag/agentic_rag.py`)
+    subgraph "API Layer"
+        Router[API Router]
+        Auth[Auth Endpoints]
+        Chat[Chat Endpoints]
+        KB[Knowledge Base Endpoints]
+        Query[Query Endpoints]
+        Admin[Admin Endpoints]
+    end
 
-The codebase consolidates to a single agentic pipeline. The former Fast/Thinking (`fast_pipeline.py`) and Agentic LangGraph (`rag_graph/`) pipelines have been removed. The agentic agent is now the sole production pipeline.
+    subgraph "Service Layer"
+        AgenticRAG[Agentic RAG Service]
+        Retrieval[Retrieval Service]
+        Ingestion[Ingestion Service]
+        Graph[Graph Service]
+        ChatService[Chat Service]
+        Watcher[DataStore Watcher]
+    end
+
+    subgraph "Data Layer"
+        MySQL[(MySQL Database)]
+        Qdrant[(Qdrant Vector DB)]
+        Neo4j[(Neo4j Graph DB)]
+        Redis[(Redis Cache)]
+        Storage[Local File Storage]
+    end
+
+    UI --> APIlib
+    Pages --> Components
+    Components --> Context
+    APIlib --> Router
+
+    Router --> Auth
+    Router --> Chat
+    Router --> KB
+    Router --> Query
+    Router --> Admin
+
+    Chat --> AgenticRAG
+    Chat --> ChatService
+    Query --> AgenticRAG
+    KB --> Ingestion
+    Admin --> Watcher
+
+    AgenticRAG --> Retrieval
+    AgenticRAG --> Graph
+    Ingestion --> Retrieval
+    Ingestion --> Graph
+
+    Retrieval --> Qdrant
+    Retrieval --> MySQL
+    Graph --> Neo4j
+    ChatService --> MySQL
+    AgenticRAG --> Redis
+    Watcher --> Storage
+    Ingestion --> Storage
+
+    Auth --> MySQL
+    Admin --> MySQL
+    KB --> MySQL
+```
+
+## Agentic RAG Pipeline Flow
+
+```mermaid
+graph LR
+    A[User Query] --> B[Query Rewriting]
+    B --> C[Query Classification]
+    C --> D{Query Type}
+
+    D -->|FACTUAL| E[Direct Retrieval]
+    D -->|ENTITY_CENTRIC| F[Entity Extraction + Graph Retrieval]
+    D -->|MULTI_PART| G[Subtask Decomposition]
+    D -->|AMBIGUOUS| H[Query Expansion]
+
+    G --> G1[Parallel Subtasks]
+    G1 --> E
+
+    E --> I[Hybrid Retrieval]
+    I --> I1[Dense Search Qdrant]
+    I --> I2[Sparse Search SPLADE]
+    I --> I3[Exact Search MySQL]
+    I --> I4[Graph Search Neo4j]
+
+    I1 --> J[RRF Fusion]
+    I2 --> J
+    I3 --> J
+    I4 --> J
+
+    J --> K[Cross-Encoder Reranking]
+    K --> L[Answer Generation]
+    L --> M[Confidence Scoring]
+    M --> N[Streaming Response]
+
+    F --> I4
+    H --> B
+```
+
+## Document Ingestion Pipeline
+
+```mermaid
+graph TB
+    A[File Upload] --> B[Storage Save]
+    B --> C[Processing Task Created]
+    C --> D[Document Converter]
+    D --> E[MarkItDown + OCR]
+    E --> F[Markdown Cleaner]
+    F --> G[Text Splitter]
+    G --> H[Chunk Generation]
+
+    H --> I1[Dense Embedding OpenAI]
+    H --> I2[Sparse Embedding SPLADE]
+    H --> I3[MySQL FULLTEXT Index]
+
+    I1 --> J1[Qdrant Dense Collection]
+    I2 --> J2[Qdrant Sparse Collection]
+    I3 --> J3[MySQL Chunks Table]
+
+    H --> K[Entity Extraction]
+    K --> K1{GraphRAG Enabled?}
+    K1 -->|Yes| L[LLM Extraction]
+    K1 -->|No| M[Skip Graph]
+    L --> N[Neo4j Upsert]
+
+    J1 --> O[Progress Update 100%]
+    J2 --> O
+    J3 --> O
+    N --> O
+    M --> O
+```
+
+## Multi-Tenant Data Model
+
+```mermaid
+erDiagram
+    ORGANIZATION ||--o{ USER : has
+    ORGANIZATION ||--o{ KNOWLEDGE_BASE : owns
+    ORGANIZATION ||--o{ CHAT : owns
+    ORGANIZATION ||--o{ DATASTORE : uses
+    ORGANIZATION }|--|| ORGANIZATION : parent_child
+
+    USER ||--o{ CHAT : creates
+    USER }|--|| ORGANIZATION : belongs_to
+
+    KNOWLEDGE_BASE ||--o{ DOCUMENT : contains
+    KNOWLEDGE_BASE ||--o{ KNOWLEDGE_BASE_DATASTORE : uses
+    DOCUMENT ||--o{ DOCUMENT_CHUNK : has
+    DOCUMENT ||--o{ PROCESSING_TASK : tracks
+
+    CHAT ||--o{ MESSAGE : contains
+    CHAT ||--o{ CHAT_FILE : has_attachments
+    MESSAGE ||--o{ MESSAGE_CITATION : cites
+    CHAT }|--|| FOLDER : organized_in
+
+    DATASTORE ||--o{ DATASTORE_FILE_MANIFEST : indexes
+    DATASTORE ||--o{ ORGANIZATION_DATASTORE : shared_with
+```
+
+## API Endpoint Structure
 
 ```
-User Query
+/api
+├── /auth
+│   ├── POST /register (User registration)
+│   ├── POST /token (JWT login)
+│   ├── GET /admin-only (Admin test endpoint)
+│   ├── POST /change-password (Change password)
+│   └── GET /me (Get current user info)
+├── /chat
+│   ├── GET / (List chats)
+│   ├── POST / (Create chat)
+│   ├── GET /search (Full-text search across messages)
+│   ├── GET /{id} (Get chat with messages)
+│   ├── DELETE /{id} (Delete chat)
+│   ├── PATCH /{id} (Update chat: title, pinned, KBs)
+│   ├── POST /{id}/cancel (Cancel streaming response)
+│   ├── POST /{id}/message (Send message with SSE streaming)
+│   ├── GET /{id}/messages/paginated (Paginated messages)
+│   ├── DELETE /{id}/messages/{msg_id} (Delete message)
+│   ├── PATCH /{id}/messages/{msg_id} (Edit message)
+│   └── POST /{id}/branch (Create branch from message)
+├── /chat/{chat_id}/files
+│   ├── POST / (Upload file to chat)
+│   ├── GET /{file_id} (Get file status)
+│   ├── DELETE /{file_id} (Delete file)
+│   └── GET /{file_id}/download (Download file)
+├── /folders
+│   ├── POST / (Create folder)
+│   ├── GET / (List user's folders)
+│   ├── PATCH /{folder_id} (Rename folder)
+│   ├── DELETE /{folder_id} (Delete folder)
+│   ├── PATCH /{folder_id}/chats/{chat_id} (Assign chat to folder)
+│   └── DELETE /{folder_id}/chats/{chat_id} (Unassign chat)
+├── /knowledge-base
+│   ├── POST / (Create KB)
+│   ├── GET / (List user's KBs with data sources)
+│   ├── GET /{kb_id} (Get KB details)
+│   ├── PUT /{kb_id} (Update KB)
+│   ├── DELETE /{kb_id} (Delete KB with conditional cascade)
+│   ├── POST /{kb_id}/documents/upload (Batch upload documents)
+│   ├── POST /{kb_id}/preview (Preview chunking)
+│   ├── DELETE /{kb_id}/documents/{doc_id} (Delete document)
+│   ├── POST /{kb_id}/data-sources (Link data sources)
+│   ├── DELETE /{kb_id}/data-sources/{ds_id} (Unlink data source)
+│   └── POST /{kb_id}/test-retrieval (Test retrieval on KB)
+├── /query
+│   ├── POST / (Stateless RAG query - no chat session)
+│   └── GET /kb/{kb_id}/ingest-status (KB processing status)
+├── /config
+│   └── GET / (Client config: chunk_size, chunk_overlap)
+└── /admin (Superadmin only)
+    ├── /orgs
+    │   ├── GET / (List all orgs - hierarchical)
+    │   ├── POST / (Create org - parent_id required)
+    │   ├── PATCH /{org_id} (Update org)
+    │   ├── DELETE /{org_id} (Delete org)
+    │   ├── GET /{org_id}/llm-config (Get org LLM config)
+    │   ├── PUT /{org_id}/llm-config (Upsert org LLM config)
+    │   └── GET /{org_id}/ingestion-status (Org ingestion status)
+    ├── /users
+    │   ├── GET / (List all users)
+    │   ├── POST / (Create user)
+    │   ├── PATCH /{user_id} (Update user)
+    │   ├── DELETE /{user_id} (Delete user)
+    │   └── POST /{user_id}/change-password (Change user password)
+    └── /datastores
+        ├── GET / (List all datastores)
+        ├── POST / (Create datastore)
+        ├── GET /{id} (Get datastore details)
+        ├── PATCH /{id} (Update datastore)
+        ├── DELETE /{id} (Delete datastore)
+        ├── POST /{id}/assign (Assign to orgs)
+        ├── DELETE /{id}/assign (Unassign from orgs)
+        ├── POST /{id}/scan (Trigger manual scan)
+        ├── POST /{id}/stop-scan (Stop scan)
+        ├── GET /{id}/scan-progress (Get scan progress)
+        ├── GET /{id}/scan-progress-stream (SSE scan progress)
+        ├── GET /scan-status (All scan status)
+        ├── POST /{id}/flush (Flush pending changes)
+        ├── GET /recovery-status (All recovery status)
+        ├── GET /{id}/recovery-status (Specific recovery status)
+        ├── GET /{id}/recovery-stream (SSE recovery stream)
+        └── POST /{id}/recover (Trigger recovery)
+```
+
+## Hybrid Retrieval Architecture
+
+```
+Query
   │
-  ├─ 1. Rewrite query using chat history (LLM)
-  ├─ 2. Classify: simple (direct) or complex (decompose)
+  ├─→ Dense Vector Search (Qdrant)
+  │   └─→ OpenAI text-embedding-3-small
+  │   └─→ Cosine similarity
+  │   └─→ Top-k results
   │
-  └─ SIMPLE path:
-      rewrite → hybrid search → rerank → stream answer
+  ├─→ Sparse Vector Search (Qdrant)
+  │   └─→ SPLADE sparse embeddings
+  │   └─→ CPU-based FastEmbed
+  │   └─→ Top-k results
   │
-  └─ COMPLEX path:
-      rewrite → decompose into sub-queries
-        └─ FOR EACH SUBTASK:
-            rewrite sub-query → search → rerank → stream answer (token-by-token)
-            update task list in UI
-      └─ FINAL: synthesize all subtask answers → grade → stream final summary
-         lightweight self-review (non-blocking)
+  ├─→ Exact Keyword Search (MySQL)
+  │   └─→ FULLTEXT index
+  │   └─→ BM25 ranking
+  │   └─→ Top-k results
+  │
+  └─→ Graph Retrieval (Neo4j)
+      └─→ Entity/relationship traversal
+      └─→ Multi-hop queries
+      └─→ Top-k results
+
+RRF Fusion (Reciprocal Rank Fusion)
+  │
+  ├─→ Combine rankings from all legs
+  ├─→ Apply configurable weights
+  └─→ Produce unified ranking
+
+Cross-Encoder Reranking
+  │
+  ├─→ ms-marco-MiniLM-L-6-v2
+  ├─→ Re-score top N results
+  └─→ Final ranked context
 ```
 
-**Model auto-selection:** heuristic keyword matching on subtask text (`compare`, `analyze`, `design`, etc.) selects between `OPENAI_MODEL` and `REASONING_MODEL`. No extra LLM classification call.
+## Technology Stack Summary
 
-**Model selection for complex queries:** if the overall query matches thinking keywords, all subtasks use `REASONING_MODEL`; otherwise `OPENAI_MODEL`.
+### Backend
+- **Framework**: FastAPI with async support
+- **Agent Orchestration**: LangGraph (StateGraph with streaming)
+- **LLM Framework**: LangChain
+- **ORM**: SQLAlchemy with Alembic migrations
+- **Vector Database**: Qdrant (dense + sparse embeddings)
+- **Graph Database**: Neo4j (GraphRAG)
+- **Primary Database**: MySQL 8.4 with FULLTEXT search
+- **Cache/State**: Redis Stack (LangGraph checkpoints)
+- **Document Processing**: MarkItDown with OCR support
+- **Embeddings**: OpenAI (dense), SPLADE/FastEmbed (sparse)
+- **Reranking**: ms-marco MiniLM cross-encoder
 
----
+### Frontend
+- **Framework**: Next.js 14 (App Router)
+- **Language**: TypeScript
+- **Styling**: Tailwind CSS
+- **Components**: shadcn/ui (Radix UI primitives)
+- **State Management**: React Context
+- **Markdown**: react-markdown with syntax highlighting
+- **Charts**: echarts
+- **Diagrams**: mermaid
 
-## Data Flow
+### Infrastructure
+- **Containerization**: Docker Compose
+- **Reverse Proxy**: Custom Next.js server
+- **Database Admin**: Adminer
+- **File Storage**: Local filesystem with volume mounts
+- **Network**: Bridge network with service discovery
 
-### 1. Document Ingestion Pipeline
+## Key Architectural Patterns
 
-**Direct uploads:** PDF, DOCX, PPTX, XLSX, TXT, MD, HTML, CSV, JSON, XML, MSG, EML, EPUB, images (JPG/PNG/GIF/BMP/TIFF), ZIP
-
-**Event-driven ingestion (DataStores):** same formats, detected via watchdog filesystem events.
-
-**Parsing:** MarkItDown (Microsoft) — single library for all formats, producing consistent Markdown output. OCR via `markitdown-ocr` when `VISION_MODEL` is set.
-
-```
-Upload (PDF / DOCX / PPTX / XLSX / TXT / MD / HTML / CSV / JSON /
-        XML / MSG / EML / EPUB / images (OCR) / ZIP)
-    │
-    ▼
-document_processor.py
-    ├── MarkItDown → Markdown (OCR via VISION_MODEL when set)
-    ├── RecursiveCharacterTextSplitter → chunks
-    ├── Dense embedding → Qdrant (per-KB collection kb_<id>)
-    ├── SPLADE sparse embedding → Qdrant (named sparse vector)
-    ├── chunk_text + metadata → MySQL document_chunks (for FTS)
-    └── graph_service.py [GRAPHRAG_ENABLED=true]
-            └── LLMEntityRelationExtractor → Neo4j Entity nodes + relationships
-                → (chunk)-[:FROM_CHUNK]->(entity) keyed by qdrant_point_id
-```
-
-### 2. Agentic Pipeline (`agentic_rag/agentic_rag.py`)
-
-The sole production pipeline. `chat_service.generate_response()` delegates to `run_agentic_rag()` when `answering_mode = "agentic"` (the current default).
-
-```
-User message
-    │
-    ▼
-chat_service.generate_response()
-    ├── answeringMode = "agentic"
-    └── run_agentic_rag()
-            ├─ 1. Rewrite query (LLM: QUERY_MODEL)
-            ├─ 2. Classify: simple or complex (heuristic, no LLM call)
-            │
-            ├─ SIMPLE path:
-            │   → hybrid search → rerank → stream answer
-            │
-            └─ COMPLEX path:
-                → decompose into N sub-queries (LLM)
-                └─ FOR EACH SUBTASK:
-                    → rewrite sub-query → search → rerank
-                    → stream answer (token-by-token) with progress events
-                → synthesize final answer
-                → lightweight post-review (non-blocking)
-```
-
-**Event protocol (SSE prefixes):**
-- `p:` progress — transient status messages
-- `t:` task_list — subtask list with status
-- `th:` thinking — reasoning model chain-of-thought
-- `0:` token — streaming answer text
-- `1:` rewritten_query — standalone rewritten query (internal)
-- `2:` context — retrieved documents
-- `3:` error — exception message
-- `d:` done — finish reason + usage
-
-The frontend `agent-timeline.tsx` renders `p:`, `t:`, and `th:` events as real-time progress indicators. All other events follow the same contract as the previous `rag_graph.run_stream()` format.
-
-### 4. Chat File Upload Pipeline
-
-```json
-POST /api/chat/{chat_id}/files
-    ├── 10 MB size guard
-    ├── Save to uploads/ephemeral/{chat_id}/
-    ├── Background: MarkItDown → Markdown → token estimate
-    │       ├── token_count > 25% of OPENAI_MODEL_CONTEXT_SIZE → status=error
-    │       └── else → status=ready, markdown_content stored in MySQL
-    └── Client polls /files/{file_id} for status
-
-User sends message with file
-    └── Agentic: file_markdown passed to run_agentic_rag() — full content, no truncation. File section selection uses LLM-based heuristic.
-
-Chat delete → rm -rf uploads/ephemeral/{chat_id}/
-```
-
-### 5. Multi-Tenancy Flow
-
-```
-Admin creates org
-    ├── Assign users (role: user/admin/super_admin, org_id)
-    ├── Assign data sources (DataStore → OrganisationDataStore)
-    ├── Configure LLM settings (org LLM config, ingestion status)
-    └── Configure file watchers (per-datastore local dir)
-
-User creates chat (user_id, org_id)
-    ├── Chats are user-scoped (Chat.user_id == current_user.id)
-    └── Knowledge bases are filtered by org_id
-
-Admin creates data store (folder_path, scan_pattern)
-    ├── Auto-scan (event-driven, not periodic) with debouncing interval
-    ├── Assign to orgs (OrganisationDataStore junction)
-    └── Per-datastore file watcher picks up new files from the folder
-```
-
----
-
-## Backend Code Structure
-
-```
-backend/app/
-├── api/api_v1/
-│   ├── auth.py             # JWT login / register / rate limiting / token test
-│   ├── chat.py             # Chat endpoints; extracts answering_mode from request body
-│   ├── chat_files.py       # Ephemeral file upload, status poll, download, delete
-│   ├── folders.py          # Chat folder management
-│   ├── knowledge_base.py   # KB + document CRUD, upload, processing
-│   ├── admin.py            # Org CRUD, LLM config, ingestion status, users, watchers
-│   ├── datastores.py       # DataStore CRUD, assign/unassign, scan status
-│   ├── watcher.py          # Per-org file watcher endpoints
-│   ├── query.py            # Stateless RAG query, KB ingest status
-│   └── api.py              # Router aggregation, /config endpoint
-├── core/
-│   ├── config.py           # All settings (pydantic-settings); OPENAI_MODEL,
-│   │                         QUERY_MODEL, REASONING_MODEL, VISION_MODEL,
-│   │                         OPENAI_MODEL_CONTEXT_SIZE, RERANKER_*, GRAPHRAG_*
-│   ├── security.py         # Password hashing, JWT, rate limiting
-│   └── storage.py          # Local filesystem helpers
-├── models/                 # SQLAlchemy ORM: User, KnowledgeBase, Document,
-│                             DocumentChunk, ProcessingTask, Chat, Message, ChatFile
-├── services/
-│   ├── agentic_rag/        # Single agentic pipeline (rewrite → classify → subtasks → stream)
-│   │   ├── agentic_rag.py  # Autonomous agent: rewrite, decompose, iterate, synthesize
-│   │   ├── context_manager.py  # Token budgeting
-│   │   ├── user_profile.py   # User preference store
-│   │   └── tools/            # Safe DB query, graph query tools
-│   ├── chat_service.py     # Routes to run_agentic_rag()
-│   ├── retrieval.py        # 3-leg hybrid search + weighted RRF + adaptive presets
-│   ├── reranker.py         # Cross-encoder reranking (score_threshold configurable)
-│   ├── document_processor.py # Ingest: parse → chunk → embed → index
-│   ├── graph_service.py    # Neo4j ingestion + graph expansion/enrichment
-│   ├── entity_extractor.py # LLM entity extraction from queries + Neo4j score boost
-│   ├── confidence.py       # 4-level retrieval confidence scoring
-│   ├── export_service.py   # PDF/Word/Image export
-│   └── markdown_cleaner.py # Post-processing for LLM markdown output
-└── startup/                # Alembic auto-migrate on startup
-```
-
-## Frontend Code Structure
-
-```
-frontend/src/
-├── app/
-│   ├── dashboard/
-│   │   ├── chat/[id]/page.tsx    # Chat view: messages, streaming, AgentTimeline,
-│   │   │                           mode selector, stop button, abort controller
-│   │   ├── chat/new/page.tsx     # New chat: select KB + retrieval options
-│   │   ├── admin/                # Admin panel: orgs, users, data sources, watcher
-│   │   ├── knowledge/            # KB management CRUD
-│   │   └── test-retrieval/[id]/  # KB retrieval test page
-│   └── api/chat/[id]/
-│       ├── messages/route.ts           # Streaming proxy
-│       ├── messages/with-file/route.ts # File+message streaming proxy
-│       └── files/[fileId]/download/route.ts
-├── components/chat/
-│   ├── agent-timeline.tsx  # Real-time pipeline step display (active/done collapsibles)
-│   │                         Events: p: (progress), t: (task list), th: (thinking)
-│   ├── answer.tsx          # Markdown renderer with [N](N) citation link parsing
-│   │                         Think blocks, confidence score, query classification badge,
-│   │                         tool trace, retrieved context blocks, citation popovers
-│   ├── chat-input.tsx      # Textarea + mode selector (agentic mode)
-│   │                         + Stop button (replaces Send during generation)
-│   │                         + KB selector + file upload chip
-│   ├── chat-sidebar.tsx    # Collapsible sidebar; drag-to-folder; message search
-│   │                         Chat export, folder create/rename/delete
-│   ├── file-attachment.tsx # Pre-send dropzone chip + post-send download chip
-│   ├── branch-picker.tsx   # Chat branching (multiple answer variants) with sibling navigation
-│   └── mermaid-diagram.tsx # Mermaid diagram rendering in answers
-└── middleware.ts            # Route protection (redirect to /login)
-```
-
----
-
-## Docker Stack
-
-| Service | Image | Purpose |
-|---|---|---|
-| `backend` | custom (Python FastAPI) | API server + pipeline |
-| `frontend` | custom (Next.js) | Web UI |
-| `qdrant` | `qdrant/qdrant` | Vector database |
-| `db` | `mysql:8` | Relational data + FULLTEXT index |
-| `neo4j` | `neo4j:2026.04` | Entity/relationship graph (GraphRAG) |
-| `adminer` | `adminer` | MySQL web GUI (dev compose only, port 8081) |
-
----
-
-## Key Architectural Decisions
-
-### 1. Single Agentic Pipeline with Simple/Complex Branching
-The codebase consolidates to one production pipeline: `agentic_rag/agentic_rag.py`. The former Fast/Thinking (`fast_pipeline.py`) and Agentic LangGraph (`rag_graph/`) pipelines were removed as dead code. The agent classifies queries as simple (direct answer) or complex (subtask decomposition) using heuristic keyword matching — no extra LLM classification call.
-
-### 2. Inline Streaming for Complex Subtasks
-Rather than buffering all results, each subtask streams tokens in real-time. The UI shows a task list that updates as each subtask completes. The final synthesis is a lightweight post-review that never blocks streaming.
-
-### 3. Reinforced Scoring (via shared `retrieval.py`)
-A chunk retrieved for N sub-queries has its RRF score accumulated across those N results. Chunks central to many aspects of the question naturally rank higher than chunks relevant to only one edge. Implemented in the shared `retrieval.hybrid_search_with_legs()` and `_dedup_and_reinforce()` logic used by all retrieval paths.
-
-### 4. File Token Budget Before Pipeline
-Both file size (10 MB) and token count (25% of `OPENAI_MODEL_CONTEXT_SIZE`) are enforced at upload/processing time — not at generation time. By the time a file reaches the pipeline, it has already been approved. No silent truncation at the LLM boundary.
-
-### 5. Simple vs Complex Branching
-For simple queries, the agent takes a direct path: rewrite → search → rerank → stream. For complex queries, it decomposes into subtasks with progress events. Heuristic keyword matching (`compare`, `analyze`, `design`, etc.) determines the path. No LLM classification overhead.
-
-### 6. Real-Time Progress Events
-The agentic pipeline emits `p:` (progress), `t:` (task list), and `th:` (thinking) SSE events. The frontend `agent-timeline.tsx` renders these as live progress indicators — no LangGraph `on_chain_start` intercept needed.
-
-### 7. 3-Leg Hybrid Retrieval with Adaptive Presets
-Dense vectors handle paraphrases; SPLADE captures TF-IDF signal; MySQL FTS handles exact keywords. Weighted RRF fuses all three. Per-query-type presets (`RETRIEVAL_CONFIG_PRESETS`) allow different leg weights for FACTUAL vs ENTITY_CENTRIC vs MULTI_PART queries.
-
-### 8. GraphRAG: Qdrant + Neo4j Strict Separation
-Vectors live exclusively in Qdrant. Neo4j Chunk nodes are keyed by `qdrant_point_id`. Graph expansion finds chunks not in the top-K by traversing entity edges; enrichment appends entity triples to existing chunks. Neither operation requires re-embedding.
-
-### 9. OpenAI-Compatible API Throughout
-Four model roles — `OPENAI_MODEL`, `QUERY_MODEL`, `REASONING_MODEL`, `VISION_MODEL` — all point at OpenAI-compatible endpoints and can be on different servers via `OPENAI_API_BASE` / `OPENAI_VISION_API_BASE`. Switching models requires only `.env` changes, no code changes.
-
-### 10. AbortController for Stop
-The frontend holds an `AbortController` in a ref. The Stop button calls `abortControllerRef.current.abort()`. The `fetch` stream catches `AbortError` and preserves the partial message with `*(generation stopped)*` appended. Real errors show a toast and remove the placeholder.
-
-### 11. Multi-Tenancy with Org-Scoped Chats
-Chats are user-scoped (`Chat.user_id == current_user.id`), not org-scoped. Users can only see their own chats regardless of org membership. Knowledge bases are org-scoped, so users only see KBs in their org. Admins and super admins see across all orgs.
-
-### 12. DataStore Event-Driven Ingestion
-
-DataStores are separate from KnowledgeBases — they have no KB relationship. File ingestion happens via two independent paths:
-
-**Event-driven (watchdog):**
-```
-File added/modified/deleted in datastore folder
-    │
-    ▼
-DatastoreFileEventHandler
-    ├── Watchdog observer (PollingObserver on macOS Docker, InotifyObserver on Linux)
-    ├── _resolve_datastore() — finds which datastore's folder_path contains the event
-    ├── _should_process() — per-file debounce (1s window)
-    ├── _dispatch() — 1s write-completion delay via _SyntheticEvent, then debouncer
-    └── _queue_change() → _process_pending_changes() → _on_changes()
-            │
-            ├── _handle_file() — the real entry point
-            │     ├── Event = "deleted" → _handle_deletion()
-            │     ├── Document exists + hash changed → _update_document()
-            │     └── Document doesn't exist → _ingest_file()
-            └── _refresh_file_count() — updates last_scan_total_files
-
-**Manual scan (user clicks "Scan"):**
-```
-POST /datastores/{id}/scan
-    │
-    ▼
-DataStoreWatcher.scan_single_datastore(datastore_id)
-    ├── _init_scan() — assigns scan_id, counts files, sets status=running
-    ├── Walk all files in datastore folder
-    │     For each file:
-    │       _handle_file_in_scan() — compute hash, check Document existence
-    │         ├── Hash unchanged + chunks exist → skip
-    │         ├── Hash unchanged + no chunks → re-ingest (ingestion likely failed)
-    │         ├── Hash changed → re-ingest
-    │         └── New file → ingest
-    ├── Wait for all ingestion Futures (up to 1 hour each)
-    └── _complete_scan() — sets status=completed or error, persists new/modified/skipped/errors
-```
-
-### 13. Rate Limiting with Exponential Backoff
-The login endpoint tracks failed attempts per IP address with exponential backoff: 3 attempts trigger escalating delays (15s → 30s → 60s → 120s → 240s → 480s → 900s). Successful login resets the counter. Rate-limited responses return 429 with `Retry-After` header.
-
-### 14. Message Pagination with Infinite Scroll
-The chat page loads messages in pages of 20, using cursor-based pagination (`before_id`). An `IntersectionObserver` watches a sentinel element at the top of the message list and loads older messages when the sentinel enters the viewport. Scroll position is preserved across page loads using `useLayoutEffect`.
+1. **Multi-Tenancy**: Hierarchical organization structure with path-based tree traversal
+2. **Agentic RAG**: LangGraph-based multi-agent pipeline with parallel subtask execution
+3. **Hybrid Retrieval**: 3-leg search (dense + sparse + exact) with RRF fusion
+4. **GraphRAG**: Entity/relationship extraction with graph-enhanced retrieval
+5. **Streaming**: Server-Sent Events for real-time agent progress updates
+6. **Auto-Ingestion**: File system watcher with background processing
+7. **Branching**: Conversation branching for exploration of alternate paths
+8. **Recovery**: Startup recovery service for crash resilience

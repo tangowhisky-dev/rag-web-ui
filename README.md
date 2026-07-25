@@ -6,7 +6,7 @@
   </p>
   <p>
     <a href="https://github.com/rag-web-ui/rag-web-ui/blob/main/LICENSE"><img src="https://img.shields.io/github/license/rag-web-ui/rag-web-ui" alt="License"></a>
-    <a href="#"><img src="https://img.shields.io/badge/python-3.12+-blue.svg" alt="Python"></a>
+    <a href="#"><img src="https://img.shields.io/badge/python-3.11-blue.svg" alt="Python"></a>
     <a href="#"><img src="https://img.shields.io/badge/node-%3E%3D18-green.svg" alt="Node"></a>
     <a href="#"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg" alt="PRs Welcome"></a>
   </p>
@@ -35,12 +35,13 @@ RAG Web UI is a self-hosted knowledge base Q&A system with multi-tenant org mana
 | Layer | Technology |
 |---|---|
 | Frontend | Next.js 14, TypeScript, Tailwind CSS, shadcn/ui |
-| Backend | Python FastAPI, LangGraph, LangChain, SQLAlchemy |
-| Vector DB | Qdrant (dense + sparse vectors) |
-| Graph DB | Neo4j (entity/relationship graph for GraphRAG — optional) |
+| Backend | Python 3.11, FastAPI, LangGraph, LangChain, SQLAlchemy |
+| Vector DB | Qdrant v1.18 (dense + sparse vectors) |
+| Graph DB | Neo4j 2026.04.0 (entity/relationship graph for GraphRAG — optional) |
 | Sparse Embeddings | SPLADE via FastEmbed (CPU, local) |
+| Cache/State | Redis Stack 7.4.0 (LangGraph checkpoints, response cache) |
 | File Storage | Local folder mapped as Docker volume |
-| Database | MySQL 8 |
+| Database | MySQL 8.4 |
 
 ## Quick Start
 
@@ -157,8 +158,8 @@ GraphRAG extracts entities and relationships from ingested chunks and stores the
 
 | Mode | How to enable | Notes |
 |---|---|---|
-| LLM | `GRAPHRAG_LLM=<model>` in `.env` | `LLMEntityRelationExtractor` with JSON-schema constrained output. No RAM requirement beyond your LLM. |
-| Disabled | `GRAPHRAG_LLM` unset | Extraction skipped; graph retrieval leg inactive. |
+| LLM | `GRAPHRAG_ENABLED=true` and `GRAPHRAG_LLM=<model>` in `.env` | `LLMEntityRelationExtractor` with JSON-schema constrained output. No RAM requirement beyond your LLM. |
+| Disabled | `GRAPHRAG_ENABLED` unset or `false` | Extraction skipped; graph retrieval leg inactive. |
 
 **Data architecture:**
 ```
