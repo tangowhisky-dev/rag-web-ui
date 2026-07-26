@@ -106,9 +106,8 @@ interface MessageFileChipProps {
 
 export function MessageFileChip({ fileName, fileId, chatId }: MessageFileChipProps) {
   const handleDownload = async () => {
-    const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
     const res = await fetch(`/api/chat/${chatId}/files/${fileId}/download`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      credentials: "include",
     });
     if (!res.ok) return;
     const blob = await res.blob();

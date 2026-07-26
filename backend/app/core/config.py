@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "360"))
 
+    # Comma-separated list of trusted proxy IP addresses. The wildcard '*' trusts
+    # all proxies. Only used for extracting the real client IP from X-Forwarded-*
+    # headers; if the direct peer is not trusted the backend's peer IP is used.
+    TRUSTED_PROXIES: str = os.getenv("TRUSTED_PROXIES", "")
+
     # File storage
     UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", "/app/uploads")
 

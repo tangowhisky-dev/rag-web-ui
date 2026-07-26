@@ -85,7 +85,7 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
     console.debug("[SEARCH] query=%s", q);
     try {
       const res = await fetch(`/api/chat/search?q=${encodeURIComponent(q)}`, {
-        headers: { Authorization: `Bearer ${localStorage.getItem("token") ?? ""}` },
+        credentials: "include",
       });
       if (!res.ok) throw new Error("search failed");
       const data: SearchResult[] = await res.json();
@@ -175,7 +175,7 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
   const handleExport = async (id: number) => {
     try {
       const res = await fetch(`/api/chat/${id}/export`, {
-        headers: { Authorization: `Bearer ${localStorage.getItem("token") ?? ""}` },
+        credentials: "include",
       });
       if (!res.ok) throw new Error("Export failed");
       const blob = await res.blob();

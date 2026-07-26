@@ -1,22 +1,29 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { getTokenClaims, type TokenClaims } from '@/lib/auth';
+import { api } from '@/lib/api';
+
+interface CurrentUser {
+  sub: string;
+  role: string;
+}
 
 export function UserName() {
-  const [claims, setClaims] = useState<TokenClaims | null>(null);
+  const [user, setUser] = useState<CurrentUser | null>(null);
 
   useEffect(() => {
-    setClaims(getTokenClaims());
+    api.get('/api/auth/test-token')
+      .then((data) => setUser(data as CurrentUser))
+      .catch(() => setUser(null));
   }, []);
 
-  const username = claims?.sub ?? null;
+  const username = user?.sub ?? null;
 
-  if (!username || !claims) return null;
+  if (!username || !user) return null;
 
-  // Extract just the username part (strip domain if present, e.g. "user@domain" → "user")
+  // Extract just the username part (strip domain if present, e.g. "user@domain" -> "user")
   const displayName = username.includes('@') ? username.split('@')[0] : username;
-  const role = claims.role ?? 'user';
+  const role = user.role ?? 'user';
 
   const tooltipText = `signed in as ${displayName} (${role})`;
 

@@ -173,7 +173,7 @@ def delete_kb(
     """
     kb = (
         db.query(KnowledgeBase)
-        .filter(KnowledgeBase.id == kb_id)
+        .filter(KnowledgeBase.id == kb_id, KnowledgeBase.user_id == user_id)
         .first()
     )
     if not kb:

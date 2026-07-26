@@ -13,26 +13,13 @@ export function middleware(request: NextRequest) {
     return response;
   }
 
-  // ── Dashboard auth: require valid token ──
+  // ── Dashboard auth: require token cookie ──
   const token = request.cookies.get('token')?.value;
 
-  if (request.nextUrl.pathname.startsWith('/dashboard/admin')) {
+  if (request.nextUrl.pathname.startsWith('/dashboard')) {
     if (!token) {
       return NextResponse.redirect(new URL('/', request.url));
     }
-    try {
-      const rawPayload = Buffer.from(token.split('.')[1], 'base64url').toString();
-      const claims = JSON.parse(rawPayload) as { role?: string };
-      if (claims.role !== 'admin' && claims.role !== 'super_admin') {
-        return NextResponse.redirect(new URL('/dashboard', request.url));
-      }
-    } catch {
-      return NextResponse.redirect(new URL('/', request.url));
-    }
-  }
-
-  if (!token) {
-    return NextResponse.redirect(new URL('/', request.url));
   }
 
   return NextResponse.next();

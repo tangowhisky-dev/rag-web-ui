@@ -22,10 +22,11 @@ from pydantic import BaseModel, Field
 from pydantic.config import ConfigDict
 from sqlalchemy.orm import Session
 
-from app.core.security import require_admin
+from app.core.security import get_admin_org_ids, require_admin
 from app.db.session import get_db
 from app.models.datastore import DataStore, OrganizationDataStore
 from app.models.organisation import Organisation
+from app.models.user import User
 from app.services.datastore_watcher import DataStoreWatcher
 
 logger = logging.getLogger(__name__)
@@ -155,6 +156,22 @@ def _get_datastore_or_404(db: Session, datastore_id: int) -> DataStore:
     return ds
 
 
+def _datastore_in_scope(db: Session, datastore_id: int, admin_org_ids: Optional[List[int]]) -> bool:
+    """Return True if the datastore is assigned to an org in the admin's scope."""
+    if admin_org_ids is None:
+        return True
+    return (
+        db.query(OrganizationDataStore)
+        .filter(
+            OrganizationDataStore.data_store_id == datastore_id,
+            OrganizationDataStore.org_id.in_(admin_org_ids),
+            OrganizationDataStore.is_active == True,
+        )
+        .first()
+        is not None
+    )
+
+
 def _get_watcher() -> DataStoreWatcher:
     """Access the module-level watcher_service from main.py.
     
@@ -207,10 +224,22 @@ def _serialize_ds(ds: DataStore) -> dict:
 @router.get("/datastores", response_model=List[DataStoreResponse])
 def list_datastores(
     db: Session = Depends(get_db),
-    _: object = Depends(require_admin),
+    current_user: User = Depends(require_admin),
 ):
-    """List all datastores with their assigned organisations."""
-    datastores = db.query(DataStore).order_by(DataStore.id).all()
+    """List datastores visible to the current admin's organisation scope."""
+    admin_org_ids = get_admin_org_ids(db, current_user)
+    query = db.query(DataStore)
+    if admin_org_ids is not None:
+        query = (
+            query
+            .join(OrganizationDataStore)
+            .filter(
+                OrganizationDataStore.org_id.in_(admin_org_ids),
+                OrganizationDataStore.is_active == True,
+            )
+            .distinct()
+        )
+    datastores = query.order_by(DataStore.id).all()
     result = []
     for ds in datastores:
         resp = _serialize_ds(ds)
@@ -263,9 +292,9 @@ def list_datastores(
 def create_datastore(
     payload: DataStoreCreate,
     db: Session = Depends(get_db),
-    _: object = Depends(require_admin),
+    current_user: User = Depends(require_admin),
 ):
-    """Create a new datastore."""
+    """Create a new datastore. Non-super-admins are auto-assigned to their own org."""
     # Validate folder exists and is under /app/data
     abs_path = _validate_folder_path(payload.folder_path)
 
@@ -319,8 +348,21 @@ def create_datastore(
         "[DATASTORE] created id=%d name=%s path=%s file_count=%d",
         ds.id, ds.name, ds.folder_path, file_count,
     )
+
+    # Auto-assign non-super-admin created datastores to the admin's own org
+    assigned_org_ids = []
+    if current_user.role != UserRole.super_admin and current_user.org_id is not None:
+        link = OrganizationDataStore(
+            org_id=current_user.org_id,
+            data_store_id=ds.id,
+            is_active=True,
+        )
+        db.add(link)
+        db.commit()
+        assigned_org_ids = [{"id": current_user.org_id, "name": current_user.organisation.name if current_user.organisation else None}]
+
     resp = _serialize_ds(ds)
-    resp["assigned_orgs"] = []
+    resp["assigned_orgs"] = assigned_org_ids
     return DataStoreResponse(**resp)
 
 
@@ -328,10 +370,14 @@ def create_datastore(
 def get_datastore(
     datastore_id: int,
     db: Session = Depends(get_db),
-    _: object = Depends(require_admin),
+    current_user: User = Depends(require_admin),
 ):
     """Get datastore details."""
+    admin_org_ids = get_admin_org_ids(db, current_user)
     ds = _get_datastore_or_404(db, datastore_id)
+    if not _datastore_in_scope(db, datastore_id, admin_org_ids):
+        raise HTTPException(status_code=404, detail="DataStore not found")
+
     resp = _serialize_ds(ds)
     links = (
         db.query(OrganizationDataStore)
@@ -342,6 +388,8 @@ def get_datastore(
         )
         .all()
     )
+    if admin_org_ids is not None:
+        links = [link for link in links if link.organisation.id in admin_org_ids]
     resp["assigned_orgs"] = [
         {"id": link.organisation.id, "name": link.organisation.name}
         for link in links
@@ -354,10 +402,13 @@ def update_datastore(
     datastore_id: int,
     payload: DataStoreUpdate,
     db: Session = Depends(get_db),
-    _: object = Depends(require_admin),
+    current_user: User = Depends(require_admin),
 ):
     """Update a datastore."""
+    admin_org_ids = get_admin_org_ids(db, current_user)
     ds = _get_datastore_or_404(db, datastore_id)
+    if not _datastore_in_scope(db, datastore_id, admin_org_ids):
+        raise HTTPException(status_code=404, detail="DataStore not found")
 
     if payload.folder_path is not None:
         abs_path = _validate_folder_path(payload.folder_path)
@@ -406,7 +457,7 @@ def update_datastore(
             )
     db.refresh(ds)
     logger.info("[DATASTORE] updated id=%d", ds.id)
-    # Get assigned orgs for this datastore
+    # Get assigned orgs for this datastore (filtered to the admin's scope)
     links = (
         db.query(OrganizationDataStore)
         .join(Organisation)
@@ -416,6 +467,8 @@ def update_datastore(
         )
         .all()
     )
+    if admin_org_ids is not None:
+        links = [link for link in links if link.organisation.id in admin_org_ids]
     resp = _serialize_ds(ds)
     resp["assigned_orgs"] = [
         {
@@ -431,14 +484,19 @@ def update_datastore(
 def delete_datastore(
     datastore_id: int,
     db: Session = Depends(get_db),
-    _: object = Depends(require_admin),
+    current_user: User = Depends(require_admin),
 ):
     """
     Delete a datastore and all its associated data.
-    
+
     Note: Actual files in the DataStore folder are NOT deleted from disk.
     Only database records (DataStore, Documents, Chunks, Vectors, Graph data) are removed.
     """
+    admin_org_ids = get_admin_org_ids(db, current_user)
+    ds = _get_datastore_or_404(db, datastore_id)
+    if not _datastore_in_scope(db, datastore_id, admin_org_ids):
+        raise HTTPException(status_code=404, detail="DataStore not found")
+
     from app.services.cleanup import delete_datastore as _delete_ds
     result, status = _delete_ds(db, datastore_id)
     # Return 204 No Content for success (maintains backward compatibility)
@@ -452,24 +510,35 @@ def assign_datastore_to_orgs(
     datastore_id: int,
     payload: AssignRequest,
     db: Session = Depends(get_db),
-    _: object = Depends(require_admin),
+    current_user: User = Depends(require_admin),
 ):
-    """Assign a datastore to one or more organisations. Empty org_ids removes all assignments."""
+    """Assign a datastore to one or more organisations within the admin's scope."""
+    admin_org_ids = get_admin_org_ids(db, current_user)
+    _get_datastore_or_404(db, datastore_id)
+
     if not payload.org_ids:
-        # Remove all existing assignments
+        # Remove only assignments within the admin's scope
         deleted = (
             db.query(OrganizationDataStore)
-            .filter(OrganizationDataStore.data_store_id == datastore_id)
+            .filter(
+                OrganizationDataStore.data_store_id == datastore_id,
+                OrganizationDataStore.org_id.in_(admin_org_ids or []),
+            )
             .delete(synchronize_session=False)
         )
         logger.info(
-            "[DATASTORE] removed %d existing assignments for id=%d (org_ids empty)",
+            "[DATASTORE] removed %d assignments in scope for id=%d",
             deleted, datastore_id,
         )
         db.commit()
         return
 
     for org_id in payload.org_ids:
+        if admin_org_ids is not None and org_id not in admin_org_ids:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Organisation outside your scope (id={org_id})",
+            )
         org = db.query(Organisation).filter(Organisation.id == org_id).first()
         if org is None:
             raise HTTPException(
@@ -492,6 +561,7 @@ def assign_datastore_to_orgs(
         link = OrganizationDataStore(
             org_id=org_id,
             data_store_id=datastore_id,
+            is_active=True,
         )
         db.add(link)
 
@@ -508,24 +578,33 @@ def unassign_datastore_from_orgs(
     datastore_id: int,
     payload: AssignRequest,
     db: Session = Depends(get_db),
-    _: object = Depends(require_admin),
+    current_user: User = Depends(require_admin),
 ):
-    """Unassign a datastore from one or more organisations. If org_ids is empty, unassign from all orgs."""
+    """Unassign a datastore from orgs within the admin's scope."""
+    admin_org_ids = get_admin_org_ids(db, current_user)
     _get_datastore_or_404(db, datastore_id)
 
     if not payload.org_ids:
-        # Empty list = unassign from ALL orgs
+        # Empty list = unassign only from orgs in the admin's scope
         deleted = (
             db.query(OrganizationDataStore)
-            .filter(OrganizationDataStore.data_store_id == datastore_id)
+            .filter(
+                OrganizationDataStore.data_store_id == datastore_id,
+                OrganizationDataStore.org_id.in_(admin_org_ids or []),
+            )
             .delete(synchronize_session=False)
         )
         logger.info(
-            "[DATASTORE] unassigned id=%d from all orgs (%d removed)",
+            "[DATASTORE] unassigned id=%d from in-scope orgs (%d removed)",
             datastore_id, deleted,
         )
     else:
         for org_id in payload.org_ids:
+            if admin_org_ids is not None and org_id not in admin_org_ids:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Organisation outside your scope (id={org_id})",
+                )
             link = (
                 db.query(OrganizationDataStore)
                 .filter(
@@ -544,10 +623,13 @@ def unassign_datastore_from_orgs(
 def get_datastore_status(
     datastore_id: int,
     db: Session = Depends(get_db),
-    _: object = Depends(require_admin),
+    current_user: User = Depends(require_admin),
 ):
     """Get datastore scan status."""
+    admin_org_ids = get_admin_org_ids(db, current_user)
     ds = _get_datastore_or_404(db, datastore_id)
+    if not _datastore_in_scope(db, datastore_id, admin_org_ids):
+        raise HTTPException(status_code=404, detail="DataStore not found")
     resp = _serialize_ds(ds)
     resp["datastore_id"] = resp.pop("id")
     resp["pending_changes"] = 0

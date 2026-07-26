@@ -6,12 +6,9 @@
  */
 export async function cancelStream(chatId: string): Promise<boolean> {
   try {
-    const token = typeof window !== "undefined" ? localStorage.getItem("token") || "" : "";
     const res = await fetch(`/api/chat/${chatId}/cancel`, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
+      credentials: "include",
     });
     return res.ok;
   } catch {

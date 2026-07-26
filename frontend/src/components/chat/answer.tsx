@@ -507,9 +507,8 @@ export const Answer: FC<{
     if (!messageId || !chatId) return;
     const ext = format === "word" ? "docx" : format === "image" ? "png" : "pdf";
     const url = `/api/chat/${chatId}/messages/${messageId}/export?format=${format}`;
-    const token = typeof window !== "undefined" ? window.localStorage.getItem("token") || "" : "";
     try {
-      const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+      const res = await fetch(url, { credentials: "include" });
       if (!res.ok) throw new Error(`Export failed: ${res.status}`);
       const blob = await res.blob();
       const a = document.createElement("a");

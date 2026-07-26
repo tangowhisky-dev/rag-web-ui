@@ -4,7 +4,6 @@ import { useEffect, useState } from "react";
 import DashboardLayout from "@/components/layout/dashboard-layout";
 import { Book, MessageSquare, ArrowRight, Plus, Brain, Sparkles, Shield, Upload, Link2 } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
-import { isAdmin } from "@/lib/auth";
 import { useHydrated } from "@/lib/hooks";
 
 interface Stats {
@@ -15,6 +14,7 @@ interface Stats {
 export default function DashboardPage() {
   const hydrated = useHydrated();
   const [stats, setStats] = useState<Stats>({ knowledgeBases: 0, chats: 0 });
+  const [currentUser, setCurrentUser] = useState<{ role: string } | null>(null);
 
   useEffect(() => {
     const fetchStats = async () => {
@@ -30,6 +30,10 @@ export default function DashboardPage() {
       }
     };
     fetchStats();
+
+    api.get("/api/auth/test-token")
+      .then((data) => setCurrentUser(data as { role: string }))
+      .catch(() => setCurrentUser(null));
   }, []);
 
   return (
@@ -55,7 +59,7 @@ export default function DashboardPage() {
                 <Plus className="mr-2 h-4 w-4" />
                 New Knowledge Base
               </a>
-              {hydrated && isAdmin() && (
+              {hydrated && (currentUser?.role === "admin" || currentUser?.role === "super_admin") && (
                 <a
                   href="/dashboard/admin"
                   className="inline-flex items-center justify-center rounded-md border border-input bg-background px-5 py-2.5 text-sm font-medium hover:bg-accent transition-colors"

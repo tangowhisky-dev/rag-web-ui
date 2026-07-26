@@ -69,13 +69,17 @@ def client():
 # Helpers
 # ---------------------------------------------------------------------------
 
-def create_user(db, username: str, password: str, role: UserRole) -> User:
+def create_user(db, username: str, password: str, role: UserRole, org_id=None) -> User:
+    if org_id is None:
+        root = db.query(Organisation).filter(Organisation.parent_id.is_(None)).first()
+        org_id = root.id if root else None
     user = User(
         username=username,
         email=f"{username}@example.com",
         hashed_password=get_password_hash(password),
         is_active=True,
         role=role,
+        org_id=org_id,
     )
     db.add(user)
     db.commit()
@@ -83,11 +87,18 @@ def create_user(db, username: str, password: str, role: UserRole) -> User:
     return user
 
 
-def create_org(db, name: str) -> Organisation:
-    org = Organisation(name=name)
+def create_org(db, name: str, parent_id=None) -> Organisation:
+    if parent_id is None:
+        root = db.query(Organisation).filter(Organisation.parent_id.is_(None)).first()
+        parent_id = root.id if root else None
+    org = Organisation(name=name, parent_id=parent_id)
     db.add(org)
     db.flush()
-    org.path = f"/{org.id}"
+    if parent_id is not None:
+        parent = db.query(Organisation).filter(Organisation.id == parent_id).first()
+        org.path = f"{parent.path}/{org.id}"
+    else:
+        org.path = f"/{org.id}"
     db.commit()
     db.refresh(org)
     return org

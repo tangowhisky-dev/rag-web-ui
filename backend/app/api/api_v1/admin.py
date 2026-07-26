@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
-from app.core.security import require_admin
+from app.core.security import get_admin_org_ids, require_admin
 from app.db.session import get_db
 from app.models.organisation import Organisation
 from app.models.org_llm_config import OrgLLMConfig
@@ -14,7 +14,7 @@ from app.models.organisation import OrgAbbreviation
 from app.models.datastore import DataStore
 from app.schemas.organisation import OrgCreate, OrgUpdate, OrgResponse, OrgLLMConfigUpdate, OrgLLMConfigResponse, OrgIngestionStatusResponse
 from app.models.knowledge import KnowledgeBase, ProcessingTask
-from app.schemas.user import UserAdminCreate, UserAdminUpdate, UserResponse, UserDeleteResponse, PasswordChange
+from app.schemas.user import UserAdminCreate, UserAdminUpdate, UserResponse, UserDeleteResponse, PasswordChange, AdminPasswordChange
 from app.models.user import User, UserRole
 from app.core.security import get_password_hash
 from app.services.agentic_rag.redis_memory import delete_user_redis_sync
@@ -25,9 +25,13 @@ org_router = APIRouter()
 @org_router.get("/orgs", response_model=List[OrgResponse])
 def list_orgs(
     db: Session = Depends(get_db),
-    _: object = Depends(require_admin),
+    current_user: User = Depends(require_admin),
 ):
-    orgs = db.query(Organisation).order_by(Organisation.id).all()
+    admin_org_ids = get_admin_org_ids(db, current_user)
+    query = db.query(Organisation)
+    if admin_org_ids is not None:
+        query = query.filter(Organisation.id.in_(admin_org_ids))
+    orgs = query.order_by(Organisation.id).all()
     # Attach user_count and level to each org response
     user_counts = {
         o.id: db.query(User).filter(User.org_id == o.id).count()
@@ -52,10 +56,15 @@ def list_orgs(
 def create_org(
     payload: OrgCreate,
     db: Session = Depends(get_db),
-    _: object = Depends(require_admin),
+    current_user: User = Depends(require_admin),
 ):
     if db.query(Organisation).filter(Organisation.name == payload.name).first():
         raise HTTPException(status_code=400, detail="Org name already exists")
+
+    # parent_id must be within the admin's scope
+    admin_org_ids = get_admin_org_ids(db, current_user)
+    if admin_org_ids is not None and payload.parent_id not in admin_org_ids:
+        raise HTTPException(status_code=403, detail="Parent org is outside your organisation scope")
 
     # parent_id is now required — every org must have a parent
     parent = db.query(Organisation).filter(Organisation.id == payload.parent_id).first()
@@ -82,11 +91,15 @@ def update_org(
     org_id: int,
     payload: OrgUpdate,
     db: Session = Depends(get_db),
-    _: object = Depends(require_admin),
+    current_user: User = Depends(require_admin),
 ):
     org = db.query(Organisation).filter(Organisation.id == org_id).first()
     if org is None:
         raise HTTPException(status_code=404, detail="Org not found")
+
+    admin_org_ids = get_admin_org_ids(db, current_user)
+    if admin_org_ids is not None and org.id not in admin_org_ids:
+        raise HTTPException(status_code=403, detail="Org is outside your organisation scope")
 
     if payload.name is not None:
         if payload.name != org.name and db.query(Organisation).filter(
@@ -99,6 +112,8 @@ def update_org(
         raise HTTPException(status_code=400, detail="Organisation must always have a parent")
 
     if payload.parent_id is not None:
+        if admin_org_ids is not None and payload.parent_id not in admin_org_ids:
+            raise HTTPException(status_code=403, detail="Parent org is outside your organisation scope")
         parent = db.query(Organisation).filter(Organisation.id == payload.parent_id).first()
         if parent is None:
             raise HTTPException(status_code=404, detail="Parent org not found")
@@ -127,11 +142,15 @@ def update_org(
 def delete_org(
     org_id: int,
     db: Session = Depends(get_db),
-    _: object = Depends(require_admin),
+    current_user: User = Depends(require_admin),
 ):
     org = db.query(Organisation).filter(Organisation.id == org_id).first()
     if org is None:
         raise HTTPException(status_code=404, detail="Org not found")
+
+    admin_org_ids = get_admin_org_ids(db, current_user)
+    if admin_org_ids is not None and org.id not in admin_org_ids:
+        raise HTTPException(status_code=403, detail="Org is outside your organisation scope")
 
     children = db.query(Organisation).filter(Organisation.parent_id == org_id).count()
     if children:
@@ -150,8 +169,16 @@ def delete_org(
 def get_org_llm_config(
     org_id: int,
     db: Session = Depends(get_db),
-    _: object = Depends(require_admin),
+    current_user: User = Depends(require_admin),
 ):
+    org = db.query(Organisation).filter(Organisation.id == org_id).first()
+    if org is None:
+        raise HTTPException(status_code=404, detail="Org not found")
+
+    admin_org_ids = get_admin_org_ids(db, current_user)
+    if admin_org_ids is not None and org_id not in admin_org_ids:
+        raise HTTPException(status_code=403, detail="Org is outside your organisation scope")
+
     config = db.query(OrgLLMConfig).filter(OrgLLMConfig.org_id == org_id).first()
     if config is None:
         raise HTTPException(status_code=404, detail="LLM config not found for this org")
@@ -163,11 +190,15 @@ def upsert_org_llm_config(
     org_id: int,
     payload: OrgLLMConfigUpdate,
     db: Session = Depends(get_db),
-    _: object = Depends(require_admin),
+    current_user: User = Depends(require_admin),
 ):
     org = db.query(Organisation).filter(Organisation.id == org_id).first()
     if org is None:
         raise HTTPException(status_code=404, detail="Org not found")
+
+    admin_org_ids = get_admin_org_ids(db, current_user)
+    if admin_org_ids is not None and org_id not in admin_org_ids:
+        raise HTTPException(status_code=403, detail="Org is outside your organisation scope")
 
     config = db.query(OrgLLMConfig).filter(OrgLLMConfig.org_id == org_id).first()
     if config is None:
@@ -192,11 +223,15 @@ def upsert_org_llm_config(
 def get_org_ingestion_status(
     org_id: int,
     db: Session = Depends(get_db),
-    _: object = Depends(require_admin),
+    current_user: User = Depends(require_admin),
 ):
     org = db.query(Organisation).filter(Organisation.id == org_id).first()
     if org is None:
         raise HTTPException(status_code=404, detail="Org not found")
+
+    admin_org_ids = get_admin_org_ids(db, current_user)
+    if admin_org_ids is not None and org_id not in admin_org_ids:
+        raise HTTPException(status_code=403, detail="Org is outside your organisation scope")
 
     # Aggregate ProcessingTask rows across all KBs belonging to this org
     tasks = (
@@ -259,18 +294,22 @@ def get_admin_counts(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
-    # Organisations: all admins see all orgs (consistent with list_orgs endpoint)
-    org_count = db.query(Organisation).count()
+    admin_org_ids = get_admin_org_ids(db, current_user)
 
-    # Users: super admins see all, regular admins see their org's users
-    # (consistent with list_users endpoint visibility rules)
-    if current_user.role == UserRole.super_admin:
+    if admin_org_ids is None:
+        org_count = db.query(Organisation).count()
         user_count = db.query(User).count()
+        ds_count = db.query(DataStore).count()
     else:
-        user_count = db.query(User).filter(User.org_id == current_user.org_id).count()
-
-    # Data sources: all admins see all data stores
-    ds_count = db.query(DataStore).count()
+        org_count = db.query(Organisation).filter(Organisation.id.in_(admin_org_ids)).count()
+        user_count = db.query(User).filter(User.org_id.in_(admin_org_ids)).count()
+        ds_count = (
+            db.query(DataStore)
+            .join(OrganizationDataStore)
+            .filter(OrganizationDataStore.org_id.in_(admin_org_ids))
+            .distinct()
+            .count()
+        )
 
     return AdminCountsResponse(
         organizations=org_count, users=user_count, data_sources=ds_count,
@@ -296,8 +335,12 @@ def create_abbreviation(
     org_id: int,
     payload: AbbreviationCreate,
     db: Session = Depends(get_db),
-    _: object = Depends(require_admin),
+    current_user: User = Depends(require_admin),
 ):
+    admin_org_ids = get_admin_org_ids(db, current_user)
+    if admin_org_ids is not None and org_id not in admin_org_ids:
+        raise HTTPException(status_code=403, detail="Org is outside your organisation scope")
+
     org = db.query(Organisation).filter(Organisation.id == org_id).first()
     if org is None:
         raise HTTPException(status_code=404, detail="Org not found")
@@ -320,8 +363,12 @@ def create_abbreviation(
 def list_abbreviations(
     org_id: int,
     db: Session = Depends(get_db),
-    _: object = Depends(require_admin),
+    current_user: User = Depends(require_admin),
 ):
+    admin_org_ids = get_admin_org_ids(db, current_user)
+    if admin_org_ids is not None and org_id not in admin_org_ids:
+        raise HTTPException(status_code=403, detail="Org is outside your organisation scope")
+
     org = db.query(Organisation).filter(Organisation.id == org_id).first()
     if org is None:
         raise HTTPException(status_code=404, detail="Org not found")
@@ -333,8 +380,12 @@ def delete_abbreviation(
     org_id: int,
     abbrev_id: int,
     db: Session = Depends(get_db),
-    _: object = Depends(require_admin),
+    current_user: User = Depends(require_admin),
 ):
+    admin_org_ids = get_admin_org_ids(db, current_user)
+    if admin_org_ids is not None and org_id not in admin_org_ids:
+        raise HTTPException(status_code=403, detail="Org is outside your organisation scope")
+
     abbrev = (
         db.query(OrgAbbreviation)
         .filter(OrgAbbreviation.id == abbrev_id, OrgAbbreviation.org_id == org_id)
@@ -359,9 +410,10 @@ def list_users(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
-    if current_user.role == UserRole.super_admin:
+    admin_org_ids = get_admin_org_ids(db, current_user)
+    if admin_org_ids is None:
         return db.query(User).order_by(User.id).all()
-    return db.query(User).filter(User.org_id == current_user.org_id).order_by(User.id).all()
+    return db.query(User).filter(User.org_id.in_(admin_org_ids)).order_by(User.id).all()
 
 
 @user_router.post("/users", response_model=UserResponse, status_code=201)
@@ -377,8 +429,11 @@ def create_user(
             detail="Only super admin can create users with admin or super admin role",
         )
 
+    admin_org_ids = get_admin_org_ids(db, current_user)
     if not payload.org_id:
         raise HTTPException(status_code=422, detail="User must belong to an organisation")
+    if admin_org_ids is not None and payload.org_id not in admin_org_ids:
+        raise HTTPException(status_code=403, detail="Cannot create users outside your organisation scope")
     org = db.query(Organisation).filter(Organisation.id == payload.org_id).first()
     if org is None:
         raise HTTPException(status_code=404, detail="Org not found")
@@ -420,6 +475,10 @@ def update_user(
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
 
+    admin_org_ids = get_admin_org_ids(db, current_user)
+    if admin_org_ids is not None and user.org_id not in admin_org_ids:
+        raise HTTPException(status_code=403, detail="User is outside your organisation scope")
+
     if payload.role is not None:
         # Only super_admin can promote a user to admin or super_admin role
         if current_user.role == UserRole.admin and payload.role not in ("user",):
@@ -433,6 +492,8 @@ def update_user(
             raise HTTPException(status_code=422, detail=f"Invalid role: {payload.role}")
 
     if payload.org_id is not None:
+        if admin_org_ids is not None and payload.org_id not in admin_org_ids:
+            raise HTTPException(status_code=403, detail="Target org is outside your organisation scope")
         org = db.query(Organisation).filter(Organisation.id == payload.org_id).first()
         if org is None:
             raise HTTPException(status_code=404, detail="Org not found")
@@ -451,7 +512,7 @@ def update_user(
 @user_router.post("/users/{user_id}/change-password", status_code=200)
 def change_user_password(
     user_id: int,
-    payload: PasswordChange,
+    payload: AdminPasswordChange,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
@@ -467,6 +528,7 @@ def change_user_password(
         raise HTTPException(status_code=404, detail="User not found")
 
     user.hashed_password = get_password_hash(payload.new_password)
+    user.token_version += 1
     db.commit()
     db.refresh(user)
     logger.info("[ADMIN] password_changed user_id=%s username=%s", user_id, user.username)

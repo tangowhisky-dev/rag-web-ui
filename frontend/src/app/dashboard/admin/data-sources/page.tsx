@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { api, ApiError } from '@/lib/api';
-import { getTokenClaims } from '@/lib/auth';
+
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import {
@@ -130,14 +130,6 @@ export default function DataSourcesPage() {
   const router = useRouter();
   const { toast } = useToast();
 
-  // Auth check
-  useEffect(() => {
-    const claims = getTokenClaims();
-    if (!claims || claims.role !== 'super_admin') {
-      router.push('/dashboard');
-    }
-  }, [router]);
-
   const [datastores, setDatastores] = useState<DataStore[]>([]);
   const [orgs, setOrgs] = useState<Org[]>([]);
   const [loading, setLoading] = useState(true);
@@ -211,9 +203,8 @@ export default function DataSourcesPage() {
 
     const fetchRecoveryStatuses = async () => {
       try {
-        const token = typeof window !== 'undefined' ? (localStorage.getItem('token') || '') : '';
         const response = await fetch('/api/admin/datastores/recovery-status', {
-          headers: { Authorization: `Bearer ${token}` },
+          credentials: 'include',
         });
         if (response.ok) {
           const statuses: RecoveryStatus[] = await response.json();
@@ -355,10 +346,9 @@ export default function DataSourcesPage() {
 
     try {
       // Start the scan
-      const token = typeof window !== 'undefined' ? localStorage.getItem('token') || '' : '';
       const scanResp = await fetch(`/api/admin/datastores/${dsId}/scan`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
+        credentials: 'include',
       });
       if (!scanResp.ok) {
         throw new Error(`Scan start failed with status ${scanResp.status}: ${scanResp.statusText}`);
@@ -374,7 +364,7 @@ export default function DataSourcesPage() {
         await new Promise((resolve) => setTimeout(resolve, pollInterval));
 
         const progressResp = await fetch(`/api/admin/datastores/${dsId}/scan-progress`, {
-          headers: { Authorization: `Bearer ${token}` },
+          credentials: 'include',
         });
 
         if (!progressResp.ok) {
@@ -486,10 +476,9 @@ export default function DataSourcesPage() {
       [dsId]: { status: 'running', new_files: 0, modified: 0, deleted: 0 },
     }));
     try {
-      const token = typeof window !== 'undefined' ? (localStorage.getItem('token') || '') : '';
       const res = await fetch(`/api/admin/datastores/${dsId}/recover`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
+        credentials: 'include',
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));

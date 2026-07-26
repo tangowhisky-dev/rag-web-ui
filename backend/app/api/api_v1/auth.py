@@ -2,7 +2,7 @@ import logging
 import time
 from datetime import timedelta
 from typing import Any
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from requests.exceptions import RequestException
@@ -34,20 +34,20 @@ MAX_BACKOFF_SECONDS = 900
 
 
 def _get_client_ip(request: Request) -> str:
-    """Extract client IP from request, respecting proxy headers.
+    """Extract client IP, trusting proxy headers only for known proxies.
 
-    Priority: X-Real-IP (from Next.js middleware) > X-Forwarded-For > direct connection.
+    Priority when peer is trusted: X-Real-IP > X-Forwarded-For > peer IP.
     """
-    # X-Real-IP: set by Next.js middleware for proxied requests
-    real_ip = request.headers.get("x-real-ip")
-    if real_ip:
-        return real_ip.strip()
-    # X-Forwarded-For: set by reverse proxies (may contain chain)
-    forwarded_for = request.headers.get("x-forwarded-for")
-    if forwarded_for:
-        return forwarded_for.split(",")[0].strip()
-    # Fall back to direct connection IP
-    return request.client.host if request.client else "unknown"
+    peer = request.client.host if request.client else None
+    trusted = {p.strip() for p in settings.TRUSTED_PROXIES.split(",") if p.strip()}
+    if "*" in trusted or peer in trusted:
+        real_ip = request.headers.get("x-real-ip")
+        if real_ip:
+            return real_ip.strip()
+        forwarded_for = request.headers.get("x-forwarded-for")
+        if forwarded_for:
+            return forwarded_for.split(",")[0].strip()
+    return peer or "unknown"
 
 
 def _check_rate_limit(ip: str) -> tuple[bool, int]:
@@ -131,51 +131,23 @@ def _reset_failed_attempts(ip: str) -> None:
 
 @router.post("/register", response_model=UserResponse)
 def register(*, db: Session = Depends(get_db), user_in: UserCreate) -> Any:
-    """
-    Register a new user.
-    """
-    try:
-        # Check if user with this email exists
-        user = db.query(User).filter(User.email == user_in.email).first()
-        if user:
-            raise HTTPException(
-                status_code=400,
-                detail="A user with this email already exists.",
-            )
-
-        # Check if user with this username exists
-        user = db.query(User).filter(User.username == user_in.username).first()
-        if user:
-            raise HTTPException(
-                status_code=400,
-                detail="A user with this username already exists.",
-            )
-
-        # Create new user
-        user = User(
-            email=user_in.email,
-            username=user_in.username,
-            hashed_password=security.get_password_hash(user_in.password),
-        )
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-        return user
-    except RequestException as e:
-        raise HTTPException(
-            status_code=503,
-            detail="Network error or server is unreachable. Please try again later.",
-        ) from e
+    """Public registration is disabled. Users must be created by an admin or the seed process."""
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Public registration is disabled.",
+    )
 
 @router.post("/token", response_model=Token)
 def login_access_token(
     request: Request,
+    response: Response,
     db: Session = Depends(get_db),
     form_data: OAuth2PasswordRequestForm = Depends(),
 ) -> Any:
     """
     OAuth2 compatible token login, get an access token for future requests.
     Rate limited: 3 attempts max, then exponential backoff.
+    Sets the token in an HttpOnly cookie for browser clients.
     """
     client_ip = _get_client_ip(request)
 
@@ -221,7 +193,21 @@ def login_access_token(
 
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = security.create_access_token(
-        data={"sub": user.username, "role": user.role.value, "org_id": user.org_id}, expires_delta=access_token_expires
+        data={
+            "sub": user.username,
+            "role": user.role.value,
+            "org_id": user.org_id,
+            "token_version": user.token_version,
+        },
+        expires_delta=access_token_expires,
+    )
+    response.set_cookie(
+        key="token",
+        value=access_token,
+        httponly=True,
+        max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        samesite="lax",
+        path="/",
     )
     logger.info("[AUTH] token_issued username=%s role=%s org_id=%s", user.username, user.role.value, user.org_id)
     return {"access_token": access_token, "token_type": "bearer"}
@@ -238,13 +224,19 @@ def change_password(
     current_user: User = Depends(get_current_user),
 ) -> Any:
     """
-    Change current user's password.
+    Change current user's password. Invalidates existing tokens by bumping token_version.
     """
+    if not security.verify_password(payload.current_password, current_user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Current password is incorrect",
+        )
     current_user.hashed_password = security.get_password_hash(payload.new_password)
+    current_user.token_version += 1
     db.commit()
     db.refresh(current_user)
     logging.info("[AUTH] password_changed username=%s user_id=%s", current_user.username, current_user.id)
-    return {"message": "Password changed successfully"}
+    return {"message": "Password changed successfully. Please log in again."}
 
 
 @router.post("/test-token", response_model=UserResponse)
@@ -253,3 +245,10 @@ def test_token(current_user: User = Depends(get_current_user)) -> Any:
     Test access token by getting current user.
     """
     return current_user
+
+
+@router.post("/logout", status_code=200)
+def logout(response: Response) -> Any:
+    """Clear the HttpOnly auth cookie."""
+    response.delete_cookie(key="token", path="/")
+    return {"message": "Logged out"}

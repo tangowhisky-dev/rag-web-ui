@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
 import { CircuitBoard } from "lucide-react";
 import Breadcrumb from "@/components/ui/breadcrumb";
 import { NavActions } from "./nav-actions";
@@ -15,22 +14,14 @@ export default function DashboardLayout({
   pageTitle?: string;
   graphRagActive?: boolean;
 }) {
-  const router = useRouter();
   const [hydrated, setHydrated] = useState(false);
-  const [isAuthorized, setIsAuthorized] = useState(false);
 
   useEffect(() => {
     setHydrated(true);
-    const token = localStorage.getItem("token");
-    if (!token) {
-      router.push("/");
-    } else {
-      setIsAuthorized(true);
-    }
-  }, [router]);
+  }, []);
 
   // Wait for hydration before showing content
-  if (!hydrated || !isAuthorized) {
+  if (!hydrated) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
         <div className="text-muted-foreground">Loading...</div>

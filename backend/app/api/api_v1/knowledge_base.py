@@ -480,13 +480,23 @@ async def cleanup_temp_files(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Clean up expired temporary files.
+    Clean up expired temporary files for the current user's knowledge bases only.
     """
     expired_time = datetime.now(timezone.utc) - timedelta(hours=24)
-    expired_uploads = db.query(DocumentUpload).filter(
-        DocumentUpload.created_at < expired_time
-    ).all()
-    
+    user_kb_ids = (
+        db.query(KnowledgeBase.id)
+        .filter(KnowledgeBase.user_id == current_user.id)
+        .subquery()
+    )
+    expired_uploads = (
+        db.query(DocumentUpload)
+        .filter(
+            DocumentUpload.created_at < expired_time,
+            DocumentUpload.knowledge_base_id.in_(user_kb_ids),
+        )
+        .all()
+    )
+
     for upload in expired_uploads:
         try:
             delete_file(upload.temp_path)

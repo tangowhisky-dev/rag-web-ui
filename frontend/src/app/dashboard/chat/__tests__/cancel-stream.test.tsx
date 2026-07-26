@@ -2,18 +2,14 @@
  * Tests for cancelStream utility.
  *
  * Verifies:
- *  1. Correct endpoint URL with Bearer token
+ *  1. Calls the cancel endpoint with credentials
  *  2. Returns true on 200 response
  *  3. Returns false on network error
  *  4. Returns false on non-200 response
  */
 import { cancelStream } from "@/lib/cancel-stream";
 
-// jsdom provides localStorage
-const mockToken = "test-jwt-token";
-
 beforeEach(() => {
-  localStorage.setItem("token", mockToken);
   // Reset fetch mock between tests
   global.fetch = jest.fn();
 });
@@ -23,7 +19,7 @@ afterEach(() => {
 });
 
 describe("cancelStream", () => {
-  it("calls the correct endpoint URL with Bearer token", async () => {
+  it("calls the correct endpoint URL with credentials", async () => {
     (global.fetch as jest.Mock).mockResolvedValue({
       ok: true,
       status: 200,
@@ -33,9 +29,7 @@ describe("cancelStream", () => {
 
     expect(global.fetch).toHaveBeenCalledWith("/api/chat/42/cancel", {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${mockToken}`,
-      },
+      credentials: "include",
     });
   });
 

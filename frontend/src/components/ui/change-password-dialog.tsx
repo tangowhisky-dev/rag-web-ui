@@ -63,8 +63,7 @@ export function ChangePasswordDialog({ open, onOpenChange, username }: ChangePas
       resetForm();
       onOpenChange(false);
       // Clear auth and redirect to home
-      localStorage.removeItem('token');
-      document.cookie = 'token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT';
+      await api.post('/api/auth/logout');
       router.push('/');
     } catch (err) {
       toast({

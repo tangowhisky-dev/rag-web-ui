@@ -71,6 +71,9 @@ def client():
 def create_user(db, username: str, password: str, role: UserRole, org_id=None) -> User:
     """Create a User with the given role directly in the DB."""
     from app.core.security import get_password_hash
+    if org_id is None:
+        root = db.query(Organisation).filter(Organisation.parent_id.is_(None)).first()
+        org_id = root.id if root else None
     user = User(
         username=username,
         email=f"{username}@example.com",
@@ -141,6 +144,9 @@ def test_admin_only_rejects_unauthenticated(client):
 
 def create_org(db, name: str, parent_id=None) -> Organisation:
     """Create an Organisation directly in the DB."""
+    if parent_id is None:
+        root = db.query(Organisation).filter(Organisation.parent_id.is_(None)).first()
+        parent_id = root.id if root else None
     org = Organisation(name=name, parent_id=parent_id)
     db.add(org)
     db.flush()

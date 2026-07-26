@@ -77,6 +77,19 @@ class UserResponse(UserBase):
 
 
 class PasswordChange(BaseModel):
+    current_password: str
+    new_password: str
+
+    @field_validator('new_password')
+    @classmethod
+    def validate_password_strength(cls, v: str) -> str:
+        error = validate_password_strength(v)
+        if error:
+            raise ValueError(error)
+        return v
+
+
+class AdminPasswordChange(BaseModel):
     new_password: str
 
     @field_validator('new_password')

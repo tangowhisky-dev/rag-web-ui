@@ -65,26 +65,21 @@ def client():
     fastapi_app.dependency_overrides.clear()
 
 
-def _register_and_login(client, username="testuser", password="testpass123",
-                        email=None, role=UserRole.user, db=None):
-    """Register a user (optionally with a specific role) then login, return token."""
+def _create_and_login(client, db, username="testuser", password="testpass123",
+                      email=None, role=UserRole.user):
+    """Create a user directly in the DB then login, return token."""
     if email is None:
         email = f"{username}@example.com"
 
-    # Register via API (creates user with default role=user)
-    resp = client.post("/api/auth/register", json={
-        "email": email,
-        "username": username,
-        "password": password,
-        "is_active": True,
-    })
-    assert resp.status_code == 200, f"register failed: {resp.text}"
-
-    # If a non-default role is requested, update directly in DB
-    if role != UserRole.user and db is not None:
-        user = db.query(User).filter(User.username == username).first()
-        user.role = role
-        db.commit()
+    user = User(
+        username=username,
+        email=email,
+        hashed_password=security.get_password_hash(password),
+        is_active=True,
+        role=role,
+    )
+    db.add(user)
+    db.commit()
 
     # Login
     token_resp = client.post("/api/auth/token", data={
@@ -99,9 +94,9 @@ def _register_and_login(client, username="testuser", password="testpass123",
 # Tests
 # ---------------------------------------------------------------------------
 
-def test_login_token_has_role_and_org_id(client):
+def test_login_token_has_role_and_org_id(client, db):
     """Token returned by /api/auth/token must carry `role` and `org_id` claims."""
-    token = _register_and_login(client)
+    token = _create_and_login(client, db)
 
     payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
 
@@ -110,9 +105,9 @@ def test_login_token_has_role_and_org_id(client):
     assert "org_id" in payload, "JWT payload missing `org_id` claim"
 
 
-def test_get_current_user_returns_role(client):
+def test_get_current_user_returns_role(client, db):
     """GET /api/auth/test-token with valid Bearer token must return JSON with `role`."""
-    token = _register_and_login(client)
+    token = _create_and_login(client, db)
 
     resp = client.post("/api/auth/test-token",
                        headers={"Authorization": f"Bearer {token}"})
@@ -123,9 +118,9 @@ def test_get_current_user_returns_role(client):
     assert data["role"] == "user"
 
 
-def test_admin_only_rejects_user_role(client):
+def test_admin_only_rejects_user_role(client, db):
     """/api/auth/admin-only must return 403 for a user with role=user."""
-    token = _register_and_login(client)
+    token = _create_and_login(client, db)
 
     resp = client.get("/api/auth/admin-only",
                       headers={"Authorization": f"Bearer {token}"})
@@ -135,9 +130,9 @@ def test_admin_only_rejects_user_role(client):
 def test_admin_only_accepts_admin_role(client, db):
     """/api/auth/admin-only must return 200 for a user with role=admin."""
     # The seed function creates admin@example.com, so use a different email.
-    token = _register_and_login(client, username="adminuser",
+    token = _create_and_login(client, db, username="adminuser",
                                 email="adminuser@example.com",
-                                role=UserRole.admin, db=db)
+                                role=UserRole.admin)
 
     resp = client.get("/api/auth/admin-only",
                       headers={"Authorization": f"Bearer {token}"})

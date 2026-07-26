@@ -17,14 +17,7 @@ export class ApiError extends Error {
 export async function fetchApi(fullUrl: string, options: FetchOptions = {}) {
   const { data, headers: customHeaders = {}, ...restOptions } = options;
 
-  // Get token from localStorage
-  let token = '';
-  if (typeof window !== 'undefined') {
-    token = localStorage.getItem('token') || '';
-  }
-
   const headers: Record<string, string> = {
-    ...(token && { Authorization: `Bearer ${token}` }),
     ...customHeaders,
   };
 
@@ -35,6 +28,7 @@ export async function fetchApi(fullUrl: string, options: FetchOptions = {}) {
 
   const config: RequestInit = {
     ...restOptions,
+    credentials: 'include',
     headers,
   };
 
@@ -54,11 +48,14 @@ export async function fetchApi(fullUrl: string, options: FetchOptions = {}) {
   try {
     const response = await fetch(fullUrl, config);
 
-    // Skip 401 redirect for login endpoint — let the page handle it
-    if (response.status === 401 && !fullUrl.includes('/api/auth/token')) {
+    // Skip 401 redirect for login/logout endpoints
+    if (response.status === 401 && !fullUrl.includes('/api/auth/token') && !fullUrl.includes('/api/auth/logout')) {
       if (typeof window !== 'undefined') {
-        localStorage.removeItem('token');
-        document.cookie = 'token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT';
+        try {
+          await api.post('/api/auth/logout');
+        } catch {
+          // best effort
+        }
         window.location.href = '/';
       }
       throw new ApiError(401, 'Unauthorized - Please log in again');

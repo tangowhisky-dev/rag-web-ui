@@ -167,9 +167,8 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = setInterval(async () => {
       try {
-        const token = localStorage.getItem("token");
         const res = await fetch(`/api/chat/${params.id}/files/${fileId}`, {
-          headers: { Authorization: `Bearer ${token}` },
+          credentials: "include",
         });
         if (!res.ok) return;
         const data = await res.json();
@@ -188,13 +187,12 @@ function ChatPageInner({ params }: { params: { id: string } }) {
   // Upload file immediately on attach
   const handleFileAccepted = async (file: File) => {
     setFileError("");
-    const token = localStorage.getItem("token");
     const formData = new FormData();
     formData.append("file", file);
     try {
       const res = await fetch(`/api/chat/${params.id}/files`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
+        credentials: "include",
         body: formData,
       });
       if (!res.ok) {
@@ -212,10 +210,9 @@ function ChatPageInner({ params }: { params: { id: string } }) {
 
   const handleFileRemove = async () => {
     if (uploadedFile) {
-      const token = localStorage.getItem("token");
       fetch(`/api/chat/${params.id}/files/${uploadedFile.id}`, {
         method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` },
+        credentials: "include",
       }).catch(() => {});
     }
     setUploadedFile(null);
@@ -722,18 +719,13 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     setTaskList([]);
     setThinkingContent(null);
 
-    const token =
-      typeof window !== "undefined"
-        ? window.localStorage.getItem("token") || ""
-        : "";
-
     const controller = new AbortController();
     abortControllerRef.current = controller;
 
     const response = await fetch(`/api/chat/${params.id}/messages`, {
       method: "POST",
+      credentials: "include",
       headers: {
-        Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
@@ -949,11 +941,10 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     abortControllerRef.current = abortController;
 
     try {
-      const token = localStorage.getItem("token") || "";
       const res = await fetch(`/api/chat/clarification`, {
         method: "POST",
+        credentials: "include",
         headers: {
-          Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
@@ -1034,7 +1025,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
   const handleExport = async () => {
     try {
       const res = await fetch(`/api/chat/${params.id}/export`, {
-        headers: { Authorization: `Bearer ${localStorage.getItem("token") ?? ""}` },
+        credentials: "include",
       });
       if (!res.ok) throw new Error("Export failed");
       const blob = await res.blob();

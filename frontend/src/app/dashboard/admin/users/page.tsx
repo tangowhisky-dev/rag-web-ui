@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { api, ApiError } from '@/lib/api';
-import { getTokenClaims, validatePasswordStrength } from '@/lib/auth';
+import { validatePasswordStrength } from '@/lib/auth';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -44,12 +44,6 @@ const ALL_ROLE_OPTIONS: RoleOption[] = ['user', 'admin', 'super_admin'];
 
 const adminRoleOptions: RoleOption[] = ['user'];
 
-function getAvailableRoles(): RoleOption[] {
-  const claims = getTokenClaims();
-  if (claims?.role === 'super_admin') return ALL_ROLE_OPTIONS;
-  return adminRoleOptions;
-}
-
 function roleBadgeVariant(role: string): 'default' | 'secondary' | 'destructive' {
   if (role === 'super_admin') return 'destructive';
   if (role === 'admin') return 'secondary';
@@ -64,6 +58,7 @@ export default function AdminUsersPage() {
   const [orgs, setOrgs] = useState<Org[]>([]);
   const [loading, setLoading] = useState(true);
   const [availableRoles, setAvailableRoles] = useState<RoleOption[]>([]);
+  const [currentRole, setCurrentRole] = useState<string>('');
   const [search, setSearch] = useState('');
 
   // Create dialog
@@ -102,19 +97,22 @@ export default function AdminUsersPage() {
   });
 
   useEffect(() => {
-    // Auth check is handled by the layout.tsx middleware.
-    setAvailableRoles(getAvailableRoles());
+    // Auth check is handled by the middleware.
     fetchAll();
   }, [router]);
 
   async function fetchAll() {
     try {
-      const [usersData, orgsData] = await Promise.all([
+      const [usersData, orgsData, currentUser] = await Promise.all([
         api.get('/api/admin/users'),
         api.get('/api/admin/orgs'),
+        api.get('/api/auth/test-token'),
       ]);
       setUsers(usersData);
       setOrgs(orgsData);
+      const role = (currentUser as { role?: string }).role ?? '';
+      setCurrentRole(role);
+      setAvailableRoles(role === 'super_admin' ? ALL_ROLE_OPTIONS : adminRoleOptions);
     } catch (err) {
       toast({
         title: 'Error',
@@ -152,8 +150,7 @@ export default function AdminUsersPage() {
   }
 
   function openEdit(user: User) {
-    const claims = getTokenClaims();
-    const isSuperAdmin = claims?.role === 'super_admin';
+    const isSuperAdmin = currentRole === 'super_admin';
     setSelectedUser(user);
     // Always assign a valid org — first org if none assigned
     const orgId = user.org_id || (orgs.length > 0 ? orgs[0].id : null);
@@ -470,7 +467,7 @@ export default function AdminUsersPage() {
                 value={editForm.role}
                 onChange={(e) => setEditForm((f) => ({ ...f, role: e.target.value as RoleOption }))}
               >
-                {selectedUser && getTokenClaims()?.role !== 'super_admin' && selectedUser.role !== 'user' ? (
+                {selectedUser && currentRole !== 'super_admin' && selectedUser.role !== 'user' ? (
                   <option key={selectedUser.role} value={selectedUser.role} disabled>
                     {selectedUser.role} (cannot change — requires super admin)
                   </option>

@@ -1,32 +1,23 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
 import Breadcrumb from '@/components/ui/breadcrumb';
 import AdminSidebar from '@/components/admin/admin-sidebar';
-import { isAdmin } from '@/lib/auth';
 import { NavActions } from '@/components/layout/nav-actions';
 
 // LLM config is managed per-organisation on the Orgs page (LLM Config button).
 // The standalone /dashboard/admin/llm-config page does not exist.
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
-  const router = useRouter();
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [hydrated, setHydrated] = useState(false);
-  const [isAuthorized, setIsAuthorized] = useState(false);
 
   useEffect(() => {
     setHydrated(true);
-    if (!isAdmin()) {
-      router.replace('/dashboard');
-    } else {
-      setIsAuthorized(true);
-    }
-  }, [router]);
+  }, []);
 
-  // Wait for hydration before checking authorization
-  if (!hydrated || !isAuthorized) {
+  // Wait for hydration before rendering
+  if (!hydrated) {
     return (
       <div className="relative h-screen bg-background overflow-hidden flex items-center justify-center">
         <div className="text-muted-foreground">Loading...</div>

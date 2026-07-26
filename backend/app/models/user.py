@@ -21,6 +21,7 @@ class User(Base, TimestampMixin):
     is_active = Column(Boolean, default=True)
     role = Column(SAEnum(UserRole), nullable=False, default=UserRole.user, server_default='user')
     org_id = Column(Integer, ForeignKey('organisations.id'), nullable=True, index=True)
+    token_version = Column(Integer, default=0, server_default='0', nullable=False)
 
     # Relationships
     # cascade='all, delete-orphan' ensures KBs, chats, and their children are deleted when the user is deleted

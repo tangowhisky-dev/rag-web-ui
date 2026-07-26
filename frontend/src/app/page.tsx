@@ -58,11 +58,7 @@ export default function Home() {
     };
   }, [retryAfter]);
 
-  useEffect(() => {
-    if (typeof window !== "undefined" && localStorage.getItem("token")) {
-      router.replace("/dashboard");
-    }
-  }, [router]);
+
 
   const handleLogin = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -73,11 +69,9 @@ export default function Home() {
     formUrlEncoded.append("username", formData.get("username") as string);
     formUrlEncoded.append("password", formData.get("password") as string);
     try {
-      const data = await api.post("/api/auth/token", formUrlEncoded, {
+      await api.post("/api/auth/token", formUrlEncoded, {
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
       });
-      localStorage.setItem("token", data.access_token);
-      document.cookie = `token=${data.access_token}; path=/; SameSite=Lax`;
       router.push("/dashboard");
     } catch (err) {
       if (err instanceof ApiError) {
