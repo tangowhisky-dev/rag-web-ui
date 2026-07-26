@@ -22,10 +22,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 from qdrant_client.models import PointIdsList
+from qdrant_client.http.exceptions import UnexpectedResponse
 
 from app.core.config import settings
 from app.db.session import SessionLocal
-from app.models.datastore import DataStore, OrganizationDataStore
+from app.models.datastore import DataStore, DataStoreFileManifest, OrganizationDataStore
 from app.models.knowledge import Document, DocumentUpload, ProcessingTask, DocumentChunk
 from app.models.knowledge import KnowledgeBase
 from app.services.ingestion import (
@@ -659,15 +660,65 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
         return False
 
     def _compute_hash(self, path: str) -> str:
-        """Compute SHA-256 hash of a file."""
+        """Compute SHA-256 hash of a file, aborting if the file changes mid-read."""
+        try:
+            size_before = os.path.getsize(path)
+        except OSError:
+            return ""
+
         h = hashlib.sha256()
         try:
             with open(path, "rb") as f:
                 for chunk in iter(lambda: f.read(8192), b""):
                     h.update(chunk)
-            return h.hexdigest()
         except OSError:
             return ""
+
+        try:
+            size_after = os.path.getsize(path)
+        except OSError:
+            return ""
+
+        if size_before != size_after:
+            logger.warning("[WATCHER] file size changed during hashing: %s", path)
+            return ""
+
+        return h.hexdigest()
+
+    def _upsert_manifest(
+        self,
+        db: Session,
+        datastore_id: int,
+        event_path: str,
+        file_hash: str,
+        file_size: int,
+    ) -> None:
+        """Create or update the DataStoreFileManifest row for a file."""
+        now = datetime.now(timezone.utc)
+        manifest = (
+            db.query(DataStoreFileManifest)
+            .filter(
+                DataStoreFileManifest.datastore_id == datastore_id,
+                DataStoreFileManifest.file_path == event_path,
+            )
+            .first()
+        )
+        if manifest:
+            manifest.file_hash = file_hash
+            manifest.file_size = file_size
+            manifest.updated_at = now
+        else:
+            db.add(
+                DataStoreFileManifest(
+                    datastore_id=datastore_id,
+                    file_path=event_path,
+                    file_hash=file_hash,
+                    file_size=file_size,
+                    discovered_at=now,
+                    updated_at=now,
+                )
+            )
+        db.commit()
 
     def _ingest_file(
         self,
@@ -761,6 +812,9 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
             db.add(task)
             db.commit()
             db.refresh(task)
+
+            # Keep manifest in sync so discovery does not re-process this file
+            self._upsert_manifest(db, datastore_id, event_path, file_hash, file_size)
 
             logger.info(
                 "[WATCHER] ingestion_started path=%s datastore_id=%s doc_id=%s task_id=%s",
@@ -872,6 +926,9 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
                 db.add(task)
             db.commit()
 
+            # Keep manifest in sync with the new hash
+            self._upsert_manifest(db, datastore_id, event_path, file_hash, file_size)
+
             logger.info(
                 "[WATCHER] update_started doc_id=%s path=%s",
                 document_id,
@@ -956,6 +1013,18 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
                                 collection_name=f"ds_{datastore_id}",
                                 points_selector=PointIdsList(points=point_ids),
                             )
+                    except UnexpectedResponse as e:
+                        # 404 means the vectors were already deleted — safe to ignore
+                        if "404" in str(e):
+                            logger.info(
+                                "[WATCHER] Qdrant vectors already gone for document_id=%s",
+                                doc.id,
+                            )
+                        else:
+                            logger.warning(
+                                "[WATCHER] Qdrant delete failed for document_id=%s: %s",
+                                doc.id, e,
+                            )
                     except Exception as e:
                         logger.warning(
                             "[WATCHER] Qdrant delete failed for document_id=%s: %s",
@@ -986,6 +1055,14 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
                         datastore_id,
                         doc.id,
                     )
+
+                # Remove manifest entry for the deleted file (or if it was never ingested)
+                db.query(DataStoreFileManifest).filter(
+                    DataStoreFileManifest.datastore_id == datastore_id,
+                    DataStoreFileManifest.file_path == event_path,
+                ).delete(synchronize_session=False)
+
+                db.commit()
                 return
 
             # KB deletion: query by org_id from handler mapping
@@ -1021,6 +1098,17 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
                                 get_qdrant_client().delete(
                                     collection_name=f"kb_{kb_id}",
                                     points_selector=PointIdsList(points=point_ids),
+                                )
+                        except UnexpectedResponse as e:
+                            if "404" in str(e):
+                                logger.info(
+                                    "[WATCHER] Qdrant vectors already gone for document_id=%s",
+                                    doc.id,
+                                )
+                            else:
+                                logger.warning(
+                                    "[WATCHER] Qdrant delete failed for document_id=%s: %s",
+                                    doc.id, e,
                                 )
                         except Exception as e:
                             logger.warning(

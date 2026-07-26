@@ -33,6 +33,34 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _validate_folder_path(folder_path: str) -> str:
+    """Validate that a folder path exists and is located under /app/data."""
+    abs_path = os.path.abspath(folder_path)
+    data_root = "/app/data"
+    real_path = os.path.realpath(abs_path)
+    real_root = os.path.realpath(data_root)
+
+    if not os.path.isdir(real_path):
+        if os.path.isdir(real_root):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Directory does not exist: {abs_path}. Valid data sources must be subdirectories of {data_root}.",
+            )
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Directory does not exist: {abs_path}. Ensure the /app/data volume is mounted and the folder exists.",
+            )
+
+    if real_path != real_root and not real_path.startswith(real_root + os.sep):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Directory must be under {data_root}: {abs_path}",
+        )
+
+    return abs_path
+
+
 # ---------------------------------------------------------------------------
 # Request / response schemas
 # ---------------------------------------------------------------------------
@@ -238,21 +266,8 @@ def create_datastore(
     _: object = Depends(require_admin),
 ):
     """Create a new datastore."""
-    # Validate folder exists
-    abs_path = os.path.abspath(payload.folder_path)
-    if not os.path.isdir(abs_path):
-        # Provide helpful guidance about valid paths
-        valid_base = "/app/data"
-        if os.path.isdir(valid_base):
-            raise HTTPException(
-                status_code=400,
-                detail=f"Directory does not exist: {abs_path}. Valid data sources must be subdirectories of {valid_base}. Create the folder in the Docker container first.",
-            )
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Directory does not exist: {abs_path}. Ensure the /app/data volume is mounted and the folder exists.",
-            )
+    # Validate folder exists and is under /app/data
+    abs_path = _validate_folder_path(payload.folder_path)
 
     # Check for duplicate path
     existing = (
@@ -345,19 +360,8 @@ def update_datastore(
     ds = _get_datastore_or_404(db, datastore_id)
 
     if payload.folder_path is not None:
-        abs_path = os.path.abspath(payload.folder_path)
-        if not os.path.isdir(abs_path):
-            valid_base = "/app/data"
-            if os.path.isdir(valid_base):
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Directory does not exist: {abs_path}. Valid data sources must be subdirectories of {valid_base}. Create the folder in the Docker container first.",
-                )
-            else:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Directory does not exist: {abs_path}. Ensure the /app/data volume is mounted and the folder exists.",
-                )
+        abs_path = _validate_folder_path(payload.folder_path)
+
         # Check for duplicate path (excluding current)
         existing = (
             db.query(DataStore)

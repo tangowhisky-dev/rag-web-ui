@@ -29,6 +29,7 @@ from app.services.datastore_watcher.handler import (
     _Debouncer,
     _SyntheticEvent,
 )
+from app.services.discovery import discover_datastore
 from app.services.ingestion import (
     SUPPORTED_EXTENSIONS,
     process_document_background,
@@ -541,83 +542,82 @@ class DataStoreWatcher:
             # Count total files first
             total_files = self._count_files_in_folder(ds.folder_path, ds.scan_pattern)
 
+            # Use the discovery engine for accurate new/modified/deleted classification
+            try:
+                result = discover_datastore(datastore_id)
+            except Exception as e:
+                logger.error(
+                    "[WATCHER] discovery_failed datastore_id=%d: %s", datastore_id, e,
+                    exc_info=True,
+                )
+                self._complete_scan(datastore_id, False, str(e))
+                summary["errors"] = 1
+                return summary
+
+            summary["scanned"] = result.total_files_discovered
+            summary["skipped"] = result.skipped_files
+            summary["new"] = len(result.new_files)
+            summary["modified"] = len(result.modified_files)
+            summary["deleted"] = len(result.deleted_files)
+
+            # Reflect discovery counts in SSE state
+            for sid, scan_info in self._active_scans.items():
+                if scan_info["datastore_id"] == datastore_id:
+                    scan_info["new"] = summary["new"]
+                    scan_info["modified"] = summary["modified"]
+                    scan_info["skipped"] = summary["skipped"]
+                    scan_info["deleted"] = summary["deleted"]
+                    scan_info["error_count"] = summary["errors"]
+                    scan_info["total"] = total_files
+                    break
+
             # Collect futures from ingestion tasks
             ingestion_futures: List[Future] = []
 
-            # Walk all files in the folder
-            for root, _dirs, files in os.walk(ds.folder_path):
-                # Check for cancellation
+            # Process new/modified files
+            files_to_process = result.new_files + result.modified_files
+            for idx, fmeta in enumerate(files_to_process):
                 if self._is_scan_cancelled(datastore_id):
                     logger.info("[WATCHER] scan_cancelled mid-scan datastore_id=%d", datastore_id)
                     self._complete_scan(datastore_id, False, "Scan cancelled by admin")
                     summary["errors"] = 1
                     return summary
 
-                for fname in files:
-                    fpath = os.path.join(root, fname)
+                fpath = fmeta["file_path"]
+                try:
+                    future = self._handle_file_in_scan(fpath, datastore_id, scan_id)
+                    if future is not None:
+                        ingestion_futures.append(future)
 
-                    try:
-                        # Check if file matches scan_pattern
-                        if not self._matches_pattern(fpath, ds.scan_pattern):
-                            summary["skipped"] += 1
-                            # Update _active_scans for SSE
-                            for sid, scan_info in self._active_scans.items():
-                                if scan_info["datastore_id"] == datastore_id:
-                                    scan_info["skipped"] = summary["skipped"]
-                                    scan_info["modified"] = summary["modified"]
-                                    break
-                            continue
+                    self._update_scan_progress(datastore_id, idx + 1)
+                    for sid, scan_info in self._active_scans.items():
+                        if scan_info["datastore_id"] == datastore_id:
+                            scan_info["new"] = summary["new"]
+                            scan_info["modified"] = summary["modified"]
+                            scan_info["skipped"] = summary["skipped"]
+                            scan_info["error_count"] = summary["errors"]
+                            break
 
-                        summary["scanned"] += 1
+                except Exception as e:
+                    logger.error("[WATCHER] scan error for %s: %s", fpath, e)
+                    summary["errors"] += 1
+                    for sid, scan_info in self._active_scans.items():
+                        if scan_info["datastore_id"] == datastore_id:
+                            scan_info["error_count"] = summary["errors"]
+                            break
 
-                        # Check if file is new or modified (without re-doing the hash)
-                        file_is_modified = False
-                        db2 = SessionLocal()
-                        try:
-                            existing = (
-                                db2.query(Document)
-                                .filter(
-                                    Document.file_path == fpath,
-                                    Document.data_store_id == datastore_id,
-                                )
-                                .first()
-                            )
-                            if existing:
-                                file_is_modified = True
-                        finally:
-                            db2.close()
-
-                        if file_is_modified:
-                            summary["modified"] += 1
-                        else:
-                            summary["new"] += 1
-
-                        # Process file for this datastore (no KB knowledge needed)
-                        future = self._handle_file_in_scan(fpath, datastore_id, scan_id)
-                        if future is not None:
-                            ingestion_futures.append(future)
-
-                        # Update progress in memory for SSE
-                        self._update_scan_progress(datastore_id, summary["scanned"])
-                        # Update new/modified/skipped/error counts in _active_scans for SSE
-                        for sid, scan_info in self._active_scans.items():
-                            if scan_info["datastore_id"] == datastore_id:
-                                scan_info["new"] = summary["new"]
-                                scan_info["modified"] = summary["modified"]
-                                scan_info["skipped"] = summary["skipped"]
-                                scan_info["error_count"] = summary["errors"]
-                                break
-
-                    except Exception as e:
-                        logger.error(
-                            "[WATCHER] scan error for %s: %s", fpath, e
-                        )
-                        summary["errors"] += 1
-                        # Update _active_scans for SSE
-                        for sid, scan_info in self._active_scans.items():
-                            if scan_info["datastore_id"] == datastore_id:
-                                scan_info["error_count"] = summary["errors"]
-                                break
+            # Process deleted files (files on disk that no longer exist)
+            for fmeta in result.deleted_files:
+                fpath = fmeta["file_path"]
+                try:
+                    self._handler._handle_deletion(fpath, datastore_id)
+                except Exception as e:
+                    logger.error("[WATCHER] deletion error for %s: %s", fpath, e)
+                    summary["errors"] += 1
+                    for sid, scan_info in self._active_scans.items():
+                        if scan_info["datastore_id"] == datastore_id:
+                            scan_info["error_count"] = summary["errors"]
+                            break
 
             # Wait for all ingestion tasks to complete before marking scan done
             if ingestion_futures:
@@ -1070,8 +1070,8 @@ class DataStoreWatcher:
         parameter is the cumulative count (summary["scanned"]), so we set
         it directly with = instead of += to avoid double-counting.
 
-        Protected by _progress_lock to prevent race with event-driven
-        ingestion's += update.
+        Also updates the in-memory active scan so the polling endpoint sees
+        progress immediately.
         """
         db: Session = SessionLocal()
         try:
@@ -1081,6 +1081,12 @@ class DataStoreWatcher:
 
             with self._progress_lock:
                 ds.last_scan_processed = processed
+
+                for sid, info in self._active_scans.items():
+                    if info["datastore_id"] == datastore_id:
+                        info["processed"] = processed
+                        break
+
             db.commit()
         finally:
             db.close()

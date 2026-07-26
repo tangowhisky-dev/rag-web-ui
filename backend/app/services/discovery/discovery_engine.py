@@ -37,17 +37,35 @@ logger = logging.getLogger(__name__)
 def hash_file(file_path: str) -> str:
     """Compute SHA-256 hash of a file using 8192-byte chunks.
 
-    Returns the hex digest string, or empty string on I/O error.
+    Returns the hex digest string, or empty string on I/O error or if the
+    file's size changes while being read.
     """
+    try:
+        size_before = os.path.getsize(file_path)
+    except OSError:
+        logger.warning("[DISCOVERY] failed_to_get_size path=%s", file_path)
+        return ""
+
     h = hashlib.sha256()
     try:
         with open(file_path, "rb") as f:
             for chunk in iter(lambda: f.read(8192), b""):
                 h.update(chunk)
-        return h.hexdigest()
     except OSError:
         logger.warning("[DISCOVERY] failed_to_compute_hash path=%s", file_path)
         return ""
+
+    try:
+        size_after = os.path.getsize(file_path)
+    except OSError:
+        logger.warning("[DISCOVERY] failed_to_get_size path=%s", file_path)
+        return ""
+
+    if size_before != size_after:
+        logger.warning("[DISCOVERY] file size changed during hashing: %s", file_path)
+        return ""
+
+    return h.hexdigest()
 
 
 # ── Configuration ─────────────────────────────────────────────────────────────
