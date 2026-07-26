@@ -159,8 +159,8 @@ Boris Cherny (creator of Claude Code) keeps his team's file around 100 lines. Un
 ### Commands
 - Install: `pip install -r requirements.txt` (backend), `npm install` (frontend)
 - Build: `docker compose up -d --build` (full stack), `next build` (frontend only)
-- Test (all): `pytest` (backend, run from `backend/`), `npm run test:ci` (frontend, run from `frontend/`)
-- Test (single file): `pytest tests/test_file.py` (backend), `npm run test -- --testPathPattern=test_file` (frontend)
+- Test (all): `docker exec rag-web-ui-backend-1 pytest` (backend, must run inside container), `npm run test:ci` (frontend, run from `frontend/`)
+- Test (single file): `docker exec rag-web-ui-backend-1 pytest tests/test_file.py` (backend), `npm run test -- --testPathPattern=test_file` (frontend)
 - Lint: `next lint` (frontend)
 - Typecheck: TypeScript via `tsc` (frontend, uses `tsconfig.json`)
 - Run locally: `docker compose up -d` (full stack), or `uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload` (backend dev), `next dev` (frontend dev)
@@ -202,6 +202,7 @@ The skill auto-detects the project stack (Tailwind + shadcn/ui here) and routes 
 When the user corrects your approach, append a one-line rule here before ending the session. Write it concretely ("Always use X for Y"), never abstractly ("be careful with Y"). If an existing line already covers the correction, tighten it instead of adding a new one. Remove lines when the underlying issue goes away (model upgrades, refactors, process changes).
 
 - Never restart Docker containers unless the user explicitly asks; when a restart is required, use `docker compose -f docker-compose.dev.yml`.
+- Always run backend pytest inside the `rag-web-ui-backend-1` container (e.g. `docker exec rag-web-ui-backend-1 pytest`) because the backend requires the container's installed dependencies, database patches, and environment.
 
 ---
 

@@ -11,7 +11,7 @@ from app.db.session import get_db
 from app.models.organisation import Organisation
 from app.models.org_llm_config import OrgLLMConfig
 from app.models.organisation import OrgAbbreviation
-from app.models.datastore import DataStore
+from app.models.datastore import DataStore, OrganizationDataStore
 from app.schemas.organisation import OrgCreate, OrgUpdate, OrgResponse, OrgLLMConfigUpdate, OrgLLMConfigResponse, OrgIngestionStatusResponse
 from app.models.knowledge import KnowledgeBase, ProcessingTask
 from app.schemas.user import UserAdminCreate, UserAdminUpdate, UserResponse, UserDeleteResponse, PasswordChange, AdminPasswordChange

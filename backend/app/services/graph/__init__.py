@@ -1,7 +1,9 @@
 from .graph_service import (
     build_graph_for_document,
     delete_graph_for_document,
+    delete_graph_for_kb,
     expand_docs_via_graph,
+    purge_stale_graph_data,
     _get_driver,
 )
 from .entity_extractor import (
@@ -12,7 +14,9 @@ from .entity_extractor import (
 __all__ = [
     "build_graph_for_document",
     "delete_graph_for_document",
+    "delete_graph_for_kb",
     "expand_docs_via_graph",
+    "purge_stale_graph_data",
     "_get_driver",
     "extract_entities_from_query",
     "extract_expand_boost",

@@ -26,7 +26,7 @@ from app.core.security import get_admin_org_ids, require_admin
 from app.db.session import get_db
 from app.models.datastore import DataStore, OrganizationDataStore
 from app.models.organisation import Organisation
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.services.datastore_watcher import DataStoreWatcher
 
 logger = logging.getLogger(__name__)

@@ -133,7 +133,7 @@ def _delete_neo4j_for_ds(datastore_id: int) -> None:
     """Delete Neo4j Chunk nodes for a DataStore, and orphaned Entity nodes."""
     try:
         from app.services.graph import _get_driver
-        if graph_settings.NEO4J_URI:
+        if settings.NEO4J_URI:
             driver = _get_driver()
             with driver.session() as session:
                 # 1. Delete Chunk nodes for this datastore

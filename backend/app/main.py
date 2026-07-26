@@ -152,10 +152,12 @@ async def lifespan(app: FastAPI):
         logging.getLogger(__name__).error("Failed to start recovery service: %s", e)
 
     # Start the DataStore watcher service after recovery
+    global watcher_service
     if settings.WATCHER_ENABLED:
         try:
             _services["watcher"] = DataStoreWatcher()
             _services["watcher"].start()
+            watcher_service = _services["watcher"]
         except Exception as e:
             logging.getLogger(__name__).error("Failed to start DataStoreWatcher: %s", e)
 
@@ -194,6 +196,7 @@ app = FastAPI(
 
 # DataStoreWatcher — started on demand during startup
 _services = {"watcher": None, "recovery": None}
+watcher_service = None
 
 # Include routers
 app.include_router(api_router, prefix=settings.API_V1_STR)

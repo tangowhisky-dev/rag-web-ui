@@ -183,24 +183,8 @@ def test_historical_memory_disabled_returns_empty():
     """
     Given: HISTORICAL_MEMORY_ENABLED=False,
     When:  retrieve_historical_memory() is called,
-    Then:  [] is returned — the DB query runs (code does step 1 before step 3),
-           but the disabled path returns empty because top_k defaults to 5
-           and the "disabled" path returns `docs[-top_k:]` which includes all docs
-           BUT with the feature flag False, the reranker path is bypassed and
-           the code returns last `top_k` raw docs with score=0.
-           However, the test sets top_k=5 by default and the disabled path
-           returns `docs[-5:]` — which are the last 5 docs with score=0,
-           NOT [].  So the result should actually be non-empty.
-
-    Wait — the code checks `if not settings.HISTORICAL_MEMORY_ENABLED
-    or not settings.RERANKER_ENABLED:` — when HISTORICAL_MEMORY_ENABLED is
-    False, it takes the disabled path (returns last K raw docs).  So the
-    result is NOT [].  This test needs to be rewritten to reflect reality,
-    OR we accept that the feature flag doesn't short-circuit the DB query.
-
-    Actually, the disabled path returns last K docs, not [].  So the result
-    will have 5 docs (default top_k=5) all with _reranker_score=0.0.
-    We should assert that the reranker was NOT called.
+    Then:  the disabled path returns the last top_k raw docs with score 0.0
+           and the reranker is not called.
     """
     rows = _make_rows(3)
     mock_db = MagicMock()

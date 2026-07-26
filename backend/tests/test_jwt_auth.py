@@ -4,8 +4,8 @@ test_jwt_auth.py — Tests for JWT auth layer with role and org_id claims.
 Covers:
   1. Login token carries `role` and `org_id` claims
   2. GET /api/auth/test-token returns `role` field in response
-  3. /api/auth/admin-only rejects role=user with 403
-  4. /api/auth/admin-only accepts role=admin with 200
+
+Admin-only access-control assertions live in test_admin.py.
 """
 import pytest
 from jose import jwt
@@ -118,25 +118,4 @@ def test_get_current_user_returns_role(client, db):
     assert data["role"] == "user"
 
 
-def test_admin_only_rejects_user_role(client, db):
-    """/api/auth/admin-only must return 403 for a user with role=user."""
-    token = _create_and_login(client, db)
 
-    resp = client.get("/api/auth/admin-only",
-                      headers={"Authorization": f"Bearer {token}"})
-    assert resp.status_code == 403, f"Expected 403, got {resp.status_code}: {resp.text}"
-
-
-def test_admin_only_accepts_admin_role(client, db):
-    """/api/auth/admin-only must return 200 for a user with role=admin."""
-    # The seed function creates admin@example.com, so use a different email.
-    token = _create_and_login(client, db, username="adminuser",
-                                email="adminuser@example.com",
-                                role=UserRole.admin)
-
-    resp = client.get("/api/auth/admin-only",
-                      headers={"Authorization": f"Bearer {token}"})
-    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
-
-    data = resp.json()
-    assert data["role"] == "admin"

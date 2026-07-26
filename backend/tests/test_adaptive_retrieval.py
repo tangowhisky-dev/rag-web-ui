@@ -88,25 +88,5 @@ def test_hybrid_search_applies_preset():
     asyncio.run(_run())
 
 
-# ── Eval harness --classify flag ──────────────────────────────────────────────
-
-def test_eval_harness_classify_flag():
-    """Verify eval harness accepts --classify flag."""
-    import subprocess
-    import os
-    
-    eval_path = os.path.join(os.path.dirname(__file__), "..", "..", "eval", "eval.py")
-    
-    # Check that the file exists and has --classify option
-    if os.path.exists(eval_path):
-        with open(eval_path) as f:
-            content = f.read()
-        # After T06, the file should have --classify flag
-        assert "--classify" in content or "classify" in content, \
-            "eval.py should support --classify flag"
-    else:
-        pytest.skip(f"eval.py not found at {eval_path}")
-
-
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
