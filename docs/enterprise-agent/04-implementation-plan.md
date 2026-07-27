@@ -193,22 +193,17 @@ No new deps for v1. Everything needed (echarts, mermaid, react-markdown, react-d
 
 ---
 
-## Part C — Migration and cutover
+## Part C — Cutover
 
-The rigid pipeline and the agent loop cannot both be the production path long-term, but a flag-gated parallel run during development reduces risk.
+The agent loop replaces the rigid pipeline entirely. There is no feature flag or parallel-run period — `pipeline.py` dispatches directly to `run_agent_loop`.
 
-### C1. Feature flag
+### C1. Cutover strategy
 
-`AGENT_LOOP_ENABLED` (env, default `false` initially). `chat_service.generate_response` checks the flag and dispatches to either `run_agentic_rag` (current) or `run_agent_loop` (new). Both share the same SSE endpoint and event protocol (v4 is a superset of v3).
+1. Verify the agent loop passes the full test suite (`pytest` and eval harness).
+2. Deploy the new pipeline as the sole path. `chat_service.generate_response` calls `run_agent_loop` unconditionally.
+3. Delete `graph.py` rigid path, `classify_query_node`, `route_by_dependencies`, subgraphs, `CLASSIFY_SYSTEM_PROMPT`, `QueryAnalysis` schema in a separate cleanup PR.
 
-### C2. Phased rollout
-
-1. Ship tools + loop behind flag, off by default. Run eval harness (`eval/`) against both paths; compare retrieval quality and answer quality.
-2. Enable for a single test org via per-org override (uses the `OrgLLMConfig` wiring added in A6 — same mechanism can carry feature flags).
-3. Enable globally after eval parity + new-tool tests pass.
-4. Delete `graph.py` rigid path, `classify_query_node`, `route_by_dependencies`, subgraphs, `CLASSIFY_SYSTEM_PROMPT`, `QueryAnalysis` schema. One cleanup PR.
-
-### C3. Backward compatibility
+### C2. Backward compatibility
 
 - Existing chats: `Message` rows without `last_answer_object`/`plan`/`tool_calls` render normally (columns nullable). The first turn under the new loop populates `last_answer_object` going forward.
 - SSE: v4 events are additive; a frontend that ignores `pl:`/`tc:`/`to:`/`la:` still works (just no tool-call cards).

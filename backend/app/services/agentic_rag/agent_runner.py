@@ -92,20 +92,15 @@ async def run_agent_loop(
                 if not isinstance(update, dict):
                     continue
 
-                if node == "plan" and update.get("plan"):
-                    plan = update.get("plan")
-                    data = plan.model_dump() if hasattr(plan, "model_dump") else plan
-                    yield {"event": "plan", "plan": data}
-
-                elif node == "think" and update.get("tool_calls"):
-                    for tc in update["tool_calls"]:
-                        yield {"event": "tool_call", "tool": tc.get("tool"), "arguments": tc.get("arguments", {})}
-
-                elif node == "tool" and update.get("observations"):
+                # plan, tool_call, and tool_observation events are emitted via
+                # the custom stream (writer() calls in agent_graph nodes). The
+                # update stream is used only to accumulate state needed for
+                # token accounting below — no events yielded here to avoid
+                # duplicating every pl:/tc:/to: event on the frontend.
+                if node == "tool" and update.get("observations"):
                     for obs in update["observations"]:
                         observation_payload = obs.model_dump() if hasattr(obs, "model_dump") else obs
                         observations.append(observation_payload)
-                        yield {"event": "tool_observation", **observation_payload}
 
                 elif node == "finalize":
                     final = update.get("final_answer", "")

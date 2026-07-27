@@ -104,90 +104,15 @@ class AgenticRAGTransformer(StreamTransformer):
         # Root-level updates carry main-graph state changes.
         if not namespace:
             self._process_root_updates(data)
-            return
-
-        # Subgraph updates (retrieval happens inside agent_subgraph).
-        # We stream context as soon as retrieved_docs are produced there.
-        logger.debug("[STREAM] subgraph update namespace=%s data_keys=%s", namespace, list(data.keys()))
-        for node_name, node_update in data.items():
-            if not isinstance(node_update, dict):
-                continue
-
-            if node_name in (
-                "collect_context",
-                "reranking",
-                "adaptive_reranking",
-                "prepare_final_context",
-            ):
-                rd = node_update.get("retrieved_docs")
-                if isinstance(rd, list) and rd:
-                    self._emit_context(rd)
-
-            # Track subtask completion: collect_context fires once per
-            # subgraph. Each firing = one subtask completed, increment by one.
-            if node_name == "collect_context" and AgenticRAGTransformer._shared_task_texts:
-                new_val = min(AgenticRAGTransformer._shared_completed_subtasks + 1, len(AgenticRAGTransformer._shared_task_texts))
-                logger.info("[STREAM] collect_context: _completed_subtasks=%d -> %d, _task_texts=%s",
-                           AgenticRAGTransformer._shared_completed_subtasks, new_val, AgenticRAGTransformer._shared_task_texts)
-                AgenticRAGTransformer._shared_completed_subtasks = new_val
-                self.events.push(
-                    {
-                        "event": "task_list",
-                        "tasks": self._make_task_list(
-                            AgenticRAGTransformer._shared_task_texts, AgenticRAGTransformer._shared_completed_subtasks
-                        ),
-                    }
-                )
-                logger.info("[STREAM] task_list pushed, current _completed_subtasks=%d", AgenticRAGTransformer._shared_completed_subtasks)
-
-            # Also debug: log every collect_context in subgraph
-            if node_name == "collect_context":
-                ctxs = node_update.get("subtask_contexts", [])
-                logger.info("[STREAM] collect_context: node_update keys=%s, subtask_contexts len=%d, _task_texts=%s, _completed_subtasks=%d",
-                           list(node_update.keys()), len(ctxs) if isinstance(ctxs, list) else 0,
-                           AgenticRAGTransformer._shared_task_texts, AgenticRAGTransformer._shared_completed_subtasks)
 
     def _process_root_updates(self, data: dict[str, Any]) -> None:
         for node_name, node_update in data.items():
             if not isinstance(node_update, dict):
                 continue
 
-            if node_name == "classify_query":
-                subtasks = node_update.get("subtasks")
-                if isinstance(subtasks, list) and len(subtasks) > 1:
-                    AgenticRAGTransformer._shared_task_texts = subtasks
-                    AgenticRAGTransformer._shared_completed_subtasks = 0
-                    logger.info("[STREAM] classify_query: set _task_texts=%s", AgenticRAGTransformer._shared_task_texts)
-                    self.events.push(
-                        {
-                            "event": "task_list",
-                            "tasks": self._make_task_list(AgenticRAGTransformer._shared_task_texts, 0),
-                        }
-                    )
-                continue
-
             rd = node_update.get("retrieved_docs")
             if isinstance(rd, list) and rd:
                 self._emit_context(rd)
-
-            # Track subtask completion at the root: prepare_final_context fires
-            # after all subgraphs, and contains the full subtask_contexts list.
-            if node_name == "prepare_final_context" and AgenticRAGTransformer._shared_task_texts:
-                ctxs = node_update.get("subtask_contexts", [])
-                if isinstance(ctxs, list) and ctxs:
-                    new_count = len(ctxs)
-                    if new_count > AgenticRAGTransformer._shared_completed_subtasks:
-                        AgenticRAGTransformer._shared_completed_subtasks = new_count
-                        logger.info("[STREAM] prepare_final_context: %d subtasks completed",
-                                   AgenticRAGTransformer._shared_completed_subtasks)
-                        self.events.push(
-                            {
-                                "event": "task_list",
-                                "tasks": self._make_task_list(
-                                    AgenticRAGTransformer._shared_task_texts, AgenticRAGTransformer._shared_completed_subtasks
-                                ),
-                            }
-                        )
 
     def _process_messages(self, namespace: list[str], data: Any) -> None:
         """Process chat-model message events.

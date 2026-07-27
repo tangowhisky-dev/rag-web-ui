@@ -1,6 +1,6 @@
 # 06 — Roadmap
 
-Phased delivery. Each phase has a verifiable success criterion and ships behind the `AGENT_LOOP_ENABLED` flag (off by default until phase 4). Per AGENTS.md §4: every phase defines success as something runnable, not "plausibly done".
+Phased delivery. Per AGENTS.md §4: every phase defines success as something runnable, not "plausibly done".
 
 ---
 
@@ -55,9 +55,9 @@ Phased delivery. Each phase has a verifiable success criterion and ships behind 
 
 ---
 
-## Phase 2 — Agent loop (behind flag)
+## Phase 2 — Agent loop
 
-**Goal**: the loop runs end-to-end, gated by `AGENT_LOOP_ENABLED=false`. Includes the offline tool-calling fallback, unified guardrail, parallel subtask dispatch, and reflect replanning.
+**Goal**: the loop runs end-to-end. Includes the offline tool-calling fallback, unified guardrail, parallel subtask dispatch, and reflect replanning.
 
 **Work**
 1. `tool_call_parser.py` — native + JSON-text + final-answer-default tiers (`04` A2b).
@@ -125,7 +125,7 @@ Phased delivery. Each phase has a verifiable success criterion and ships behind 
 **Verification**
 - Eval report: loop ≥ rigid pipeline on retrieval metrics; loop strictly better on multi-turn + file + chart cases (rigid pipeline cannot do them).
 - No regression in existing `pytest` suite after cleanup.
-- `AGENT_LOOP_ENABLED` removed from code (loop is the only path) after one release cycle of stability.
+- Loop is the sole production path; no feature flag required.
 
 **Exit criterion**: loop is the production path; rigid pipeline deleted; eval parity documented.
 
@@ -171,9 +171,10 @@ Phased delivery. Each phase has a verifiable success criterion and ships behind 
 
 ## Rollback
 
-At any point before Phase 4 step 5 (enable globally):
-- Set `AGENT_LOOP_ENABLED=false` (env or per-org override). System reverts to the rigid pipeline instantly. No data migration needed (new columns/table are additive).
-- After Phase 4 step 6 (rigid pipeline deleted): rollback requires reverting the cleanup PR. Keep the cleanup PR small and isolated so revert is clean.
+The agent loop is the sole path — there is no feature flag or fallback to the rigid pipeline.
+
+- **Before the rigid pipeline is deleted:** rollback requires reverting the cutover PR. Keep the cleanup PR small and isolated so revert is clean.
+- **After the rigid pipeline is deleted:** rollback requires a full revert of the implementation PR. The database migration (Phase 0) is additive — new columns are nullable and the `tool_call_audit` table can be dropped. No data loss occurs on revert.
 
 ---
 

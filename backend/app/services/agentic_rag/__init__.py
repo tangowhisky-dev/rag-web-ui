@@ -3,20 +3,32 @@
 Public API:
   run_agentic_rag() - async generator that streams SSE events
 
-The agent operates via LangGraph StateGraph nodes:
-1. Rewrite query using chat history (rewrite_query_node)
-2. Classify query (classify_query_node)
-3. For simple queries: direct retrieval (direct_retrieval_node) → stream answer
-4. For complex queries: subtask decomposition → iterate retrieval/generation per subtask → synthesize
-5. All tokens, progress, and thinking traces stream in real-time
+The agent operates via a loop of LangGraph nodes:
+1. Load conversation context (load_context)
+2. Rewrite query using chat history (rewrite_query_node)
+3. Compact conversation history when it grows too long (compaction_node)
+4. Plan the reasoning steps (plan_node)
+5. Think / reason through each step (think_node)
+6. Execute tools, including retrieval (tool_node)
+7. Reflect on tool results (reflect_node)
+8. Finalize and stream the answer (finalize_node)
+
+All tokens, progress, thinking traces, tool calls, and final answers stream in real-time.
 
 LangGraph components:
-  graph_state.py  - AgentState with accumulator reducers
-  nodes.py        - Node implementations (rewrite, classify, retrieve, generate, etc.)
-  callbacks.py    - SSE event bridge
-  schemas.py      - Pydantic models (QueryAnalysis)
-  utils.py        - Helper functions (token estimation, formatting)
-  graph_runner.py - Pipeline execution routing nodes to SSE output
+  agent_graph.py   - Main agent graph definition and node wiring
+  agent_runner.py  - Graph execution runner
+  graph_state.py   - AgentState with accumulator reducers
+  nodes.py         - Node implementations (rewrite, compaction, retrieve, evaluate, etc.)
+  prompts.py       - System/user prompts for planning, reasoning, and evaluation
+  schemas.py       - Pydantic models for state and tool schemas
+  streaming.py     - v3 stream transformer to SSE events
+  utils.py         - Helper functions (token estimation, formatting)
+  token_budget.py  - Context-window budget management
+  redis_memory.py  - Redis-backed checkpoint memory
+  evaluator.py     - Answer evaluation helpers
+  llm_factory.py   - LLM client construction
+  tools/           - Tool implementations (RAG retrieval, file tools, etc.)
 
 SSE Event Protocol:
   p:  progress       - transient status messages

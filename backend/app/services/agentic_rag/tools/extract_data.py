@@ -10,7 +10,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
-from app.models.chat import ChatFile
+from app.models.chat import ChatFile, Message
 from app.services.agentic_rag.llm_factory import build_chat_llm
 from app.services.agentic_rag.schemas import DataPoint, LastAnswerObject
 from app.services.agentic_rag.tool_context import ToolContext, enforce_rbac, write_audit
@@ -20,8 +20,14 @@ logger = logging.getLogger(__name__)
 
 
 class ExtractDataInput(BaseModel):
-    source: str = Field(default="last_answer", description="last_answer, retrieved_docs, or file_id.")
-    source_id: Optional[int] = Field(default=None)
+    source: str = Field(
+        default="last_answer",
+        description="Source of text to extract from: last_answer, retrieved_docs, file, or specified.",
+    )
+    source_id: Optional[int] = Field(
+        default=None,
+        description="For source='file': the ChatFile id. For source='specified': the Message id.",
+    )
     focus: Optional[str] = Field(default=None, description="What kind of numbers to extract, e.g. 'sales'.")
 
 
