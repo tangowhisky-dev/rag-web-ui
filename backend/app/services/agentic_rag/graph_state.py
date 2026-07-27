@@ -163,6 +163,7 @@ class AgentState(MessagesState):
     org_id: Annotated[Optional[int], _last_value] = None
     chat_id: Annotated[Optional[int], _last_value] = None
     user_id: Annotated[Optional[int], _last_value] = None
+    message_id: Annotated[Optional[int], _last_value] = None
     file_markdown: Annotated[Optional[str], _last_value] = None
     generate_answer: Annotated[bool, _last_value] = True  # If False, skip LLM generation (retrieval-only mode)
 

@@ -318,6 +318,7 @@ async def generate_response(
             query_model=query_model,
             org_id=org_id,
             user_id=user_id,
+            message_id=_bot_message_id,
         )
 
         async for event in stream_iter:
@@ -405,6 +406,23 @@ async def generate_response(
                 _faithfulness = usage.get("faithfulness")
                 _completeness = usage.get("completeness")
                 yield f'd:{json.dumps({"finishReason": "stop", "usage": usage, "messageId": _bot_message_id})}\n'
+                await asyncio.sleep(0)
+
+            # ── Enterprise agent loop SSE events ──────────────────────────────
+            elif event_type == "plan":
+                yield f'pl:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
+                await asyncio.sleep(0)
+
+            elif event_type == "tool_call":
+                yield f'tc:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
+                await asyncio.sleep(0)
+
+            elif event_type == "tool_observation":
+                yield f'to:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
+                await asyncio.sleep(0)
+
+            elif event_type == "last_answer":
+                yield f'la:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
                 await asyncio.sleep(0)
 
             # ── New agentic agent SSE events ──────────────────────────────────
