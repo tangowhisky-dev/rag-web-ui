@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 from app.models.chat import ChatFile
 from app.services.agentic_rag.schemas import CitationRef, LastAnswerObject
-from app.services.agentic_rag.tool_context import ToolContext, write_audit
+from app.services.agentic_rag.tool_context import ToolContext, enforce_rbac, write_audit
 from app.services.agentic_rag.token_budget import count_tokens
 from app.services.agentic_rag.tools.base import BaseAgentTool
 
@@ -51,6 +51,11 @@ class FileReadTool(BaseAgentTool):
 
         if not file_id:
             return {"ok": False, "result": {}, "error": "No file specified and no attached file found.", "tokens": 0}
+
+        rbac = enforce_rbac(ctx, file_id=file_id)
+        if rbac.get("file_id") is None:
+            return {"ok": False, "result": {}, "error": "Access denied to file.", "tokens": 0}
+        file_id = rbac["file_id"]
 
         cf = ctx.db.query(ChatFile).filter(ChatFile.id == file_id).first()
         if not cf or not cf.markdown_content:

@@ -304,13 +304,6 @@ class Settings(BaseSettings):
         "ANSWER_QUALITY_GRADING_ENABLED", "true"
     ).lower() == "true"
 
-    # ── Autonomous Agentic Agent ──────────────────────────────────────────────
-    # Maximum retry iterations for the autonomous agent loop.
-    AGENT_MAX_ITERATIONS: int = int(os.getenv("AGENT_MAX_ITERATIONS", "3"))
-    # Minimum quality score (0-100) for the critic to accept an answer.
-    # Below this threshold, the answer is emitted as low-confidence.
-    AGENT_QUALITY_THRESHOLD: int = int(os.getenv("AGENT_QUALITY_THRESHOLD", "70"))
-
     # ── Conversation Compaction ────────────────────────────────────────────
     # Enable/disable automatic conversation compaction for long sessions.
     # When enabled, older conversation messages are summarized into a

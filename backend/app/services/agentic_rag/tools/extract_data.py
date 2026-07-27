@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from app.models.chat import ChatFile
 from app.services.agentic_rag.llm_factory import build_chat_llm
 from app.services.agentic_rag.schemas import DataPoint, LastAnswerObject
-from app.services.agentic_rag.tool_context import ToolContext, write_audit
+from app.services.agentic_rag.tool_context import ToolContext, enforce_rbac, write_audit
 from app.services.agentic_rag.tools.base import BaseAgentTool
 
 logger = logging.getLogger(__name__)
@@ -81,7 +81,10 @@ class ExtractDataTool(BaseAgentTool):
                 parts.append(d.get("page_content", ""))
             text = "\n\n".join(parts)
         elif input_obj.source == "file_id" and input_obj.source_id:
-            cf = ctx.db.query(ChatFile).filter(ChatFile.id == input_obj.source_id).first()
+            rbac = enforce_rbac(ctx, file_id=input_obj.source_id)
+            if rbac.get("file_id") is None:
+                return {"ok": False, "result": {}, "error": "Access denied to file.", "tokens": 0}
+            cf = ctx.db.query(ChatFile).filter(ChatFile.id == rbac["file_id"]).first()
             text = cf.markdown_content or "" if cf else ""
         else:
             text = "Unsupported source."

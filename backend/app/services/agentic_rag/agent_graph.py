@@ -6,6 +6,7 @@ Replaces the rigid RAG pipeline with a tool-calling loop:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -255,9 +256,6 @@ async def tool_node(state: AgentState, ctx: ToolContext) -> dict:
         counts[obs.tool] = counts.get(obs.tool, 0) + 1
 
     return {"tool_calls": [], "observations": observations, "tool_call_count": counts}
-
-
-import asyncio
 
 
 async def _run_tool(tool, name: str, args: dict) -> dict:

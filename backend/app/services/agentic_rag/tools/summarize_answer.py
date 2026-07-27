@@ -9,7 +9,7 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 from app.services.agentic_rag.tools.base import BaseAgentTool
-from app.services.agentic_rag.tool_context import ToolContext, write_audit
+from app.services.agentic_rag.tool_context import ToolContext, enforce_rbac, write_audit
 from app.services.agentic_rag.llm_factory import build_chat_llm
 from app.services.agentic_rag.schemas import LastAnswerObject
 from app.models.chat import Message, ChatFile
@@ -47,15 +47,23 @@ class SummarizeAnswerTool(BaseAgentTool):
             if not text:
                 text = "No previous answer available."
         elif input_obj.source == "message_id" and input_obj.source_id:
-            msg = ctx.db.query(Message).filter(Message.id == input_obj.source_id).first()
-            text = msg.content if msg else ""
+            if not ctx.chat_id:
+                text = "Access denied."
+            else:
+                msg = ctx.db.query(Message).filter(
+                    Message.id == input_obj.source_id,
+                    Message.chat_id == ctx.chat_id,
+                ).first()
+                text = msg.content if msg else ""
             if not text:
                 text = "Message not found."
         elif input_obj.source == "file_id" and input_obj.source_id:
-            cf = ctx.db.query(ChatFile).filter(ChatFile.id == input_obj.source_id).first()
-            text = cf.markdown_content or "" if cf else ""
-            if not text:
-                text = "File not found or not processed."
+            rbac = enforce_rbac(ctx, file_id=input_obj.source_id)
+            if rbac.get("file_id") is None:
+                text = "Access denied."
+            else:
+                cf = ctx.db.query(ChatFile).filter(ChatFile.id == rbac["file_id"]).first()
+                text = cf.markdown_content or "" if cf else ""
         else:
             text = "Unsupported source."
 
