@@ -932,21 +932,28 @@ async def submit_clarification(
 
     # Resume the paused LangGraph execution and stream it as SSE.
     from langgraph.types import Command
-    from app.services.agentic_rag.graph import build_main_graph
+    from app.services.agentic_rag.agent_graph import build_agent_graph
+    from app.services.agentic_rag.llm_factory import get_org_llm
     from app.services.agentic_rag.redis_memory import get_redis_memory
     from app.services.agentic_rag.streaming import AgenticRAGTransformer
+    from app.services.agentic_rag.tool_context import ToolContext
 
     memory = await get_redis_memory()
     thread_id = f"chat-{body.chat_id}"
     config = {"configurable": {"thread_id": thread_id}}
     kb_ids = [kb.id for kb in chat.knowledge_bases]
-    graph = build_main_graph(
-        db=None,
-        kb_ids=kb_ids,
+    org_cfg = get_org_llm(current_user.org_id, db, role="chat")
+    ctx = ToolContext(
+        db=db,
+        user_id=current_user.id,
         org_id=current_user.org_id,
-        checkpointer=memory.checkpointer,
-        store=memory.store,
+        chat_id=body.chat_id,
+        qdrant_client=None,
+        redis_memory=memory,
+        org_llm_config=org_cfg,
+        state=None,
     )
+    graph = build_agent_graph(ctx)
 
     logger.info(
         "[CLARIFICATION] chat_id=%d clarification_id=%d resuming | user=%d",
@@ -982,6 +989,11 @@ async def submit_clarification(
                 "task_list": "t",
                 "thinking": "th",
                 "answer_rewrite": "r",
+                "plan": "pl",
+                "tool_call": "tc",
+                "tool_observation": "to",
+                "last_answer": "la",
+                "interrupt": "c",
             }
             return mapping.get(name) or name
 

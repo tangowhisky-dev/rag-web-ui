@@ -30,6 +30,8 @@ _TOOL_CLASSES = [
     ClarifyTool,
 ]
 
+ALL_TOOLS = _TOOL_CLASSES
+
 
 def build_tools(ctx: "ToolContext") -> list:
     """Return tool instances bound to the given ToolContext."""

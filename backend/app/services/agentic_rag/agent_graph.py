@@ -14,6 +14,7 @@ from typing import Any, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.graph import END, StateGraph
+from langgraph.types import interrupt
 
 from app.core.config import settings
 from app.models.chat import ChatFile, Message
@@ -27,7 +28,7 @@ def _writer():
     except RuntimeError:
         return lambda x: None
 from app.services.agentic_rag.llm_factory import build_chat_llm
-from app.services.agentic_rag.nodes import compaction_node, rewrite_query_node
+from app.services.agentic_rag.nodes import answer_evaluation_node, compaction_node, rewrite_query_node
 from app.services.agentic_rag.prompts import (
     AGENT_SYSTEM_PROMPT,
     LAST_ANSWER_EXTRACT_PROMPT,
@@ -36,6 +37,7 @@ from app.services.agentic_rag.prompts import (
     THINK_SYSTEM_PROMPT,
 )
 from app.services.agentic_rag.schemas import LastAnswerObject, Observation, Plan, Subtask
+from app.services.agentic_rag.tool_call_parser import parse_think_response
 from app.services.agentic_rag.tool_context import ToolContext, write_audit
 from app.services.agentic_rag.tools import applicable_tools
 from app.services.agentic_rag.token_budget import count_tokens
@@ -141,10 +143,6 @@ async def plan_node(state: AgentState, ctx: ToolContext) -> dict:
 
     writer({"event": "plan", "plan": plan.model_dump() if isinstance(plan, Plan) else plan})
 
-    if plan.needs_clarification and plan.clarification_question:
-        # Clarification is handled as an interrupt by the runner; emit interrupt event for it.
-        writer({"event": "interrupt", "question": plan.clarification_question})
-
     return {"plan": plan, "needs_clarification": plan.needs_clarification}
 
 
@@ -152,6 +150,9 @@ async def think_node(state: AgentState, ctx: ToolContext) -> dict:
     """Decide the next action: emit one or more tool calls or a final answer."""
     iteration = state.get("iteration", 0) + 1
     max_iter = settings.AGENT_MAX_ITERATIONS
+
+    if state.get("force_finalize"):
+        return {"iteration": iteration, "tool_calls": [], "precomputed_answer": ""}
 
     original = state.get("original_query", "")
     plan = state.get("plan") or Plan()
@@ -169,61 +170,28 @@ async def think_node(state: AgentState, ctx: ToolContext) -> dict:
         "Emit either {\"tool_calls\": [...]} or {\"final_answer\": \"...\"}."
     )
 
-    tool_calls: list[dict] = []
-    final_answer: Optional[str] = None
-
     mode = settings.TOOL_CALL_MODE
-    try_native = mode in ("native", "auto")
-    if try_native:
-        try:
+    try:
+        if mode == "json_text":
             llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=0.7)
-            llm_bound = llm.bind_tools(tools)
-            resp = await llm_bound.ainvoke([
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ])
-            if getattr(resp, "tool_calls", None):
-                for tc in resp.tool_calls:
-                    tool_calls.append({"tool": tc.get("name"), "arguments": tc.get("args", {})})
-            else:
-                final_answer = str(resp.content)
-        except Exception as exc:
-            logger.warning("[think_node] native tool-calling failed: %s", exc)
-            if mode == "native":
-                final_answer = f"Tool-calling error: {exc}"
+            resp = await llm.ainvoke([{"role": "system", "content": system}, {"role": "user", "content": user}])
+        else:
+            # native or auto: bind tools; parser falls back to JSON-text if native call absent.
+            llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=0.7)
+            resp = await llm.bind_tools(tools).ainvoke([{"role": "system", "content": system}, {"role": "user", "content": user}])
+    except Exception as exc:
+        logger.warning("[think_node] LLM call failed: %s", exc)
+        return {"iteration": iteration, "tool_calls": [], "precomputed_answer": f"LLM error: {exc}"}
 
-    if not tool_calls and not final_answer:
-        # JSON-text fallback
-        llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=0.7)
-        resp = await llm.ainvoke([
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ])
-        raw = str(resp.content)
-        try:
-            match = re.search(r"\{.*\}", raw, re.DOTALL)
-            parsed = json.loads(match.group(0)) if match else {}
-            if "tool_calls" in parsed:
-                tool_calls = parsed["tool_calls"]
-            elif "tool" in parsed:
-                tool_calls = [parsed]
-            elif "final_answer" in parsed:
-                final_answer = parsed["final_answer"]
-            else:
-                final_answer = raw
-        except Exception as exc:
-            logger.warning("[think_node] JSON fallback parse failed: %s", exc)
-            final_answer = raw
+    parsed = parse_think_response(resp, mode=mode)
+    tool_calls = parsed.tool_calls
+    final_answer = parsed.final_answer
 
     if iteration >= max_iter:
         tool_calls = []
 
     # Dependency guard: only allow independent tool calls in one message.
-    allowed = []
-    completed_ids = {obs.observation_id for obs in observations}
-    for tc in tool_calls:
-        # No depends tracking on actual calls for now; run all emitted calls.
-        allowed.append(tc)
+    allowed = list(tool_calls)
 
     if tool_calls and not final_answer:
         return {"iteration": iteration, "tool_calls": allowed}
@@ -302,7 +270,7 @@ async def _run_tool(tool, name: str, args: dict) -> dict:
 
 def route_plan(state: AgentState) -> str:
     if state.get("needs_clarification"):
-        return END
+        return "clarify_interrupt"
     return "think"
 
 
@@ -393,9 +361,79 @@ async def save_memory_node(state: AgentState, ctx: ToolContext) -> dict:
         msg.last_answer_object = lao.model_dump() if isinstance(lao, LastAnswerObject) else lao
     observations = state.get("observations", [])
     msg.tool_calls = [obs.model_dump() for obs in observations]
+    msg.final_confidence = state.get("final_confidence")
+    msg.confidence_level = state.get("confidence_level")
+    msg.faithfulness = state.get("faithfulness")
+    msg.completeness = state.get("completeness")
 
     ctx.db.commit()
     return {}
+
+
+async def reflect_node(state: AgentState, ctx: ToolContext) -> dict:
+    """Periodic reflection: decide whether to continue, retry, or force finalization."""
+    iteration = state.get("iteration", 0)
+    if iteration == 0 or iteration % settings.AGENT_REFLECT_EVERY != 0:
+        return {}
+
+    plan = state.get("plan") or Plan()
+    observations = state.get("observations", [])
+    system = AGENT_SYSTEM_PROMPT + "\n\n" + REFLECT_SYSTEM_PROMPT
+    user = (
+        f"Iteration: {iteration}/{settings.AGENT_MAX_ITERATIONS}\n"
+        f"Plan: {json.dumps(plan.model_dump() if isinstance(plan, Plan) else plan, default=str)}\n"
+        f"Observations:\n{_observations_text(observations)}\n\n"
+        "Return a JSON object with: { 'action': 'continue|finalize', 'reasoning': '...' }"
+    )
+
+    action = "continue"
+    reasoning = ""
+    try:
+        llm = build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)
+        resp = await llm.ainvoke([{"role": "system", "content": system}, {"role": "user", "content": user}])
+        raw = str(resp.content)
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if match:
+            parsed = json.loads(match.group(0))
+            action = parsed.get("action", "continue")
+            reasoning = parsed.get("reasoning", "")
+    except Exception as exc:
+        logger.warning("[reflect_node] reflection failed: %s", exc)
+
+    writer = _writer()
+    writer({"event": "progress", "phase": "reflect", "action": action, "reasoning": reasoning})
+    return {"reflection": {"action": action, "reasoning": reasoning}, "force_finalize": action == "finalize"}
+
+
+async def clarify_interrupt_node(state: AgentState) -> dict:
+    """Pause execution and ask the user for clarification; resumes on response."""
+    plan = state.get("plan") or Plan()
+    question = ""
+    if isinstance(plan, Plan):
+        question = plan.clarification_question or ""
+    if not question:
+        question = "Could you clarify what you need?"
+
+    writer = _writer()
+    writer({"event": "interrupt", "question": question})
+
+    try:
+        user_response = interrupt({"question": question})
+    except Exception as exc:
+        logger.warning("[clarify_interrupt_node] interrupt not supported or failed: %s", exc)
+        user_response = ""
+
+    if not user_response:
+        user_response = ""
+    return {
+        "messages": list(state.get("messages", [])) + [HumanMessage(content=str(user_response))],
+        "needs_clarification": False,
+    }
+
+
+async def answer_scoring_node(state: AgentState) -> dict:
+    """Evaluate the final answer quality."""
+    return await answer_evaluation_node(state)
 
 
 def build_agent_graph(ctx: ToolContext):
@@ -406,9 +444,12 @@ def build_agent_graph(ctx: ToolContext):
     graph.add_node("rewrite_query", partial(rewrite_query_node, api_base=ctx.org_llm_config.get("api_base")))
     graph.add_node("compaction", compaction_node)
     graph.add_node("plan", partial(plan_node, ctx=ctx))
+    graph.add_node("clarify_interrupt", clarify_interrupt_node)
     graph.add_node("think", partial(think_node, ctx=ctx))
     graph.add_node("tool", partial(tool_node, ctx=ctx))
+    graph.add_node("reflect", partial(reflect_node, ctx=ctx))
     graph.add_node("finalize", partial(finalize_node, ctx=ctx))
+    graph.add_node("answer_scoring", answer_scoring_node)
     graph.add_node("save_memory", partial(save_memory_node, ctx=ctx))
 
     graph.set_entry_point("load_context")
@@ -416,10 +457,13 @@ def build_agent_graph(ctx: ToolContext):
     graph.add_edge("rewrite_query", "compaction")
     graph.add_edge("compaction", "plan")
     graph.add_conditional_edges("plan", route_plan)
+    graph.add_edge("clarify_interrupt", "plan")
     graph.add_conditional_edges("think", route_think)
-    graph.add_edge("tool", "think")
-    graph.add_edge("finalize", "save_memory")
+    graph.add_edge("tool", "reflect")
+    graph.add_edge("reflect", "think")
+    graph.add_edge("finalize", "answer_scoring")
+    graph.add_edge("answer_scoring", "save_memory")
     graph.add_edge("save_memory", END)
 
     checkpointer = getattr(ctx.redis_memory, "checkpointer", None) if ctx.redis_memory else None
-    return graph.compile(checkpointer=checkpointer, interrupt_after=["plan"] if False else None)
+    return graph.compile(checkpointer=checkpointer)

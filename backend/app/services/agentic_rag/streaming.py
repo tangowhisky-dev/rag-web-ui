@@ -331,6 +331,16 @@ class AgenticRAGTransformer(StreamTransformer):
             content = data.get("content", "")
             if content:
                 self.events.push({"event": "token", "content": content})
+        elif kind == "plan":
+            self.events.push({"event": "plan", "plan": data.get("plan", {})})
+        elif kind == "tool_call":
+            self.events.push({"event": "tool_call", "tool": data.get("tool"), "arguments": data.get("arguments", {})})
+        elif kind == "tool_observation":
+            self.events.push({"event": "tool_observation", **{k: v for k, v in data.items() if k != "event"}})
+        elif kind == "last_answer":
+            self.events.push({"event": "last_answer", "last_answer_object": data.get("last_answer_object", {})})
+        elif kind == "interrupt":
+            self.events.push({"event": "interrupt", "question": data.get("question", "")})
 
     # ------------------------------------------------------------------
     # Helpers
