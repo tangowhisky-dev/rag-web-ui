@@ -24,22 +24,31 @@ class CodeExecuteInput(BaseModel):
     timeout_s: int = Field(default=10, ge=1, le=60)
 
 
-_DENY_RE = [
-    "import os",
-    "import sys",
-    "import subprocess",
-    "import socket",
-    "import urllib",
-    "import requests",
-    "__import__",
-    "open(",
-    "eval(",
-    "exec(",
-    "compile(",
-    ".system(",
-    "subprocess",
-    "socket",
-]
+_SAFE_IMPORT_TOP_LEVEL = frozenset({
+    "numpy", "pandas", "matplotlib", "math", "statistics",
+    "json", "re", "io", "collections", "itertools", "functools",
+    "decimal", "datetime", "csv",
+})
+
+
+def _safe_import(name, globals=None, locals=None, fromlist=(), level=0):
+    """Restricted __import__ — only allow whitelisted top-level packages."""
+    top = name.split(".")[0]
+    if top in _SAFE_IMPORT_TOP_LEVEL:
+        return __import__(name, globals, locals, fromlist, level)
+    raise ImportError(f"Import of {name!r} is not allowed in sandbox")
+
+
+def _getiter_(ob):
+    return ob
+
+
+def _getitem_(ob, index):
+    return ob[index]
+
+
+def _write_(ob):
+    return ob
 
 
 class CodeExecuteTool(BaseAgentTool):
@@ -58,34 +67,34 @@ class CodeExecuteTool(BaseAgentTool):
         ctx: ToolContext = self.ctx
 
         code = input_obj.code
-        for bad in _DENY_RE:
-            if bad in code:
-                return {"ok": False, "result": {}, "error": f"Disallowed construct detected: {bad}", "tokens": 0}
 
-        # Prepare globals
+        # Build a RestrictedPython-compatible globals dict.
+        # safe_builtins provides a vetted subset of builtins (no open, eval,
+        # exec, __import__, getattr). We add back the safe builtins the tool
+        # needs (sum, min, max, print, list, dict, enumerate, all, any) and a
+        # guarded __import__ that only allows whitelisted top-level packages.
+        try:
+            from RestrictedPython import safe_builtins
+            from RestrictedPython.Guards import safer_getattr, guarded_setattr, guarded_delattr
+        except ImportError:
+            return {"ok": False, "result": {}, "error": "RestrictedPython is not installed; code execution disabled.", "tokens": 0}
+
+        restricted_builtins = dict(safe_builtins)
+        for name, fn in [
+            ("sum", sum), ("min", min), ("max", max), ("print", print),
+            ("list", list), ("dict", dict), ("enumerate", enumerate),
+            ("all", all), ("any", any), ("__import__", _safe_import),
+        ]:
+            restricted_builtins[name] = fn
+
         globals_dict: dict[str, Any] = {
-            "__builtins__": {
-                "abs": abs,
-                "all": all,
-                "any": any,
-                "bool": bool,
-                "dict": dict,
-                "enumerate": enumerate,
-                "float": float,
-                "int": int,
-                "len": len,
-                "list": list,
-                "max": max,
-                "min": min,
-                "print": print,
-                "range": range,
-                "round": round,
-                "sorted": sorted,
-                "str": str,
-                "sum": sum,
-                "tuple": tuple,
-                "zip": zip,
-            }
+            "__builtins__": restricted_builtins,
+            "_getattr_": safer_getattr,
+            "_getiter_": _getiter_,
+            "_getitem_": _getitem_,
+            "_write_": _write_,
+            "setattr": guarded_setattr,
+            "delattr": guarded_delattr,
         }
 
         try:
@@ -126,8 +135,6 @@ class CodeExecuteTool(BaseAgentTool):
                 compiled = compile_restricted(code, filename="<sandbox>", mode="exec")
                 if compiled is None:
                     return {"ok": False, "result": {}, "error": "RestrictedPython refused to compile code.", "tokens": 0}
-            except ImportError:
-                return {"ok": False, "result": {}, "error": "RestrictedPython is not installed; code execution disabled.", "tokens": 0}
             except Exception as exc:
                 return {"ok": False, "result": {}, "error": f"Code compilation failed: {exc}", "tokens": 0}
 

@@ -123,7 +123,7 @@ class TestCodeExecuteTool:
         tool.ctx = _make_ctx()
         result = asyncio.run(tool.arun({"code": "import os"}))
         assert result["ok"] is False
-        assert "Disallowed" in result["error"]
+        assert "not allowed" in result["error"]
 
     def test_timeout(self):
         tool = CodeExecuteTool()
