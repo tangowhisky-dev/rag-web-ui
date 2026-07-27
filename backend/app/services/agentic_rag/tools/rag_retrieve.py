@@ -159,3 +159,6 @@ def make_rag_retrieve_tool(ctx: ToolContext) -> _RagRetrieveTool:
     tool = _RagRetrieveTool()
     tool.ctx = ctx
     return tool
+
+
+RagRetrieveTool = _RagRetrieveTool
