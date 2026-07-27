@@ -18,12 +18,14 @@ def _make_ctx(has_file: bool = True, has_data: bool = False) -> ToolContext:
     state = SimpleNamespace(
         retrieved_docs=[{"page_content": "revenue was 100"}] if has_data else [],
         last_answer_object=SimpleNamespace(data=[{"label": "x", "value": 1}]) if has_data else None,
+        file_markdown="# file content" if has_file else None,
     )
     return ToolContext(
         db=MagicMock(),
         user_id=1,
         org_id=1,
         chat_id=1 if has_file else None,
+        message_id=1,
         redis_memory=None,
         org_llm_config={},
         state=state,
@@ -44,7 +46,6 @@ class TestToolRegistry:
             "chart_generate",
             "summarize_answer",
             "extract_data",
-            "clarify",
         }
         assert names == expected
 

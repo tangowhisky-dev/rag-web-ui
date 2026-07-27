@@ -23,6 +23,7 @@ class ToolContext:
     user_id: int
     org_id: Optional[int] = None
     chat_id: Optional[int] = None
+    message_id: Optional[int] = None
     qdrant_client: Any = None
     redis_memory: Any = None
     org_llm_config: dict = field(default_factory=dict)
@@ -88,10 +89,10 @@ def write_audit(
     if ctx.chat_id is None or ctx.db is None:
         return
 
-    message_id = None
+    message_id = ctx.message_id
     iteration = 0
     if ctx.state is not None:
-        message_id = getattr(ctx.state, "message_id", None)
+        message_id = message_id or getattr(ctx.state, "message_id", None)
         iteration = getattr(ctx.state, "iteration", 0)
 
     if tokens_in == 0:

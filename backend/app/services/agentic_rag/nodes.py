@@ -34,7 +34,8 @@ from .prompts import (
     EVALUATION_SYSTEM_PROMPT,
 )
 from .redis_memory import get_redis_memory
-from .utils import estimate_context_tokens, format_context_string
+from .token_budget import ContextBudget, count_tokens
+from .utils import format_context_string
 
 logger = logging.getLogger(__name__)
 
@@ -92,12 +93,13 @@ async def compaction_node(state: AgentState) -> dict:
     if not settings.COMPACTION_ENABLED:
         return {"compaction_summary": None, "compaction_triggered": False}
 
-    threshold = settings.COMPACTION_HISTORY_THRESHOLD
     keep_recent = settings.COMPACTION_KEEP_RECENT
     max_summary_chars = settings.COMPACTION_SUMMARY_MAX_CHARS
 
     messages = state.get("messages", [])
-    if len(messages) <= threshold:
+    budget = ContextBudget()
+    budget.add(count_tokens(_messages_to_conversation_text(messages)))
+    if not budget.needs_compaction():
         return {"compaction_summary": None, "compaction_triggered": False}
 
     # Split: keep recent messages, summarize older ones
@@ -108,8 +110,8 @@ async def compaction_node(state: AgentState) -> dict:
         return {"compaction_summary": None, "compaction_triggered": False}
 
     logger.info(
-        "[COMPACTION] triggered | total_msgs=%d | recent=%d | summarizing=%d",
-        len(messages), len(recent_messages), len(old_messages),
+        "[COMPACTION] triggered | total_tokens=%d | total_msgs=%d | recent=%d | summarizing=%d",
+        budget.used, len(messages), len(recent_messages), len(old_messages),
     )
 
     # Build conversation text from old messages

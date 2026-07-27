@@ -3,9 +3,12 @@ import { useEffect, useState, useRef } from "react";
 // ── Node → Phase mapping ─────────────────────────────────────────────────────
 
 const NODE_PHASE: Record<string, string> = {
-  // Phase 1: Rewriting query
+  // Phase 1: Analyzing query
   rewrite_query: "Analyzing query …",
   classify_query: "Analyzing query …",
+  load_context: "Analyzing query …",
+  plan: "Analyzing query …",
+  clarify_interrupt: "Analyzing query …",
 
   // Phase 2: Gathering sources
   exact_retrieval: "Gathering sources …",
@@ -20,13 +23,25 @@ const NODE_PHASE: Record<string, string> = {
   collect_context: "Removing clutter & synthesizing …",
   prepare_final_context: "Removing clutter & synthesizing …",
 
-  // Phase 4: Generating answer
+  // Phase 4: Thinking & tools
+  think: "Thinking …",
+  tool: "Using tools …",
+
+  // Phase 5: Reflecting
+  reflect: "Reflecting …",
+  reflect_final: "Reflecting …",
+
+  // Phase 6: Generating answer
   generating: "Generating answer …",
   generate_answer: "Generating answer …",
 
-  // Phase 5: Calculating confidence
+  // Phase 7: Finalizing answer
+  finalize: "Finalizing answer …",
+  answer_scoring: "Finalizing answer …",
+  finalize_answer: "Finalizing answer …",
+
+  // Phase 8: Calculating confidence
   answer_evaluation: "Calculating confidence …",
-  finalize_answer: "Calculating confidence …",
 };
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -60,7 +75,7 @@ export const AgenticProgress = ({ agentSteps, isStreaming }: AgenticProgressProp
     // Phases 1 (Analyzing query), 4 (Generating answer), and 5 (Calculating confidence) appear once.
     // Phases 2 (Gathering sources) and 3 (Removing clutter) appear per-task
     // in complex queries, so we allow duplicates for those.
-    const dedupPhases = new Set(["Analyzing query …", "Generating answer …", "Calculating confidence …"]);
+    const dedupPhases = new Set(["Analyzing query …", "Thinking …", "Using tools …", "Reflecting …", "Finalizing answer …", "Generating answer …", "Calculating confidence …"]);
     const seen = new Set<string>();
     const unique: string[] = [];
     for (const step of agentSteps) {

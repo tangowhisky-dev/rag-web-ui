@@ -560,6 +560,12 @@ export const Answer: FC<{
         <SubtaskList tasks={taskList as SubtaskItem[]} />
       )}
       {/* Agentic progress — transient, grey, fades between phases */}
+      {progressMessages && progressMessages.length > 0 && isStreaming && (
+        <div className="text-[12px] text-zinc-500 dark:text-zinc-400 mb-1">
+          {progressMessages[progressMessages.length - 1].phase ? `${progressMessages[progressMessages.length - 1].phase}: ` : null}
+          {progressMessages[progressMessages.length - 1].message}
+        </div>
+      )}
       <AgenticProgress agentSteps={filteredAgentSteps} isStreaming={isStreaming} />
 
       {/* Confidence warning (no confidence) */}

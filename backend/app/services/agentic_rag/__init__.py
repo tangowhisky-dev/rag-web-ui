@@ -31,14 +31,21 @@ LangGraph components:
   tools/           - Tool implementations (RAG retrieval, file tools, etc.)
 
 SSE Event Protocol:
-  p:  progress       - transient status messages
-  t:  task_list      - subtask list with status
-  th: thinking       - reasoning model chain-of-thought
-  0:  token          - streaming answer text
-  1:  rewritten_query - standalone query
-  2:  context        - retrieved documents
-  3:  error          - exception message
-  d:  done           - finish reason + usage
+  p:  progress         - transient status messages
+  t:  task_list        - subtask list with status
+  th: thinking         - reasoning model chain-of-thought
+  0:  token            - streaming answer text
+  1:  rewritten_query  - standalone query
+  2:  context          - retrieved documents
+  3:  error            - exception message
+  pl: plan             - agent subtask plan
+  tc: tool_call        - tool invocation
+  to: tool_observation - tool result
+  la: last_answer      - structured summary + chart option
+  r:  answer_rewrite   - citation-normalised full answer + cited docs
+  c:  interrupt        - human-in-the-loop clarification request
+  4:  agent_step       - per-node step status
+  d:  done             - finish reason + usage
 """
 
 from .pipeline import run_agentic_rag

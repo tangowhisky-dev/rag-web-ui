@@ -36,6 +36,16 @@ const ICON_MAP: Record<string, FC<{ className?: string }>> = {
 
 const NODE_META: Record<string, { label: string; activeLabel?: string; icon: TimelineStep["icon"] }> = {
   // Core pipeline nodes (new agentic agent)
+  load_context:          { label: "Loading context…",      activeLabel: "Loading context…",      icon: "book" },
+  plan:                  { label: "Planning…",             activeLabel: "Planning…",             icon: "wrench" },
+  think:                 { label: "Thinking…",             activeLabel: "Thinking…",             icon: "wrench" },
+  tool:                  { label: "Using tools…",          activeLabel: "Using tools…",          icon: "wrench" },
+  reflect:               { label: "Reflecting…",           activeLabel: "Reflecting…",           icon: "check" },
+  reflect_final:         { label: "Final reflection…",     activeLabel: "Final reflection…",     icon: "check" },
+  finalize:              { label: "Finalizing answer…",    activeLabel: "Finalizing answer…",    icon: "wrench" },
+  answer_scoring:        { label: "Scoring answer…",       activeLabel: "Scoring answer…",       icon: "check" },
+  save_memory:           { label: "Saving memory…",        activeLabel: "Saving memory…",        icon: "book" },
+  clarify_interrupt:     { label: "Clarifying…",           activeLabel: "Clarifying…",           icon: "share" },
   rewrite_query:         { label: "Rewriting query…",        activeLabel: "Rewriting query…", icon: "search" },
   classify_query:        { label: "Classifying query…",      activeLabel: "Classifying query…", icon: "search" },
   rewrite_subtask_query: { label: "Rewriting subqueries…",   activeLabel: "Rewriting subqueries…", icon: "search" },

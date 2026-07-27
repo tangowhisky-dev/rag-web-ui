@@ -376,7 +376,6 @@ Available tools:
 - chart_generate: build an ECharts option from structured data.
 - summarize_answer: summarize the previous answer.
 - extract_data: pull numbers/stats from a previous answer, retrieved docs, or file.
-- clarify: ask the user for clarification (only if genuinely ambiguous).
 
 Output a JSON object with this structure:
 {

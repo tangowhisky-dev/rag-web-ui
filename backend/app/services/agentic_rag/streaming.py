@@ -29,11 +29,6 @@ class AgenticRAGTransformer(StreamTransformer):
 
     required_stream_modes = ("updates", "messages", "custom")
 
-    # Class-level shared state so all transformer instances (root + subgraphs)
-    # share the same task list and completion counter.
-    _shared_task_texts: list[str] = []
-    _shared_completed_subtasks: int = 0
-
     def __init__(self, scope: tuple[str, ...] = ()) -> None:
         super().__init__(scope)
         self.events = StreamChannel[dict]()
@@ -117,10 +112,9 @@ class AgenticRAGTransformer(StreamTransformer):
     def _process_messages(self, namespace: list[str], data: Any) -> None:
         """Process chat-model message events.
 
-        Answer tokens are now emitted explicitly by the `generating_node` via
+        Answer tokens are now emitted explicitly by the `finalize_node` via
         the custom stream writer, so this method only collects usage metadata
-        from the generating node. Classifier LLM tokens, tool tokens, etc. are
-        ignored.
+        from the finalizing node. Other nodes' LLM tokens are ignored.
 
         In the v3 protocol, `data` is a `(payload, metadata)` tuple where
         `metadata` carries the originating node name in `langgraph_node`.
@@ -136,8 +130,8 @@ class AgenticRAGTransformer(StreamTransformer):
 
         node_name = metadata.get("langgraph_node")
 
-        # Only collect usage from generating nodes (tokens come via custom writer).
-        if node_name not in ("generating", "generate_answer"):
+        # Only collect usage from the finalizing node (tokens come via custom writer).
+        if node_name not in ("finalize", "generating", "generate_answer"):
             return
 
         # Case 1: LangChain message chunk emitted by the model stream.
@@ -171,32 +165,8 @@ class AgenticRAGTransformer(StreamTransformer):
         kind = data.get("event")
         if kind == "agent_step":
             self.events.push({"event": "agent_step", **{k: v for k, v in data.items() if k != "event"}})
-            # Count agent_subgraph completions at root level
-            if data.get("node") == "agent_subgraph" and data.get("status") == "done" and AgenticRAGTransformer._shared_task_texts:
-                AgenticRAGTransformer._shared_completed_subtasks = min(
-                    AgenticRAGTransformer._shared_completed_subtasks + 1, len(AgenticRAGTransformer._shared_task_texts)
-                )
-                logger.info("[STREAM] agent_subgraph done: _completed_subtasks=%d/%d",
-                           AgenticRAGTransformer._shared_completed_subtasks, len(AgenticRAGTransformer._shared_task_texts))
-                self.events.push(
-                    {
-                        "event": "task_list",
-                        "tasks": self._make_task_list(
-                            AgenticRAGTransformer._shared_task_texts, AgenticRAGTransformer._shared_completed_subtasks
-                        ),
-                    }
-                )
-            elif data.get("node") == "agent_subgraph":
-                logger.info("[STREAM] agent_subgraph event: _task_texts=%s, _completed_subtasks=%d",
-                           AgenticRAGTransformer._shared_task_texts, AgenticRAGTransformer._shared_completed_subtasks)
         elif kind == "task_list":
-            tasks = data.get("tasks", [])
-            if isinstance(tasks, list) and tasks:
-                AgenticRAGTransformer._shared_task_texts = [t.get("text", t.get("id", "")) for t in tasks]
-                AgenticRAGTransformer._shared_completed_subtasks = sum(
-                    1 for t in tasks if t.get("status") == "done"
-                )
-            self.events.push({"event": "task_list", "tasks": tasks})
+            self.events.push({"event": "task_list", "tasks": data.get("tasks", [])})
         elif kind == "rewritten_query":
             self.events.push({"event": "rewritten_query", **{k: v for k, v in data.items() if k != "event"}})
         elif kind == "progress":
@@ -245,21 +215,8 @@ class AgenticRAGTransformer(StreamTransformer):
                 "docs": list(self._all_docs),
                 "confidence": "medium",
                 "score": 50,
-                "synthesis_mode": len(AgenticRAGTransformer._shared_task_texts) > 1,
             }
         )
-
-    def _make_task_list(self, texts: list[str], done_count: int) -> list[dict]:
-        tasks = []
-        for i, text in enumerate(texts):
-            if i < done_count:
-                status = "done"
-            elif i == done_count:
-                status = "active"
-            else:
-                status = "pending"
-            tasks.append({"id": i, "text": text, "status": status})
-        return tasks
 
     def set_final_state(self, state: dict) -> None:
         """Called by graph_runner once stream.output() resolves."""

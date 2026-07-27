@@ -15,6 +15,7 @@ from app.services.agentic_rag.llm_factory import get_org_llm
 from app.services.agentic_rag.redis_memory import get_redis_memory
 from app.services.agentic_rag.token_budget import count_tokens
 from app.services.agentic_rag.tool_context import ToolContext
+from app.services.agentic_rag.utils import normalize_citations
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,7 @@ async def run_agent_loop(
         user_id=user_id,
         org_id=org_id,
         chat_id=chat_id,
+        message_id=message_id,
         qdrant_client=None,
         redis_memory=memory,
         org_llm_config=org_cfg,
@@ -130,9 +132,12 @@ async def run_agent_loop(
 
     if not full_answer:
         full_answer = "I'm sorry, I could not produce an answer."
-    yield {"event": "answer_rewrite", "content": full_answer, "citations": citations}
 
-    prompt_tokens = count_tokens(str(initial_state.messages)) + count_tokens(str(citations)) + count_tokens(str(observations))
+    full_answer, cited_doc_indices = normalize_citations(full_answer, citations)
+    cited_docs = [citations[i - 1] for i in cited_doc_indices]
+    yield {"event": "answer_rewrite", "content": full_answer, "citations": cited_docs}
+
+    prompt_tokens = count_tokens(str(initial_state.messages)) + count_tokens(str(cited_docs)) + count_tokens(str(observations))
     completion_tokens = count_tokens(full_answer)
     usage["promptTokens"] = prompt_tokens
     usage["completionTokens"] = completion_tokens

@@ -8,7 +8,6 @@ if TYPE_CHECKING:
     from app.services.agentic_rag.tool_context import ToolContext
 
 from .chart_generate import ChartGenerateTool
-from .clarify import ClarifyTool
 from .code_execute import CodeExecuteTool
 from .extract_data import ExtractDataTool
 from .file_extract_table import FileExtractTableTool
@@ -27,7 +26,6 @@ _TOOL_CLASSES = [
     ChartGenerateTool,
     SummarizeAnswerTool,
     ExtractDataTool,
-    ClarifyTool,
 ]
 
 ALL_TOOLS = _TOOL_CLASSES
@@ -50,11 +48,15 @@ def applicable_tools(ctx: "ToolContext") -> list:
     - Chart only if there is data to chart (last_answer_object.data or retrieved docs).
     """
     tools = build_tools(ctx)
-    has_file = bool(ctx.chat_id)
-    has_data = (
-        getattr(ctx.state, "last_answer_object", None) is not None
-        and getattr(ctx.state.last_answer_object, "data", None)
-    ) or bool(getattr(ctx.state, "retrieved_docs", []) if ctx.state else [])
+    state = ctx.state
+    has_file = bool(getattr(state, "file_markdown", None)) if state is not None else False
+    if state is not None:
+        has_data = (
+            getattr(state, "last_answer_object", None) is not None
+            and getattr(state.last_answer_object, "data", None)
+        ) or bool(getattr(state, "retrieved_docs", []))
+    else:
+        has_data = False
 
     if not has_file:
         tools = [t for t in tools if t.name not in ("file_read", "file_summarize", "file_extract_table")]

@@ -948,6 +948,7 @@ async def submit_clarification(
         user_id=current_user.id,
         org_id=current_user.org_id,
         chat_id=body.chat_id,
+        message_id=clarification.assistant_message_id,
         qdrant_client=None,
         redis_memory=memory,
         org_llm_config=org_cfg,
