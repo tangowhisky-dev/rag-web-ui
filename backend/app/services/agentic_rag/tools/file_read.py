@@ -85,8 +85,8 @@ class FileReadTool(BaseAgentTool):
                 if m:
                     start = m.start()
                     next_heading = re.search(r"(?m)^#+\s+", content[m.end():])
-                    end = m.end() + (next_heading.start() if next_heading else len(content[start:]))
-                    content = content[start:start + end]
+                    end = m.end() + (next_heading.start() if next_heading else len(content) - m.end())
+                    content = content[start:end]
                     section_name = section
 
         # token-truncate

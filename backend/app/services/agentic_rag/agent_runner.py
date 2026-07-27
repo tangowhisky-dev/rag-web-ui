@@ -137,7 +137,17 @@ async def run_agent_loop(
     cited_docs = [citations[i - 1] for i in cited_doc_indices]
     yield {"event": "answer_rewrite", "content": full_answer, "citations": cited_docs}
 
-    prompt_tokens = count_tokens(str(initial_state.messages)) + count_tokens(str(cited_docs)) + count_tokens(str(observations))
+    prompt_tokens = sum(
+        count_tokens(m.content) if hasattr(m, "content") and isinstance(m.content, str) else count_tokens(json.dumps(m, default=str))
+        for m in initial_state.messages
+    )
+    prompt_tokens += sum(
+        count_tokens(d.get("page_content", "")) for d in cited_docs
+    )
+    prompt_tokens += sum(
+        count_tokens(json.dumps(o.model_dump() if hasattr(o, "model_dump") else o, default=str))
+        for o in observations
+    )
     completion_tokens = count_tokens(full_answer)
     usage["promptTokens"] = prompt_tokens
     usage["completionTokens"] = completion_tokens

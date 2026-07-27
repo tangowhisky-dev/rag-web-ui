@@ -28,6 +28,61 @@ def _writer():
         return get_stream_writer()
     except RuntimeError:
         return lambda x: None
+
+
+# Per-turn call caps for tools that can be invoked in a tight loop.
+_TOOL_CALL_BUDGET = {
+    "rag_retrieve": settings.AGENT_MAX_RETRIEVALS,
+    "code_execute": settings.AGENT_MAX_CODE_EXEC,
+}
+
+
+def _extract_balanced(text: str, chars: tuple[str, str]) -> str | None:
+    """Return the first balanced *chars* region in *text* while respecting strings."""
+    start_char, end_char = chars
+    start = text.find(start_char)
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for i, ch in enumerate(text[start:], start):
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+        else:
+            if ch == '"':
+                in_string = True
+            elif ch == start_char:
+                depth += 1
+            elif ch == end_char:
+                depth -= 1
+                if depth == 0:
+                    return text[start : i + 1]
+    return None
+
+
+def _extract_json_block(text: str) -> str | None:
+    """Return the first well-formed JSON object or array string from *text*.
+
+    Tries markdown fenced blocks first, then scans for balanced braces or brackets.
+    """
+    if not text:
+        return None
+    # Prefer a fenced ```json ... ``` block.
+    m = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
+    if m:
+        block = _extract_balanced(m.group(1), ("{", "}")) or _extract_balanced(m.group(1), ("[", "]"))
+        if block:
+            return block
+    # Fall back to the first inline balanced object or array.
+    return _extract_balanced(text, ("{", "}")) or _extract_balanced(text, ("[", "]"))
+
+
 from app.services.agentic_rag.llm_factory import build_chat_llm
 from app.services.agentic_rag.nodes import _agent_step, answer_evaluation_node, compaction_node, rewrite_query_node, select_recent_history
 from app.services.agentic_rag.prompts import (
@@ -171,9 +226,9 @@ async def plan_node(state: AgentState, ctx: ToolContext) -> dict:
                 {"role": "user", "content": user},
             ])
             raw = str(resp.content)
+            block = _extract_json_block(raw)
             try:
-                match = re.search(r"\{.*\}", raw, re.DOTALL)
-                plan = Plan.model_validate_json(match.group(0)) if match else Plan()
+                plan = Plan.model_validate_json(block) if block else Plan()
             except Exception as parse_exc:
                 logger.warning("[plan_node] JSON parse failed: %s", parse_exc)
                 plan = Plan(intent="rag", subtasks=[Subtask(id="a", description=original, tool_hint="rag_retrieve")])
@@ -205,11 +260,29 @@ async def think_node(state: AgentState, ctx: ToolContext) -> dict:
         ctx.state = state
         tools = applicable_tools(ctx)
         tools_text = _tool_descriptions_text(tools)
-    
+
+        # Build conversation context so the agent can handle multi-turn references.
+        recent = select_recent_history(state.get("messages", []), max_pairs=3)
+        history_text = ""
+        for msg in recent:
+            role = "User" if msg.type == "human" else "Assistant"
+            content = str(msg.content)[:500]
+            history_text += f"  {role}: {content}\n"
+
+        # Include last_answer_object summary so "summarize it" / "chart it" work.
+        lao = state.get("last_answer_object")
+        lao_text = ""
+        if lao and hasattr(lao, "summary"):
+            lao_text = f"  Previous answer summary: {lao.summary[:300]}\n"
+            if lao.key_points:
+                lao_text += f"  Key points: {'; '.join(lao.key_points[:5])}\n"
+
         system = AGENT_SYSTEM_PROMPT + "\n\n" + THINK_SYSTEM_PROMPT
         user = (
             f"Iteration: {iteration}/{max_iter}\n"
             f"User query: {original}\n"
+            f"Conversation history (recent turns):\n{history_text or '  (none)'}\n"
+            f"Previous answer context:\n{lao_text or '  (none)'}\n"
             f"Plan: {json.dumps(plan.model_dump() if isinstance(plan, Plan) else plan, default=str)}\n"
             f"Observations so far:\n{_observations_text(observations)}\n\n"
             f"Available tools:\n{tools_text}\n\n"
@@ -268,15 +341,23 @@ async def tool_node(state: AgentState, ctx: ToolContext) -> dict:
         observations = list(state.get("observations", []))
         counts = dict(state.get("tool_call_count", {}))
     
+        async def _budget_exceeded(name, args, cap):
+            return {"tool": name, "arguments": args, "result": {}, "error": f"Budget exceeded: {name} call cap is {cap}", "tokens": 0}
+
         coros = []
         for tc in tool_calls:
             name = tc.get("tool")
             args = tc.get("arguments", {})
             writer({"event": "tool_call", "tool": name, "arguments": args})
+            cap = _TOOL_CALL_BUDGET.get(name)
+            current = counts.get(name, 0)
+            if cap is not None and current >= cap:
+                coros.append(_budget_exceeded(name, args, cap))
+                continue
             tool = tools.get(name)
             if tool is None:
-                async def _missing(name=name):
-                    return {"tool": name, "arguments": {}, "result": {}, "error": f"Tool {name} not available", "tokens": 0}
+                async def _missing(name=name, args=args):
+                    return {"tool": name, "arguments": args, "result": {}, "error": f"Tool {name} not available", "tokens": 0}
                 coros.append(_missing())
             else:
                 coros.append(_run_tool(tool, name, args))
@@ -387,17 +468,21 @@ async def finalize_node(state: AgentState, ctx: ToolContext) -> dict:
         )
     
         # Use a structured extraction for data if any numeric content; otherwise cheap.
-        try:
-            llm_query = build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)
-            raw = await llm_query.ainvoke([
-                {"role": "user", "content": LAST_ANSWER_EXTRACT_PROMPT.format(answer=final[:3000])},
-            ])
-            match = re.search(r"\{.*\}", str(raw.content), re.DOTALL)
-            if match:
-                extracted = LastAnswerObject.model_validate_json(match.group(0))
-                lao = extracted
-        except Exception as exc:
-            logger.debug("[finalize_node] last_answer_object extraction skipped: %s", exc)
+        llm_query = build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)
+        extracted: Optional[LastAnswerObject] = None
+        for attempt in range(2):
+            try:
+                raw = await llm_query.ainvoke([
+                    {"role": "user", "content": LAST_ANSWER_EXTRACT_PROMPT.format(answer=final[:3000])},
+                ])
+                block = _extract_json_block(str(raw.content))
+                if block:
+                    extracted = LastAnswerObject.model_validate_json(block)
+                    break
+            except Exception as exc:
+                logger.debug("[finalize_node] last_answer_object extraction attempt %d failed: %s", attempt + 1, exc)
+        if extracted:
+            lao = extracted
     
         # Preserve chart from chart_generate observation if present.
         for obs in observations:
@@ -440,7 +525,11 @@ async def save_memory_node(state: AgentState, ctx: ToolContext) -> dict:
         msg.faithfulness = state.get("faithfulness")
         msg.completeness = state.get("completeness")
     
-        ctx.db.commit()
+        try:
+            ctx.db.commit()
+        except Exception as exc:
+            logger.warning("[save_memory_node] failed to commit message updates: %s", exc)
+            ctx.db.rollback()
         return {}
     
     
@@ -504,9 +593,9 @@ async def reflect_node(state: AgentState, ctx: ToolContext) -> dict:
             llm = build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)
             resp = await llm.ainvoke([{"role": "system", "content": system}, {"role": "user", "content": user}])
             raw = str(resp.content)
-            match = re.search(r"\{.*\}", raw, re.DOTALL)
-            if match:
-                parsed = json.loads(match.group(0))
+            block = _extract_json_block(raw)
+            if block:
+                parsed = json.loads(block)
                 action = parsed.get("action", "continue")
                 reasoning = parsed.get("reasoning", "")
         except Exception as exc:
@@ -572,9 +661,9 @@ async def reflect_final_node(state: AgentState, ctx: ToolContext) -> dict:
             llm = build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)
             resp = await llm.ainvoke([{"role": "system", "content": system}, {"role": "user", "content": user}])
             raw = str(resp.content)
-            match = re.search(r"\{.*\}", raw, re.DOTALL)
-            if match:
-                parsed = json.loads(match.group(0))
+            block = _extract_json_block(raw)
+            if block:
+                parsed = json.loads(block)
                 ready = parsed.get("ready", True)
                 reasoning = parsed.get("reasoning", "")
         except Exception as exc:

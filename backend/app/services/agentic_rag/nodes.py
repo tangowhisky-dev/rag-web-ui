@@ -160,10 +160,7 @@ def _agent_step(name: str) -> Generator[None, None, None]:
 
     No-op when called outside a LangGraph runnable context (e.g. unit tests).
     """
-    try:
-        writer = get_stream_writer()
-    except RuntimeError:
-        writer = None
+    writer = _safe_writer()
     if writer is not None:
         writer({"event": "agent_step", "node": name, "status": "active", "latency_ms": 0})
     try:
@@ -171,6 +168,19 @@ def _agent_step(name: str) -> Generator[None, None, None]:
     finally:
         if writer is not None:
             writer({"event": "agent_step", "node": name, "status": "done", "latency_ms": 0})
+
+
+def _safe_writer():
+    """Return the stream writer if inside a graph context, else None.
+
+    Retrieval nodes are called both from the graph (where stream events work)
+    and from the rag_retrieve tool (where there is no graph context). This
+    helper lets nodes emit progress events safely in both cases.
+    """
+    try:
+        return get_stream_writer()
+    except RuntimeError:
+        return None
 
 
 # ── Answer Generation ──────────────────────────────────────────────────────
@@ -218,8 +228,9 @@ async def rewrite_query_node(
         )
 
         # Stream the rewritten query so the UI can display it immediately.
-        writer = get_stream_writer()
-        writer({"event": "rewritten_query", "query": rewritten})
+        writer = _safe_writer()
+        if writer:
+            writer({"event": "rewritten_query", "query": rewritten})
 
         return {"rewritten_query": rewritten}
 
@@ -437,8 +448,9 @@ async def dense_retrieval_node(
         query = state.get("rewritten_query", state.get("original_query", ""))
         datastore_ids = get_effective_datastore_ids(kb_ids, org_id, db) if db else []
 
-        writer = get_stream_writer()
-        writer({"event": "progress", "phase": "dense_retrieval", "message": "Running dense vector retrieval..."})
+        writer = _safe_writer()
+        if writer:
+            writer({"event": "progress", "phase": "dense_retrieval", "message": "Running dense vector retrieval..."})
 
         try:
             docs = dense_search_docs(query=query, kb_ids=kb_ids, datastore_ids=datastore_ids)
@@ -478,8 +490,9 @@ async def sparse_retrieval_node(
         query = state.get("rewritten_query", state.get("original_query", ""))
         datastore_ids = get_effective_datastore_ids(kb_ids, org_id, db) if db else []
 
-        writer = get_stream_writer()
-        writer({"event": "progress", "phase": "sparse_retrieval", "message": "Running sparse keyword retrieval..."})
+        writer = _safe_writer()
+        if writer:
+            writer({"event": "progress", "phase": "sparse_retrieval", "message": "Running sparse keyword retrieval..."})
 
         try:
             docs = sparse_search_docs(query=query, kb_ids=kb_ids, datastore_ids=datastore_ids)
@@ -519,8 +532,9 @@ async def exact_retrieval_node(
         query = state.get("rewritten_query", state.get("original_query", ""))
         datastore_ids = get_effective_datastore_ids(kb_ids, org_id, db) if db else []
 
-        writer = get_stream_writer()
-        writer({"event": "progress", "phase": "exact_retrieval", "message": "Running exact full-text retrieval..."})
+        writer = _safe_writer()
+        if writer:
+            writer({"event": "progress", "phase": "exact_retrieval", "message": "Running exact full-text retrieval..."})
 
         try:
             docs = exact_search_docs(query=query, kb_ids=kb_ids, datastore_ids=datastore_ids, db=db)
@@ -562,8 +576,9 @@ def merge_node(
 
         # Stream the merged candidate docs as they become available.
         if merged:
-            writer = get_stream_writer()
-            writer({"event": "context", "docs": merged})
+            writer = _safe_writer()
+            if writer:
+                writer({"event": "context", "docs": merged})
 
         return {
             "retrieved_docs": merged,

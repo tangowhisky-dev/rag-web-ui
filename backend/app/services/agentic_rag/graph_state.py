@@ -85,13 +85,6 @@ class AgentState(MessagesState):
     compaction_summary: Annotated[Optional[str], _last_value] = None
     compaction_triggered: Annotated[bool, _last_value] = False
 
-    # ── Routing state ─────────────────────────────────────────────────────
-    # Routing decision from classify_query — controls whether retrieval runs
-    # and whether file content/metadata is injected into the prompt.
-    needs_retrieval: Annotated[bool, _last_value] = True
-    needs_file_content: Annotated[bool, _last_value] = False
-    needs_file_metadata: Annotated[bool, _last_value] = False
-
     # ── Generation state ────────────────────────────────────────────────
     answer: str = ""
     answer_usage: Optional[dict] = None  # Token usage captured during streaming

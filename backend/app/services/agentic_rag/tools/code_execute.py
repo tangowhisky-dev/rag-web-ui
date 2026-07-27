@@ -126,8 +126,10 @@ class CodeExecuteTool(BaseAgentTool):
                 compiled = compile_restricted(code, filename="<sandbox>", mode="exec")
                 if compiled is None:
                     return {"ok": False, "result": {}, "error": "RestrictedPython refused to compile code.", "tokens": 0}
-            except Exception:
-                compiled = compile(code, "<sandbox>", "exec")
+            except ImportError:
+                return {"ok": False, "result": {}, "error": "RestrictedPython is not installed; code execution disabled.", "tokens": 0}
+            except Exception as exc:
+                return {"ok": False, "result": {}, "error": f"Code compilation failed: {exc}", "tokens": 0}
 
             with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
                 exec(compiled, globals_dict)

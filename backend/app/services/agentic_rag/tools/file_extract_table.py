@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import time
-from io import StringIO
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
@@ -67,7 +66,7 @@ class FileExtractTableTool(BaseAgentTool):
         df = None
         try:
             if cf.content_type.endswith("csv") or cf.file_name.lower().endswith(".csv"):
-                df = pd.read_csv(StringIO(cf.markdown_content or ""))
+                df = pd.read_csv(cf.stored_path)
             elif cf.content_type.endswith(("xlsx", "xls")) or cf.file_name.lower().endswith((".xlsx", ".xls")):
                 df = pd.read_excel(cf.stored_path)
             elif "html" in cf.content_type or cf.file_name.lower().endswith(".html"):
