@@ -528,8 +528,8 @@ class StartupRecoveryService:
                 logger.warning("[RECOVERY] Qdrant delete failed for doc_id=%s: %s", doc.id, e)
 
             # Delete DB records
-            db.query(DocumentChunk).filter(DocumentChunk.document_id == doc.id).delete()
-            db.query(ProcessingTask).filter(ProcessingTask.document_id == doc.id).delete()
+            db.query(DocumentChunk).filter(DocumentChunk.document_id == doc.id).delete(synchronize_session=False)
+            db.query(ProcessingTask).filter(ProcessingTask.document_id == doc.id).delete(synchronize_session=False)
 
             # Clean up Neo4j graph nodes for this document
             try:
@@ -540,7 +540,7 @@ class StartupRecoveryService:
                 logger.warning("[RECOVERY] Neo4j cleanup failed for doc_id=%s: %s", doc.id, e)
 
             # Delete the Document record
-            db.delete(doc)
+            db.query(Document).filter(Document.id == doc.id).delete(synchronize_session=False)
             logger.info("[RECOVERY] document_deleted datastore_id=%s doc_id=%s file_path=%s", datastore_id, doc.id, file_path)
 
             # Delete DataStoreFileManifest entry

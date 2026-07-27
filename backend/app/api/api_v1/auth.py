@@ -161,7 +161,7 @@ def login_access_token(
         )
 
     user = db.query(User).filter(User.username == form_data.username).first()
-    if not user or not security.verify_password(form_data.password, user.hashed_password) or not user.is_active:
+    if not user or not security.verify_password(form_data.password, user.hashed_password):
         # Record failed attempt
         attempts = _record_failed_attempt(client_ip)
         logger.warning(
@@ -173,6 +173,20 @@ def login_access_token(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    if not user.is_active:
+        attempts = _record_failed_attempt(client_ip)
+        logger.warning(
+            "[AUTH] login_failed ip=%s username=%s attempts=%d",
+            client_ip,
+            form_data.username,
+            attempts,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Inactive user",
             headers={"WWW-Authenticate": "Bearer"},
         )
 

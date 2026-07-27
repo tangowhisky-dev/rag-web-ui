@@ -492,8 +492,21 @@ class TestRecoveryDeletedFileCleanedUp:
                             "app.services.ingestion._chunk_id_to_point_id"
                         ) as mock_chunk_id:
                             mock_chunk_id.return_value = "point-0"
-                            service.start()
-                            time.sleep(1)
+                            scan_id = service._next_scan_id()
+                            service._active_scans[scan_id] = {
+                                "datastore_id": ds_id,
+                                "datastore_name": "test",
+                                "status": "running",
+                                "scan_id": scan_id,
+                                "total_files": 0,
+                                "processed_files": 0,
+                                "new_files": 0,
+                                "modified_files": 0,
+                                "deleted_files": 0,
+                                "error_message": None,
+                                "started_at": datetime.now(timezone.utc).isoformat(),
+                            }
+                            service._discovery_pipeline_worker(ds_id, scan_id)
 
         # Verify Qdrant delete was called
         mock_qdrant_client.delete.assert_called_once()
