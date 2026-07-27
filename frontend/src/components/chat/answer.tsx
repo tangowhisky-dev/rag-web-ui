@@ -10,6 +10,7 @@ import React, {
 import { AnchorHTMLAttributes } from "react";
 import { Copy, Trash2, FileText, FileImage, FileType, RefreshCw, Brain } from "lucide-react";
 import { AgenticProgress, AgentStepEvent } from "./agentic-progress";
+import { AgentLoopPanel } from "./agent-loop-panel";
 import {
   Popover,
   PopoverContent,
@@ -153,7 +154,13 @@ export const Answer: FC<{
   finalConfidenceLevel?: "very_high" | "high" | "medium" | "low" | "none";
   faithfulness?: number;
   completeness?: number;
-}> = ({ messageId, chatId, markdown, citations = [], rewrittenQuery, confidence, confidenceScore, confidenceBreakdown, suggestion, failedLegs, queryClassification, toolTrace, agentSteps, taskList, progressMessages, synthesisMode, isStreaming = false, onDelete, finalConfidence, finalConfidenceLevel, faithfulness, completeness }) => {
+  // Enterprise agent loop state
+  plan?: Record<string, unknown>;
+  toolCalls?: Array<Record<string, unknown>>;
+  toolObservations?: Array<Record<string, unknown>>;
+  lastAnswerObject?: Record<string, unknown>;
+  chartOption?: Record<string, unknown>;
+}> = ({ messageId, chatId, markdown, citations = [], rewrittenQuery, confidence, confidenceScore, confidenceBreakdown, suggestion, failedLegs, queryClassification, toolTrace, agentSteps, taskList, progressMessages, synthesisMode, isStreaming = false, onDelete, finalConfidence, finalConfidenceLevel, faithfulness, completeness, plan, toolCalls, toolObservations, lastAnswerObject, chartOption }) => {
   const [citationInfoMap, setCitationInfoMap] = useState<
     Record<string, CitationInfo>
   >({});
@@ -663,6 +670,14 @@ export const Answer: FC<{
           </div>
         </div>
       )}
+
+      <AgentLoopPanel
+        plan={plan}
+        toolCalls={toolCalls}
+        toolObservations={toolObservations}
+        lastAnswerObject={lastAnswerObject}
+        chartOption={chartOption}
+      />
     </div>
   );
 };

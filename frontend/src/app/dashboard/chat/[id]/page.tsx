@@ -71,6 +71,12 @@ interface Message {
   retrievalConfidence?: number;
   faithfulness?: number;
   completeness?: number;
+  // Enterprise agent loop per-turn state
+  plan?: Record<string, unknown>;
+  toolCalls?: Array<Record<string, unknown>>;
+  toolObservations?: Array<Record<string, unknown>>;
+  lastAnswerObject?: Record<string, unknown>;
+  chartOption?: Record<string, unknown>;
 }
 
 interface ChatMessage {
@@ -627,6 +633,63 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       return;
     }
 
+    // pl: plan — enterprise agent subtask plan
+    if (trimmedLine.startsWith("pl:")) {
+      try {
+        const payload = JSON.parse(trimmedLine.slice(2)) as { plan?: Record<string, unknown> };
+        appendAssistantChunk(assistantId, (message) => ({
+          ...message,
+          plan: payload.plan,
+        }));
+      } catch (e) {
+        console.error("Failed to parse plan event:", e);
+      }
+      return;
+    }
+
+    // tc: tool_call — enterprise agent tool invocation
+    if (trimmedLine.startsWith("tc:")) {
+      try {
+        const payload = JSON.parse(trimmedLine.slice(2)) as Record<string, unknown>;
+        appendAssistantChunk(assistantId, (message) => ({
+          ...message,
+          toolCalls: [...(message.toolCalls ?? []), payload],
+        }));
+      } catch (e) {
+        console.error("Failed to parse tool_call event:", e);
+      }
+      return;
+    }
+
+    // to: tool_observation — enterprise agent tool result
+    if (trimmedLine.startsWith("to:")) {
+      try {
+        const payload = JSON.parse(trimmedLine.slice(2)) as Record<string, unknown>;
+        appendAssistantChunk(assistantId, (message) => ({
+          ...message,
+          toolObservations: [...(message.toolObservations ?? []), payload],
+        }));
+      } catch (e) {
+        console.error("Failed to parse tool_observation event:", e);
+      }
+      return;
+    }
+
+    // la: last_answer — enterprise agent structured summary + chart option
+    if (trimmedLine.startsWith("la:")) {
+      try {
+        const payload = JSON.parse(trimmedLine.slice(2)) as { last_answer_object?: Record<string, unknown> };
+        appendAssistantChunk(assistantId, (message) => ({
+          ...message,
+          lastAnswerObject: payload.last_answer_object,
+          chartOption: payload.last_answer_object?.chart_option as Record<string, unknown> | undefined,
+        }));
+      } catch (e) {
+        console.error("Failed to parse last_answer event:", e);
+      }
+      return;
+    }
+
     if (trimmedLine.startsWith("3:")) {
       const errorMessage = trimmedLine.slice(2);
       throw new Error(errorMessage || "Streaming request failed");
@@ -1127,6 +1190,11 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                           finalConfidenceLevel={message.finalConfidenceLevel}
                           faithfulness={message.faithfulness}
                           completeness={message.completeness}
+                          plan={message.plan}
+                          toolCalls={message.toolCalls}
+                          toolObservations={message.toolObservations}
+                          lastAnswerObject={message.lastAnswerObject}
+                          chartOption={message.chartOption}
                         />
                       )}
                     </div>
