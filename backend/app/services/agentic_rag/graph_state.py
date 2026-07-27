@@ -11,6 +11,8 @@ from typing import Annotated, Any, List, Literal, Optional, Union
 
 from langgraph.graph import MessagesState
 
+from app.services.agentic_rag.schemas import Plan, LastAnswerObject, Observation, Artifact
+
 
 def accumulate(existing: list, new: list) -> list:
     """Default reducer: append new items to existing list.
@@ -163,6 +165,16 @@ class AgentState(MessagesState):
     user_id: Annotated[Optional[int], _last_value] = None
     file_markdown: Annotated[Optional[str], _last_value] = None
     generate_answer: Annotated[bool, _last_value] = True  # If False, skip LLM generation (retrieval-only mode)
+
+    # ── Agent loop state ────────────────────────────────────────────────
+    plan: Annotated[Optional[Plan], _last_value] = None
+    observations: Annotated[List[Observation], accumulate] = []
+    iteration: Annotated[int, _last_value] = 0
+    tool_call_count: Annotated[dict, _last_value] = {}
+    last_answer_object: Annotated[Optional[LastAnswerObject], _last_value] = None
+    artifacts: Annotated[List[Artifact], accumulate] = []
+    needs_clarification: Annotated[bool, _last_value] = False
+    clarification_question: Annotated[Optional[str], _last_value] = None
 
     # ── Metadata ────────────────────────────────────────────────────────
     latency_ms: int = 0

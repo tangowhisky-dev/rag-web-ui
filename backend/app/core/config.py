@@ -336,6 +336,22 @@ class Settings(BaseSettings):
         """Model to use for entity/relationship extraction. Falls back to OPENAI_MODEL."""
         return self.GRAPHRAG_LLM or self.OPENAI_MODEL
 
+    # ── Enterprise Agent Loop ───────────────────────────────────────────────────
+    AGENT_LOOP_ENABLED: bool = os.getenv("AGENT_LOOP_ENABLED", "false").lower() == "true"
+    TOOL_CALL_MODE: str = os.getenv("TOOL_CALL_MODE", "auto")  # native, json_text, auto
+    AGENT_MAX_ITERATIONS: int = int(os.getenv("AGENT_MAX_ITERATIONS", "8"))
+    AGENT_MAX_RETRIEVALS: int = int(os.getenv("AGENT_MAX_RETRIEVALS", "3"))
+    AGENT_MAX_CODE_EXEC: int = int(os.getenv("AGENT_MAX_CODE_EXEC", "3"))
+    AGENT_MAX_REFLECTIONS: int = int(os.getenv("AGENT_MAX_REFLECTIONS", "2"))
+    AGENT_REFLECT_EVERY: int = int(os.getenv("AGENT_REFLECT_EVERY", "2"))
+    SANDBOX_BACKEND: str = os.getenv("SANDBOX_BACKEND", "restrictedpython")
+    SANDBOX_TIMEOUT_S: int = int(os.getenv("SANDBOX_TIMEOUT_S", "10"))
+    CONTEXT_RESERVED_GENERATION: int = int(os.getenv("CONTEXT_RESERVED_GENERATION", "4096"))
+    CONTEXT_TOOL_BUDGET: int = int(os.getenv("CONTEXT_TOOL_BUDGET", "8192"))
+    TOKENIZER_MODEL: Optional[str] = os.getenv("TOKENIZER_MODEL") or None
+    HIGHLIGHTS_TOKEN_CAP: int = int(os.getenv("HIGHLIGHTS_TOKEN_CAP", "2000"))
+    CONTEXT_COMPACTION_TRIGGER_RATIO: float = float(os.getenv("CONTEXT_COMPACTION_TRIGGER_RATIO", "0.85"))
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
 

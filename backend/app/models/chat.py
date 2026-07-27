@@ -87,6 +87,9 @@ class Message(Base, TimestampMixin):
     faithfulness = Column(Integer, nullable=True)
     completeness = Column(Integer, nullable=True)
     rewritten_query = Column(LONGTEXT, nullable=True)  # standalone retrieval query after rewrite
+    last_answer_object = Column(JSON, nullable=True)    # structured summary of the assistant answer
+    plan = Column(JSON, nullable=True)                  # plan object for this turn (debugging/replay)
+    tool_calls = Column(JSON, nullable=True)            # array of tool-call/observation records
 
     # Relationships
     chat = relationship("Chat", back_populates="messages")
