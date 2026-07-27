@@ -77,18 +77,12 @@ def _check_rate_limit(ip: str) -> tuple[bool, int]:
         retry_after = max(0, int(backoff_until - now))
         return True, retry_after
 
-    # Backoff expired — increment level and immediately apply next backoff
+    # Backoff expired — reset the window and allow the attempt
     if backoff_until:
-        data["backoff_level"] = data.get("backoff_level", 0) + 1
+        data["attempts"] = 0
+        data["backoff_level"] = 0
         data["backoff_until"] = None
-        # Apply escalated backoff immediately if there are enough failures
-        if data["attempts"] >= MAX_LOGIN_ATTEMPTS:
-            backoff = min(
-                BASE_BACKOFF_SECONDS * (2 ** data["backoff_level"]),
-                MAX_BACKOFF_SECONDS
-            )
-            data["backoff_until"] = now + backoff
-            return True, int(backoff)
+        data["first_attempt_time"] = now
 
     return False, 0
 
@@ -167,7 +161,7 @@ def login_access_token(
         )
 
     user = db.query(User).filter(User.username == form_data.username).first()
-    if not user or not security.verify_password(form_data.password, user.hashed_password):
+    if not user or not security.verify_password(form_data.password, user.hashed_password) or not user.is_active:
         # Record failed attempt
         attempts = _record_failed_attempt(client_ip)
         logger.warning(
@@ -179,12 +173,6 @@ def login_access_token(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    elif not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Inactive user",
             headers={"WWW-Authenticate": "Bearer"},
         )
 

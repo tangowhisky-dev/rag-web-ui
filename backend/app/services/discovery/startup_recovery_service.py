@@ -266,6 +266,10 @@ class StartupRecoveryService:
                 logger.warning("[RECOVERY] Cannot read file during ingestion queue: %s", e)
                 return
 
+            if not file_hash:
+                logger.warning("[RECOVERY] Cannot hash file, skipping: %s", file_path)
+                return
+
             task_id: int | None = None  # set by one of the branches below
 
             if doc:
@@ -581,7 +585,7 @@ def _sha256(file_path: str) -> str:
             for chunk in iter(lambda: f.read(8192), b""):
                 h.update(chunk)
     except OSError:
-        h = hashlib.sha256(b"")  # file may be unreadable during recovery
+        return ""  # file may be unreadable during recovery
     return h.hexdigest()
 
 

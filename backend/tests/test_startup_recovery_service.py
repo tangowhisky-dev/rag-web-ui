@@ -993,13 +993,11 @@ class TestUtils:
         assert digest == expected
 
     def test_sha256_unreadable_file(self, tmp_path):
-        """_sha256() on missing file should return SHA-256 of empty string (graceful)."""
+        """_sha256() on missing file should return empty string so callers can skip it."""
         from app.services.discovery.startup_recovery_service import _sha256
-        import hashlib
 
         digest = _sha256("/nonexistent/path/file.txt")
-        expected = hashlib.sha256(b"").hexdigest()
-        assert digest == expected
+        assert digest == ""
 
     def test_guess_content_type_text(self):
         """_guess_content_type should return 'text/plain' for .txt files."""

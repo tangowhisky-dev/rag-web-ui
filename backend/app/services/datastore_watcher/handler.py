@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 from qdrant_client.models import PointIdsList
 from qdrant_client.http.exceptions import UnexpectedResponse
 
@@ -600,14 +601,31 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
             if existing:
                 # Document exists - check if hash changed (file modified)
                 if existing.file_hash == file_hash:
-                    logger.info(
-                        "[WATCHER] no_change path=%s hash=%s datastore_id=%s doc_id=%s",
-                        event_path,
-                        hash_prefix,
-                        datastore_id,
-                        existing.id,
-                    )
-                    return
+                    # File unchanged - but check if chunks exist (ingestion may have failed)
+                    chunk_count = db.query(DocumentChunk).filter(
+                        DocumentChunk.document_id == existing.id
+                    ).count()
+                    if chunk_count > 0:
+                        # File unchanged and chunks exist - skip
+                        logger.info(
+                            "[WATCHER] no_change path=%s hash=%s datastore_id=%s doc_id=%s",
+                            event_path,
+                            hash_prefix,
+                            datastore_id,
+                            existing.id,
+                        )
+                        return
+                    else:
+                        # File unchanged but no chunks - re-ingest (ingestion likely failed)
+                        logger.info(
+                            "[WATCHER] re_ingest_no_chunks path=%s doc_id=%s datastore_id=%s",
+                            event_path,
+                            existing.id,
+                            datastore_id,
+                        )
+                        return self._update_document(
+                            existing.id, event_path, file_hash, datastore_id, scan_id=0
+                        )
                 else:
                     # File was modified - trigger re-ingestion
                     logger.info(
@@ -787,18 +805,27 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
         db: Session = SessionLocal()
         try:
             # Create Document record (in-place, no copy to uploads)
-            doc = Document(
-                knowledge_base_id=None,
-                data_store_id=datastore_id,
-                file_path=event_path,
-                file_name=fname,
-                file_hash=file_hash,
-                file_size=file_size,
-                content_type=content_type,
-            )
-            db.add(doc)
-            db.commit()
-            db.refresh(doc)
+            try:
+                doc = Document(
+                    knowledge_base_id=None,
+                    data_store_id=datastore_id,
+                    file_path=event_path,
+                    file_name=fname,
+                    file_hash=file_hash,
+                    file_size=file_size,
+                    content_type=content_type,
+                )
+                db.add(doc)
+                db.commit()
+                db.refresh(doc)
+            except IntegrityError:
+                db.rollback()
+                logger.warning(
+                    "[WATCHER] duplicate_document path=%s datastore_id=%s action=skip",
+                    event_path,
+                    datastore_id,
+                )
+                return
 
             # Create ProcessingTask record
             task = ProcessingTask(
@@ -1333,17 +1360,29 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
             len(changes),
         )
 
-        # Process each change
+        # Process each change and collect ingestion futures
         changes_processed = 0
+        futures: List[Tuple[Future, str]] = []
         for change in changes:
             fpath = change["path"]
             event_type = change.get("event_type", "modified")
             try:
-                self._handle_file(fpath, datastore_id, event_type)
+                future = self._handle_file(fpath, datastore_id, event_type)
+                if future is not None:
+                    futures.append((future, fpath))
                 changes_processed += 1
             except Exception as e:
                 logger.error(
                     "[WATCHER] handle_file_error path=%s event=%s: %s", fpath, event_type, e, exc_info=True
+                )
+
+        # Wait for event-driven ingestion to finish before updating progress
+        for future, fpath in futures:
+            try:
+                future.result(timeout=3600)
+            except Exception as e:
+                logger.error(
+                    "[WATCHER] ingestion_future_error path=%s: %s", fpath, e, exc_info=True
                 )
 
         # Update last_scan_processed so UI doesn't show stale 0

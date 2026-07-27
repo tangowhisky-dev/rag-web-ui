@@ -68,6 +68,8 @@ class Document(Base, TimestampMixin):
     __table_args__ = (
         # Ensure file_name is unique within each knowledge base
         sa.UniqueConstraint('knowledge_base_id', 'file_name', name='uq_kb_file_name'),
+        # Ensure a file is only represented once per data store
+        sa.UniqueConstraint('file_path', 'data_store_id', name='uq_document_file_path_datastore'),
     )
 
 class DocumentUpload(Base):

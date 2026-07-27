@@ -17,7 +17,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from sqlalchemy import update
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from app.core.config import settings
 from app.db.session import SessionLocal
@@ -371,7 +373,7 @@ class DataStoreWatcher:
             db.close()
 
     def _update_scan_progress(self, datastore_id: int, processed: int, error: Optional[str] = None) -> None:
-        """Update scan progress in memory and DB."""
+        """Update scan progress in memory and DB atomically."""
         db: Session = SessionLocal()
         try:
             ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
@@ -381,15 +383,19 @@ class DataStoreWatcher:
             # Find this datastore in active scans
             for sid, info in self._active_scans.items():
                 if info["datastore_id"] == datastore_id:
-                    info["processed"] = processed
+                    info["processed"] = info.get("processed", 0) + processed
                     if error:
                         info["status"] = "error"
                         info["error_count"] = info.get("error_count", 0)
                         info["error_message"] = error
                     break
 
-            # Update DB
-            ds.last_scan_processed = processed
+            # Update DB atomically (same pattern as handler._update_scan_progress)
+            db.execute(
+                update(DataStore)
+                .where(DataStore.id == datastore_id)
+                .values(last_scan_processed=DataStore.last_scan_processed + processed)
+            )
             ds.last_scan_total_files = ds.last_scan_total_files or 0
 
             if error:
@@ -589,7 +595,7 @@ class DataStoreWatcher:
                     if future is not None:
                         ingestion_futures.append(future)
 
-                    self._update_scan_progress(datastore_id, idx + 1)
+                    self._update_scan_progress(datastore_id, 1)
                     for sid, scan_info in self._active_scans.items():
                         if scan_info["datastore_id"] == datastore_id:
                             scan_info["new"] = summary["new"]
@@ -779,18 +785,27 @@ class DataStoreWatcher:
 
         db: Session = SessionLocal()
         try:
-            doc = Document(
-                knowledge_base_id=None,
-                data_store_id=datastore_id,
-                file_path=event_path,
-                file_name=fname,
-                file_hash=file_hash,
-                file_size=file_size,
-                content_type=content_type,
-            )
-            db.add(doc)
-            db.commit()
-            db.refresh(doc)
+            try:
+                doc = Document(
+                    knowledge_base_id=None,
+                    data_store_id=datastore_id,
+                    file_path=event_path,
+                    file_name=fname,
+                    file_hash=file_hash,
+                    file_size=file_size,
+                    content_type=content_type,
+                )
+                db.add(doc)
+                db.commit()
+                db.refresh(doc)
+            except IntegrityError:
+                db.rollback()
+                logger.warning(
+                    "[WATCHER] duplicate_document path=%s datastore_id=%s action=skip",
+                    event_path,
+                    datastore_id,
+                )
+                return
 
             task = ProcessingTask(
                 knowledge_base_id=None,

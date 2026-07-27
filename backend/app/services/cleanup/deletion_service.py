@@ -9,7 +9,6 @@ Pipeline types: ``"kb"`` or ``"ds"``.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from pathlib import Path
 from qdrant_client import QdrantClient
@@ -118,12 +117,8 @@ def _delete_neo4j_for_kb(db: Session, kb_id: int) -> None:
             .filter(KnowledgeBase.id != kb_id)
             .all()
         ]
-        asyncio.get_event_loop().run_in_executor(
-            None, lambda: delete_graph_for_kb(kb_id=kb_id)
-        )
-        asyncio.get_event_loop().run_in_executor(
-            None, lambda: purge_stale_graph_data(active_kb_ids=remaining_kb_ids)
-        )
+        delete_graph_for_kb(kb_id=kb_id)
+        purge_stale_graph_data(active_kb_ids=remaining_kb_ids)
         logger.info("DeletionService: cleaned Neo4j graph for kb_%d", kb_id)
     except Exception as e:
         logger.warning("DeletionService: Neo4j delete failed for kb_%d: %s", kb_id, e)
