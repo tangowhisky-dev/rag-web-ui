@@ -19,7 +19,7 @@ from langgraph.types import interrupt
 
 from app.core.config import settings
 from app.models.chat import ChatFile, Message
-from app.services.agentic_rag.callbacks import get_stream_writer
+from langgraph.config import get_stream_writer
 
 
 def _writer():
