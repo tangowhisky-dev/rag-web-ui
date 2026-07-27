@@ -316,11 +316,17 @@ async def finalize_node(state: AgentState, ctx: ToolContext) -> dict:
         )
         try:
             llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=0.7)
-            resp = await llm.ainvoke([
+            final = ""
+            async for chunk in llm.astream([
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
-            ])
-            final = str(resp.content)
+            ]):
+                content = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
+                if content:
+                    writer({"event": "token", "content": content})
+                    final += content
+            if not final:
+                final = "I'm sorry, I couldn't generate a response at this time."
         except Exception as exc:
             logger.warning("[finalize_node] generation failed: %s", exc)
             final = "I'm sorry, I couldn't generate a response at this time."

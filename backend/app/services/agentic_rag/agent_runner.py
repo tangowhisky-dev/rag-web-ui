@@ -70,8 +70,25 @@ async def run_agent_loop(
     usage = {"promptTokens": 0, "completionTokens": 0, "messageId": message_id}
 
     try:
-        async for chunk in graph.astream(initial_state, config, stream_mode="updates"):
-            for node, update in chunk.items():
+        async for chunk in graph.astream(initial_state, config, stream_mode=["updates", "custom"]):
+            kind, payload = chunk if isinstance(chunk, tuple) else ("updates", chunk)
+
+            if kind == "custom":
+                if not isinstance(payload, dict):
+                    continue
+                if payload.get("event") == "token":
+                    token = payload.get("content", "")
+                    if token:
+                        full_answer += token
+                        yield payload
+                else:
+                    yield payload
+                continue
+
+            if kind != "updates" or not isinstance(payload, dict):
+                continue
+
+            for node, update in payload.items():
                 if not isinstance(update, dict):
                     continue
 
@@ -86,9 +103,9 @@ async def run_agent_loop(
 
                 elif node == "tool" and update.get("observations"):
                     for obs in update["observations"]:
-                        payload = obs.model_dump() if hasattr(obs, "model_dump") else obs
-                        observations.append(payload)
-                        yield {"event": "tool_observation", **payload}
+                        observation_payload = obs.model_dump() if hasattr(obs, "model_dump") else obs
+                        observations.append(observation_payload)
+                        yield {"event": "tool_observation", **observation_payload}
 
                 elif node == "finalize":
                     final = update.get("final_answer", "")
