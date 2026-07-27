@@ -337,7 +337,6 @@ class Settings(BaseSettings):
         return self.GRAPHRAG_LLM or self.OPENAI_MODEL
 
     # ── Enterprise Agent Loop ───────────────────────────────────────────────────
-    AGENT_LOOP_ENABLED: bool = os.getenv("AGENT_LOOP_ENABLED", "false").lower() == "true"
     TOOL_CALL_MODE: str = os.getenv("TOOL_CALL_MODE", "auto")  # native, json_text, auto
     AGENT_MAX_ITERATIONS: int = int(os.getenv("AGENT_MAX_ITERATIONS", "8"))
     AGENT_MAX_RETRIEVALS: int = int(os.getenv("AGENT_MAX_RETRIEVALS", "3"))

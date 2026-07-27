@@ -32,6 +32,9 @@ class FileReadTool(BaseAgentTool):
     )
     args_schema: type[BaseModel] = FileReadInput
 
+    def _run(self, *args: Any, **kwargs: Any) -> Any:
+        raise NotImplementedError("Use arun() for agent tools.")
+
     async def _execute(self, input_obj: FileReadInput) -> dict:
         t0 = time.monotonic()
         ctx: ToolContext = self.ctx

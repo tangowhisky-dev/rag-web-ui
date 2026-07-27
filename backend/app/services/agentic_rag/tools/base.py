@@ -26,3 +26,7 @@ class BaseAgentTool(BaseTool):
     async def _execute(self, input_obj: BaseModel) -> dict:
         """Concrete tool logic; overridden by subclasses."""
         raise NotImplementedError
+
+    def _run(self, *args: Any, **kwargs: Any) -> Any:
+        """Synchronous entry-point is not supported; use arun instead."""
+        raise NotImplementedError("Use arun() for agent tools.")

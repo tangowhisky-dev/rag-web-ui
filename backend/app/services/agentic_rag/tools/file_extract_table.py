@@ -30,6 +30,9 @@ class FileExtractTableTool(BaseAgentTool):
     )
     args_schema: type[BaseModel] = FileExtractTableInput
 
+    def _run(self, *args: Any, **kwargs: Any) -> Any:
+        raise NotImplementedError("Use arun() for agent tools.")
+
     async def _execute(self, input_obj: FileExtractTableInput) -> dict:
         t0 = time.monotonic()
         ctx: ToolContext = self.ctx

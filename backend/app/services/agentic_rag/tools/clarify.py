@@ -16,6 +16,9 @@ class ClarifyTool(BaseAgentTool):
     description: str = "Ask the user a clarification question. Handled by the agent graph interrupt."
     args_schema: type[BaseModel] = ClarifyInput
 
+    def _run(self, *args: Any, **kwargs: Any) -> Any:
+        raise NotImplementedError("Use arun() for agent tools.")
+
     async def _execute(self, input_obj: ClarifyInput) -> dict:
         return {
             "ok": False,

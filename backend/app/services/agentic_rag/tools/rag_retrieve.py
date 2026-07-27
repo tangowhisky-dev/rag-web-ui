@@ -57,6 +57,11 @@ class _RagRetrieveTool(BaseTool):
         return await _rag_retrieve(self.ctx, input_obj)
 
 
+    def _run(self, *args: Any, **kwargs: Any) -> Any:
+        """Synchronous entry-point is not supported; use arun instead."""
+        raise NotImplementedError("Use arun() for agent tools.")
+
+
 async def _rag_retrieve(ctx: ToolContext, input_obj: RagRetrieveInput) -> dict:
     t0 = time.monotonic()
     rbac = enforce_rbac(ctx, kb_ids=input_obj.kb_ids)

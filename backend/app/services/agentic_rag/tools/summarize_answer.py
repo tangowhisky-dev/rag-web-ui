@@ -32,6 +32,9 @@ class SummarizeAnswerTool(BaseAgentTool):
     )
     args_schema: type[BaseModel] = SummarizeAnswerInput
 
+    def _run(self, *args: Any, **kwargs: Any) -> Any:
+        raise NotImplementedError("Use arun() for agent tools.")
+
     async def _execute(self, input_obj: SummarizeAnswerInput) -> dict:
         t0 = time.monotonic()
         ctx: ToolContext = self.ctx

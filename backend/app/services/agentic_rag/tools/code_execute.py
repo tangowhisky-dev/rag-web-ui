@@ -50,6 +50,9 @@ class CodeExecuteTool(BaseAgentTool):
     )
     args_schema: type[BaseModel] = CodeExecuteInput
 
+    def _run(self, *args: Any, **kwargs: Any) -> Any:
+        raise NotImplementedError("Use arun() for agent tools.")
+
     async def _execute(self, input_obj: CodeExecuteInput) -> dict:
         t0 = time.monotonic()
         ctx: ToolContext = self.ctx
