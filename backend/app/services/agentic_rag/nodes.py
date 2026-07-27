@@ -32,14 +32,12 @@ from .prompts import (
     ANSWER_SYSTEM_PROMPT_BASE,
     CHAT_ONLY_SYSTEM_PROMPT,
     CHAT_ONLY_SYSTEM_PROMPT_BASE,
-    CLASSIFY_SYSTEM_PROMPT,
     COMPACTION_SYSTEM_PROMPT,
     COMPACTION_USER_PROMPT,
     EVALUATION_SYSTEM_PROMPT,
     RETRIEVED_CONTEXT_TEMPLATE,
 )
 from .redis_memory import get_redis_memory
-from .schemas import QueryAnalysis
 from .utils import estimate_context_tokens, strip_reasoning_tags, format_context_string, normalize_citations
 
 logger = logging.getLogger(__name__)
@@ -269,129 +267,6 @@ def enrich_subtask_query_node(state: AgentState) -> dict:
     enriched = _enrich_query(subtask, dependencies, dep_context)
 
     return {"rewritten_query": enriched}
-
-
-# ── Query Classification ───────────────────────────────────────────────────
-# CLASSIFY_SYSTEM_PROMPT imported from prompts.py
-
-
-async def classify_query_node(
-    state: AgentState,
-) -> dict:
-    """Classify query using structured LLM output with per-subtask routing."""
-    rewritten = state.get("rewritten_query", "")
-    query = state.get("original_query", "")
-    pending_query = ""  # Set when is_clear=False for clarification flow
-
-    try:
-        llm = _get_llm(streaming=False)
-        llm_structured = llm.with_structured_output(QueryAnalysis)
-
-        response = llm_structured.invoke([
-            {"role": "system", "content": CLASSIFY_SYSTEM_PROMPT},
-            {"role": "user", "content": rewritten},
-        ])
-        is_clear = getattr(response, "is_clear", True)
-        questions = getattr(response, "questions", [rewritten]) or [rewritten]
-        clarification_needed = getattr(response, "clarification_needed", "")
-        clarification_questions = getattr(response, "clarification_questions", [])
-        raw_deps = getattr(response, "subtask_dependencies", None)
-        subtask_deps = raw_deps if raw_deps is not None else [[] for _ in questions]
-
-        # Extract per-subtask routing flags
-        subtask_routing = getattr(response, "subtask_routing", None)
-        if subtask_routing is None or len(subtask_routing) != len(questions):
-            # LLM didn't return per-subtask routing — fall back to global flags
-            logger.warning(
-                "[CLASSIFY] subtask_routing length %d != questions length %d, falling back to global",
-                len(subtask_routing) if subtask_routing else 0, len(questions),
-            )
-            gr = getattr(response, "needs_retrieval", True)
-            gc = getattr(response, "needs_file_content", False)
-            gm = getattr(response, "needs_file_metadata", False)
-            subtask_routing = [
-                {"needs_retrieval": gr, "needs_file_content": gc, "needs_file_metadata": gm}
-                for _ in questions
-            ]
-
-        # Sanity check: override is_clear=False for clearly factual/definitional
-        # queries. The LLM sometimes misclassifies these as unclear, which routes
-        # to request_clarification and silently kills the response.
-        query_lower = rewritten.lower()
-        factual_patterns = (
-            "explain ", "what is ", "what's ", "define ", "describe ",
-            "how does ", "how do ", "difference between ", "vs ", "versus ",
-            "means ", "what does ", "what does ", "meaning of ",
-            "tell me about ", "give me an overview of ", "overview of ",
-        )
-        is_factual = any(query_lower.startswith(p) for p in factual_patterns)
-        if is_factual and not is_clear:
-            logger.warning(
-                "[CLASSIFY] factual query misclassified as unclear — overriding is_clear=True | query=%s",
-                rewritten[:80],
-            )
-            is_clear = True
-            clarification_needed = ""
-
-        # Set pending_query for clarification flow
-        pending_query = rewritten if not is_clear else ""
-    except Exception as exc:
-        logger.warning("[CLASSIFY] structured classification failed: %s - using fallback", exc)
-        is_clear = True
-        questions = [rewritten]
-        clarification_needed = ""
-        clarification_questions = []
-        subtask_deps = [[] for _ in questions]
-        subtask_routing = [
-            {"needs_retrieval": True, "needs_file_content": False, "needs_file_metadata": False}
-            for _ in questions
-        ]
-
-    with _agent_step("classify_query"):
-        subtasks = questions if len(questions) > 1 else [rewritten]
-        # Align dependencies and routing with subtasks list
-        subtask_deps = subtask_deps[:len(subtasks)] if len(subtask_deps) == len(subtasks) else [[] for _ in subtasks]
-        subtask_routing = subtask_routing[:len(subtasks)] if len(subtask_routing) == len(subtasks) else [
-            {"needs_retrieval": True, "needs_file_content": False, "needs_file_metadata": False}
-            for _ in subtasks
-        ]
-
-        # Emit explicit task_list event for multi-subtask queries so the runner
-        # doesn't have to reverse-engineer it from state updates.
-        if len(subtasks) > 1:
-            writer = get_stream_writer()
-            writer({
-                "event": "task_list",
-                "tasks": [
-                    {"id": i, "text": text, "status": "pending"}
-                    for i, text in enumerate(subtasks)
-                ],
-            })
-
-        # Compute legacy global flags for backward compatibility (first subtask wins)
-        if subtask_routing:
-            first_routing = subtask_routing[0]
-            needs_retrieval = getattr(first_routing, "needs_retrieval", True)
-            needs_file_content = getattr(first_routing, "needs_file_content", False)
-            needs_file_metadata = getattr(first_routing, "needs_file_metadata", False)
-        else:
-            needs_retrieval = True
-            needs_file_content = False
-            needs_file_metadata = False
-
-        return {
-            "question_is_clear": is_clear,
-            "clarification_needed": clarification_needed,
-            "clarification_questions": clarification_questions,
-            "pending_query": pending_query,
-            "subtasks": subtasks,
-            "is_complex": len(subtasks) > 1,
-            "needs_retrieval": needs_retrieval,
-            "needs_file_content": needs_file_content,
-            "needs_file_metadata": needs_file_metadata,
-            "subtask_dependencies": subtask_deps,
-            "subtask_routing": subtask_routing,  # NEW: per-subtask routing
-        }
 
 
 # ---------------------------------------------------------------------------

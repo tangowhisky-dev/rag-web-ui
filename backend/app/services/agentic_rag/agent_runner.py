@@ -120,10 +120,6 @@ async def run_agent_loop(
                     usage["faithfulness"] = update.get("faithfulness")
                     usage["completeness"] = update.get("completeness")
 
-                elif node == "save_memory":
-                    if full_answer:
-                        yield {"event": "answer_rewrite", "content": full_answer, "citations": citations}
-
     except Exception as exc:
         # Handle LangGraph interrupts for human-in-the-loop clarification.
         exc_name = type(exc).__name__

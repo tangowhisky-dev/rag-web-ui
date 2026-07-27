@@ -14,49 +14,6 @@ from langgraph.stream import ProtocolEvent, StreamChannel, StreamTransformer
 
 logger = logging.getLogger(__name__)
 
-# Nodes that should surface in the agent timeline UI.
-# Subgraph-scoped nodes are prefixed by their parent namespace, so we match
-# the last segment of the namespace path.
-TRACKED_NODES = frozenset(
-    (
-        "load_subtask_memory",
-        "rewrite_query",
-        "classify_query",
-        "request_clarification",
-        "agent_subgraph",
-        "rewrite_subtask_query",
-        "dense_retrieval",
-        "sparse_retrieval",
-        "exact_retrieval",
-        "merge",
-        "neo4j_expansion",
-        "reranking",
-        "filter",
-        "sufficiency_check",
-        "adaptive_reranking",
-        "collect_context",
-        "prepare_final_context",
-        "generating",
-        "chart_validation",
-        "answer_evaluation",
-        "finalize_answer",
-    )
-)
-
-
-def _namespace_node_name(namespace: list[str]) -> Optional[str]:
-    """Return the tracked node name from a namespace path, if any.
-
-    Namespaces look like [] for root graph events, or
-    ["agent_subgraph:<task_id>", "merge:<task_id>"] for subgraph events.
-    """
-    for segment in reversed(namespace):
-        name = segment.split(":", 1)[0]
-        if name in TRACKED_NODES:
-            return name
-    return None
-
-
 class AgenticRAGTransformer(StreamTransformer):
     """Custom v3 stream transformer for agentic RAG.
 

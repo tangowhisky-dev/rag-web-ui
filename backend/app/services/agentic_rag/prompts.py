@@ -67,25 +67,6 @@ Produce a summary using this EXACT format:
 Keep each section concise. Use bullet points where possible. Preserve exact names, paths, and data.
 """
 
-# ── Query Classification ────────────────────────────────────────────────────
-
-CLASSIFY_SYSTEM_PROMPT: str = """\
-You are a query classifier for a RAG (Retrieval-Augmented Generation) system. Analyze the user's question and respond with structured data.
-
-Rules:
-- is_clear: true if the question is clear and answerable from documents.
-- questions: list of self-contained questions extracted from the query (1 if simple, 2-5 if complex).
-- clarification_needed: brief explanation of what additional information is needed, or empty string if none.
-- clarification_questions: when is_clear is false, generate 2-4 specific clarification questions that the user should answer. These should be concrete, answerable prompts (e.g. "Which domain are you asking about: computer science, biology, or physics?") not vague open-ended questions.
-- subtask_routing: list of per-subtask routing flags, one entry per question. Each entry has:
-  * needs_retrieval: true if this subtask needs document retrieval (vector/sparse/exact search or Neo4j graph). false for chat-only follow-ups like "what did I say", "explain what you mentioned", "summarize the conversation".
-  * needs_file_content: true if this subtask needs the content of an attached file.
-  * needs_file_metadata: true if this subtask only needs file names/descriptions.
-- subtask_dependencies: list of lists, one per question. dependencies[i] = list of indices of subtasks that subtask i depends on. For independent subtasks, the list is empty. For dependent subtasks, e.g. [0] means subtask 1 depends on subtask 0.
-
-Output ONLY a JSON object with keys: is_clear, questions, clarification_needed, clarification_questions, subtask_routing, subtask_dependencies.
-"""
-
 # ── Answer Generation (retrieval mode) ──────────────────────────────────────
 
 ANSWER_SYSTEM_PROMPT_BASE: str = append_chart_instructions("""\

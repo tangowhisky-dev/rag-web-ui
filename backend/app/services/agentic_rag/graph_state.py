@@ -48,16 +48,6 @@ class AgentState(MessagesState):
     # agent_subgraph each write these keys in the same step.
     original_query: Annotated[str, _last_value] = ""
     rewritten_query: Annotated[str, _last_value] = ""
-    is_complex: Annotated[bool, _last_value] = False
-    subtasks: Annotated[List[str], _last_value] = []
-    subtask_independence: Annotated[List[bool], _last_value] = []
-    current_subtask_index: Annotated[int, _last_value] = 0
-
-    # ── Clarification state ─────────────────────────────────────────────
-    question_is_clear: Annotated[bool, _last_value] = True
-    pending_query: Annotated[str, _last_value] = ""
-    clarification_questions: Annotated[List[str], _last_value] = []
-    clarification_response: Annotated[str, _last_value] = ""  # User's response to clarification
 
     # ── Per-leg retrieval state (separated for observability) ───────────
     dense_docs: Annotated[List[dict], accumulate] = []
@@ -73,11 +63,6 @@ class AgentState(MessagesState):
     failed_legs: Annotated[List[str], accumulate] = []  # Legs that failed (for confidence messages)
     leg_doc_counts: Annotated[dict, lambda a, b: {**a, **b}] = {}  # {leg_name: count} for sufficiency check
     
-    # ── Memory state ────────────────────────────────────────────────────
-    # (kept for compatibility; historical memory removed in favor of
-    #  checkpoint-managed conversation flow)
-    historical_memory_docs: Annotated[List[dict], accumulate] = []
-
     # ── Merged retrieval state ──────────────────────────────────────────
     # All scored docs (with _reranker_score) — used by adaptive reranking.
     all_scored_docs: Annotated[List[dict], _last_value] = []
@@ -106,17 +91,6 @@ class AgentState(MessagesState):
     needs_retrieval: Annotated[bool, _last_value] = True
     needs_file_content: Annotated[bool, _last_value] = False
     needs_file_metadata: Annotated[bool, _last_value] = False
-
-    # ── Subtask dependencies ──────────────────────────────────────────────
-    # Each entry is a list of subtask indices that subtask i depends on.
-    # Used by route_by_dependencies to choose parallel vs sequential execution.
-    subtask_dependencies: Annotated[List[List[int]], _last_value] = []
-
-    # ── Subgraph conversation history ─────────────────────────────────────
-    # Bounded history passed into subgraphs via Send().
-    # This is NOT the MessagesState ``messages`` channel, so subgraph writes
-    # do not get merged back into the parent conversation via ``add_messages``.
-    subgraph_history: Annotated[List[Any], _last_value] = []
 
     # ── Generation state ────────────────────────────────────────────────
     answer: str = ""

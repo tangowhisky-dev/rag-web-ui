@@ -51,8 +51,12 @@ def upgrade() -> None:
         sa.Column("tokens_out", sa.Integer(), nullable=True),
         sa.Column("latency_ms", sa.Integer(), nullable=True),
         sa.Column("status", sa.String(20), nullable=False),
-        sa.Column("error_message", sa.Text(), nullable=True),
+        sa.Column("error", sa.Text(), nullable=True),
         sa.Column("created_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
+        sa.CheckConstraint(
+            "status IN ('ok','error','denied','timeout','budget_exceeded')",
+            name="tool_call_audit_status_check",
+        ),
     )
     op.create_index(
         "ix_tool_call_audit_chat_created",
