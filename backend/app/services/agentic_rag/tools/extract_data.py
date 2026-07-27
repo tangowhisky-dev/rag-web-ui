@@ -55,7 +55,8 @@ class ExtractDataTool(BaseAgentTool):
     name: str = "extract_data"
     description: str = (
         "Extract structured numbers and statistics from the previous answer, "
-        "retrieved documents, or an attached file. Use before chart_generate."
+        "retrieved documents, an attached file, or a specified message. "
+        "Use before chart_generate. Sources: last_answer, retrieved_docs, file, specified."
     )
     args_schema: type[BaseModel] = ExtractDataInput
 
@@ -86,12 +87,22 @@ class ExtractDataTool(BaseAgentTool):
             for d in docs[:10]:
                 parts.append(d.get("page_content", ""))
             text = "\n\n".join(parts)
-        elif input_obj.source == "file_id" and input_obj.source_id:
+        elif input_obj.source == "file" and input_obj.source_id:
             rbac = enforce_rbac(ctx, file_id=input_obj.source_id)
             if rbac.get("file_id") is None:
                 return {"ok": False, "result": {}, "error": "Access denied to file.", "tokens": 0}
             cf = ctx.db.query(ChatFile).filter(ChatFile.id == rbac["file_id"]).first()
             text = cf.markdown_content or "" if cf else ""
+        elif input_obj.source == "specified" and input_obj.source_id:
+            if not ctx.chat_id:
+                return {"ok": False, "result": {}, "error": "Access denied: no chat context.", "tokens": 0}
+            msg = ctx.db.query(Message).filter(
+                Message.id == input_obj.source_id,
+                Message.chat_id == ctx.chat_id,
+            ).first()
+            text = msg.content if msg else ""
+            if not text:
+                text = "Message not found."
         else:
             text = "Unsupported source."
 
