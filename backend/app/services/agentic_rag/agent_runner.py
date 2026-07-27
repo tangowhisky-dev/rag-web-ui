@@ -13,6 +13,7 @@ from app.services.agentic_rag.agent_graph import build_agent_graph
 from app.services.agentic_rag.graph_state import AgentState
 from app.services.agentic_rag.llm_factory import get_org_llm
 from app.services.agentic_rag.redis_memory import get_redis_memory
+from app.services.agentic_rag.token_budget import count_tokens
 from app.services.agentic_rag.tool_context import ToolContext
 
 logger = logging.getLogger(__name__)
@@ -65,6 +66,7 @@ async def run_agent_loop(
 
     full_answer = ""
     citations = []
+    observations: list[dict] = []
     usage = {"promptTokens": 0, "completionTokens": 0, "messageId": message_id}
 
     try:
@@ -85,6 +87,7 @@ async def run_agent_loop(
                 elif node == "tool" and update.get("observations"):
                     for obs in update["observations"]:
                         payload = obs.model_dump() if hasattr(obs, "model_dump") else obs
+                        observations.append(payload)
                         yield {"event": "tool_observation", **payload}
 
                 elif node == "finalize":
@@ -120,11 +123,12 @@ async def run_agent_loop(
     if not full_answer:
         full_answer = "I'm sorry, I could not produce an answer."
     yield {"event": "answer_rewrite", "content": full_answer, "citations": citations}
+
+    prompt_tokens = count_tokens(str(initial_state.messages)) + count_tokens(str(citations)) + count_tokens(str(observations))
+    completion_tokens = count_tokens(full_answer)
+    usage["promptTokens"] = prompt_tokens
+    usage["completionTokens"] = completion_tokens
     yield {
         "event": "done",
-        "usage": {
-            "promptTokens": 1,
-            "completionTokens": 1,
-            **usage,
-        },
+        "usage": usage,
     }

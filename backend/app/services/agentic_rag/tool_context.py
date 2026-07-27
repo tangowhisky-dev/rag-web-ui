@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -9,6 +10,7 @@ from typing import Any, Optional
 from sqlalchemy.orm import Session
 
 from app.models.chat import Chat, ChatFile, ToolCallAudit
+from app.services.agentic_rag.token_budget import count_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +43,7 @@ def enforce_rbac(
 
     if ctx.chat_id is None:
         # Outside a chat, do not allow resource access.
-        return result
+        return {"kb_ids": [], "file_id": None}
 
     chat = (
         ctx.db.query(Chat)
@@ -91,6 +93,11 @@ def write_audit(
     if ctx.state is not None:
         message_id = getattr(ctx.state, "message_id", None)
         iteration = getattr(ctx.state, "iteration", 0)
+
+    if tokens_in == 0:
+        tokens_in = count_tokens(json.dumps(arguments, default=str))
+    if tokens_out == 0:
+        tokens_out = count_tokens(json.dumps(result_summary, default=str))
 
     try:
         record = ToolCallAudit(

@@ -55,9 +55,10 @@ else:
 
 # Patch MySQL-only types so SQLite can create the tables.
 from sqlalchemy import Text as _Text
+from sqlalchemy.types import JSON as _JSON
 from sqlalchemy.dialects import mysql as _mysql
 _mysql.LONGTEXT = _Text
-_mysql.JSON = _Text  # MySQL JSON → generic Text for SQLite
+_mysql.JSON = _JSON  # MySQL JSON → generic JSON for SQLite
 
 if _USE_SQLITE:
     # Stub out app.db.session *before* any app.* import.
