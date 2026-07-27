@@ -1,10 +1,17 @@
-"""Tool modules for the autonomous agentic agent.
+"""Agent tool registry."""
 
-Tools are callable functions that the LLM supervisor can request the executor
-to run during task execution.
-"""
+from __future__ import annotations
 
-from .db_query_tool import db_query_tool
-from .graph_query_tool import graph_query_tool
+from typing import TYPE_CHECKING
 
-__all__ = ["db_query_tool", "graph_query_tool"]
+if TYPE_CHECKING:
+    from app.services.agentic_rag.tool_context import ToolContext
+
+from .rag_retrieve import make_rag_retrieve_tool
+
+
+def build_tools(ctx: "ToolContext") -> list:
+    """Return tool instances bound to the given ToolContext."""
+    return [
+        make_rag_retrieve_tool(ctx),
+    ]
