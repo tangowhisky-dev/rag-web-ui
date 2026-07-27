@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-import json
 import logging
-import uuid
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.models.chat import Chat, ChatFile
+from app.models.chat import Chat, ChatFile, ToolCallAudit
 
 logger = logging.getLogger(__name__)
 
@@ -96,32 +93,20 @@ def write_audit(
         iteration = getattr(ctx.state, "iteration", 0)
 
     try:
-        ctx.db.execute(
-            text(
-                """
-                INSERT INTO tool_call_audit
-                (id, chat_id, message_id, iteration, tool_name, arguments, result_summary,
-                 tokens_in, tokens_out, latency_ms, status, error_message, created_at)
-                VALUES
-                (:id, :chat_id, :message_id, :iteration, :tool_name, :arguments, :result_summary,
-                 :tokens_in, :tokens_out, :latency_ms, :status, :error_message, NOW())
-                """
-            ),
-            {
-                "id": str(uuid.uuid4()),
-                "chat_id": ctx.chat_id,
-                "message_id": message_id,
-                "iteration": iteration,
-                "tool_name": tool,
-                "arguments": json.dumps(arguments, default=str),
-                "result_summary": json.dumps(result_summary, default=str),
-                "tokens_in": tokens_in,
-                "tokens_out": tokens_out,
-                "latency_ms": latency_ms,
-                "status": status,
-                "error_message": error or "",
-            },
+        record = ToolCallAudit(
+            chat_id=ctx.chat_id,
+            message_id=message_id,
+            iteration=iteration,
+            tool_name=tool,
+            arguments=arguments,
+            result_summary=result_summary,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            latency_ms=latency_ms,
+            status=status,
+            error=error,
         )
+        ctx.db.add(record)
         ctx.db.flush()
     except Exception as exc:
         logger.warning("Failed to write tool_call_audit row: %s", exc)

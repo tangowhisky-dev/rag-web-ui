@@ -1,4 +1,5 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, Boolean, Table, BigInteger, Text, DateTime, Float
+from uuid import uuid4
+from sqlalchemy import Column, Integer, String, ForeignKey, Boolean, Table, BigInteger, Text, DateTime, Float, CheckConstraint
 from sqlalchemy.dialects.mysql import LONGTEXT, JSON
 from sqlalchemy.orm import relationship
 from app.models.base import Base, TimestampMixin
@@ -121,3 +122,32 @@ class ChatFile(Base):
 
     chat = relationship("Chat", back_populates="chat_files")
     message = relationship("Message", backref="chat_file", foreign_keys=[message_id])
+
+
+class ToolCallAudit(Base):
+    """Audit trail for every tool call made by the agent loop."""
+    __tablename__ = "tool_call_audit"
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('ok','error','denied','timeout','budget_exceeded')",
+            name="tool_call_audit_status_check",
+        ),
+    )
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    chat_id = Column(Integer, ForeignKey("chats.id", ondelete="CASCADE"), nullable=True, index=True)
+    message_id = Column(Integer, ForeignKey("messages.id", ondelete="SET NULL"), nullable=True, index=True)
+    iteration = Column(Integer, nullable=False, default=0)
+    tool_name = Column(String(50), nullable=False)
+    arguments = Column(JSON, nullable=True)
+    result_summary = Column(JSON, nullable=True)
+    tokens_in = Column(Integer, nullable=False, default=0)
+    tokens_out = Column(Integer, nullable=False, default=0)
+    latency_ms = Column(Integer, nullable=False, default=0)
+    status = Column(String(20), nullable=False)
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    chat = relationship("Chat", backref="tool_call_audits")
+    message = relationship("Message", backref="tool_call_audits")

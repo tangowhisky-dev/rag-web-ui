@@ -68,7 +68,7 @@ def _observations_text(observations: list[Observation]) -> str:
 
 
 async def load_context_node(state: AgentState, ctx: ToolContext) -> dict:
-    """Load previous-answer object and file metadata into state."""
+    """Load previous-answer object, recalled memory, and file metadata into state."""
     last_obj: Optional[LastAnswerObject] = None
     if ctx.chat_id and ctx.message_id:
         # The current assistant message may already exist; find the previous assistant message.
@@ -85,8 +85,21 @@ async def load_context_node(state: AgentState, ctx: ToolContext) -> dict:
             except Exception:
                 last_obj = None
 
+    recalled: list[dict] = []
+    if ctx.redis_memory and getattr(ctx.redis_memory, "search_memory", None):
+        try:
+            recalled = await ctx.redis_memory.search_memory(
+                query=state.get("original_query", ""),
+                user_id=ctx.user_id,
+                chat_id=ctx.chat_id,
+                limit=3,
+            )
+        except Exception as exc:
+            logger.warning("[load_context] memory search failed: %s", exc)
+
     return {
         "last_answer_object": last_obj,
+        "retrieved_docs": recalled,
         "org_id": ctx.org_id,
         "user_id": ctx.user_id,
         "chat_id": ctx.chat_id,
@@ -110,11 +123,15 @@ async def plan_node(state: AgentState, ctx: ToolContext) -> dict:
     if lao and hasattr(lao, "summary"):
         last_summary = lao.summary
 
+    recalled = state.get("retrieved_docs", [])
+    recalled_text = "\n".join(d.get("page_content", "") for d in recalled[:3])
+
     system = AGENT_SYSTEM_PROMPT + "\n\n" + PLAN_SYSTEM_PROMPT
     user = (
         f"Original query: {original}\n"
         f"Rewritten query: {rewritten}\n"
         f"Previous answer summary: {last_summary}\n"
+        f"Recalled long-term memory:\n{recalled_text}\n\n"
         f"Attached files: {json.dumps(file_meta)}\n\n"
         "Produce a plan JSON matching the schema."
     )
@@ -154,6 +171,10 @@ async def think_node(state: AgentState, ctx: ToolContext) -> dict:
 
     if state.get("force_finalize"):
         return {"iteration": iteration, "tool_calls": [], "precomputed_answer": ""}
+
+    precomputed = state.get("precomputed_tool_calls", [])
+    if precomputed:
+        return {"iteration": iteration, "tool_calls": list(precomputed), "precomputed_tool_calls": []}
 
     original = state.get("original_query", "")
     plan = state.get("plan") or Plan()
@@ -202,10 +223,10 @@ async def think_node(state: AgentState, ctx: ToolContext) -> dict:
 def route_think(state: AgentState) -> str:
     iteration = state.get("iteration", 0)
     if iteration >= settings.AGENT_MAX_ITERATIONS:
-        return "finalize"
+        return "reflect_final"
     if state.get("tool_calls"):
         return "tool"
-    return "finalize"
+    return "reflect_final"
 
 
 async def tool_node(state: AgentState, ctx: ToolContext) -> dict:
@@ -369,13 +390,50 @@ async def save_memory_node(state: AgentState, ctx: ToolContext) -> dict:
 
 
 async def reflect_node(state: AgentState, ctx: ToolContext) -> dict:
-    """Periodic reflection: decide whether to continue, retry, or force finalization."""
+    """Periodic reflection: concrete replanning rules + LLM discretion."""
     iteration = state.get("iteration", 0)
     if iteration == 0 or iteration % settings.AGENT_REFLECT_EVERY != 0:
         return {}
 
-    plan = state.get("plan") or Plan()
     observations = state.get("observations", [])
+    counts = state.get("tool_call_count", {})
+    original = state.get("original_query", "")
+    rewritten = state.get("rewritten_query", original)
+    precomputed: list[dict] = []
+
+    # Concrete replanning rules =================================================
+    for obs in observations:
+        if obs.tool == "rag_retrieve" and obs.result.get("count", 0) == 0:
+            if counts.get("rag_retrieve", 0) < settings.AGENT_MAX_RETRIEVALS:
+                precomputed.append({
+                    "tool": "rag_retrieve",
+                    "arguments": {
+                        "query": rewritten or original,
+                        "legs": ["dense", "sparse", "exact"],
+                        "min_confidence": 0.1,
+                    },
+                })
+        if obs.tool == "chart_generate" and obs.error:
+            if counts.get("extract_data", 0) < settings.AGENT_MAX_RETRIEVALS:
+                precomputed.append({
+                    "tool": "extract_data",
+                    "arguments": {"source": "retrieved_docs"},
+                })
+        if obs.tool == "code_execute" and obs.error:
+            if counts.get("code_execute", 0) < settings.AGENT_MAX_CODE_EXEC:
+                precomputed.append({
+                    "tool": "extract_data",
+                    "arguments": {"source": "retrieved_docs"},
+                })
+
+    if precomputed:
+        return {
+            "reflection": {"action": "retry", "reasoning": "Concrete replanning rule triggered."},
+            "precomputed_tool_calls": precomputed,
+        }
+
+    # LLM discretion ============================================================
+    plan = state.get("plan") or Plan()
     system = AGENT_SYSTEM_PROMPT + "\n\n" + REFLECT_SYSTEM_PROMPT
     user = (
         f"Iteration: {iteration}/{settings.AGENT_MAX_ITERATIONS}\n"
@@ -434,6 +492,40 @@ async def answer_scoring_node(state: AgentState) -> dict:
     return await answer_evaluation_node(state)
 
 
+async def reflect_final_node(state: AgentState, ctx: ToolContext) -> dict:
+    """Final pre-finalize reflection: one last satisfaction check."""
+    plan = state.get("plan") or Plan()
+    observations = state.get("observations", [])
+    original = state.get("original_query", "")
+
+    system = AGENT_SYSTEM_PROMPT + "\n\n" + REFLECT_SYSTEM_PROMPT
+    user = (
+        f"This is the FINAL reflection before answering.\n"
+        f"Original query: {original}\n"
+        f"Plan: {json.dumps(plan.model_dump() if isinstance(plan, Plan) else plan, default=str)}\n"
+        f"Observations:\n{_observations_text(observations)}\n\n"
+        "Return JSON: { 'ready': true|false, 'reasoning': '...' }"
+    )
+
+    ready = True
+    reasoning = ""
+    try:
+        llm = build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)
+        resp = await llm.ainvoke([{"role": "system", "content": system}, {"role": "user", "content": user}])
+        raw = str(resp.content)
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if match:
+            parsed = json.loads(match.group(0))
+            ready = parsed.get("ready", True)
+            reasoning = parsed.get("reasoning", "")
+    except Exception as exc:
+        logger.warning("[reflect_final_node] reflection failed: %s", exc)
+
+    writer = _writer()
+    writer({"event": "progress", "phase": "reflect_final", "ready": ready, "reasoning": reasoning})
+    return {"reflection_final": {"ready": ready, "reasoning": reasoning}}
+
+
 def build_agent_graph(ctx: ToolContext):
     """Compile and return the agent loop graph."""
     graph = StateGraph(AgentState)
@@ -446,6 +538,7 @@ def build_agent_graph(ctx: ToolContext):
     graph.add_node("think", partial(think_node, ctx=ctx))
     graph.add_node("tool", partial(tool_node, ctx=ctx))
     graph.add_node("reflect", partial(reflect_node, ctx=ctx))
+    graph.add_node("reflect_final", partial(reflect_final_node, ctx=ctx))
     graph.add_node("finalize", partial(finalize_node, ctx=ctx))
     graph.add_node("answer_scoring", answer_scoring_node)
     graph.add_node("save_memory", partial(save_memory_node, ctx=ctx))
@@ -459,6 +552,7 @@ def build_agent_graph(ctx: ToolContext):
     graph.add_conditional_edges("think", route_think)
     graph.add_edge("tool", "reflect")
     graph.add_edge("reflect", "think")
+    graph.add_edge("reflect_final", "finalize")
     graph.add_edge("finalize", "answer_scoring")
     graph.add_edge("answer_scoring", "save_memory")
     graph.add_edge("save_memory", END)
