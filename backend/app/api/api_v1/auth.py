@@ -241,7 +241,7 @@ def change_password(
     return {"message": "Password changed successfully. Please log in again."}
 
 
-@router.api_route("/test-token", methods=["GET", "POST"], response_model=UserResponse)
+@router.get("/test-token", response_model=UserResponse)
 def test_token(current_user: User = Depends(get_current_user)) -> Any:
     """
     Test access token by getting current user.
