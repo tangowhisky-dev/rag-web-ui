@@ -43,7 +43,9 @@ app.prepare().then(() => {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              Authorization: req.headers["authorization"] || "",
+              "Accept": req.headers["accept"] || "text/event-stream",
+              "Authorization": req.headers["authorization"] || "",
+              "Cookie": req.headers["cookie"] || "",
               "Content-Length": body.length,
             },
           },
