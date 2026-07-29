@@ -212,12 +212,18 @@ async def plan_node(state: AgentState, ctx: ToolContext) -> dict:
     
         try:
             llm = build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)
-            structured = llm.with_structured_output(Plan, method="json_mode", include_raw=True)
+            structured = llm.with_structured_output(Plan, method="json_schema", include_raw=True)
             resp = await structured.ainvoke([
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ])
-            plan = resp.parsed if hasattr(resp, "parsed") else resp
+            # include_raw=True returns a dict with 'raw', 'parsed', 'parsing_error'
+            if isinstance(resp, dict):
+                plan = resp.get("parsed")
+                if plan is None or resp.get("parsing_error"):
+                    raise resp.get("parsing_error") or ValueError("structured output parsed to None")
+            else:
+                plan = resp.parsed if hasattr(resp, "parsed") else resp
         except Exception as exc:
             logger.warning("[plan_node] structured output failed: %s; using JSON parse fallback", exc)
             llm = build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)

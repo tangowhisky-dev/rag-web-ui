@@ -109,8 +109,8 @@ def test_get_current_user_returns_role(client, db):
     """GET /api/auth/test-token with valid Bearer token must return JSON with `role`."""
     token = _create_and_login(client, db)
 
-    resp = client.post("/api/auth/test-token",
-                       headers={"Authorization": f"Bearer {token}"})
+    resp = client.get("/api/auth/test-token",
+                      headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200, resp.text
 
     data = resp.json()

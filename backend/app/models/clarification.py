@@ -7,7 +7,7 @@ agent resume.
 """
 
 from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, JSON
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, backref
 from datetime import datetime, timezone
 
 from app.models.base import Base
@@ -42,5 +42,5 @@ class ClarificationRequest(Base):
     answered_at = Column(DateTime, nullable=True)
 
     # Relationships
-    chat = relationship("Chat", backref="clarification_requests")
+    chat = relationship("Chat", backref=backref("clarification_requests", cascade="all, delete-orphan"))
     assistant_message = relationship("Message", foreign_keys=[assistant_message_id])

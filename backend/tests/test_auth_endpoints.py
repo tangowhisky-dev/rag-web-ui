@@ -87,7 +87,7 @@ def test_change_password_success(client, db):
     assert resp.status_code == 200
 
     # Old token should no longer work because token_version was bumped.
-    resp2 = client.post(
+    resp2 = client.get(
         "/api/auth/test-token",
         headers={"Authorization": f"Bearer {token}"},
     )

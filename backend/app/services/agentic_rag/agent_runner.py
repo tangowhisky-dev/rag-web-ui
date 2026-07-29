@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from typing import Any, AsyncGenerator, Optional
@@ -12,6 +13,12 @@ from app.core.config import settings
 from app.services.agentic_rag.agent_graph import build_agent_graph
 from app.services.agentic_rag.graph_state import AgentState
 from app.services.agentic_rag.llm_factory import get_org_llm
+from app.services.agentic_rag.prompts import (
+    AGENT_SYSTEM_PROMPT,
+    ANSWER_SYSTEM_PROMPT_BASE,
+    PLAN_SYSTEM_PROMPT,
+    THINK_SYSTEM_PROMPT,
+)
 from app.services.agentic_rag.redis_memory import get_redis_memory
 from app.services.agentic_rag.token_budget import count_tokens
 from app.services.agentic_rag.tool_context import ToolContext
@@ -69,6 +76,8 @@ async def run_agent_loop(
     full_answer = ""
     citations = []
     observations: list[dict] = []
+    plan_obj = None
+    think_iterations = 0
     usage = {"promptTokens": 0, "completionTokens": 0, "messageId": message_id}
 
     try:
@@ -104,6 +113,12 @@ async def run_agent_loop(
                         observation_payload = obs.model_dump() if hasattr(obs, "model_dump") else obs
                         observations.append(observation_payload)
 
+                elif node == "plan":
+                    plan_obj = update.get("plan")
+
+                elif node == "think":
+                    think_iterations = max(think_iterations, update.get("iteration", 0))
+
                 elif node == "finalize":
                     final = update.get("final_answer", "")
                     if final:
@@ -116,6 +131,7 @@ async def run_agent_loop(
                     usage["confidence_level"] = update.get("confidence_level")
                     usage["faithfulness"] = update.get("faithfulness")
                     usage["completeness"] = update.get("completeness")
+                    usage["retrieval_score"] = update.get("retrieval_score")
 
     except Exception as exc:
         # Handle LangGraph interrupts for human-in-the-loop clarification.
@@ -137,17 +153,44 @@ async def run_agent_loop(
     cited_docs = [citations[i - 1] for i in cited_doc_indices]
     yield {"event": "answer_rewrite", "content": full_answer, "citations": cited_docs}
 
-    prompt_tokens = sum(
-        count_tokens(m.content) if hasattr(m, "content") and isinstance(m.content, str) else count_tokens(json.dumps(m, default=str))
-        for m in initial_state.messages
-    )
+    # ── Token accounting ────────────────────────────────────────────────
+    # Count the total prompt context sent to the LLM across all calls.
+    # Components: system prompts (constant per call), user query, all
+    # retrieved docs, tool observations, plan, and file markdown.
+    # This is used for usage reporting and context budget tracking.
+
+    # System prompt overhead (constant per call type)
+    plan_sys_tokens = count_tokens(AGENT_SYSTEM_PROMPT) + count_tokens(PLAN_SYSTEM_PROMPT)
+    think_sys_tokens = count_tokens(AGENT_SYSTEM_PROMPT) + count_tokens(THINK_SYSTEM_PROMPT)
+    finalize_sys_tokens = count_tokens(AGENT_SYSTEM_PROMPT) + count_tokens(ANSWER_SYSTEM_PROMPT_BASE)
+
+    prompt_tokens = plan_sys_tokens  # 1 plan call
+    prompt_tokens += think_sys_tokens * max(think_iterations, 1)  # think calls
+    prompt_tokens += finalize_sys_tokens  # 1 finalize call
+
+    # User query
+    prompt_tokens += count_tokens(query)
+
+    # All retrieved docs (not just cited subset)
     prompt_tokens += sum(
-        count_tokens(d.get("page_content", "")) for d in cited_docs
+        count_tokens(d.get("page_content", "")) for d in citations
     )
+
+    # Tool observations
     prompt_tokens += sum(
         count_tokens(json.dumps(o.model_dump() if hasattr(o, "model_dump") else o, default=str))
         for o in observations
     )
+
+    # Plan
+    if plan_obj:
+        prompt_tokens += count_tokens(
+            json.dumps(plan_obj.model_dump() if hasattr(plan_obj, "model_dump") else plan_obj, default=str)
+        )
+
+    # File markdown
+    if file_markdown:
+        prompt_tokens += count_tokens(file_markdown)
     completion_tokens = count_tokens(full_answer)
     usage["promptTokens"] = prompt_tokens
     usage["completionTokens"] = completion_tokens
