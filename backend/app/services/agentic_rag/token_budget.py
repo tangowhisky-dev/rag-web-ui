@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Optional, Union
 
 from app.core.config import settings
@@ -17,7 +18,17 @@ except Exception:  # pragma: no cover - optional dependency guard
 try:
     from transformers import AutoTokenizer  # type: ignore
 except Exception:  # pragma: no cover - optional dependency guard
-    AutoTokenizer = None
+    AutoTokenizer = None  # type: ignore
+
+
+# Module-level singleton: loaded once, reused across all count_tokens calls.
+_tokenizer: Any = None
+_tokenizer_loaded: bool = False
+
+
+def _is_local_path(name: str) -> bool:
+    """True if ``name`` points to a local directory (HF repo id or mounted path)."""
+    return os.path.isdir(name)
 
 
 def _tiktoken_encoder(model_name: str):
@@ -30,44 +41,89 @@ def _tiktoken_encoder(model_name: str):
         try:
             return tiktoken.get_encoding(model_name)
         except Exception:
-            logger.warning("Tokenizer '%s' not found; using cl100k_base fallback", model_name)
-            try:
-                return tiktoken.get_encoding("cl100k_base")
-            except Exception:
-                return None
+            return None
 
 
 def _hf_tokenizer(model_name: str):
-    """Return a HuggingFace tokenizer if files are available locally."""
+    """Return a HuggingFace tokenizer.
+
+    Uses ``local_files_only=True`` when ``model_name`` is a local directory
+    (offline deployment) so AutoTokenizer never tries to hit the network.
+    """
     if AutoTokenizer is None:
         return None
     try:
-        return AutoTokenizer.from_pretrained(model_name, local_files_only=True)
-    except Exception:
+        local_only = _is_local_path(model_name)
+        return AutoTokenizer.from_pretrained(model_name, local_files_only=local_only)
+    except Exception as exc:
+        logger.warning("HF tokenizer load failed for '%s': %s", model_name, exc)
         return None
 
 
 def get_tokenizer(model_name: Optional[str] = None):
-    """Load a tokenizer for the given model name.
+    """Load and cache a tokenizer for the given model name.
 
     Order:
-    1. tiktoken (OpenAI-compatible models)
-    2. transformers AutoTokenizer (local HuggingFace models)
-    3. tiktoken cl100k_base fallback
+    1. If ``TOKENIZER_MODEL`` is set (explicit override), try HF first.
+       This is the offline-deployment path: a local directory mounted in
+       the container.
+    2. tiktoken (OpenAI-compatible models).
+    3. HuggingFace AutoTokenizer (HF Hub repo id or local path).
+    4. tiktoken cl100k_base fallback.
+
+    The result is cached as a module-level singleton — the first call pays
+    the load cost, subsequent calls reuse it.
     """
-    model_name = model_name or settings.TOKENIZER_MODEL or settings.OPENAI_MODEL
-    if not model_name:
+    global _tokenizer, _tokenizer_loaded
+    if _tokenizer_loaded:
+        return _tokenizer
+
+    resolved = model_name or settings.TOKENIZER_MODEL or settings.OPENAI_MODEL
+    if not resolved:
+        _tokenizer_loaded = True
         return None
 
-    enc = _tiktoken_encoder(model_name)
-    if enc:
-        return enc
+    # Explicit TOKENIZER_MODEL override → HF first (offline local path).
+    if settings.TOKENIZER_MODEL and not model_name:
+        enc = _hf_tokenizer(resolved)
+        if enc is not None:
+            _tokenizer = enc
+            _tokenizer_loaded = True
+            return _tokenizer
+        # Fall through to tiktoken / cl100k_base below.
 
-    enc = _hf_tokenizer(model_name)
-    if enc:
-        return enc
+    # tiktoken for OpenAI-compatible model names.
+    enc = _tiktoken_encoder(resolved)
+    if enc is not None:
+        _tokenizer = enc
+        _tokenizer_loaded = True
+        return _tokenizer
 
-    logger.warning("No tokenizer available for '%s'; count_tokens will use character heuristic", model_name)
+    # HF as a secondary fallback (HF Hub repo id that transformers can resolve).
+    enc = _hf_tokenizer(resolved)
+    if enc is not None:
+        _tokenizer = enc
+        _tokenizer_loaded = True
+        return _tokenizer
+
+    # Last resort: cl100k_base (approximate for non-OpenAI models).
+    if tiktoken is not None:
+        try:
+            enc = tiktoken.get_encoding("cl100k_base")
+            logger.warning(
+                "No exact tokenizer for '%s'; using cl100k_base fallback", resolved
+            )
+            _tokenizer = enc
+            _tokenizer_loaded = True
+            return _tokenizer
+        except Exception:
+            pass
+
+    logger.warning(
+        "No tokenizer available for '%s'; count_tokens will use character heuristic",
+        resolved,
+    )
+    _tokenizer_loaded = True
     return None
 
 
