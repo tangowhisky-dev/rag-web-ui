@@ -1,7 +1,7 @@
 from uuid import uuid4
 from sqlalchemy import Column, Integer, String, ForeignKey, Boolean, Table, BigInteger, Text, DateTime, Float, CheckConstraint
 from sqlalchemy.dialects.mysql import LONGTEXT, JSON
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, backref
 from app.models.base import Base, TimestampMixin
 from datetime import datetime, timezone
 
@@ -137,7 +137,7 @@ class ToolCallAudit(Base):
     )
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
-    chat_id = Column(Integer, ForeignKey("chats.id", ondelete="CASCADE"), nullable=True, index=True)
+    chat_id = Column(Integer, ForeignKey("chats.id", ondelete="CASCADE"), nullable=False, index=True)
     message_id = Column(Integer, ForeignKey("messages.id", ondelete="SET NULL"), nullable=True, index=True)
     iteration = Column(Integer, nullable=False, default=0)
     tool_name = Column(String(50), nullable=False)
@@ -150,5 +150,5 @@ class ToolCallAudit(Base):
     error = Column(Text, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
 
-    chat = relationship("Chat", backref="tool_call_audits")
+    chat = relationship("Chat", backref=backref("tool_call_audits", cascade="all, delete-orphan"))
     message = relationship("Message", backref="tool_call_audits")
