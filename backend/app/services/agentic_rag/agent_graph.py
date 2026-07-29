@@ -159,6 +159,172 @@ def _observations_text(observations: list[Observation], full: bool = False) -> s
     return "\n".join(parts)
 
 
+# ---------------------------------------------------------------------------
+# Runtime compaction — referral-style context budget check
+# ---------------------------------------------------------------------------
+
+# How many docs to keep per rag_retrieve observation when compacting.
+_COMPACT_KEEP_DOCS = 5
+# Doc preview length when compacting (shorter than the 800 used in full mode).
+_COMPACT_DOC_PREVIEW_CHARS = 200
+# How many stdout lines to keep for code_execute when compacting.
+_COMPACT_KEEP_STDOUT_LINES = 20
+
+
+def _compact_observations(observations: list[Observation]) -> list[Observation]:
+    """Stage 1 (deterministic): shrink tool observations in-place.
+
+    Per the design doc (05-context-memory.md §4.4):
+    - rag_retrieve: keep only top 5 chunks by score (already sorted by reranker).
+    - code_execute: keep result + last 20 lines of stdout.
+    - file_read: keep only a summary line.
+
+    Returns a new list; original observations are not mutated.
+    """
+    compacted = []
+    for obs in observations:
+        if obs.error:
+            compacted.append(obs)
+            continue
+        if obs.tool == "rag_retrieve":
+            docs = obs.result.get("docs", [])
+            if len(docs) > _COMPACT_KEEP_DOCS:
+                new_result = dict(obs.result)
+                new_result["docs"] = docs[:_COMPACT_KEEP_DOCS]
+                compacted.append(Observation(
+                    tool=obs.tool, observation_id=obs.observation_id,
+                    arguments=obs.arguments, result=new_result,
+                    error=obs.error, tokens=obs.tokens,
+                ))
+            else:
+                compacted.append(obs)
+        elif obs.tool == "code_execute":
+            stdout = obs.result.get("stdout", "")
+            if stdout and stdout.count("\n") > _COMPACT_KEEP_STDOUT_LINES:
+                lines = stdout.split("\n")
+                trimmed = "\n".join(lines[-_COMPACT_KEEP_STDOUT_LINES:])
+                new_result = dict(obs.result)
+                new_result["stdout"] = f"[...trimmed {len(lines) - _COMPACT_KEEP_STDOUT_LINES} lines...]\n{trimmed}"
+                compacted.append(Observation(
+                    tool=obs.tool, observation_id=obs.observation_id,
+                    arguments=obs.arguments, result=new_result,
+                    error=obs.error, tokens=obs.tokens,
+                ))
+            else:
+                compacted.append(obs)
+        else:
+            compacted.append(obs)
+    return compacted
+
+
+async def _compact_messages_llm(messages: list, api_base: str | None = None) -> tuple[list, str | None]:
+    """Stage 2 (LLM call): summarize oldest messages into a structured summary.
+
+    Keeps the most recent COMPACTION_KEEP_RECENT messages verbatim.
+    Returns (compacted_messages, summary_text).
+    """
+    from app.services.agentic_rag.nodes import _messages_to_conversation_text
+    from app.services.agentic_rag.prompts import COMPACTION_SYSTEM_PROMPT, COMPACTION_USER_PROMPT
+    from app.services.agentic_rag.nodes import _get_llm
+
+    keep_recent = settings.COMPACTION_KEEP_RECENT
+    recent = messages[-keep_recent:]
+    old = messages[:len(messages) - keep_recent]
+    if not old:
+        return messages, None
+
+    conversation_text = _messages_to_conversation_text(old)
+    try:
+        llm = _get_llm(
+            model_name=settings.effective_query_model,
+            temperature=0.0,
+            streaming=False,
+            api_base=api_base,
+        )
+        response = llm.invoke([
+            {"role": "system", "content": COMPACTION_SYSTEM_PROMPT},
+            {"role": "user", "content": COMPACTION_USER_PROMPT.format(conversation=conversation_text)},
+        ])
+        summary = str(response.content).strip()
+        if len(summary) > settings.COMPACTION_SUMMARY_MAX_CHARS:
+            summary = summary[:settings.COMPACTION_SUMMARY_MAX_CHARS] + "\n\n[...summary truncated]"
+        # Prepend the summary as a system-like HumanMessage so the LLM sees it.
+        compacted = [HumanMessage(content=f"[Conversation summary]\n{summary}")] + recent
+        return compacted, summary
+    except Exception as exc:
+        logger.warning("[_compact_messages_llm] failed: %s — keeping full history", exc)
+        return messages, None
+
+
+async def _compact_if_needed(
+    state: AgentState,
+    prompt_text: str,
+    system_overhead: int = 0,
+    api_base: str | None = None,
+) -> dict:
+    """Runtime compaction referral. Called before any LLM call with variable-length context.
+
+    Checks if system_overhead + prompt_text exceeds the context budget.
+    If so, applies two stages:
+      1. Deterministic: compact tool observations (keep top 5 docs, trim stdout).
+      2. LLM call: summarize oldest messages (only if stage 1 wasn't enough).
+
+    Returns a state update dict (observations and/or messages) that the caller
+    should merge into its local state before building the LLM prompt.
+    Empty dict if no compaction was needed.
+    """
+    if not settings.COMPACTION_ENABLED:
+        return {}
+
+    from app.services.agentic_rag.token_budget import ContextBudget
+
+    budget = ContextBudget()
+    budget.add(count_tokens(prompt_text))
+    budget.add(system_overhead)
+
+    if not budget.needs_compaction():
+        return {}
+
+    logger.info(
+        "[_compact_if_needed] over budget | used=%d threshold=%d — compacting",
+        budget.used, budget.compaction_threshold,
+    )
+
+    updates: dict[str, Any] = {}
+
+    # Stage 1: Compact observations (deterministic, no LLM call).
+    observations = list(state.get("observations", []))
+    compacted_obs = _compact_observations(observations)
+
+    # Re-check budget with compacted observations.
+    # We need to recompute the prompt text with the compacted observations
+    # to see if stage 1 was sufficient. The caller will rebuild the prompt
+    # from the updated state, so we estimate the savings.
+    obs_tokens_before = sum(count_tokens(json.dumps(o.result, default=str)) for o in observations)
+    obs_tokens_after = sum(count_tokens(json.dumps(o.result, default=str)) for o in compacted_obs)
+    savings = obs_tokens_before - obs_tokens_after
+
+    if savings > 0:
+        updates["observations"] = compacted_obs
+        budget.used -= savings
+        logger.info("[_compact_if_needed] stage 1 (observations) saved %d tokens", savings)
+
+    if not budget.needs_compaction():
+        return updates
+
+    # Stage 2: Compact messages (LLM call).
+    messages = list(state.get("messages", []))
+    if len(messages) > settings.COMPACTION_KEEP_RECENT:
+        compacted_msgs, summary = await _compact_messages_llm(messages, api_base=api_base)
+        if summary is not None:
+            updates["messages"] = compacted_msgs
+            updates["compaction_summary"] = summary
+            logger.info("[_compact_if_needed] stage 2 (messages) summarized %d old messages",
+                        len(messages) - settings.COMPACTION_KEEP_RECENT)
+
+    return updates
+
+
 async def load_context_node(state: AgentState, ctx: ToolContext) -> dict:
     """Load previous-answer object, recalled memory, and file metadata into state."""
     with _agent_step("load_context"):
@@ -327,6 +493,33 @@ async def think_node(state: AgentState, ctx: ToolContext) -> dict:
             f"Available tools:\n{tools_text}\n\n"
             "Emit either {\"tool_calls\": [...]} or {\"final_answer\": true}."
         )
+
+        # Runtime compaction: check if the prompt exceeds the context budget.
+        # If so, compact observations (deterministic) and/or messages (LLM call),
+        # then rebuild the prompt from the compacted state.
+        compaction_updates = await _compact_if_needed(
+            state, user, system_overhead=count_tokens(system), api_base=ctx.org_llm_config.get("api_base"),
+        )
+        if compaction_updates:
+            state = {**state, **compaction_updates}
+            observations = state.get("observations", [])
+            recent = select_recent_history(state.get("messages", []), max_pairs=3)
+            history_text = ""
+            for msg in recent:
+                role = "User" if msg.type == "human" else "Assistant"
+                content = str(msg.content)[:500]
+                history_text += f"  {role}: {content}\n"
+            user = (
+                f"Iteration: {iteration}/{max_iter}\n"
+                f"User query: {original}\n"
+                f"Conversation history (recent turns):\n{history_text or '  (none)'}\n"
+                f"Previous answer context:\n{lao_text or '  (none)'}\n"
+                f"Verification feedback:\n{reflection_text or '  (none)'}\n"
+                f"Plan: {json.dumps(plan.model_dump() if isinstance(plan, Plan) else plan, default=str)}\n"
+                f"Observations so far:\n{_observations_text(observations, full=True)}\n\n"
+                f"Available tools:\n{tools_text}\n\n"
+                "Emit either {\"tool_calls\": [...]} or {\"final_answer\": true}."
+            )
     
         mode = settings.TOOL_CALL_MODE
         try:
@@ -352,7 +545,7 @@ async def think_node(state: AgentState, ctx: ToolContext) -> dict:
         allowed = list(tool_calls)
     
         if tool_calls and not final_answer:
-            return {"iteration": iteration, "tool_calls": allowed}
+            return {**compaction_updates, "iteration": iteration, "tool_calls": allowed}
 
         # final_answer can be:
         #   - True (boolean signal from {"final_answer": true}) — think is done,
@@ -360,8 +553,8 @@ async def think_node(state: AgentState, ctx: ToolContext) -> dict:
         #   - str (Tier 3 fallback — LLM wrote plain text instead of JSON) — pass
         #     it through as precomputed since the text was already generated.
         if isinstance(final_answer, bool) and final_answer:
-            return {"iteration": iteration, "tool_calls": [], "precomputed_answer": ""}
-        return {"iteration": iteration, "tool_calls": [], "precomputed_answer": final_answer or ""}
+            return {**compaction_updates, "iteration": iteration, "tool_calls": [], "precomputed_answer": ""}
+        return {**compaction_updates, "iteration": iteration, "tool_calls": [], "precomputed_answer": final_answer or ""}
     
     
 def route_think(state: AgentState) -> str:
@@ -490,7 +683,8 @@ async def finalize_node(state: AgentState, ctx: ToolContext) -> dict:
         original = state.get("original_query", "")
         observations = state.get("observations", [])
         docs = state.get("retrieved_docs", [])
-    
+        compaction_updates: dict = {}
+
         if precomputed:
             final = precomputed
         else:
@@ -508,6 +702,23 @@ async def finalize_node(state: AgentState, ctx: ToolContext) -> dict:
                 f"Tool observations:\n{_observations_text(observations)}\n\n"
                 "Provide a concise, accurate answer. Cite the retrieved document chunks that support each factual claim."
             )
+
+            # Runtime compaction before the generation LLM call.
+            compaction_updates = await _compact_if_needed(
+                state, user, system_overhead=count_tokens(system),
+                api_base=ctx.org_llm_config.get("api_base"),
+            )
+            if compaction_updates:
+                state = {**state, **compaction_updates}
+                observations = state.get("observations", [])
+                docs = state.get("retrieved_docs", docs)
+                context_text = format_context_string(docs, state.get("file_markdown"))
+                user = (
+                    f"User query: {original}\n\n"
+                    f"Retrieved context:\n{context_text}\n\n"
+                    f"Tool observations:\n{_observations_text(observations)}\n\n"
+                    "Provide a concise, accurate answer. Cite the retrieved document chunks that support each factual claim."
+                )
             try:
                 llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=0.7, streaming=True)
                 final = ""
@@ -561,6 +772,7 @@ async def finalize_node(state: AgentState, ctx: ToolContext) -> dict:
         writer({"event": "last_answer", "last_answer_object": lao.model_dump()})
     
         return {
+            **compaction_updates,
             "final_answer": final,
             "answer": final,
             "last_answer_object": lao,
@@ -654,7 +866,22 @@ async def reflect_node(state: AgentState, ctx: ToolContext) -> dict:
             f"Observations:\n{_observations_text(observations)}\n\n"
             "Return a JSON object with: { 'action': 'continue|finalize', 'reasoning': '...' }"
         )
-    
+
+        # Runtime compaction before the reflect LLM call.
+        compaction_updates = await _compact_if_needed(
+            state, user, system_overhead=count_tokens(system),
+            api_base=ctx.org_llm_config.get("api_base"),
+        )
+        if compaction_updates:
+            state = {**state, **compaction_updates}
+            observations = state.get("observations", [])
+            user = (
+                f"Iteration: {iteration}/{settings.AGENT_MAX_ITERATIONS}\n"
+                f"Plan: {json.dumps(plan.model_dump() if isinstance(plan, Plan) else plan, default=str)}\n"
+                f"Observations:\n{_observations_text(observations)}\n\n"
+                "Return a JSON object with: { 'action': 'continue|finalize', 'reasoning': '...' }"
+            )
+
         action = "continue"
         reasoning = ""
         try:
@@ -668,10 +895,10 @@ async def reflect_node(state: AgentState, ctx: ToolContext) -> dict:
                 reasoning = parsed.get("reasoning", "")
         except Exception as exc:
             logger.warning("[reflect_node] reflection failed: %s", exc)
-    
+
         writer = _writer()
         writer({"event": "progress", "phase": "reflect", "action": action, "reasoning": reasoning})
-        return {"reflection": {"action": action, "reasoning": reasoning}, "force_finalize": action == "finalize"}
+        return {**compaction_updates, "reflection": {"action": action, "reasoning": reasoning}, "force_finalize": action == "finalize"}
     
     
 async def clarify_interrupt_node(state: AgentState) -> dict:
