@@ -138,6 +138,8 @@ class AgentState(MessagesState):
     plan: Annotated[Optional[Plan], _last_value] = None
     observations: Annotated[List[Observation], accumulate] = []
     iteration: Annotated[int, _last_value] = 0
+    tool_calls: Annotated[List[dict], _last_value] = []
+    precomputed_answer: Annotated[str, _last_value] = ""
     tool_call_count: Annotated[dict, _last_value] = {}
     last_answer_object: Annotated[Optional[LastAnswerObject], _last_value] = None
     artifacts: Annotated[List[Artifact], accumulate] = []

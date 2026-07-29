@@ -408,9 +408,20 @@ async def tool_node(state: AgentState, ctx: ToolContext) -> dict:
     
 async def _run_tool(tool, name: str, args: dict) -> dict:
     try:
-        result = await tool.arun(args)
-        return {"tool": name, "arguments": args, "result": result, "error": None, "tokens": 0}
+        raw = await tool.arun(args)
+        # Tools return {"ok": bool, "result": {...}, "error": str|None, "tokens": int}.
+        # Unwrap the envelope so obs.result is the inner payload (e.g. {"docs": [...], ...}).
+        if isinstance(raw, dict) and "result" in raw:
+            return {
+                "tool": name,
+                "arguments": args,
+                "result": raw.get("result", {}),
+                "error": raw.get("error"),
+                "tokens": raw.get("tokens", 0),
+            }
+        return {"tool": name, "arguments": args, "result": raw, "error": None, "tokens": 0}
     except Exception as exc:
+        logger.warning("[_run_tool] %s failed: %s", name, exc)
         return {"tool": name, "arguments": args, "result": {}, "error": str(exc), "tokens": 0}
 
 

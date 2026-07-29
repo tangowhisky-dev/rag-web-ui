@@ -198,7 +198,7 @@ def _safe_writer():
     """
     try:
         return get_stream_writer()
-    except RuntimeError:
+    except (RuntimeError, KeyError):
         return None
 
 

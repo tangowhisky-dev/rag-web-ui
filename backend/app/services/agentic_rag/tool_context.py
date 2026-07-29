@@ -118,3 +118,4 @@ def write_audit(
         ctx.db.flush()
     except Exception as exc:
         logger.warning("Failed to write tool_call_audit row: %s", exc)
+        ctx.db.rollback()
