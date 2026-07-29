@@ -19,7 +19,24 @@ from langgraph.types import interrupt
 
 from app.core.config import settings
 from app.models.chat import ChatFile, Message
+from app.services.agentic_rag.schemas import Observation
 from langgraph.config import get_stream_writer
+
+
+def _coerce_observation(obs: Observation | dict) -> Observation:
+    """Coerce a dict (e.g. restored from Redis checkpoint) to an Observation.
+
+    Redis checkpoint serializes Pydantic models as LangChain constructor
+    dicts: {"lc": 2, "type": "constructor", "id": [...], "kwargs": {...}}.
+    The actual fields live under "kwargs".
+    """
+    if isinstance(obs, Observation):
+        return obs
+    if isinstance(obs, dict):
+        if "kwargs" in obs and "lc" in obs:
+            return Observation(**obs["kwargs"])
+        return Observation(**obs)
+    return Observation(tool=str(obs))
 
 
 def _writer():
@@ -224,7 +241,8 @@ def _observations_text(observations: list[Observation], full: bool = False) -> s
 
     parts = []
     seen_hashes: set[str] = set()
-    for i, obs in enumerate(observations, 1):
+    for i, raw_obs in enumerate(observations, 1):
+        obs = _coerce_observation(raw_obs)
         parts.append(f"Observation {i}: tool={obs.tool} args={obs.arguments}")
         if obs.error:
             parts.append(f"  error: {obs.error}")
@@ -280,7 +298,8 @@ def _compact_observations(observations: list[Observation]) -> list[Observation]:
     Returns a new list; original observations are not mutated.
     """
     compacted = []
-    for obs in observations:
+    for raw_obs in observations:
+        obs = _coerce_observation(raw_obs)
         if obs.error:
             compacted.append(obs)
             continue
@@ -398,7 +417,7 @@ async def _compact_if_needed(
     # We need to recompute the prompt text with the compacted observations
     # to see if stage 1 was sufficient. The caller will rebuild the prompt
     # from the updated state, so we estimate the savings.
-    obs_tokens_before = sum(count_tokens(json.dumps(o.result, default=str)) for o in observations)
+    obs_tokens_before = sum(count_tokens(json.dumps(_coerce_observation(o).result, default=str)) for o in observations)
     obs_tokens_after = sum(count_tokens(json.dumps(o.result, default=str)) for o in compacted_obs)
     savings = obs_tokens_before - obs_tokens_after
 
@@ -743,7 +762,8 @@ async def tool_node(state: AgentState, ctx: ToolContext) -> dict:
         merged_docs: list[dict] = []
         seen_hashes: set[str] = set()
         best_confidence = 0.0
-        for obs in observations:
+        for raw_obs in observations:
+            obs = _coerce_observation(raw_obs)
             if obs.tool == "rag_retrieve" and not obs.error:
                 docs = obs.result.get("docs")
                 if isinstance(docs, list):
@@ -878,7 +898,8 @@ async def finalize_node(state: AgentState, ctx: ToolContext) -> dict:
             lao = extracted
     
         # Preserve chart from chart_generate observation if present.
-        for obs in observations:
+        for raw_obs in observations:
+            obs = _coerce_observation(raw_obs)
             if obs.tool == "chart_generate" and obs.result.get("chart_option"):
                 lao.chart_option = obs.result["chart_option"]
                 break
@@ -913,7 +934,7 @@ async def save_memory_node(state: AgentState, ctx: ToolContext) -> dict:
         if lao:
             msg.last_answer_object = lao.model_dump() if isinstance(lao, LastAnswerObject) else lao
         observations = state.get("observations", [])
-        msg.tool_calls = [obs.model_dump() for obs in observations]
+        msg.tool_calls = [_coerce_observation(obs).model_dump() for obs in observations]
         msg.final_confidence = state.get("final_confidence")
         msg.final_confidence_level = state.get("confidence_level")
         msg.faithfulness = state.get("faithfulness")
@@ -941,7 +962,8 @@ async def reflect_node(state: AgentState, ctx: ToolContext) -> dict:
         precomputed: list[dict] = []
     
         # Concrete replanning rules =================================================
-        for obs in observations:
+        for raw_obs in observations:
+            obs = _coerce_observation(raw_obs)
             if obs.tool == "rag_retrieve" and len(obs.result.get("docs", [])) == 0:
                 if counts.get("rag_retrieve", 0) < settings.AGENT_MAX_RETRIEVALS:
                     precomputed.append({
@@ -1056,13 +1078,14 @@ def _build_execution_summary(state: AgentState) -> dict:
     iteration = state.get("iteration", 0)
 
     # Map subtask tool_hints to whether we have a matching observation.
+    coerced = [_coerce_observation(o) for o in observations]
     subtask_status = []
     for st in plan.subtasks:
         hint = st.tool_hint
         if hint == "any":
-            has_obs = len(observations) > 0
+            has_obs = len(coerced) > 0
         else:
-            has_obs = any(o.tool == hint and not o.error for o in observations)
+            has_obs = any(o.tool == hint and not o.error for o in coerced)
         subtask_status.append({
             "id": st.id,
             "description": st.description,
@@ -1073,13 +1096,13 @@ def _build_execution_summary(state: AgentState) -> dict:
     # Retrieval stats.
     retrieval_queries = counts.get("rag_retrieve", 0)
     total_docs = 0
-    for o in observations:
+    for o in coerced:
         if o.tool == "rag_retrieve" and not o.error:
             total_docs += len(o.result.get("docs", []))
 
     # Tool failures.
     failures = []
-    for o in observations:
+    for o in coerced:
         if o.error:
             failures.append({"tool": o.tool, "error": o.error})
 
