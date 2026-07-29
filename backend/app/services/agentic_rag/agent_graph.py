@@ -130,16 +130,22 @@ def _tool_descriptions_text(tools: list) -> str:
 def _observations_text(observations: list[Observation], full: bool = False) -> str:
     """Format observations for LLM context.
 
-    When full=True, include the complete page_content of up to 10 docs
-    per observation so think_node can judge whether the retrieval actually
-    answers the query. Chunks are 1500 chars (CHUNK_SIZE), so 10 docs =
-    ~15k chars = ~3.75k tokens — well within budget. The _compact_if_needed
-    helper handles overflow if observations accumulate across many iterations.
+    When full=True, include the complete page_content of all docs per
+    observation (deduplicated across observations by content_hash) so
+    think_node can judge whether the retrieval actually answers the query.
+    Chunks are 1500 chars (CHUNK_SIZE). With dedup, the worst case
+    (3 rag_retrieve calls returning the same 29 docs) is 29 unique docs
+    = ~43k chars = ~10.9k tokens — well within budget. The
+    _compact_if_needed helper handles overflow if unique docs accumulate
+    across many iterations with different queries.
 
     When full=False, include a compact summary (doc count, confidence, top
     doc preview) to keep reflect/finalize prompts small.
     """
+    from app.services.infrastructure import content_hash as _ch
+
     parts = []
+    seen_hashes: set[str] = set()
     for i, obs in enumerate(observations, 1):
         parts.append(f"Observation {i}: tool={obs.tool} args={obs.arguments}")
         if obs.error:
@@ -150,9 +156,17 @@ def _observations_text(observations: list[Observation], full: bool = False) -> s
         doc_count = len(docs)
         confidence = result.get("confidence", "N/A")
         if full:
-            parts.append(f"  doc_count={doc_count} confidence={confidence}")
-            for j, doc in enumerate(docs[:10], 1):
-                content = str(doc.get("page_content", "")) if isinstance(doc, dict) else str(doc)
+            unique_docs = []
+            for doc in docs:
+                if not isinstance(doc, dict):
+                    continue
+                h = doc.get("metadata", {}).get("content_hash") or _ch(doc.get("page_content", ""))
+                if h not in seen_hashes:
+                    seen_hashes.add(h)
+                    unique_docs.append(doc)
+            parts.append(f"  doc_count={doc_count} unique_so_far={len(seen_hashes)} confidence={confidence}")
+            for j, doc in enumerate(unique_docs, 1):
+                content = str(doc.get("page_content", ""))
                 parts.append(f"  doc_{j}: {content}")
         else:
             parts.append(f"  doc_count={doc_count} confidence={confidence}")
@@ -638,17 +652,33 @@ async def tool_node(state: AgentState, ctx: ToolContext) -> dict:
             writer({"event": "tool_observation", **obs.model_dump()})
             counts[obs.tool] = counts.get(obs.tool, 0) + 1
     
-        # Promote the latest rag_retrieve docs/confidence into graph state so
-        # finalize_node, answer_evaluation_node, extract_data(source="retrieved_docs"),
-        # and the citations payload in agent_runner all see the retrieved chunks.
+        # Promote all rag_retrieve docs into graph state (deduplicated across
+        # observations by content_hash) so finalize_node, answer_evaluation_node,
+        # extract_data(source="retrieved_docs"), and the citations payload in
+        # agent_runner all see the full set of retrieved chunks — not just the
+        # first call's docs.
         state_update: dict = {"tool_calls": [], "observations": observations, "tool_call_count": counts}
+        from app.services.infrastructure import content_hash as _ch
+        merged_docs: list[dict] = []
+        seen_hashes: set[str] = set()
+        best_confidence = 0.0
         for obs in observations:
             if obs.tool == "rag_retrieve" and not obs.error:
                 docs = obs.result.get("docs")
-                if isinstance(docs, list) and docs:
-                    state_update["retrieved_docs"] = docs
-                    state_update["retrieval_confidence"] = obs.result.get("confidence", 0.0)
-                    break
+                if isinstance(docs, list):
+                    for doc in docs:
+                        if not isinstance(doc, dict):
+                            continue
+                        h = doc.get("metadata", {}).get("content_hash") or _ch(doc.get("page_content", ""))
+                        if h not in seen_hashes:
+                            seen_hashes.add(h)
+                            merged_docs.append(doc)
+                    conf = obs.result.get("confidence", 0.0)
+                    if conf > best_confidence:
+                        best_confidence = conf
+        if merged_docs:
+            state_update["retrieved_docs"] = merged_docs
+            state_update["retrieval_confidence"] = best_confidence
     
         return state_update
     

@@ -441,7 +441,7 @@ The LLM's output is either:
 - `{"tool_calls": [{"tool": "rag_retrieve", "arguments": {...}}]}` — call a tool
 - `{"final_answer": true}` — signal readiness to answer (finalize will generate)
 
-### Impact of `_observations_text(full=True)` with full doc content
+### Impact of `_observations_text(full=True)` with full doc content + cross-observation dedup
 
 **Before the fix:** observations were truncated to 500 chars of raw JSON. The think LLM saw:
 ```
@@ -450,22 +450,32 @@ Observation 1: tool=rag_retrieve args={'query': 'what is mutex?'}
 ```
 — just the first 500 chars of a JSON blob containing 29 docs. The LLM couldn't tell if the docs actually answered the question. It would call rag_retrieve again, hitting the retrieval cap, then emit final_answer with low confidence.
 
-**After the fix:** observations include the complete page_content of up to 10 docs per observation:
+**After the fix:** observations include the complete page_content of all docs per observation, deduplicated across observations by content_hash:
 ```
 Observation 1: tool=rag_retrieve args={'query': 'what is mutex?'}
-  doc_count=29 confidence=0.71
+  doc_count=29 unique_so_far=29 confidence=0.71
   doc_1: A mutex (short for mutual exclusion) is a synchronization primitive used to protect shared resources in concurrent programming. It ensures that only one thread can access a critical section at a time. The mutex has two operations: acquire (lock) and release (unlock). When a thread acquires the mutex, other threads that try to acquire it are blocked until it is released. Mutexes can be implemented at the hardware level using atomic instructions or at the OS level using system calls...
   doc_2: In operating systems, a mutex lock is implemented as a binary variable that can be in one of two states: locked or unlocked. The Pthreads library provides pthread_mutex_lock and pthread_mutex_unlock operations...
-  doc_3: The concept of mutual exclusion was first described by Edsger Dijkstra in 1965. He introduced the semaphore, a generalization of the mutex, as a primitive for coordinating access to shared resources...
+  ...
+  doc_29: ...
+
+Observation 2: tool=rag_retrieve args={'query': 'mutex semaphore differences'}
+  doc_count=22 unique_so_far=35 confidence=0.65
+  doc_30: The key difference between a mutex and a semaphore is that a mutex...
+  doc_31: Semaphores use a counter to allow multiple threads to access a resource...
   ...
 ```
 
-The LLM can now read the complete content of the top 10 retrieved chunks and judge: "Does this explain mutex? Yes — doc_1 defines it, doc_2 explains the implementation, doc_3 gives history." It emits `final_answer=true` on the first iteration instead of retrying.
+The LLM sees all retrieved chunks — full content, no truncation, no duplicates. It can judge: "Does this explain mutex? Yes — doc_1 defines it, doc_2 explains the implementation." It emits `final_answer=true` on the first iteration instead of retrying.
 
-**Why full docs and not truncated previews:** The ingestion pipeline uses `CHUNK_SIZE=1500` characters. At 1500 chars per chunk, 10 docs = 15,000 chars ≈ ~3,750 tokens — well within the 131k context window. An earlier version capped previews at 800 chars based on an incorrect assumption of ~5000 chars per doc; that was wrong by 3.3x. At 1500 chars, the 800-char cap was truncating each chunk at 53% of its content, cutting off the LLM mid-definition. Passing the full 1500-char chunk gives the LLM the complete unit of text that was indexed and reranked — no information loss.
+**Why full docs and not truncated previews:** The ingestion pipeline uses `CHUNK_SIZE=1500` characters. At 1500 chars per chunk, 29 docs = 43,500 chars ≈ ~10,900 tokens — well within the 131k context window. An earlier version capped previews at 800 chars based on an incorrect assumption of ~5000 chars per doc; that was wrong by 3.3x. At 1500 chars, the 800-char cap was truncating each chunk at 53% of its content, cutting off the LLM mid-definition. Passing the full 1500-char chunk gives the LLM the complete unit of text that was indexed and reranked — no information loss.
 
-**Why 10 docs and not all 29:** The 10-doc limit bounds the worst case. If the agent makes 3 rag_retrieve calls (the budget cap), observations accumulate 3 × 10 = 30 doc previews = ~45k chars ≈ ~11k tokens. With system prompts (~3k tokens) + plan + history + tools text (~2k tokens), the total think prompt is ~16k tokens — far below the 131k limit. If observations grow further (graph expansion adds 20 docs per call), the `_compact_if_needed` helper trims older observations to their top 5 docs, keeping the prompt within budget.
+**Why all docs and not a 10-doc cap:** With cross-observation dedup, the worst case (3 rag_retrieve calls returning the same 29 docs) is 29 unique docs = ~10.9k tokens. If the agent uses different queries across calls (the intended use case), each call may return different chunks — capping at 10 would discard relevant results from later calls. The `_compact_if_needed` helper handles overflow if unique docs accumulate beyond the context budget.
+
+**Cross-observation dedup:** Each rag_retrieve call already deduplicates within its own results (merge_node deduplicates across dense/sparse/exact legs by content_hash). But when the agent makes multiple rag_retrieve calls, the same chunks can appear in multiple observations — especially if the queries are similar. Without cross-observation dedup, the think LLM sees the same chunk 2-3 times, wasting context tokens and potentially skewing its judgment. The `_observations_text(full=True)` function now deduplicates by content_hash across all observations, showing each unique chunk only once with a running `unique_so_far` counter.
+
+**Cross-observation dedup in tool_node:** The tool_node also now merges and deduplicates all rag_retrieve observations into `retrieved_docs` (graph state), so finalize_node, answer_scoring, extract_data, and the citations payload see the full deduplicated set — not just the first call's docs (which was a bug: the old code used `break` after the first rag_retrieve observation, discarding all subsequent calls' docs).
 
 **Impact on the loop:**
-- "what is mutex?" — was 3 retrievals + 8 iterations + iteration cap forced finalize. Now: 1 retrieval + 1 think iteration + 1 reflect_final (ready=True) + finalize. ~2 minutes → ~30 seconds.
+- "what is mutex?" — was 3 retrievals + 8 iterations + iteration cap forced finalize. Now: 1 retrieval + 1 think iteration + 1 reflect_final (ready=True) + finalize. Completeness improved from 60 to 85, confidence from 0.524 to 0.689.
 - Complex queries with format requirements ("explain mutex and semaphore, give 5 differences") — the LLM can see whether the docs contain comparison content and decide to retrieve again with a different query or proceed to answer.
