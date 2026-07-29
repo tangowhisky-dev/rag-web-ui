@@ -22,7 +22,6 @@ class AnswerEvaluation:
     """Result of answer quality evaluation."""
     faithfulness: int  # 0-100
     completeness: int  # 0-100
-    citation_quality: int  # 0-100
     confidence_match: bool
     flags: List[str]
     raw_response: str = ""
@@ -61,7 +60,6 @@ def _parse_evaluation_response(raw: str) -> AnswerEvaluation:
         return AnswerEvaluation(
             faithfulness=int(data.get("faithfulness", 50)),
             completeness=int(data.get("completeness", 50)),
-            citation_quality=int(data.get("citation_quality", 50)),
             confidence_match=bool(data.get("confidence_match", True)),
             flags=data.get("flags", []) or [],
             raw_response=raw,
@@ -129,7 +127,6 @@ def _default_evaluation(error: str = "") -> AnswerEvaluation:
     return AnswerEvaluation(
         faithfulness=50,
         completeness=50,
-        citation_quality=50,
         confidence_match=True,
         flags=[f"Evaluation unavailable: {error}"] if error else ["Evaluation skipped"],
         raw_response="",
@@ -199,7 +196,6 @@ def summarize_evaluation(evaluation: AnswerEvaluation) -> str:
     parts = []
     parts.append(f"Faithfulness: {evaluation.faithfulness}/100")
     parts.append(f"Completeness: {evaluation.completeness}/100")
-    parts.append(f"Citation quality: {evaluation.citation_quality}/100")
 
     if evaluation.confidence_match:
         parts.append("Confidence matches quality: Yes")

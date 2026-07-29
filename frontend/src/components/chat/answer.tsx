@@ -154,13 +154,14 @@ export const Answer: FC<{
   finalConfidenceLevel?: "very_high" | "high" | "medium" | "low" | "none";
   faithfulness?: number;
   completeness?: number;
+  retrievalScore?: number;
   // Enterprise agent loop state
   plan?: Record<string, unknown>;
   toolCalls?: Array<Record<string, unknown>>;
   toolObservations?: Array<Record<string, unknown>>;
   lastAnswerObject?: Record<string, unknown>;
   chartOption?: Record<string, unknown>;
-}> = ({ messageId, chatId, markdown, citations = [], rewrittenQuery, confidence, confidenceScore, confidenceBreakdown, suggestion, failedLegs, queryClassification, toolTrace, agentSteps, taskList, progressMessages, synthesisMode, isStreaming = false, onDelete, finalConfidence, finalConfidenceLevel, faithfulness, completeness, plan, toolCalls, toolObservations, lastAnswerObject, chartOption }) => {
+}> = ({ messageId, chatId, markdown, citations = [], rewrittenQuery, confidence, confidenceScore, confidenceBreakdown, suggestion, failedLegs, queryClassification, toolTrace, agentSteps, taskList, progressMessages, synthesisMode, isStreaming = false, onDelete, finalConfidence, finalConfidenceLevel, faithfulness, completeness, retrievalScore, plan, toolCalls, toolObservations, lastAnswerObject, chartOption }) => {
   const [citationInfoMap, setCitationInfoMap] = useState<
     Record<string, CitationInfo>
   >({});
@@ -655,7 +656,7 @@ export const Answer: FC<{
           </div>
 
           {/* Right: confidence + speed */}
-          <div className="flex-1 min-w-0 max-w-xs flex flex-col gap-1.5">
+          <div className="flex-1 min-w-0 max-w-[14rem] flex flex-col gap-1.5">
             {finalConfidence !== undefined && (
               <ConfidenceCollapsible
                 level={finalConfidenceLevel}
@@ -665,6 +666,7 @@ export const Answer: FC<{
                 finalConfidenceLevel={finalConfidenceLevel}
                 faithfulness={faithfulness}
                 completeness={completeness}
+                retrievalScore={retrievalScore}
                 failedLegs={failedLegs}
               />
             )}
@@ -849,6 +851,7 @@ const ConfidenceCollapsible: FC<{
   finalConfidenceLevel?: ConfidenceLevel;
   faithfulness?: number;
   completeness?: number;
+  retrievalScore?: number;
   failedLegs?: string[];
 }> = ({
   level,
@@ -858,6 +861,7 @@ const ConfidenceCollapsible: FC<{
   finalConfidenceLevel,
   faithfulness,
   completeness,
+  retrievalScore,
   failedLegs,
 }) => {
   const [open, setOpen] = useState(false);
@@ -917,6 +921,12 @@ const ConfidenceCollapsible: FC<{
         <div className={`px-3 pb-2 pt-1 border-t ${cfg.border} space-y-2`}>
           {(finalConfidence !== undefined || faithfulness !== undefined || completeness !== undefined) && (
             <div className="space-y-1">
+              {retrievalScore !== undefined && (
+                <div className="flex justify-between gap-4">
+                  <span className="text-zinc-500 dark:text-zinc-400">Retrieval quality</span>
+                  <span className={`font-medium ${cfg.text}`}>{retrievalScore}/100</span>
+                </div>
+              )}
               {faithfulness !== undefined && (
                 <div className="flex justify-between gap-4">
                   <span className="text-zinc-500 dark:text-zinc-400">Faithfulness</span>
@@ -927,12 +937,6 @@ const ConfidenceCollapsible: FC<{
                 <div className="flex justify-between gap-4">
                   <span className="text-zinc-500 dark:text-zinc-400">Completeness</span>
                   <span className={`font-medium ${cfg.text}`}>{completeness}/100</span>
-                </div>
-              )}
-              {score !== undefined && (
-                <div className="flex justify-between gap-4">
-                  <span className="text-zinc-500 dark:text-zinc-400">Retrieval confidence</span>
-                  <span className={`font-medium ${cfg.text}`}>{score}/100</span>
                 </div>
               )}
             </div>

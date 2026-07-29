@@ -295,6 +295,7 @@ async def generate_response(
         _final_confidence_level: str | None = None
         _faithfulness: int | None = None
         _completeness: int | None = None
+        _retrieval_score: int | None = None
 
         # Cache the message ID so the error handler can reference it even if
         # the bot_message instance becomes detached.
@@ -405,6 +406,7 @@ async def generate_response(
                 _final_confidence_level = usage.get("confidence_level")
                 _faithfulness = usage.get("faithfulness")
                 _completeness = usage.get("completeness")
+                _retrieval_score = usage.get("retrieval_score")
                 yield f'd:{json.dumps({"finishReason": "stop", "usage": usage, "messageId": _bot_message_id})}\n'
                 await asyncio.sleep(0)
 
@@ -510,6 +512,8 @@ async def generate_response(
             bot_message.faithfulness = _faithfulness
         if _completeness is not None:
             bot_message.completeness = _completeness
+        if _retrieval_score is not None:
+            bot_message.retrieval_score = _retrieval_score
 
         try:
             db.commit()

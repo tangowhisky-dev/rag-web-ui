@@ -87,6 +87,7 @@ class Message(Base, TimestampMixin):
     final_confidence_level = Column(String(20), nullable=True)
     faithfulness = Column(Integer, nullable=True)
     completeness = Column(Integer, nullable=True)
+    retrieval_score = Column(Integer, nullable=True)   # 0-100, from retrieval_confidence
     rewritten_query = Column(LONGTEXT, nullable=True)  # standalone retrieval query after rewrite
     last_answer_object = Column(JSON, nullable=True)    # structured summary of the assistant answer
     plan = Column(JSON, nullable=True)                  # plan object for this turn (debugging/replay)

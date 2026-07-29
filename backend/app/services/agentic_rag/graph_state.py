@@ -118,7 +118,7 @@ class AgentState(MessagesState):
     confidence_level: str = "none"
     faithfulness: int = 0
     completeness: int = 0
-    citation_quality: int = 0
+    retrieval_score: int = 0
     confidence_match: bool = True
     evaluation_flags: Annotated[List[str], _last_value] = []
 
