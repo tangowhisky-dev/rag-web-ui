@@ -34,9 +34,17 @@ def format_context_string(docs: list[dict], file_markdown: str | None = None) ->
 
     Each doc becomes ``[KB-N] (source)\\ncontent``.  If *file_markdown* is
     provided it is appended after a ``[File Content]`` header.
+
+    Contiguous chunks from the same document have their overlap pruned
+    so the LLM doesn't see duplicated text (300 chars per adjacent pair
+    at 20% overlap). Citation indices are unaffected — pruning only
+    shortens the content, not the chunk's position in the list.
     """
+    from app.services.agentic_rag.agent_graph import _prune_contiguous_overlaps
+
+    pruned_docs = _prune_contiguous_overlaps(docs) if docs else docs
     parts: list[str] = []
-    for i, doc in enumerate(docs, 1):
+    for i, doc in enumerate(pruned_docs, 1):
         content = doc.get("page_content", "").strip()
         source = doc.get("metadata", {}).get("source", "")
         header = f"[KB-{i}]" + (f" ({source})" if source else "")

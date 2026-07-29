@@ -127,6 +127,84 @@ def _tool_descriptions_text(tools: list) -> str:
     return "\n".join(lines)
 
 
+def _strip_overlap(prev: str, curr: str, max_search: int) -> str:
+    """Strip the overlapping prefix from *curr* that duplicates the tail of *prev*.
+
+    Searches for the longest suffix of *prev* (up to *max_search* chars) that
+    appears as a prefix of *curr* and strips it. Returns *curr* unchanged if
+    no overlap is found.
+    """
+    search_len = min(len(prev), len(curr), max_search)
+    for length in range(search_len, 0, -1):
+        if prev[-length:] == curr[:length]:
+            return curr[length:]
+    return curr
+
+
+def _prune_contiguous_overlaps(docs: list[dict]) -> list[dict]:
+    """Prune overlap text from contiguous chunks.
+
+    Chunks are created with OVERLAP_PERCENTAGE (default 20% = 300 chars at
+    CHUNK_SIZE=1500). When two adjacent chunks from the same document are
+    both retrieved, the overlapping region appears twice. This function:
+
+    1. Groups docs by document_id.
+    2. Sorts by chunk_index within each group.
+    3. For contiguous chunks (chunk_index differs by 1), strips the overlap
+       from the later chunk using _strip_overlap.
+    4. Non-contiguous chunks are left unchanged.
+
+    Returns a new list with pruned page_content. Original metadata (chunk_index,
+    document_id, content_hash) is preserved for citations — pruning only
+    affects the text shown to the LLM, not the citation mapping.
+    """
+    if not docs:
+        return docs
+
+    max_overlap = max(200, settings.chunk_overlap * 2)
+
+    # Group by document_id, sort by chunk_index within each group.
+    by_doc: dict[Any, list[dict]] = {}
+    for doc in docs:
+        meta = doc.get("metadata", {}) if isinstance(doc, dict) else {}
+        doc_id = meta.get("document_id")
+        if doc_id is None:
+            continue
+        by_doc.setdefault(doc_id, []).append(doc)
+
+    # Build a set of (doc_id, chunk_index) → pruned content.
+    pruned_content: dict[int, str] = {}  # id() of doc → pruned text
+    for doc_id, group in by_doc.items():
+        group.sort(key=lambda d: d.get("metadata", {}).get("chunk_index", 0))
+        prev_text = None
+        for doc in group:
+            chunk_idx = doc.get("metadata", {}).get("chunk_index", 0)
+            content = doc.get("page_content", "")
+            if prev_text is not None:
+                # Check if contiguous (previous chunk_index + 1 == current).
+                prev_idx = group[group.index(doc) - 1].get("metadata", {}).get("chunk_index", 0)
+                if prev_idx + 1 == chunk_idx:
+                    pruned = _strip_overlap(prev_text, content, max_overlap)
+                    pruned_content[id(doc)] = pruned
+                    prev_text = pruned
+                    continue
+            prev_text = content
+
+    if not pruned_content:
+        return docs
+
+    # Build result with pruned content where applicable.
+    result = []
+    for doc in docs:
+        if id(doc) in pruned_content:
+            doc_copy = dict(doc)
+            doc_copy["page_content"] = pruned_content[id(doc)]
+            result.append(doc_copy)
+        else:
+            result.append(doc)
+    return result
+
+
 def _observations_text(observations: list[Observation], full: bool = False) -> str:
     """Format observations for LLM context.
 
@@ -165,7 +243,10 @@ def _observations_text(observations: list[Observation], full: bool = False) -> s
                     seen_hashes.add(h)
                     unique_docs.append(doc)
             parts.append(f"  doc_count={doc_count} unique_so_far={len(seen_hashes)} confidence={confidence}")
-            for j, doc in enumerate(unique_docs, 1):
+            # Prune overlap from contiguous chunks so the LLM doesn't see
+            # duplicated text (300 chars per adjacent pair at 20% overlap).
+            pruned_docs = _prune_contiguous_overlaps(unique_docs)
+            for j, doc in enumerate(pruned_docs, 1):
                 content = str(doc.get("page_content", ""))
                 parts.append(f"  doc_{j}: {content}")
         else:
