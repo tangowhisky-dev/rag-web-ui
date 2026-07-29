@@ -93,6 +93,7 @@ class CodeExecuteTool(BaseAgentTool):
             "_getiter_": _getiter_,
             "_getitem_": _getitem_,
             "_write_": _write_,
+            "_print_": lambda *args, **kwargs: print(*args, **kwargs),
             "setattr": guarded_setattr,
             "delattr": guarded_delattr,
         }
