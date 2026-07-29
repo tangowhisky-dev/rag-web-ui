@@ -41,7 +41,7 @@ const NODE_META: Record<string, { label: string; activeLabel?: string; icon: Tim
   think:                 { label: "Thinking…",             activeLabel: "Thinking…",             icon: "wrench" },
   tool:                  { label: "Using tools…",          activeLabel: "Using tools…",          icon: "wrench" },
   reflect:               { label: "Reflecting…",           activeLabel: "Reflecting…",           icon: "check" },
-  reflect_final:         { label: "Final reflection…",     activeLabel: "Final reflection…",     icon: "check" },
+  reflect_final:         { label: "Verifying completeness…", activeLabel: "Verifying completeness…", icon: "check" },
   finalize:              { label: "Finalizing answer…",    activeLabel: "Finalizing answer…",    icon: "wrench" },
   answer_scoring:        { label: "Scoring answer…",       activeLabel: "Scoring answer…",       icon: "check" },
   save_memory:           { label: "Saving memory…",        activeLabel: "Saving memory…",        icon: "book" },

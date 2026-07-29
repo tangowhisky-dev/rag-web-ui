@@ -417,6 +417,24 @@ Output JSON: { "action": "continue|tool_call|final_answer", "plan_patch": "optio
 When action=tool_call, also include "tool_calls": [...].
 """
 
+REFLECT_FINAL_PROMPT: str = """\
+You are the final verification module. The acting agent has decided it is done and ready to answer. \
+Your job is to verify that the user's instruction is fully satisfied BEFORE the answer is generated.
+
+Check these conditions:
+1. **Query coverage**: Does every part of the user's original query have supporting observations?
+2. **Format compliance**: If the user specified a format (e.g. "10 points", "as a table", "in bullet points"), \
+will the agent be able to follow it with the current observations?
+3. **Evidence**: Are there tool observations (retrieved docs, file content, computed results) that support \
+the factual claims the agent will need to make?
+4. **Missing tools**: Did the plan call for a tool that was never invoked?
+
+If all conditions are met, return ready=true. If any condition is not met, return ready=false with a \
+specific, actionable reasoning that tells the acting agent exactly what is missing.
+
+Return JSON: { "ready": true|false, "reasoning": "..." }
+"""
+
 LAST_ANSWER_EXTRACT_PROMPT: str = """\
 Extract a structured summary from the assistant answer below. Return valid JSON only matching this schema:
 {

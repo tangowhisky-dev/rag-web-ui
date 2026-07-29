@@ -90,6 +90,7 @@ from app.services.agentic_rag.prompts import (
     ANSWER_SYSTEM_PROMPT_BASE,
     LAST_ANSWER_EXTRACT_PROMPT,
     PLAN_SYSTEM_PROMPT,
+    REFLECT_FINAL_PROMPT,
     REFLECT_SYSTEM_PROMPT,
     THINK_SYSTEM_PROMPT,
 )
@@ -283,12 +284,25 @@ async def think_node(state: AgentState, ctx: ToolContext) -> dict:
             if lao.key_points:
                 lao_text += f"  Key points: {'; '.join(lao.key_points[:5])}\n"
 
+        # If reflect_final sent us back, include its reasoning so the agent
+        # knows exactly what was missing and can act on it.
+        reflection = state.get("reflection_final")
+        reflection_text = ""
+        if reflection and isinstance(reflection, dict) and not reflection.get("ready", True):
+            reflection_text = (
+                f"  NOTE — the verification module rejected your previous final_answer because:\n"
+                f"  {reflection.get('reasoning', '')}\n"
+                "  Do NOT reference this feedback in your answer. Use it only as guidance to\n"
+                "  decide which tool to call next, then emit a clean final_answer.\n"
+            )
+
         system = AGENT_SYSTEM_PROMPT + "\n\n" + THINK_SYSTEM_PROMPT
         user = (
             f"Iteration: {iteration}/{max_iter}\n"
             f"User query: {original}\n"
             f"Conversation history (recent turns):\n{history_text or '  (none)'}\n"
             f"Previous answer context:\n{lao_text or '  (none)'}\n"
+            f"Verification feedback:\n{reflection_text or '  (none)'}\n"
             f"Plan: {json.dumps(plan.model_dump() if isinstance(plan, Plan) else plan, default=str)}\n"
             f"Observations so far:\n{_observations_text(observations)}\n\n"
             f"Available tools:\n{tools_text}\n\n"
@@ -330,6 +344,16 @@ def route_think(state: AgentState) -> str:
     if state.get("tool_calls"):
         return "tool"
     return "reflect_final"
+
+
+def route_reflect_final(state: AgentState) -> str:
+    """Route after final verification: ready → finalize, not ready → think."""
+    reflection = state.get("reflection_final", {})
+    ready = reflection.get("ready", True) if isinstance(reflection, dict) else True
+    iteration = state.get("iteration", 0)
+    if not ready and iteration < settings.AGENT_MAX_ITERATIONS:
+        return "think"
+    return "finalize"
 
 
 async def tool_node(state: AgentState, ctx: ToolContext) -> dict:
@@ -657,21 +681,24 @@ async def answer_scoring_node(state: AgentState) -> dict:
     
     
 async def reflect_final_node(state: AgentState, ctx: ToolContext) -> dict:
-    """Final pre-finalize reflection: one last satisfaction check."""
+    """Final pre-finalize verification: is the user's instruction fully satisfied?"""
     with _agent_step("reflect_final"):
         plan = state.get("plan") or Plan()
         observations = state.get("observations", [])
         original = state.get("original_query", "")
-    
-        system = AGENT_SYSTEM_PROMPT + "\n\n" + REFLECT_SYSTEM_PROMPT
+        iteration = state.get("iteration", 0)
+        max_iter = settings.AGENT_MAX_ITERATIONS
+
+        system = AGENT_SYSTEM_PROMPT + "\n\n" + REFLECT_FINAL_PROMPT
         user = (
-            f"This is the FINAL reflection before answering.\n"
+            f"This is the FINAL verification before answering.\n"
             f"Original query: {original}\n"
             f"Plan: {json.dumps(plan.model_dump() if isinstance(plan, Plan) else plan, default=str)}\n"
             f"Observations:\n{_observations_text(observations)}\n\n"
-            "Return JSON: { 'ready': true|false, 'reasoning': '...' }"
+            f"Iteration: {iteration}/{max_iter}\n"
+            "Return JSON: { \"ready\": true|false, \"reasoning\": \"...\" }"
         )
-    
+
         ready = True
         reasoning = ""
         try:
@@ -685,7 +712,12 @@ async def reflect_final_node(state: AgentState, ctx: ToolContext) -> dict:
                 reasoning = parsed.get("reasoning", "")
         except Exception as exc:
             logger.warning("[reflect_final_node] reflection failed: %s", exc)
-    
+
+        # Force ready when iteration cap is reached — no more retries possible.
+        if not ready and iteration >= max_iter:
+            logger.info("[reflect_final_node] not ready but iteration cap reached (%d/%d) — forcing finalize", iteration, max_iter)
+            ready = True
+
         writer = _writer()
         writer({"event": "progress", "phase": "reflect_final", "ready": ready, "reasoning": reasoning})
         return {"reflection_final": {"ready": ready, "reasoning": reasoning}}
@@ -717,7 +749,7 @@ def build_agent_graph(ctx: ToolContext):
     graph.add_conditional_edges("think", route_think)
     graph.add_edge("tool", "reflect")
     graph.add_edge("reflect", "think")
-    graph.add_edge("reflect_final", "finalize")
+    graph.add_conditional_edges("reflect_final", route_reflect_final)
     graph.add_edge("finalize", "answer_scoring")
     graph.add_edge("answer_scoring", "save_memory")
     graph.add_edge("save_memory", END)

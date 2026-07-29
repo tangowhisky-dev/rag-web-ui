@@ -145,6 +145,8 @@ class AgentState(MessagesState):
     artifacts: Annotated[List[Artifact], accumulate] = []
     needs_clarification: Annotated[bool, _last_value] = False
     clarification_question: Annotated[Optional[str], _last_value] = None
+    reflection_final: Annotated[Optional[dict], _last_value] = None  # {ready: bool, reasoning: str} from reflect_final_node
+    clarification_question: Annotated[Optional[str], _last_value] = None
 
     # ── Metadata ────────────────────────────────────────────────────────
     latency_ms: int = 0

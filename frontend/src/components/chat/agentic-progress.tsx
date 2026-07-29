@@ -29,7 +29,7 @@ const NODE_PHASE: Record<string, string> = {
 
   // Phase 5: Reflecting
   reflect: "Reflecting …",
-  reflect_final: "Reflecting …",
+  reflect_final: "Verifying …",
 
   // Phase 6: Generating answer
   generating: "Generating answer …",
