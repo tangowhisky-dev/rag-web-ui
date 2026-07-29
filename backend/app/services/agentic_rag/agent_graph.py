@@ -90,7 +90,6 @@ from app.services.agentic_rag.prompts import (
     ANSWER_SYSTEM_PROMPT_BASE,
     LAST_ANSWER_EXTRACT_PROMPT,
     PLAN_SYSTEM_PROMPT,
-    REFLECT_FINAL_PROMPT,
     REFLECT_SYSTEM_PROMPT,
     THINK_SYSTEM_PROMPT,
 )
@@ -128,15 +127,35 @@ def _tool_descriptions_text(tools: list) -> str:
     return "\n".join(lines)
 
 
-def _observations_text(observations: list[Observation]) -> str:
+def _observations_text(observations: list[Observation], full: bool = False) -> str:
+    """Format observations for LLM context.
+
+    When full=True, include doc previews (first 800 chars of each doc's
+    page_content) so think_node can judge whether the retrieval actually
+    answers the query. When full=False, include a compact summary (doc
+    count, confidence, top doc preview) to keep reflect/finalize prompts
+    small.
+    """
     parts = []
     for i, obs in enumerate(observations, 1):
         parts.append(f"Observation {i}: tool={obs.tool} args={obs.arguments}")
         if obs.error:
             parts.append(f"  error: {obs.error}")
+            continue
+        result = obs.result if isinstance(obs.result, dict) else {}
+        docs = result.get("docs", [])
+        doc_count = len(docs)
+        confidence = result.get("confidence", "N/A")
+        if full:
+            parts.append(f"  doc_count={doc_count} confidence={confidence}")
+            for j, doc in enumerate(docs[:10], 1):
+                content = str(doc.get("page_content", ""))[:800] if isinstance(doc, dict) else str(doc)[:800]
+                parts.append(f"  doc_{j}: {content}")
         else:
-            summary = json.dumps(obs.result, default=str)[:500]
-            parts.append(f"  result: {summary}")
+            parts.append(f"  doc_count={doc_count} confidence={confidence}")
+            if docs and isinstance(docs[0], dict):
+                preview = str(docs[0].get("page_content", ""))[:300]
+                parts.append(f"  top_doc_preview: {preview}")
     return "\n".join(parts)
 
 
@@ -304,9 +323,9 @@ async def think_node(state: AgentState, ctx: ToolContext) -> dict:
             f"Previous answer context:\n{lao_text or '  (none)'}\n"
             f"Verification feedback:\n{reflection_text or '  (none)'}\n"
             f"Plan: {json.dumps(plan.model_dump() if isinstance(plan, Plan) else plan, default=str)}\n"
-            f"Observations so far:\n{_observations_text(observations)}\n\n"
+            f"Observations so far:\n{_observations_text(observations, full=True)}\n\n"
             f"Available tools:\n{tools_text}\n\n"
-            "Emit either {\"tool_calls\": [...]} or {\"final_answer\": \"...\"}."
+            "Emit either {\"tool_calls\": [...]} or {\"final_answer\": true}."
         )
     
         mode = settings.TOOL_CALL_MODE
@@ -688,43 +707,119 @@ async def answer_scoring_node(state: AgentState) -> dict:
         return await answer_evaluation_node(state)
     
     
+def _build_execution_summary(state: AgentState) -> dict:
+    """Build a structured execution summary for deterministic verification."""
+    plan = state.get("plan") or Plan()
+    observations = state.get("observations", [])
+    counts = dict(state.get("tool_call_count", {}))
+    iteration = state.get("iteration", 0)
+
+    # Map subtask tool_hints to whether we have a matching observation.
+    subtask_status = []
+    for st in plan.subtasks:
+        hint = st.tool_hint
+        if hint == "any":
+            has_obs = len(observations) > 0
+        else:
+            has_obs = any(o.tool == hint and not o.error for o in observations)
+        subtask_status.append({
+            "id": st.id,
+            "description": st.description,
+            "tool_hint": hint,
+            "completed": has_obs,
+        })
+
+    # Retrieval stats.
+    retrieval_queries = counts.get("rag_retrieve", 0)
+    total_docs = 0
+    for o in observations:
+        if o.tool == "rag_retrieve" and not o.error:
+            total_docs += len(o.result.get("docs", []))
+
+    # Tool failures.
+    failures = []
+    for o in observations:
+        if o.error:
+            failures.append({"tool": o.tool, "error": o.error})
+
+    # Remaining retrieval budget.
+    retrieval_budget_left = settings.AGENT_MAX_RETRIEVALS - retrieval_queries
+
+    return {
+        "user_goal": state.get("original_query", ""),
+        "intent": plan.intent,
+        "subtasks": subtask_status,
+        "retrieval": {
+            "queries": retrieval_queries,
+            "documents": total_docs,
+        },
+        "tool_failures": failures,
+        "remaining_budget": {
+            "retrieval": retrieval_budget_left,
+            "iterations": settings.AGENT_MAX_ITERATIONS - iteration,
+        },
+    }
+
+
+def _verify_execution(summary: dict) -> tuple[bool, str]:
+    """Deterministic execution verification.
+
+    Returns (ready, reasoning). ready=True means the agent has done enough
+    work to generate an answer. ready=False means a required step is missing
+    and another iteration is likely to help.
+    """
+    issues = []
+
+    # 1. No observations at all — nothing was attempted.
+    if not summary["subtasks"] and summary["retrieval"]["queries"] == 0:
+        # No plan subtasks and no retrieval — could be a conversation query.
+        # If intent is conversation, that's fine.
+        if summary.get("intent") not in ("conversation",):
+            issues.append("No tool calls were made and no subtasks were planned.")
+        else:
+            return True, "Conversation intent — no tools needed."
+
+    # 2. Uncompleted subtasks that still have budget.
+    for st in summary["subtasks"]:
+        if not st["completed"]:
+            issues.append(f"Subtask '{st['id']}' ({st['description'][:60]}) has no successful tool result.")
+
+    # 3. Retrieval returned zero docs and budget remains.
+    if summary["retrieval"]["queries"] > 0 and summary["retrieval"]["documents"] == 0:
+        if summary["remaining_budget"]["retrieval"] > 0:
+            issues.append("Retrieval returned 0 documents; another query may help.")
+        else:
+            # No budget left — can't fix this, proceed with what we have.
+            pass
+
+    # 4. Tool failures that could be retried.
+    for f in summary["tool_failures"]:
+        tool = f["tool"]
+        if "Budget exceeded" in f["error"]:
+            continue  # Budget-exceeded failures can't be retried.
+        issues.append(f"Tool '{tool}' failed: {f['error'][:80]}")
+
+    if issues:
+        return False, "; ".join(issues)
+    return True, "All planned steps have supporting tool results."
+
+
 async def reflect_final_node(state: AgentState, ctx: ToolContext) -> dict:
-    """Final pre-finalize verification: is the user's instruction fully satisfied?"""
+    """Final pre-finalize verification: deterministic execution completeness check."""
     with _agent_step("reflect_final"):
-        plan = state.get("plan") or Plan()
-        observations = state.get("observations", [])
-        original = state.get("original_query", "")
         iteration = state.get("iteration", 0)
         max_iter = settings.AGENT_MAX_ITERATIONS
 
-        system = AGENT_SYSTEM_PROMPT + "\n\n" + REFLECT_FINAL_PROMPT
-        user = (
-            f"This is the FINAL verification before answering.\n"
-            f"Original query: {original}\n"
-            f"Plan: {json.dumps(plan.model_dump() if isinstance(plan, Plan) else plan, default=str)}\n"
-            f"Observations:\n{_observations_text(observations)}\n\n"
-            f"Iteration: {iteration}/{max_iter}\n"
-            "Return JSON: { \"ready\": true|false, \"reasoning\": \"...\" }"
-        )
-
-        ready = True
-        reasoning = ""
-        try:
-            llm = build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)
-            resp = await llm.ainvoke([{"role": "system", "content": system}, {"role": "user", "content": user}])
-            raw = str(resp.content)
-            block = _extract_json_block(raw)
-            if block:
-                parsed = json.loads(block)
-                ready = parsed.get("ready", True)
-                reasoning = parsed.get("reasoning", "")
-        except Exception as exc:
-            logger.warning("[reflect_final_node] reflection failed: %s", exc)
+        summary = _build_execution_summary(state)
+        ready, reasoning = _verify_execution(summary)
 
         # Force ready when iteration cap is reached — no more retries possible.
         if not ready and iteration >= max_iter:
             logger.info("[reflect_final_node] not ready but iteration cap reached (%d/%d) — forcing finalize", iteration, max_iter)
             ready = True
+            reasoning = f"Forced finalize at iteration cap. Pending issues: {reasoning}"
+
+        logger.info("[reflect_final_node] ready=%s reasoning=%s", ready, reasoning[:200])
 
         writer = _writer()
         writer({"event": "progress", "phase": "reflect_final", "ready": ready, "reasoning": reasoning})
