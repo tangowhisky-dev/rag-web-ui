@@ -25,11 +25,6 @@ class AnswerEvaluation(BaseModel):
         le=100,
         description="How completely the answer addresses all parts of the query (0-100).",
     )
-    citation_quality: int = Field(
-        ge=0,
-        le=100,
-        description="How accurate and properly formatted the citations are (0-100).",
-    )
     issues: List[str] = Field(
         default_factory=list,
         description="List of specific quality issues found, or empty if none.",

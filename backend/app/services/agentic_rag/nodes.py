@@ -98,7 +98,26 @@ async def compaction_node(state: AgentState) -> dict:
 
     messages = state.get("messages", [])
     budget = ContextBudget()
+    # Count conversation history
     budget.add(count_tokens(_messages_to_conversation_text(messages)))
+    # Account for constant system prompt overhead per LLM call.
+    # The agent makes at least 3 calls (plan + think + finalize), each
+    # sending AGENT_SYSTEM_PROMPT plus a node-specific prompt. Without
+    # this, compaction triggers too late — the conversation history alone
+    # may fit, but the total context (history + system prompts + retrieval)
+    # overflows the window.
+    from app.services.agentic_rag.prompts import (
+        AGENT_SYSTEM_PROMPT,
+        ANSWER_SYSTEM_PROMPT_BASE,
+        PLAN_SYSTEM_PROMPT,
+        THINK_SYSTEM_PROMPT,
+    )
+    sys_overhead = (
+        count_tokens(AGENT_SYSTEM_PROMPT) + count_tokens(PLAN_SYSTEM_PROMPT)
+        + count_tokens(AGENT_SYSTEM_PROMPT) + count_tokens(THINK_SYSTEM_PROMPT)
+        + count_tokens(AGENT_SYSTEM_PROMPT) + count_tokens(ANSWER_SYSTEM_PROMPT_BASE)
+    )
+    budget.add(sys_overhead)
     if not budget.needs_compaction():
         return {"compaction_summary": None, "compaction_triggered": False}
 
@@ -609,6 +628,7 @@ async def answer_evaluation_node(
                 "confidence_level": "none",
                 "faithfulness": 0,
                 "completeness": 0,
+                "retrieval_score": 0,
             }
 
         context_text = format_context_string(docs, state.get("file_markdown"))
@@ -627,14 +647,12 @@ async def answer_evaluation_node(
             )
             faithfulness = evaluation.faithfulness
             completeness = evaluation.completeness
-            citation_quality = evaluation.citation_quality
             confidence_match = evaluation.confidence_match
             eval_flags = evaluation.flags
         except Exception as exc:
             logger.warning("[ANSWER_EVALUATION] failed: %s", exc)
             faithfulness = 50
             completeness = 50
-            citation_quality = 50
             confidence_match = True
             eval_flags = ["Evaluation unavailable"]
 
@@ -658,7 +676,7 @@ async def answer_evaluation_node(
             "confidence_level": confidence_level,
             "faithfulness": faithfulness,
             "completeness": completeness,
-            "citation_quality": citation_quality,
+            "retrieval_score": int(retrieval_score),
             "confidence_match": confidence_match,
             "evaluation_flags": eval_flags,
         }

@@ -91,6 +91,7 @@ interface ChatMessage {
   final_confidence_level?: string;
   faithfulness?: number;
   completeness?: number;
+  retrieval_score?: number;
   file_name?: string;
   file_id?: number;
   citations?: Citation[];
@@ -317,6 +318,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       finalConfidenceLevel: msg.final_confidence_level as Message["finalConfidenceLevel"] | undefined,
       faithfulness: msg.faithfulness ?? undefined,
       completeness: msg.completeness ?? undefined,
+      retrievalScore: msg.retrieval_score ?? undefined,
       file_name: msg.file_name ?? undefined,
       file_id: msg.file_id ?? undefined,
     };
@@ -705,6 +707,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
             confidence_level?: string;
             faithfulness?: number;
             completeness?: number;
+            retrieval_score?: number;
           };
         };
         const usage = payload.usage;
@@ -718,6 +721,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                   finalConfidenceLevel: usage?.confidence_level as Message["finalConfidenceLevel"],
                   faithfulness: usage?.faithfulness,
                   completeness: usage?.completeness,
+                  retrievalScore: usage?.retrieval_score,
                 }
               : message
           )
@@ -1190,6 +1194,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                           finalConfidenceLevel={message.finalConfidenceLevel}
                           faithfulness={message.faithfulness}
                           completeness={message.completeness}
+                          retrievalScore={message.retrievalScore}
                           plan={message.plan}
                           toolCalls={message.toolCalls}
                           toolObservations={message.toolObservations}
