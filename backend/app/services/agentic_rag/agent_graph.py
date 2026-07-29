@@ -130,11 +130,14 @@ def _tool_descriptions_text(tools: list) -> str:
 def _observations_text(observations: list[Observation], full: bool = False) -> str:
     """Format observations for LLM context.
 
-    When full=True, include doc previews (first 800 chars of each doc's
-    page_content) so think_node can judge whether the retrieval actually
-    answers the query. When full=False, include a compact summary (doc
-    count, confidence, top doc preview) to keep reflect/finalize prompts
-    small.
+    When full=True, include the complete page_content of up to 10 docs
+    per observation so think_node can judge whether the retrieval actually
+    answers the query. Chunks are 1500 chars (CHUNK_SIZE), so 10 docs =
+    ~15k chars = ~3.75k tokens — well within budget. The _compact_if_needed
+    helper handles overflow if observations accumulate across many iterations.
+
+    When full=False, include a compact summary (doc count, confidence, top
+    doc preview) to keep reflect/finalize prompts small.
     """
     parts = []
     for i, obs in enumerate(observations, 1):
@@ -149,7 +152,7 @@ def _observations_text(observations: list[Observation], full: bool = False) -> s
         if full:
             parts.append(f"  doc_count={doc_count} confidence={confidence}")
             for j, doc in enumerate(docs[:10], 1):
-                content = str(doc.get("page_content", ""))[:800] if isinstance(doc, dict) else str(doc)[:800]
+                content = str(doc.get("page_content", "")) if isinstance(doc, dict) else str(doc)
                 parts.append(f"  doc_{j}: {content}")
         else:
             parts.append(f"  doc_count={doc_count} confidence={confidence}")

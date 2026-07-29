@@ -441,7 +441,7 @@ The LLM's output is either:
 - `{"tool_calls": [{"tool": "rag_retrieve", "arguments": {...}}]}` — call a tool
 - `{"final_answer": true}` — signal readiness to answer (finalize will generate)
 
-### Impact of `_observations_text(full=True)` with 800-char doc previews
+### Impact of `_observations_text(full=True)` with full doc content
 
 **Before the fix:** observations were truncated to 500 chars of raw JSON. The think LLM saw:
 ```
@@ -450,19 +450,21 @@ Observation 1: tool=rag_retrieve args={'query': 'what is mutex?'}
 ```
 — just the first 500 chars of a JSON blob containing 29 docs. The LLM couldn't tell if the docs actually answered the question. It would call rag_retrieve again, hitting the retrieval cap, then emit final_answer with low confidence.
 
-**After the fix:** observations include up to 10 doc previews, each 800 chars:
+**After the fix:** observations include the complete page_content of up to 10 docs per observation:
 ```
 Observation 1: tool=rag_retrieve args={'query': 'what is mutex?'}
   doc_count=29 confidence=0.71
-  doc_1: A mutex (short for mutual exclusion) is a synchronization primitive used to protect shared resources in concurrent programming. It ensures that only one thread can access a critical section at a time. The mutex has two operations: acquire (lock) and release (unlock). When a thread acquires the mutex, other threads that try to acquire it are blocked until it is released...
-  doc_2: In operating systems, a mutex lock is implemented as a binary variable...
-  doc_3: The concept of mutual exclusion was first described by Dijkstra...
+  doc_1: A mutex (short for mutual exclusion) is a synchronization primitive used to protect shared resources in concurrent programming. It ensures that only one thread can access a critical section at a time. The mutex has two operations: acquire (lock) and release (unlock). When a thread acquires the mutex, other threads that try to acquire it are blocked until it is released. Mutexes can be implemented at the hardware level using atomic instructions or at the OS level using system calls...
+  doc_2: In operating systems, a mutex lock is implemented as a binary variable that can be in one of two states: locked or unlocked. The Pthreads library provides pthread_mutex_lock and pthread_mutex_unlock operations...
+  doc_3: The concept of mutual exclusion was first described by Edsger Dijkstra in 1965. He introduced the semaphore, a generalization of the mutex, as a primitive for coordinating access to shared resources...
   ...
 ```
 
-The LLM can now read the actual content of the top 10 retrieved docs and judge: "Does this explain mutex? Yes — doc_1 defines it, doc_2 explains the implementation, doc_3 gives history." It emits `final_answer=true` on the first iteration instead of retrying.
+The LLM can now read the complete content of the top 10 retrieved chunks and judge: "Does this explain mutex? Yes — doc_1 defines it, doc_2 explains the implementation, doc_3 gives history." It emits `final_answer=true` on the first iteration instead of retrying.
 
-**Why 800 chars and not full docs:** Full docs (29 × ~5000 chars = ~145k chars) blew the context window (151k tokens vs 131k limit). 800 chars × 10 docs = ~8000 chars ≈ ~2000 tokens — enough for the LLM to understand what was retrieved without overflowing the context. The 800-char preview typically covers the first 2-3 paragraphs of each doc, which is where the most relevant content is (reranking already sorted by relevance).
+**Why full docs and not truncated previews:** The ingestion pipeline uses `CHUNK_SIZE=1500` characters. At 1500 chars per chunk, 10 docs = 15,000 chars ≈ ~3,750 tokens — well within the 131k context window. An earlier version capped previews at 800 chars based on an incorrect assumption of ~5000 chars per doc; that was wrong by 3.3x. At 1500 chars, the 800-char cap was truncating each chunk at 53% of its content, cutting off the LLM mid-definition. Passing the full 1500-char chunk gives the LLM the complete unit of text that was indexed and reranked — no information loss.
+
+**Why 10 docs and not all 29:** The 10-doc limit bounds the worst case. If the agent makes 3 rag_retrieve calls (the budget cap), observations accumulate 3 × 10 = 30 doc previews = ~45k chars ≈ ~11k tokens. With system prompts (~3k tokens) + plan + history + tools text (~2k tokens), the total think prompt is ~16k tokens — far below the 131k limit. If observations grow further (graph expansion adds 20 docs per call), the `_compact_if_needed` helper trims older observations to their top 5 docs, keeping the prompt within budget.
 
 **Impact on the loop:**
 - "what is mutex?" — was 3 retrievals + 8 iterations + iteration cap forced finalize. Now: 1 retrieval + 1 think iteration + 1 reflect_final (ready=True) + finalize. ~2 minutes → ~30 seconds.
