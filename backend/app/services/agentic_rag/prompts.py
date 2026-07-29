@@ -398,9 +398,9 @@ If the gateway supports function-calling, emit native tool calls. If it does not
 or for a single call:
 { "tool": "<name>", "arguments": {...} }
 or to finish:
-{ "final_answer": "your final answer" }
+{ "final_answer": true }
 
-Only call independent tools in one message; dependent calls must wait for their observations. If the plan is satisfied, emit final_answer.
+Do NOT write the answer text. When you are ready to answer, emit { "final_answer": true } and the finalizer will generate the answer. Only call independent tools in one message; dependent calls must wait for their observations. If the plan is satisfied, emit final_answer.
 """
 
 REFLECT_SYSTEM_PROMPT: str = """\

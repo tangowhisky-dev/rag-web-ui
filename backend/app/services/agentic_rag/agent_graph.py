@@ -334,6 +334,14 @@ async def think_node(state: AgentState, ctx: ToolContext) -> dict:
     
         if tool_calls and not final_answer:
             return {"iteration": iteration, "tool_calls": allowed}
+
+        # final_answer can be:
+        #   - True (boolean signal from {"final_answer": true}) — think is done,
+        #     finalize_node will generate the answer with streaming.
+        #   - str (Tier 3 fallback — LLM wrote plain text instead of JSON) — pass
+        #     it through as precomputed since the text was already generated.
+        if isinstance(final_answer, bool) and final_answer:
+            return {"iteration": iteration, "tool_calls": [], "precomputed_answer": ""}
         return {"iteration": iteration, "tool_calls": [], "precomputed_answer": final_answer or ""}
     
     
@@ -482,7 +490,7 @@ async def finalize_node(state: AgentState, ctx: ToolContext) -> dict:
                 "Provide a concise, accurate answer. Cite the retrieved document chunks that support each factual claim."
             )
             try:
-                llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=0.7)
+                llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=0.7, streaming=True)
                 final = ""
                 async for chunk in llm.astream([
                     {"role": "system", "content": system},
