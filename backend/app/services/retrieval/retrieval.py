@@ -186,10 +186,12 @@ def _qdrant_payload_to_doc(payload: dict) -> LangchainDocument:
 # ── Search legs ───────────────────────────────────────────────────────────────
 
 @with_retry_sync(max_attempts=3)
-def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], candidates: int) -> Dict[str, _Candidate]:
+def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], candidates: int, min_score: Optional[float] = None) -> Dict[str, _Candidate]:
     """Qdrant cosine-similarity search using the dense (OpenAI) embedding.
     
     Searches both KB collections (kb_{kb_id}) and DataStore collections (ds_{datastore_id}).
+    ``min_score`` overrides settings.DENSE_MIN_SCORE for this call (used by the
+    graduated relaxation ladder in rag_retrieve).
     """
     logger.info("[DENSE] embedding request | model=%s | query=%r", settings.DENSE_EMBEDDINGS_MODEL, query[:120])
     response = get_openai_client().embeddings.create(
@@ -202,7 +204,7 @@ def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], candi
 
     result: Dict[str, _Candidate] = {}
     rank = 0
-    min_score = settings.DENSE_MIN_SCORE
+    min_score = settings.DENSE_MIN_SCORE if min_score is None else min_score
     if min_score > 0.0:
         logger.info("[DENSE] applying min_cosine=%.2f", min_score)
 
@@ -277,10 +279,12 @@ def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], candi
 
 
 @with_retry_sync(max_attempts=3)
-def _sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], candidates: int) -> Dict[str, _Candidate]:
+def _sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], candidates: int, min_score: Optional[float] = None) -> Dict[str, _Candidate]:
     """Qdrant learned-sparse search (SPLADE via FastEmbed).
     
     Searches both KB collections (kb_{kb_id}) and DataStore collections (ds_{datastore_id}).
+    ``min_score`` overrides settings.SPARSE_MIN_SCORE for this call (used by the
+    graduated relaxation ladder in rag_retrieve).
     """
     logger.info("[SPARSE] SPLADE embed | model=%s | query=%r", settings.SPLADE_MODEL, query[:120])
     sparse_emb = next(iter(get_sparse_embedder().embed([query])))
@@ -295,7 +299,7 @@ def _sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], cand
 
     result: Dict[str, _Candidate] = {}
     rank = 0
-    min_score = settings.SPARSE_MIN_SCORE
+    min_score = settings.SPARSE_MIN_SCORE if min_score is None else min_score
     if min_score > -float("inf"):
         logger.info("[SPARSE] applying min_score=%.2f", min_score)
     # Search KB collections
@@ -369,10 +373,12 @@ def _sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], cand
 
 
 @with_retry_sync(max_attempts=3)
-def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: Session, candidates: int) -> Dict[str, _Candidate]:
+def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: Session, candidates: int, min_score: Optional[float] = None) -> Dict[str, _Candidate]:
     """MySQL InnoDB FULLTEXT search — exact keyword / BM25 scoring, server-side.
     
     Searches both KB documents and DataStore documents.
+    ``min_score`` overrides settings.EXACT_MIN_SCORE for this call (used by the
+    graduated relaxation ladder in rag_retrieve).
 
     IMPORTANT: This function creates its own fresh SessionLocal() session for
     each retry attempt instead of using the passed ``db`` session. The passed
@@ -456,7 +462,7 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
         for i, row in enumerate(all_rows[:5]):
             logger.debug("  exact[%d] fts_score=%.4f text=%r", i, row.fts_score, (row.chunk_text or "")[:80])
 
-    min_score = settings.EXACT_MIN_SCORE
+    min_score = settings.EXACT_MIN_SCORE if min_score is None else min_score
     result: Dict[str, _Candidate] = {}
     filtered = 0
     for rank, row in enumerate(all_rows):
@@ -806,12 +812,13 @@ def dense_search_docs(
     kb_ids: List[int],
     datastore_ids: List[int],
     top_k: Optional[int] = None,
+    min_score: Optional[float] = None,
 ) -> List[LangchainDocument]:
     """Run only the dense leg and return its ranked candidate docs."""
     candidates = top_k or settings.RETRIEVAL_TOP_K
     pool = candidates * _LEG_POOL_MULTIPLIER
     return _candidates_to_docs(
-        _dense_search(query, kb_ids, datastore_ids, pool), "dense"
+        _dense_search(query, kb_ids, datastore_ids, pool, min_score=min_score), "dense"
     )
 
 
@@ -820,12 +827,13 @@ def sparse_search_docs(
     kb_ids: List[int],
     datastore_ids: List[int],
     top_k: Optional[int] = None,
+    min_score: Optional[float] = None,
 ) -> List[LangchainDocument]:
     """Run only the sparse leg and return its ranked candidate docs."""
     candidates = top_k or settings.RETRIEVAL_TOP_K
     pool = candidates * _LEG_POOL_MULTIPLIER
     return _candidates_to_docs(
-        _sparse_search(query, kb_ids, datastore_ids, pool), "sparse"
+        _sparse_search(query, kb_ids, datastore_ids, pool, min_score=min_score), "sparse"
     )
 
 
@@ -835,10 +843,11 @@ def exact_search_docs(
     datastore_ids: List[int],
     db: Session,
     top_k: Optional[int] = None,
+    min_score: Optional[float] = None,
 ) -> List[LangchainDocument]:
     """Run only the exact (MySQL FTS) leg and return its ranked candidate docs."""
     candidates = top_k or settings.RETRIEVAL_TOP_K
     pool = candidates * _LEG_POOL_MULTIPLIER
     return _candidates_to_docs(
-        _exact_search(query, kb_ids, datastore_ids, db, pool), "exact"
+        _exact_search(query, kb_ids, datastore_ids, db, pool, min_score=min_score), "exact"
     )

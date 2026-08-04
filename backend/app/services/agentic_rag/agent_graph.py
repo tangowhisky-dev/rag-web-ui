@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from functools import partial
 from typing import Any, Optional
 
@@ -248,9 +249,21 @@ def _observations_text(observations: list[Observation], full: bool = False) -> s
             parts.append(f"  error: {obs.error}")
             continue
         result = obs.result if isinstance(obs.result, dict) else {}
+        if "docs" not in result:
+            # Non-retrieval tools (code_execute, chart_generate, extract_data,
+            # file_read, etc.) don't use the docs/confidence shape — render
+            # their result directly. Without this, the LLM never sees these
+            # tools' output and re-issues the same call repeatedly, believing
+            # it got nothing back.
+            max_len = 2000 if full else 300
+            summary = json.dumps(result, default=str)[:max_len]
+            parts.append(f"  result: {summary}")
+            continue
         docs = result.get("docs", [])
         doc_count = len(docs)
         confidence = result.get("confidence", "N/A")
+        sufficient = result.get("sufficient")
+        sufficient_text = f" sufficient={sufficient}" if sufficient is not None else ""
         if full:
             unique_docs = []
             for doc in docs:
@@ -260,7 +273,7 @@ def _observations_text(observations: list[Observation], full: bool = False) -> s
                 if h not in seen_hashes:
                     seen_hashes.add(h)
                     unique_docs.append(doc)
-            parts.append(f"  doc_count={doc_count} unique_so_far={len(seen_hashes)} confidence={confidence}")
+            parts.append(f"  doc_count={doc_count} unique_so_far={len(seen_hashes)} confidence={confidence}{sufficient_text}")
             # Prune overlap from contiguous chunks so the LLM doesn't see
             # duplicated text (300 chars per adjacent pair at 20% overlap).
             pruned_docs = _prune_contiguous_overlaps(unique_docs)
@@ -268,11 +281,29 @@ def _observations_text(observations: list[Observation], full: bool = False) -> s
                 content = str(doc.get("page_content", ""))
                 parts.append(f"  doc_{j}: {content}")
         else:
-            parts.append(f"  doc_count={doc_count} confidence={confidence}")
+            parts.append(f"  doc_count={doc_count} confidence={confidence}{sufficient_text}")
             if docs and isinstance(docs[0], dict):
                 preview = str(docs[0].get("page_content", ""))[:300]
                 parts.append(f"  top_doc_preview: {preview}")
     return "\n".join(parts)
+
+
+def _tried_rag_retrieve_queries(observations: list[Observation]) -> list[str]:
+    """Exact query strings already sent to rag_retrieve, in order tried.
+
+    The ladder inside rag_retrieve already exhausts every relaxation level
+    for a given query string, so resubmitting the identical text can never
+    yield a better result — it only wastes an iteration (the dedup layer in
+    tool_node reuses the prior observation instead of re-running it).
+    """
+    seen: list[str] = []
+    for raw_obs in observations:
+        obs = _coerce_observation(raw_obs)
+        if obs.tool == "rag_retrieve":
+            query = obs.arguments.get("query")
+            if query and query not in seen:
+                seen.append(query)
+    return seen
 
 
 # ---------------------------------------------------------------------------
@@ -480,6 +511,7 @@ async def load_context_node(state: AgentState, ctx: ToolContext) -> dict:
             "user_id": ctx.user_id,
             "chat_id": ctx.chat_id,
             "message_id": ctx.message_id,
+            "started_at": time.monotonic(),
         }
     
     
@@ -599,12 +631,18 @@ async def think_node(state: AgentState, ctx: ToolContext) -> dict:
             )
 
         system = AGENT_SYSTEM_PROMPT + "\n\n" + THINK_SYSTEM_PROMPT
+        tried_queries = _tried_rag_retrieve_queries(observations)
+        tried_queries_text = (
+            f"  Already tried (do NOT resubmit these exact strings to rag_retrieve): {tried_queries}\n"
+            if tried_queries else ""
+        )
         user = (
             f"Iteration: {iteration}/{max_iter}\n"
             f"User query: {original}\n"
             f"Conversation history (recent turns):\n{history_text or '  (none)'}\n"
             f"Previous answer context:\n{lao_text or '  (none)'}\n"
             f"Verification feedback:\n{reflection_text or '  (none)'}\n"
+            f"{tried_queries_text}"
             f"Plan: {json.dumps(plan.model_dump() if isinstance(plan, Plan) else plan, default=str)}\n"
             f"Observations so far:\n{_observations_text(observations, full=True)}\n\n"
             f"Available tools:\n{tools_text}\n\n"
@@ -626,12 +664,18 @@ async def think_node(state: AgentState, ctx: ToolContext) -> dict:
                 role = "User" if msg.type == "human" else "Assistant"
                 content = str(msg.content)[:500]
                 history_text += f"  {role}: {content}\n"
+            tried_queries = _tried_rag_retrieve_queries(observations)
+            tried_queries_text = (
+                f"  Already tried (do NOT resubmit these exact strings to rag_retrieve): {tried_queries}\n"
+                if tried_queries else ""
+            )
             user = (
                 f"Iteration: {iteration}/{max_iter}\n"
                 f"User query: {original}\n"
                 f"Conversation history (recent turns):\n{history_text or '  (none)'}\n"
                 f"Previous answer context:\n{lao_text or '  (none)'}\n"
                 f"Verification feedback:\n{reflection_text or '  (none)'}\n"
+                f"{tried_queries_text}"
                 f"Plan: {json.dumps(plan.model_dump() if isinstance(plan, Plan) else plan, default=str)}\n"
                 f"Observations so far:\n{_observations_text(observations, full=True)}\n\n"
                 f"Available tools:\n{tools_text}\n\n"
@@ -674,9 +718,16 @@ async def think_node(state: AgentState, ctx: ToolContext) -> dict:
         return {**compaction_updates, "iteration": iteration, "tool_calls": [], "precomputed_answer": final_answer or ""}
     
     
+def _wall_clock_exceeded(state: AgentState) -> bool:
+    started_at = state.get("started_at")
+    if not started_at:
+        return False
+    return (time.monotonic() - started_at) >= settings.AGENT_MAX_WALL_SECONDS
+
+
 def route_think(state: AgentState) -> str:
     iteration = state.get("iteration", 0)
-    if iteration >= settings.AGENT_MAX_ITERATIONS:
+    if iteration >= settings.AGENT_MAX_ITERATIONS or _wall_clock_exceeded(state):
         return "reflect_final"
     if state.get("tool_calls"):
         return "tool"
@@ -688,7 +739,7 @@ def route_reflect_final(state: AgentState) -> str:
     reflection = state.get("reflection_final", {})
     ready = reflection.get("ready", True) if isinstance(reflection, dict) else True
     iteration = state.get("iteration", 0)
-    if not ready and iteration < settings.AGENT_MAX_ITERATIONS:
+    if not ready and iteration < settings.AGENT_MAX_ITERATIONS and not _wall_clock_exceeded(state):
         return "think"
     return "finalize"
 
@@ -707,15 +758,41 @@ async def tool_node(state: AgentState, ctx: ToolContext) -> dict:
         tools = {t.name: t for t in applicable_tools(ctx)}
         observations = list(state.get("observations", []))
         counts = dict(state.get("tool_call_count", {}))
-    
+
+        # Idempotency guard: the think LLM sometimes re-emits an identical
+        # tool_call (same tool + same arguments) across iterations even
+        # when instructed not to. Reuse the prior observation instead of
+        # re-running an expensive retrieval/tool call for nothing.
+        def _call_signature(name: str, args: dict) -> tuple[str, str]:
+            return (name, json.dumps(args, sort_keys=True, default=str))
+
+        prior_signatures: dict[tuple[str, str], Observation] = {}
+        for raw_obs in observations:
+            obs = _coerce_observation(raw_obs)
+            prior_signatures.setdefault(_call_signature(obs.tool, obs.arguments), obs)
+
         async def _budget_exceeded(name, args, cap):
             return {"tool": name, "arguments": args, "result": {}, "error": f"Budget exceeded: {name} call cap is {cap}", "tokens": 0}
+
+        async def _reuse_prior(prior: Observation):
+            return {
+                "tool": prior.tool,
+                "arguments": prior.arguments,
+                "result": prior.result,
+                "error": prior.error,
+                "tokens": 0,
+            }
 
         coros = []
         for tc in tool_calls:
             name = tc.get("tool")
             args = tc.get("arguments", {})
             writer({"event": "tool_call", "tool": name, "arguments": args})
+            prior = prior_signatures.get(_call_signature(name, args))
+            if prior is not None:
+                logger.info("[tool_node] duplicate call skipped, reusing prior observation: tool=%s args=%s", name, args)
+                coros.append(_reuse_prior(prior))
+                continue
             cap = _TOOL_CALL_BUDGET.get(name)
             current = counts.get(name, 0)
             if cap is not None and current >= cap:
@@ -762,6 +839,15 @@ async def tool_node(state: AgentState, ctx: ToolContext) -> dict:
         merged_docs: list[dict] = []
         seen_hashes: set[str] = set()
         best_confidence = 0.0
+        # Seed with recalled memory docs from load_context_node so a fresh
+        # rag_retrieve call doesn't silently discard them — merge, don't overwrite.
+        for doc in state.get("retrieved_docs", []) or []:
+            if not isinstance(doc, dict):
+                continue
+            h = doc.get("metadata", {}).get("content_hash") or _ch(doc.get("page_content", ""))
+            if h not in seen_hashes:
+                seen_hashes.add(h)
+                merged_docs.append(doc)
         for raw_obs in observations:
             obs = _coerce_observation(raw_obs)
             if obs.tool == "rag_retrieve" and not obs.error:
@@ -957,23 +1043,20 @@ async def reflect_node(state: AgentState, ctx: ToolContext) -> dict:
     
         observations = state.get("observations", [])
         counts = state.get("tool_call_count", {})
-        original = state.get("original_query", "")
-        rewritten = state.get("rewritten_query", original)
         precomputed: list[dict] = []
     
         # Concrete replanning rules =================================================
+        # NOTE: rag_retrieve now runs its own internal graduated relaxation ladder
+        # (loosening leg/reranker thresholds across multiple levels, see
+        # tools/rag_retrieve.py) before returning. A zero-doc / insufficient
+        # observation therefore already reflects the best the retrieval system
+        # could do for that exact query string — automatically re-issuing the
+        # *same* query here would just repeat the same ladder and return
+        # identical results. Do not auto-retry rag_retrieve with an unchanged
+        # query; leave that decision (and any query reformulation) to LLM
+        # discretion below, which sees the sufficiency/doc-count signal.
         for raw_obs in observations:
             obs = _coerce_observation(raw_obs)
-            if obs.tool == "rag_retrieve" and len(obs.result.get("docs", [])) == 0:
-                if counts.get("rag_retrieve", 0) < settings.AGENT_MAX_RETRIEVALS:
-                    precomputed.append({
-                        "tool": "rag_retrieve",
-                        "arguments": {
-                            "query": rewritten or original,
-                            "legs": ["dense", "sparse", "exact"],
-                            "min_confidence": 0.1,
-                        },
-                    })
             if obs.tool == "chart_generate" and obs.error:
                 if counts.get("extract_data", 0) < settings.AGENT_MAX_RETRIEVALS:
                     precomputed.append({
@@ -1109,6 +1192,9 @@ def _build_execution_summary(state: AgentState) -> dict:
     # Remaining retrieval budget.
     retrieval_budget_left = settings.AGENT_MAX_RETRIEVALS - retrieval_queries
 
+    started_at = state.get("started_at")
+    elapsed_seconds = round(time.monotonic() - started_at, 1) if started_at else 0.0
+
     return {
         "user_goal": state.get("original_query", ""),
         "intent": plan.intent,
@@ -1121,6 +1207,7 @@ def _build_execution_summary(state: AgentState) -> dict:
         "remaining_budget": {
             "retrieval": retrieval_budget_left,
             "iterations": settings.AGENT_MAX_ITERATIONS - iteration,
+            "seconds": round(settings.AGENT_MAX_WALL_SECONDS - elapsed_seconds, 1),
         },
     }
 
@@ -1177,11 +1264,12 @@ async def reflect_final_node(state: AgentState, ctx: ToolContext) -> dict:
         summary = _build_execution_summary(state)
         ready, reasoning = _verify_execution(summary)
 
-        # Force ready when iteration cap is reached — no more retries possible.
-        if not ready and iteration >= max_iter:
-            logger.info("[reflect_final_node] not ready but iteration cap reached (%d/%d) — forcing finalize", iteration, max_iter)
+        # Force ready when iteration cap OR wall-clock budget is reached — no
+        # more retries possible/worthwhile.
+        if not ready and (iteration >= max_iter or _wall_clock_exceeded(state)):
+            logger.info("[reflect_final_node] not ready but iteration/wall-clock cap reached (%d/%d) — forcing finalize", iteration, max_iter)
             ready = True
-            reasoning = f"Forced finalize at iteration cap. Pending issues: {reasoning}"
+            reasoning = f"Forced finalize at iteration/time cap. Pending issues: {reasoning}"
 
         logger.info("[reflect_final_node] ready=%s reasoning=%s", ready, reasoning[:200])
 

@@ -165,8 +165,12 @@ class Settings(BaseSettings):
     # Minimum score per retrieval leg. Docs below their leg's threshold are
     # dropped before merge — prevents clearly irrelevant results from consuming
     # cross-encoder compute and polluting the LLM context. Set to 0.0 to disable.
+    # NOTE: MySQL's MATCH...AGAINST NATURAL LANGUAGE MODE relevance score is on
+    # a small, corpus-dependent scale (typically 0-3 for natural queries) — do
+    # NOT set this anywhere near SPARSE_MIN_SCORE's scale (SPLADE term weights),
+    # or the exact leg will filter out 100% of results (observed in production).
     DENSE_MIN_SCORE: float = float(os.getenv("DENSE_MIN_SCORE", "0.5"))
-    EXACT_MIN_SCORE: float = float(os.getenv("EXACT_MIN_SCORE", "5.0"))
+    EXACT_MIN_SCORE: float = float(os.getenv("EXACT_MIN_SCORE", "0.5"))
     SPARSE_MIN_SCORE: float = float(os.getenv("SPARSE_MIN_SCORE", "5.0"))
 
     # ── Cross-encoder reranker ───────────────────────────────────────────────────
@@ -193,6 +197,20 @@ class Settings(BaseSettings):
     ADAPTIVE_RETRIEVAL_RERANKER_THRESHOLD: float = float(
         os.getenv("ADAPTIVE_RETRIEVAL_RERANKER_THRESHOLD", "-5.0")
     )
+    # Deepest relaxation tier for the rag_retrieve graduated ladder (agentic
+    # loop only): used when level-1 relaxation is still insufficient. Loosest
+    # reranker threshold and zeroed-out leg minimums — last resort before
+    # honestly reporting insufficient retrieval instead of fabricating.
+    RETRIEVAL_RELAX_LEVEL2_RERANKER_THRESHOLD: float = float(
+        os.getenv("RETRIEVAL_RELAX_LEVEL2_RERANKER_THRESHOLD", "-8.0")
+    )
+
+    # ── Agent loop wall-clock budget ─────────────────────────────────────────
+    # Iteration caps alone don't bound wall-clock time, since a single
+    # iteration's graph expansion / LLM calls can be slow. Once this many
+    # seconds have elapsed since load_context_node, the loop is forced to
+    # finalize on the next routing decision regardless of iteration count.
+    AGENT_MAX_WALL_SECONDS: float = float(os.getenv("AGENT_MAX_WALL_SECONDS", "120"))
 
     # ── Historical Memory Retrieval ────────────────────────────────────────────
     # Enable/disable historical memory retrieval (querying past assistant
@@ -255,6 +273,9 @@ class Settings(BaseSettings):
     # Number of graph hops to traverse from seed nodes at query time.
     GRAPHRAG_RETRIEVAL_HOPS: int = int(os.getenv("GRAPHRAG_RETRIEVAL_HOPS", "1"))
     GRAPHRAG_RETRIEVAL_LIMIT: int = int(os.getenv("GRAPHRAG_RETRIEVAL_LIMIT", "20"))
+    # Cap on distinct entities visited after the first hop, to bound combinatorial
+    # fan-out through highly-connected "hub" entities (e.g. common generic terms).
+    GRAPHRAG_ENTITY_FANOUT_CAP: int = int(os.getenv("GRAPHRAG_ENTITY_FANOUT_CAP", "50"))
 
     # Maximum number of chunks to run graph extraction on per document.
     # Chunks beyond this limit are skipped for graph extraction but still

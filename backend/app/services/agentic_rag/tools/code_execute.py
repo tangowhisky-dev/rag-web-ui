@@ -76,6 +76,7 @@ class CodeExecuteTool(BaseAgentTool):
         try:
             from RestrictedPython import safe_builtins
             from RestrictedPython.Guards import safer_getattr, guarded_setattr, guarded_delattr
+            from RestrictedPython.PrintCollector import PrintCollector
         except ImportError:
             return {"ok": False, "result": {}, "error": "RestrictedPython is not installed; code execution disabled.", "tokens": 0}
 
@@ -93,7 +94,7 @@ class CodeExecuteTool(BaseAgentTool):
             "_getiter_": _getiter_,
             "_getitem_": _getitem_,
             "_write_": _write_,
-            "_print_": lambda *args, **kwargs: print(*args, **kwargs),
+            "_print_": PrintCollector,
             "setattr": guarded_setattr,
             "delattr": guarded_delattr,
         }
@@ -146,15 +147,21 @@ class CodeExecuteTool(BaseAgentTool):
             if result is None:
                 # try last expression? exec doesn't return. Use result variable.
                 result = ""
-
-            signal.alarm(0)
         except TimeoutError as exc:
             return {"ok": False, "result": {}, "error": f"Timeout after {input_obj.timeout_s}s", "tokens": 0}
         except Exception as exc:
-            signal.alarm(0)
             return {"ok": False, "result": {}, "error": f"{exc}\n{traceback.format_exc()}", "tokens": 0}
+        finally:
+            # Always disarm the alarm on every exit path (including early
+            # returns from compile failure) — an unarmed alarm otherwise
+            # fires later inside the asyncio event loop and crashes the
+            # whole worker process with an uncaught TimeoutError.
+            signal.alarm(0)
 
-        stdout = stdout_buf.getvalue()
+        # RestrictedPython routes print() through a PrintCollector instance
+        # bound to `_print` in globals_dict, not real stdout.
+        print_collector = globals_dict.get("_print")
+        stdout = stdout_buf.getvalue() + (print_collector() if print_collector else "")
         stderr = stderr_buf.getvalue()
 
         # Capture matplotlib figure as base64 if any

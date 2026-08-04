@@ -90,6 +90,14 @@ def parse_think_response(
                 elif "final_answer" in parsed:
                     final_answer = parsed["final_answer"]
                     return ParsedThinkResponse(final_answer=final_answer)
+                elif isinstance(parsed, dict) and len(parsed) == 1:
+                    # Malformed shorthand some local models emit, e.g.
+                    # {"rag_retrieve": {"query": "..."}} instead of the
+                    # documented {"tool": ..., "arguments": ...} shape.
+                    # Treat the single key as the tool name.
+                    (name, args), = parsed.items()
+                    if isinstance(args, dict):
+                        return ParsedThinkResponse(tool_calls=[{"tool": name, "arguments": args}])
         except Exception as exc:
             logger.warning("[tool_call_parser] JSON fallback parse failed: %s", exc)
 

@@ -53,3 +53,13 @@ class TestParseThinkResponse:
         resp = _msg("not { valid json")
         parsed = parse_think_response(resp, mode="json_text")
         assert parsed.final_answer == "not { valid json"
+
+    def test_shorthand_single_key_tool_call(self):
+        # Malformed shape some local models emit instead of the documented
+        # {"tool": ..., "arguments": ...} — must not be swallowed as a literal answer.
+        resp = _msg('{"rag_retrieve": {"query": "race condition definition"}}')
+        parsed = parse_think_response(resp, mode="json_text")
+        assert parsed.final_answer is None
+        assert len(parsed.tool_calls) == 1
+        assert parsed.tool_calls[0]["tool"] == "rag_retrieve"
+        assert parsed.tool_calls[0]["arguments"]["query"] == "race condition definition"

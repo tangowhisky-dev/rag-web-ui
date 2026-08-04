@@ -1,4 +1,9 @@
-"""rag_retrieve tool — wraps the existing 3-leg retrieval pipeline."""
+"""rag_retrieve tool — wraps the existing 3-leg retrieval pipeline.
+
+Implements a graduated relaxation ladder: if the first pass isn't sufficient,
+retry with progressively looser leg/reranker thresholds instead of leaving
+the decision to "try again" entirely to the calling LLM.
+"""
 
 from __future__ import annotations
 
@@ -10,8 +15,8 @@ from typing import Any, Optional
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
+from app.core.config import settings
 from app.services.agentic_rag.nodes import (
-    adaptive_reranking_node,
     dense_retrieval_node,
     exact_retrieval_node,
     filter_node,
@@ -34,7 +39,10 @@ class RagRetrieveInput(BaseModel):
     top_k: Optional[int] = Field(default=None)
     legs: Optional[list[str]] = Field(default=None)
     graph_expand: bool = Field(default=True)
-    min_confidence: float = Field(default=0.3)
+    min_confidence: Optional[float] = Field(
+        default=None,
+        description="Confidence bar (0-1) below which the graduated relaxation ladder kicks in. Defaults to settings.ADAPTIVE_RETRIEVAL_THRESHOLD/100.",
+    )
 
 
 class _RagRetrieveTool(BaseTool):
@@ -62,6 +70,79 @@ class _RagRetrieveTool(BaseTool):
         raise NotImplementedError("Use arun() for agent tools.")
 
 
+def _is_sufficient(docs: list, confidence: float, min_confidence: float) -> bool:
+    return len(docs) >= 3 and confidence > min_confidence
+
+
+# Graduated relaxation ladder. Level 0 is the normal, tightest pass. Each
+# subsequent level loosens leg minimums and the reranker filter threshold.
+# `min_score=None` means "use the leg's default from settings".
+_RELAXATION_LEVELS: list[dict[str, Any]] = [
+    {
+        "dense_min_score": None,
+        "sparse_min_score": None,
+        "exact_min_score": None,
+        "rerank_threshold": None,  # settings.RERANKER_SCORE_THRESHOLD
+    },
+    {
+        "dense_min_score": max(0.0, settings.DENSE_MIN_SCORE - 0.15),
+        "sparse_min_score": settings.SPARSE_MIN_SCORE * 0.5,
+        "exact_min_score": settings.EXACT_MIN_SCORE * 0.5,
+        "rerank_threshold": settings.ADAPTIVE_RETRIEVAL_RERANKER_THRESHOLD,
+    },
+    {
+        "dense_min_score": 0.0,
+        "sparse_min_score": 0.0,
+        "exact_min_score": 0.0,
+        "rerank_threshold": settings.RETRIEVAL_RELAX_LEVEL2_RERANKER_THRESHOLD,
+    },
+]
+
+
+async def _run_retrieval_pass(
+    ctx: ToolContext,
+    query: str,
+    kb_ids: list[int],
+    org_id: Optional[int],
+    file_markdown: Optional[str],
+    legs: list[str],
+    level: dict[str, Any],
+) -> dict:
+    """Run one dense+sparse+exact+rerank+filter pass at a given relaxation level.
+
+    Graph expansion is intentionally NOT part of this pass — it's a separate,
+    more expensive step only invoked by the caller when this pass alone isn't
+    sufficient (see Issue #6: skip graph expansion when already sufficient).
+    """
+    state: dict[str, Any] = {
+        "rewritten_query": query,
+        "original_query": query,
+        "kb_ids": kb_ids,
+        "org_id": org_id,
+        "file_markdown": file_markdown,
+    }
+
+    coros = []
+    if "dense" in legs:
+        coros.append(dense_retrieval_node(state, ctx.db, kb_ids, org_id, file_markdown, min_score=level["dense_min_score"]))
+    if "sparse" in legs:
+        coros.append(sparse_retrieval_node(state, ctx.db, kb_ids, org_id, file_markdown, min_score=level["sparse_min_score"]))
+    if "exact" in legs:
+        coros.append(exact_retrieval_node(state, ctx.db, kb_ids, org_id, file_markdown, min_score=level["exact_min_score"]))
+
+    leg_results = await asyncio.gather(*coros, return_exceptions=True)
+    for r in leg_results:
+        if isinstance(r, Exception):
+            logger.warning("[rag_retrieve] leg failed: %s", r)
+        else:
+            state.update(r)
+
+    state.update(merge_node(state, file_markdown))
+    state.update(reranking_node(state))
+    state.update(filter_node(state, threshold=level["rerank_threshold"]))
+    return state
+
+
 async def _rag_retrieve(ctx: ToolContext, input_obj: RagRetrieveInput) -> dict:
     t0 = time.monotonic()
     rbac = enforce_rbac(ctx, kb_ids=input_obj.kb_ids)
@@ -73,54 +154,46 @@ async def _rag_retrieve(ctx: ToolContext, input_obj: RagRetrieveInput) -> dict:
     if ctx.state is not None:
         file_markdown = getattr(ctx.state, "file_markdown", None)
 
-    state: dict[str, Any] = {
-        "rewritten_query": input_obj.query,
-        "original_query": input_obj.query,
-        "kb_ids": kb_ids,
-        "org_id": org_id,
-        "file_markdown": file_markdown,
-    }
-
     legs = input_obj.legs or ["dense", "sparse", "exact"]
-    coros = []
-    if "dense" in legs:
-        coros.append(dense_retrieval_node(state, ctx.db, kb_ids, org_id, file_markdown))
-    if "sparse" in legs:
-        coros.append(sparse_retrieval_node(state, ctx.db, kb_ids, org_id, file_markdown))
-    if "exact" in legs:
-        coros.append(exact_retrieval_node(state, ctx.db, kb_ids, org_id, file_markdown))
+    min_confidence = (
+        input_obj.min_confidence
+        if input_obj.min_confidence is not None
+        else settings.ADAPTIVE_RETRIEVAL_THRESHOLD / 100.0
+    )
 
-    leg_results = await asyncio.gather(*coros, return_exceptions=True)
-    for r in leg_results:
-        if isinstance(r, Exception):
-            logger.warning("[rag_retrieve] leg failed: %s", r)
-        else:
-            state.update(r)
+    levels = _RELAXATION_LEVELS if settings.ADAPTIVE_RETRIEVAL_ENABLED else _RELAXATION_LEVELS[:1]
 
-    merge_result = merge_node(state, file_markdown)
-    state.update(merge_result)
+    state: dict[str, Any] = {}
+    docs: list = []
+    confidence = 0.0
+    levels_tried = 0
+    for i, level in enumerate(levels):
+        levels_tried = i + 1
+        state = await _run_retrieval_pass(ctx, input_obj.query, kb_ids, org_id, file_markdown, legs, level)
+        docs = state.get("retrieved_docs", [])
+        confidence = float(state.get("retrieval_confidence", 0.0))
+        if _is_sufficient(docs, confidence, min_confidence):
+            break
 
-    rerank_result = reranking_node(state)
-    state.update(rerank_result)
+        # Not sufficient from vector/sparse/exact legs alone at this level —
+        # graph expansion is worth its latency cost now. Recheck afterward.
+        if input_obj.graph_expand:
+            try:
+                neo4j = await neo4j_expansion_node(state, ctx.db, kb_ids, org_id, file_markdown)
+                state.update(neo4j)
+                docs = state.get("retrieved_docs", docs)
+                confidence = float(state.get("retrieval_confidence", confidence))
+            except Exception as exc:
+                logger.warning("[rag_retrieve] graph expansion failed: %s", exc)
 
-    filter_result = filter_node(state)
-    state.update(filter_result)
+        if _is_sufficient(docs, confidence, min_confidence):
+            break
 
-    if input_obj.graph_expand:
-        try:
-            neo4j = await neo4j_expansion_node(state, ctx.db, kb_ids, org_id, file_markdown)
-            state.update(neo4j)
-        except Exception as exc:
-            logger.warning("[rag_retrieve] graph expansion failed: %s", exc)
-
-    docs = state.get("retrieved_docs", [])
-    confidence = float(state.get("retrieval_confidence", 0.0))
-
-    if confidence < input_obj.min_confidence and not state.get("adaptive_reran"):
-        adaptive = adaptive_reranking_node(state, ctx.db)
-        state.update(adaptive)
-        docs = state.get("retrieved_docs", docs)
-        confidence = float(state.get("retrieval_confidence", confidence))
+        logger.info(
+            "[rag_retrieve] level %d insufficient (docs=%d confidence=%.2f) — %s",
+            i, len(docs), confidence,
+            "trying next relaxation level" if i < len(levels) - 1 else "no more levels, giving up",
+        )
 
     confidence_level = "low"
     if confidence > 0.7:
@@ -133,6 +206,7 @@ async def _rag_retrieve(ctx: ToolContext, input_obj: RagRetrieveInput) -> dict:
         "doc_count": len(docs),
         "confidence": confidence,
         "confidence_level": confidence_level,
+        "levels_tried": levels_tried,
     }
     write_audit(
         ctx,
@@ -153,7 +227,8 @@ async def _rag_retrieve(ctx: ToolContext, input_obj: RagRetrieveInput) -> dict:
             "confidence_level": confidence_level,
             "query_used": input_obj.query,
             "legs_run": legs,
-            "sufficient": len(docs) >= 3 and confidence > input_obj.min_confidence,
+            "levels_tried": levels_tried,
+            "sufficient": _is_sufficient(docs, confidence, min_confidence),
         },
         "error": None,
         "tokens": len(str(docs)) // 4,

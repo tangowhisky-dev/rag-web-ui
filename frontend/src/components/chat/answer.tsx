@@ -560,13 +560,10 @@ export const Answer: FC<{
       {taskList && taskList.length > 1 && (
         <SubtaskList tasks={taskList as SubtaskItem[]} />
       )}
-      {/* Agentic progress — transient, grey, fades between phases */}
-      {progressMessages && progressMessages.length > 0 && isStreaming && (
-        <div className="text-[12px] text-zinc-500 dark:text-zinc-400 mb-1">
-          {progressMessages[progressMessages.length - 1].phase ? `${progressMessages[progressMessages.length - 1].phase}: ` : null}
-          {progressMessages[progressMessages.length - 1].message}
-        </div>
-      )}
+      {/* Agentic progress — transient, grey, fades between phases.
+          Single source of truth for status text; raw per-leg progress
+          events (dense/sparse/exact/neo4j) are folded into "Gathering
+          sources …" here instead of also being shown verbatim. */}
       <AgenticProgress agentSteps={filteredAgentSteps} isStreaming={isStreaming} />
 
       {/* Confidence warning (no confidence) */}

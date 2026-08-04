@@ -84,7 +84,31 @@ def _get_driver() -> neo4j.Driver:
             settings.NEO4J_URI,
             auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD),
         )
+        _ensure_schema(_neo4j_driver)
     return _neo4j_driver
+
+
+def _ensure_schema(driver: neo4j.Driver) -> None:
+    """Create indexes so graph-expansion traversals aren't full label scans.
+
+    Plain indexes (not uniqueness constraints) are used so repeated calls with
+    IF NOT EXISTS are true no-ops — a uniqueness constraint creates a
+    same-named backing index, which then collides on re-creation attempts.
+    """
+    try:
+        with driver.session() as session:
+            # Named distinctly from the earlier "chunk_qdrant_point_id" constraint
+            # attempt to avoid a same-name constraint/index collision on rerun.
+            session.run(
+                "CREATE INDEX idx_chunk_qdrant_point_id IF NOT EXISTS "
+                "FOR (c:Chunk) ON (c.qdrant_point_id)"
+            )
+            session.run(
+                "CREATE INDEX idx_chunk_qdrant_collection IF NOT EXISTS "
+                "FOR (c:Chunk) ON (c.qdrant_collection)"
+            )
+    except Exception as exc:
+        logger.warning("GraphService: failed to ensure Neo4j schema indexes: %s", exc)
 
 
 def _chunk_id_to_point_id(chunk_id: str) -> str:
@@ -558,21 +582,26 @@ def expand_docs_via_graph(
         driver = _get_driver()
         collections = [f"kb_{kb_id}" for kb_id in kb_ids]
 
-        # Build dynamic path pattern for GRAPHRAG_RETRIEVAL_HOPS hops.
-        # 1 hop: (c)<-[:FROM_CHUNK]-(e)-[:FROM_CHUNK]->(c2)
-        # 2 hops: (c)<-[:FROM_CHUNK]-(e1)-[r1]-(e2)-[:FROM_CHUNK]->(c2)
+        # Build dynamic path pattern for GRAPHRAG_RETRIEVAL_HOPS hops, starting
+        # from the first-hop entity anchor `e` (already bounded below).
+        # 1 hop: (e)-[:FROM_CHUNK]->(c2)
+        # 2 hops: (e)-[r1]-(e2)-[:FROM_CHUNK]->(c2)
         # N hops: chain of N entity nodes with N-1 relationships
         hops = max(1, settings.GRAPHRAG_RETRIEVAL_HOPS)
         if hops == 1:
-            path_pattern = "(c)<-[:FROM_CHUNK]-(e)-[:FROM_CHUNK]->(c2)"
+            rest_pattern = "(e)-[:FROM_CHUNK]->(c2)"
         else:
-            parts = ["(c)<-[:FROM_CHUNK]-(e1)"]
+            parts = ["(e)"]
             for i in range(2, hops + 1):
                 parts.append(f"-[r{i - 1}]-(e{i})")
-            parts.append(f"-[:FROM_CHUNK]->(c2)")
-            path_pattern = " ".join(parts)
+            parts.append("-[:FROM_CHUNK]->(c2)")
+            rest_pattern = " ".join(parts)
 
         # Traverse from seed chunks via entity relationships to connected chunks.
+        # The first hop's distinct entities are capped (GRAPHRAG_ENTITY_FANOUT_CAP)
+        # before expanding further, so a handful of highly-connected "hub"
+        # entities (e.g. generic terms shared by hundreds of chunks) can't blow
+        # up the traversal into a combinatorial cross product.
         # Return qdrant_point_id + qdrant_collection of chunks NOT already seen.
         with driver.session() as session:
             result = session.run(
@@ -580,7 +609,9 @@ def expand_docs_via_graph(
                 MATCH (c:Chunk)
                 WHERE c.qdrant_point_id IN $seen_ids
                   AND c.qdrant_collection IN $collections
-                MATCH {path_pattern}
+                MATCH (c)<-[:FROM_CHUNK]-(e)
+                WITH DISTINCT e LIMIT $entity_cap
+                MATCH {rest_pattern}
                 WHERE c2.qdrant_point_id IS NOT NULL
                   AND NOT c2.qdrant_point_id IN $seen_ids
                   AND c2.qdrant_collection IN $collections
@@ -590,6 +621,7 @@ def expand_docs_via_graph(
                 """,
                 seen_ids=list(seen_point_ids),
                 collections=collections,
+                entity_cap=max(1, settings.GRAPHRAG_ENTITY_FANOUT_CAP),
                 limit=max(1, settings.GRAPHRAG_RETRIEVAL_LIMIT),
             )
             expansion_targets = [

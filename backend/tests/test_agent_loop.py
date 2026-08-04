@@ -6,6 +6,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from app.services.agentic_rag.agent_graph import _observations_text, _tried_rag_retrieve_queries
+from app.services.agentic_rag.schemas import Observation
 from app.services.agentic_rag.token_budget import count_tokens
 from app.services.agentic_rag.tool_context import ToolContext
 from app.services.agentic_rag.tools import applicable_tools, build_tools
@@ -130,6 +132,61 @@ class TestCodeExecuteTool:
         tool.ctx = _make_ctx()
         result = asyncio.run(tool.arun({"code": "while True: pass", "timeout_s": 1}))
         assert result["ok"] is False
+
+    def test_print_is_captured_in_stdout(self):
+        # RestrictedPython routes print() through a PrintCollector, not real
+        # stdout — must not crash with 'NoneType has no attribute _call_print'.
+        tool = CodeExecuteTool()
+        tool.ctx = _make_ctx()
+        result = asyncio.run(tool.arun({"code": "print('hello')\nresult = 1"}))
+        assert result["ok"] is True
+        assert "hello" in result["result"]["stdout"]
+
+    def test_compile_failure_disarms_alarm(self):
+        # A syntax error must not leave signal.alarm() armed — otherwise it
+        # fires later inside the event loop and crashes an unrelated call.
+        import signal
+
+        tool = CodeExecuteTool()
+        tool.ctx = _make_ctx()
+        result = asyncio.run(tool.arun({"code": "1. \"bad\",", "timeout_s": 5}))
+        assert result["ok"] is False
+        assert "compilation failed" in result["error"].lower()
+        assert signal.alarm(0) == 0  # returns previous remaining time; must be disarmed
+
+        # A subsequent normal call must succeed without an errant TimeoutError.
+        result2 = asyncio.run(tool.arun({"code": "result = 1 + 1"}))
+        assert result2["ok"] is True
+        assert result2["result"]["result"] == 2
+
+
+class TestObservationsText:
+    def test_non_retrieval_tool_result_is_rendered(self):
+        # Regression: code_execute (and other non-rag_retrieve tools) have no
+        # "docs" key, so the old formatter showed doc_count=0 and hid the
+        # actual result — causing the LLM to re-issue the same call repeatedly.
+        obs = Observation(tool="code_execute", arguments={"code": "print(391)"}, result={"stdout": "391\n", "result": ""})
+        text = _observations_text([obs], full=True)
+        assert "391" in text
+        assert "doc_count=0" not in text
+
+
+class TestTriedRagRetrieveQueries:
+    def test_dedups_and_preserves_order(self):
+        # Regression: the LLM would sometimes resubmit an identical
+        # rag_retrieve query the ladder already exhausted, wasting an
+        # iteration. This list is surfaced in the think prompt to discourage it.
+        observations = [
+            Observation(tool="rag_retrieve", arguments={"query": "race condition"}, result={"docs": [], "sufficient": False}),
+            Observation(tool="code_execute", arguments={"code": "1+1"}, result={"result": 2}),
+            Observation(tool="rag_retrieve", arguments={"query": "mutual exclusion condition"}, result={"docs": [], "sufficient": False}),
+            Observation(tool="rag_retrieve", arguments={"query": "race condition"}, result={"docs": [], "sufficient": False}),
+        ]
+        assert _tried_rag_retrieve_queries(observations) == ["race condition", "mutual exclusion condition"]
+
+    def test_empty_when_no_rag_retrieve_calls(self):
+        observations = [Observation(tool="code_execute", arguments={"code": "1+1"}, result={"result": 2})]
+        assert _tried_rag_retrieve_queries(observations) == []
 
 
 class TestExtractDataTool:

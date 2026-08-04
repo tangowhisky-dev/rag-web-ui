@@ -453,6 +453,12 @@ or to finish:
 { "final_answer": true }
 
 Do NOT write the answer text. When you are ready to answer, emit { "final_answer": true } and the finalizer will generate the answer. Only call independent tools in one message; dependent calls must wait for their observations. If the plan is satisfied, emit final_answer.
+
+rag_retrieve query rules:
+- Reuse the rewritten query verbatim as the "query" argument. Do NOT add synonyms, related terms, or extra keywords beyond what the user or the rewriter already provided.
+- Every rag_retrieve observation includes a "sufficient" flag. If sufficient=True, retrieval is already good enough — do NOT call rag_retrieve again for the same information; proceed to final_answer.
+- Do NOT re-call rag_retrieve just because confidence is not perfect. Only re-call it if the previous observation returned zero documents or is clearly irrelevant to the plan. A non-empty, on-topic result is sufficient — proceed to final_answer.
+- Never repeat a rag_retrieve call with the same "query" argument as a previous observation — it will return identical results.
 """
 
 REFLECT_SYSTEM_PROMPT: str = """\
