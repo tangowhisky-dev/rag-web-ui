@@ -495,6 +495,18 @@ All answers include citations with rich metadata.
 - Relevance score
 - Direct link to source
 
+**Citation numbering changes when streaming completes (expected):**
+During token streaming, inline citation markers (e.g. `[3]`, `[4]`, `[6]`) reflect
+each doc's raw position in the retrieved context (`KB-1`, `KB-2`, ... in retrieval
+order). Once the answer finishes generating, `normalize_citations()`
+(`backend/app/services/agentic_rag/utils.py`) renumbers citations 1..M by first
+appearance in the answer text and rewrites both the markdown and the citations
+list to match. The frontend replaces the streamed content with this normalized
+version via the `r:` (`answer_rewrite`) SSE event. The renumbered version is
+canonical — it's what gets persisted to `MessageCitation` — so citation numbers
+visibly shifting right as streaming ends is expected, not a bug; both the
+pre- and post-rewrite numbers point to the correct source chunks.
+
 ### Message Editing
 **Edit sent messages**
 

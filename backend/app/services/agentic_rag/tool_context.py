@@ -92,8 +92,9 @@ def write_audit(
     message_id = ctx.message_id
     iteration = 0
     if ctx.state is not None:
-        message_id = message_id or getattr(ctx.state, "message_id", None)
-        iteration = getattr(ctx.state, "iteration", 0)
+        # ctx.state is a dict (AgentState/MessagesState) at runtime.
+        message_id = message_id or ctx.state.get("message_id", None)
+        iteration = ctx.state.get("iteration", 0)
 
     if tokens_in == 0:
         tokens_in = count_tokens(json.dumps(arguments, default=str))

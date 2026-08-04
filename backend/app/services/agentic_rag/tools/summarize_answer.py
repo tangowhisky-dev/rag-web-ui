@@ -41,7 +41,8 @@ class SummarizeAnswerTool(BaseAgentTool):
 
         text = ""
         if input_obj.source == "last_answer":
-            lao = getattr(ctx.state, "last_answer_object", None) if ctx.state else None
+            # ctx.state is a dict (AgentState/MessagesState) at runtime.
+            lao = ctx.state.get("last_answer_object") if ctx.state else None
             if lao:
                 text = getattr(lao, "summary", "") + "\n" + "\n".join(getattr(lao, "key_points", []))
             if not text:

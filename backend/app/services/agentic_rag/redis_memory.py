@@ -190,6 +190,7 @@ class RedisMemory:
             "text": f"User: {query}\nAssistant: {answer}",
             "query": query,
             "answer": answer,
+            "chat_id": chat_id,
             **(extra or {}),
         }
 
@@ -288,22 +289,35 @@ async def _cleanup_checkpointer(redis_url: str) -> Any:
     return cp
 
 
-async def _delete_store_namespace(store: Any, namespace: tuple[str, ...]) -> None:
-    """Best-effort deletion of every item under a store namespace."""
+async def _delete_store_namespace(
+    store: Any, namespace: tuple[str, ...], chat_id: Optional[int] = None
+) -> None:
+    """Best-effort deletion of items under a store namespace.
+
+    If ``chat_id`` is given, only delete entries tagged with that chat_id
+    (used to purge a single chat's turns out of a user-scoped namespace
+    without wiping the user's other chats). Otherwise delete everything.
+    """
     try:
         items = await store.asearch(namespace, limit=10000)
     except Exception as exc:
         logger.warning("[MEMORY] failed to list namespace %s for deletion: %s", namespace, exc)
         return
     for item in items:
+        if chat_id is not None and (item.value or {}).get("chat_id") != chat_id:
+            continue
         try:
             await store.adelete(namespace, str(item.key))
         except Exception as exc:
             logger.warning("[MEMORY] failed to delete item %s/%s: %s", namespace, item.key, exc)
 
 
-async def _cleanup_chat_redis(chat_id: int) -> None:
+async def _cleanup_chat_redis(chat_id: int, user_id: Optional[int] = None) -> None:
     """Delete the checkpoint thread and long-term memory namespace for one chat.
+
+    Also purges this chat's turns out of the user-scoped namespace (if
+    ``user_id`` is given) so deleting a chat doesn't leave a "ghost" copy of
+    its content recallable from the user's other/future chats.
 
     Uses fresh LangGraph Redis clients so this can be called from a sync
     FastAPI endpoint (which runs in a threadpool) without relying on the
@@ -330,6 +344,9 @@ async def _cleanup_chat_redis(chat_id: int) -> None:
         try:
             await _delete_store_namespace(st, (str(chat_id), "memories"))
             logger.debug("[MEMORY] deleted memory namespace for chat=%s", chat_id)
+            if user_id:
+                await _delete_store_namespace(st, (str(user_id), "memories"), chat_id=chat_id)
+                logger.debug("[MEMORY] purged chat=%s entries from user=%s namespace", chat_id, user_id)
         finally:
             await st.__aexit__(None, None, None)
     except Exception as exc:
@@ -365,12 +382,12 @@ async def _cleanup_user_redis(user_id: int, chat_ids: List[int]) -> None:
         logger.warning("[MEMORY] failed to delete checkpoint threads for user=%s: %s", user_id, exc)
 
 
-def delete_chat_redis_sync(chat_id: int) -> None:
+def delete_chat_redis_sync(chat_id: int, user_id: Optional[int] = None) -> None:
     """Sync entrypoint for chat Redis cleanup from sync FastAPI endpoints."""
     if not settings.MEMORY_ENABLED:
         return
     try:
-        asyncio.run(_cleanup_chat_redis(chat_id))
+        asyncio.run(_cleanup_chat_redis(chat_id, user_id=user_id))
     except Exception as exc:
         logger.warning("[MEMORY] sync cleanup failed for chat=%s: %s", chat_id, exc)
 

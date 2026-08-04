@@ -840,6 +840,16 @@ const CONFIDENCE_COLORS: Record<ConfidenceLevel, { bar: string; text: string; bg
 
 const RETRY_THRESHOLD = 0.4;
 
+// Score quartiles (≤25/≤50/≤75/>75) drive both the bar color and the
+// Very Low/Low/High/Very High label, independent of the backend's
+// confidence_level (which uses different "medium" semantics).
+function getScoreBucket(pct: number): { key: ConfidenceLevel; label: string } {
+  if (pct <= 25) return { key: "low", label: "Very Low" };
+  if (pct <= 50) return { key: "medium", label: "Low" };
+  if (pct <= 75) return { key: "high", label: "High" };
+  return { key: "very_high", label: "Very High" };
+}
+
 const ConfidenceCollapsible: FC<{
   level?: ConfidenceLevel;
   score?: number;
@@ -864,10 +874,9 @@ const ConfidenceCollapsible: FC<{
   const [open, setOpen] = useState(false);
 
   const displayConfidence = finalConfidence !== undefined ? finalConfidence : (score !== undefined ? score / 100 : 0);
-  const displayLevel = finalConfidenceLevel ?? level ?? "medium";
   const displayPct = Math.min(100, Math.max(0, Math.round(displayConfidence * 100)));
+  const { key: displayLevel, label } = getScoreBucket(displayPct);
   const cfg = CONFIDENCE_COLORS[displayLevel];
-  const label = CONFIDENCE_CONFIG[displayLevel].label;
   const showRetry = finalConfidence !== undefined && finalConfidence < RETRY_THRESHOLD;
 
   return (

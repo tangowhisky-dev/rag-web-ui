@@ -688,7 +688,7 @@ def delete_chat(
     # Clean up ephemeral uploaded files for this chat
     delete_ephemeral_chat_files(chat_id)
     # Clean up Redis checkpoints and long-term memory for this chat
-    delete_chat_redis_sync(chat_id)
+    delete_chat_redis_sync(chat_id, user_id=current_user.id)
     return {"status": "success"}
 
 @router.patch("/messages/{message_id}", response_model=MessageResponse)
@@ -1011,11 +1011,12 @@ async def submit_clarification(
                     pass
 
         # Check if interrupted again (re-interrupt during clarification round-trip)
-        if resumed_stream.interrupted:
+        # NOTE: `interrupted` and `interrupts` are async methods on
+        # AsyncGraphRunStream (not properties) — they must be awaited.
+        if await resumed_stream.interrupted():
+            pending_interrupts = await resumed_stream.interrupts()
             interrupt_value = (
-                str(resumed_stream.interrupts[0].value)
-                if resumed_stream.interrupts
-                else ""
+                str(pending_interrupts[0].value) if pending_interrupts else ""
             )
 
             # Create a new pending request for this re-interrupt.

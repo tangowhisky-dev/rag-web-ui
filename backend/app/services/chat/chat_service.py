@@ -11,7 +11,6 @@ from langchain_core.messages import HumanMessage, AIMessage
 from openai import AsyncOpenAI
 from app.core.config import settings
 from app.models.chat import Chat, Message, MessageCitation, ChatFile
-from app.models.knowledge import KnowledgeBase
 from app.services.infrastructure import get_cancel_token, clear_cancel_token
 # ── SSE flush helpers ─────────────────────────────────────────────────────────
 # Uvicorn buffers SSE responses by default. These helpers force the HTTP
@@ -61,10 +60,26 @@ def get_effective_llm_config(org_id: Optional[int], db: Session) -> dict:
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 _IDENTITY_PATTERNS = re.compile(
-    r"^\s*(who\s+are\s+you|what\s+are\s+you|introduce\s+yourself|tell\s+me\s+about\s+yourself|"
-    r"what\s+is\s+your\s+name|what('s| is)\s+your\s+purpose|what\s+can\s+you\s+do)\s*\??\s*$",
+    r"(who\s+are\s+you|what\s+are\s+you|introduce\s+yourself|tell\s+me\s+about\s+yourself|"
+    r"what\s+is\s+your\s+name|what('s| is)\s+your\s+purpose|"
+    r"what\s+can\s+you\s+(do|help)|how\s+can\s+you\s+help|"
+    r"what\s+(tools|capabilities|features)(/\w+)?\s+.{0,40}?(have|access|available))",
     re.IGNORECASE,
 )
+
+
+def _is_identity_question(query: str) -> bool:
+    """True if every clause in the (possibly compound) query is an identity question.
+
+    Splits on '?' so phrasings like "Who are you? What can you help me with?"
+    are recognized even though each clause is checked independently. Uses
+    `search` (not an anchored full-string match) per clause so minor extra
+    wording ("with?", "to?") doesn't prevent a match.
+    """
+    clauses = [c.strip() for c in query.strip().rstrip("?").split("?") if c.strip()]
+    if not clauses:
+        return False
+    return all(_IDENTITY_PATTERNS.search(c) for c in clauses)
 
 _IDENTITY_RESPONSE = (
     "I'm professional AI based Knowledge Assistant that answers questions using "
@@ -72,10 +87,6 @@ _IDENTITY_RESPONSE = (
     "Ask me anything about your content and I'll retrieve the most relevant information "
     "and give you a clear, cited answer."
 )
-
-
-def _is_identity_question(query: str) -> bool:
-    return bool(_IDENTITY_PATTERNS.match(query.strip()))
 
 
 # ── LLM helpers ───────────────────────────────────────────────────────────────
@@ -260,19 +271,15 @@ async def generate_response(
             db.commit()
             return
 
-        # ── Check knowledge bases ──────────────────────────────────────────
-        knowledge_bases = (
-            db.query(KnowledgeBase)
-            .filter(KnowledgeBase.id.in_(knowledge_base_ids))
-            .all()
-        )
-        if not knowledge_bases:
-            error_msg = "I don't have any knowledge base to help answer your question."
-            yield f'0:"{error_msg}"\n'
-            yield f'd:{{"finishReason":"stop","usage":{{"promptTokens":0,"completionTokens":0}},"messageId":{bot_message.id}}}\n'
-            bot_message.content = error_msg
-            db.commit()
-            return
+        # ── Knowledge base check ────────────────────────────────────────────
+        # NOTE: we intentionally do NOT hard-fail here when no KB is attached.
+        # The agentic loop supports plenty of intents that need no documents at
+        # all (code_execute, chart_generate on inline data, plain conversation,
+        # identity questions with unusual phrasing, etc.) — short-circuiting to
+        # an error before planning even starts would block all of those. If the
+        # query genuinely needs retrieval, rag_retrieve returns zero docs when
+        # knowledge_base_ids is empty and the agent explains it found nothing,
+        # which is the correct behavior for a non-RAG-only agentic pipeline.
 
         # The Redis/LangGraph checkpointer is the single source of truth for
         # conversation history. We no longer pass a sliding window or MySQL
@@ -365,7 +372,7 @@ async def generate_response(
                             full_response += chunk
                         elif isinstance(chunk, dict) and "text" in chunk:
                             full_response += chunk["text"]
-                logger.debug("[CHAT SSE] yield token %r", content)
+                # logger.debug("[CHAT SSE] yield token %r", content)
                 yield f'0:{json.dumps(content)}\n'
                 yield ':\n'  # SSE flush comment — force chunk to leave backend buffer
             elif event_type == "answer_rewrite":

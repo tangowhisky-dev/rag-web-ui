@@ -69,7 +69,7 @@ class ExtractDataTool(BaseAgentTool):
 
         text = ""
         if input_obj.source == "last_answer":
-            lao = getattr(ctx.state, "last_answer_object", None) if ctx.state else None
+            lao = ctx.state.get("last_answer_object") if ctx.state else None
             if lao and isinstance(lao, LastAnswerObject) and lao.data:
                 # Already structured data; return it directly.
                 points = [
@@ -82,7 +82,7 @@ class ExtractDataTool(BaseAgentTool):
             if not text:
                 text = "No previous answer available."
         elif input_obj.source == "retrieved_docs":
-            docs = getattr(ctx.state, "retrieved_docs", []) if ctx.state else []
+            docs = ctx.state.get("retrieved_docs", []) if ctx.state else []
             parts = []
             for d in docs[:10]:
                 parts.append(d.get("page_content", ""))

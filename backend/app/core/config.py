@@ -10,6 +10,9 @@ class Settings(BaseSettings):
     VERSION: str = "1.0.0"
     API_V1_STR: str = "/api"
 
+    # Root logger level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+
     # MySQL
     MYSQL_SERVER: str = os.getenv("MYSQL_SERVER", "localhost")
     MYSQL_PORT: int = int(os.getenv("MYSQL_PORT", "3306"))

@@ -17,11 +17,12 @@ from app.services.agentic_rag.tools.extract_data import ExtractDataTool
 
 
 def _make_ctx(has_file: bool = True, has_data: bool = False) -> ToolContext:
-    state = SimpleNamespace(
-        retrieved_docs=[{"page_content": "revenue was 100"}] if has_data else [],
-        last_answer_object=SimpleNamespace(data=[{"label": "x", "value": 1}]) if has_data else None,
-        file_markdown="# file content" if has_file else None,
-    )
+    # AgentState is a plain dict (TypedDict/MessagesState) at runtime.
+    state = {
+        "retrieved_docs": [{"page_content": "revenue was 100"}] if has_data else [],
+        "last_answer_object": SimpleNamespace(data=[{"label": "x", "value": 1}]) if has_data else None,
+        "file_markdown": "# file content" if has_file else None,
+    }
     return ToolContext(
         db=MagicMock(),
         user_id=1,
@@ -211,3 +212,55 @@ class TestTokenBudget:
         # Tiktoken (or heuristic fallback) should return positive counts for non-empty text.
         assert count_tokens("") == 0
         assert count_tokens("hello world") > 0
+
+
+class TestConvergence:
+    """Regression coverage for the wasted-iteration bug: once the plan is
+    deterministically satisfied, the loop must stop without extra LLM calls."""
+
+    def _satisfied_state(self) -> dict:
+        from app.services.agentic_rag.schemas import Plan, Subtask
+
+        plan = Plan(
+            intent="rag",
+            subtasks=[Subtask(id="a", description="find x", tool_hint="rag_retrieve", depends_on=[], expected_output="answer")],
+        )
+        obs = Observation(
+            tool="rag_retrieve",
+            arguments={"query": "what is mutex"},
+            result={"docs": [{"page_content": "a mutex is..."}]},
+            error=None,
+            tokens=10,
+        )
+        return {
+            "plan": plan,
+            "observations": [obs],
+            "tool_call_count": {"rag_retrieve": 1},
+            "iteration": 0,
+            "original_query": "what is mutex",
+            "messages": [],
+        }
+
+    def test_verify_execution_ready_when_plan_satisfied(self):
+        from app.services.agentic_rag.agent_graph import _build_execution_summary, _verify_execution
+
+        summary = _build_execution_summary(self._satisfied_state())
+        ready, _reasoning = _verify_execution(summary)
+        assert ready is True
+
+    def test_route_tool_skips_reflect_when_force_finalize(self):
+        from app.services.agentic_rag.agent_graph import route_tool
+
+        assert route_tool({"force_finalize": True}) == "reflect_final"
+        assert route_tool({"force_finalize": False}) == "reflect"
+
+    def test_think_node_short_circuits_without_llm_call(self):
+        # If this ever calls the LLM again despite an already-satisfied plan,
+        # build_chat_llm would be invoked and fail against the mocked ctx.db —
+        # the absence of that failure is the regression signal.
+        from app.services.agentic_rag.agent_graph import think_node
+
+        ctx = _make_ctx(has_file=False)
+        result = asyncio.run(think_node(self._satisfied_state(), ctx))
+        assert result["tool_calls"] == []
+        assert result["precomputed_answer"] == ""

@@ -440,6 +440,14 @@ Output a JSON object with this structure:
   "needs_clarification": false,
   "clarification_question": null
 }
+
+Rules for needs_clarification:
+- Set it to true ONLY if the user's query is genuinely ambiguous or under-specified in isolation (e.g. missing a required parameter, multiple unrelated interpretations).
+- Never set it to true because the topic seems "already covered" or "commonly known" — you have no memory of this user's past chats. The "Previous answer summary" and "Recalled long-term memory" sections above are the ONLY legitimate context from prior turns; if both are empty, you have no prior context for this conversation and must not claim otherwise.
+- Do not fabricate a clarification_question that references an explanation you never actually gave in this conversation.
+- Default to needs_clarification=false and let the acting module retrieve and answer.
+
+Previous-answer requests (e.g. "summarize what you just told me", "put that in bullet points", "shorten that"): set intent to "previous_answer_action" and give it a SINGLE subtask with tool_hint "summarize_answer". Do NOT invent multi-step subtasks like "extract key points" then "summarize" — summarize_answer already reads the previous answer directly and produces the reformatted text in one call.
 """
 
 THINK_SYSTEM_PROMPT: str = """\
@@ -452,57 +460,26 @@ or for a single call:
 or to finish:
 { "final_answer": true }
 
-Do NOT write the answer text. When you are ready to answer, emit { "final_answer": true } and the finalizer will generate the answer. Only call independent tools in one message; dependent calls must wait for their observations. If the plan is satisfied, emit final_answer.
+Do NOT write the answer text. Emit the next tool call needed to advance the plan, or { "final_answer": true } if you have nothing left to do. Only call independent tools in one message; dependent calls must wait for their observations. The graph decides when the loop actually stops — do not worry about under- or over-calling final_answer.
 
 rag_retrieve query rules:
 - Reuse the rewritten query verbatim as the "query" argument. Do NOT add synonyms, related terms, or extra keywords beyond what the user or the rewriter already provided.
-- Every rag_retrieve observation includes a "sufficient" flag. If sufficient=True, retrieval is already good enough — do NOT call rag_retrieve again for the same information; proceed to final_answer.
-- Do NOT re-call rag_retrieve just because confidence is not perfect. Only re-call it if the previous observation returned zero documents or is clearly irrelevant to the plan. A non-empty, on-topic result is sufficient — proceed to final_answer.
+- Do NOT re-call rag_retrieve just because confidence is not perfect. Only re-call it if the previous observation returned zero documents or is clearly irrelevant to the plan.
 - Never repeat a rag_retrieve call with the same "query" argument as a previous observation — it will return identical results.
-"""
 
-REFLECT_SYSTEM_PROMPT: str = """\
-You are the reflection module. Review the plan and all observations so far. Decide:
-1. Did the last tool succeed? If not, apply these recovery rules:
-   - Empty retrieval: rewrite the query and re-call rag_retrieve (respect AGENT_MAX_RETRIEVALS).
-   - File too long for file_read: call file_summarize instead.
-   - Chart invalid: re-call extract_data then chart_generate.
-   - Code error: retry with corrected code (respect AGENT_MAX_CODE_EXEC).
-2. Did the user's explicit instruction get satisfied? (e.g. '10 points', 'pie chart').
-3. Are any planned subtasks still pending?
-
-Output JSON: { "action": "continue|tool_call|final_answer", "plan_patch": "optional changes", "reasoning": "..." }
-When action=tool_call, also include "tool_calls": [...].
-"""
-
-REFLECT_FINAL_PROMPT: str = """\
-You are the final verification module. The acting agent has decided it is done and ready to answer. \
-Your job is to verify that the user's instruction is fully satisfied BEFORE the answer is generated.
-
-Check these conditions:
-1. **Query coverage**: Does every part of the user's original query have supporting observations?
-2. **Format compliance**: If the user specified a format (e.g. "10 points", "as a table", "in bullet points"), \
-will the agent be able to follow it with the current observations?
-3. **Evidence**: Are there tool observations (retrieved docs, file content, computed results) that support \
-the factual claims the agent will need to make?
-4. **Missing tools**: Did the plan call for a tool that was never invoked?
-
-If all conditions are met, return ready=true. If any condition is not met, return ready=false with a \
-specific, actionable reasoning that tells the acting agent exactly what is missing.
-
-Return JSON: { "ready": true|false, "reasoning": "..." }
+Chart requests: if the plan includes a chart, call extract_data first to turn retrieved docs / the previous answer into structured {{label, value}} rows, then call chart_generate with that structured data. Do NOT hand-roll the ECharts option yourself via code_execute — chart_generate is the only tool that produces a chart_option the UI can render.
 """
 
 LAST_ANSWER_EXTRACT_PROMPT: str = """\
 Extract a structured summary from the assistant answer below. Return valid JSON only matching this schema:
-{
+{{
   "summary": "2-3 sentences",
   "key_points": ["..."],
-  "data": [{"label": "...", "value": 123, "unit": "...", "context": "..."}],
-  "citations": [{"document_id": 1, "chunk_index": 0}],
-  "chart_option": null or { ... },
+  "data": [{{"label": "...", "value": 123, "unit": "...", "context": "..."}}],
+  "citations": [{{"document_id": 1, "chunk_index": 0}}],
+  "chart_option": null or {{ ... }},
   "followups": ["..."]
-}
+}}
 
 If the answer contains no numbers, set data to []. If no chart, set chart_option to null. Keep key_points to at most 8 bullets.
 

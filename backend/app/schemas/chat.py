@@ -54,6 +54,7 @@ class MessageResponse(MessageBase):
     final_confidence_level: Optional[str] = None
     faithfulness: Optional[int] = None
     completeness: Optional[int] = None
+    retrieval_score: Optional[int] = None
     rewritten_query: Optional[str] = None
     query_classification: Optional[QueryClassification] = None
     file_name: Optional[str] = None  # filename if a chat file was attached to this message

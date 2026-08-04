@@ -49,12 +49,11 @@ def applicable_tools(ctx: "ToolContext") -> list:
     """
     tools = build_tools(ctx)
     state = ctx.state
-    has_file = bool(getattr(state, "file_markdown", None)) if state is not None else False
+    # state is a dict (AgentState/MessagesState) at runtime.
+    has_file = bool(state.get("file_markdown")) if state is not None else False
     if state is not None:
-        has_data = (
-            getattr(state, "last_answer_object", None) is not None
-            and getattr(state.last_answer_object, "data", None)
-        ) or bool(getattr(state, "retrieved_docs", []))
+        lao = state.get("last_answer_object")
+        has_data = (lao is not None and getattr(lao, "data", None)) or bool(state.get("retrieved_docs"))
     else:
         has_data = False
 

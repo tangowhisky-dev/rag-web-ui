@@ -148,11 +148,11 @@ async def _rag_retrieve(ctx: ToolContext, input_obj: RagRetrieveInput) -> dict:
     rbac = enforce_rbac(ctx, kb_ids=input_obj.kb_ids)
     kb_ids = rbac["kb_ids"]
     if not kb_ids and ctx.state is not None:
-        kb_ids = getattr(ctx.state, "kb_ids", [])
+        kb_ids = ctx.state.get("kb_ids", [])
     org_id = ctx.org_id
     file_markdown = None
     if ctx.state is not None:
-        file_markdown = getattr(ctx.state, "file_markdown", None)
+        file_markdown = ctx.state.get("file_markdown", None)
 
     legs = input_obj.legs or ["dense", "sparse", "exact"]
     min_confidence = (

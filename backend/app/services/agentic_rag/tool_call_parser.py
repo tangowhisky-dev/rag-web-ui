@@ -72,6 +72,9 @@ def parse_think_response(
 
     raw = str(response.content) if response.content else ""
 
+    if mode == "auto":
+        logger.warning("[tool_call_parser] gateway returned no native tool_calls — falling back to JSON-text parsing")
+
     # Tier 2: JSON-text fallback.
     if mode in ("auto", "json_text"):
         try:

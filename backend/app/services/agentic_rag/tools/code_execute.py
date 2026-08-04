@@ -55,7 +55,8 @@ class CodeExecuteTool(BaseAgentTool):
     name: str = "code_execute"
     description: str = (
         "Execute Python code in a restricted sandbox for computation, "
-        "data transformation, or statistics. Use with data from extract_data or file_extract_table."
+        "data transformation, or statistics. Use with data from extract_data or file_extract_table. "
+        "Do NOT use this to build chart/ECharts options — use chart_generate for that."
     )
     args_schema: type[BaseModel] = CodeExecuteInput
 

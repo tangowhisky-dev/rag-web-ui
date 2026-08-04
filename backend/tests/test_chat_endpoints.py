@@ -141,7 +141,7 @@ def test_delete_chat(client, db, monkeypatch):
     token = _get_token(client, "chat_user3")
 
     import app.services.agentic_rag.redis_memory as redis_mem
-    monkeypatch.setattr(redis_mem, "delete_chat_redis_sync", lambda _chat_id: None)
+    monkeypatch.setattr(redis_mem, "delete_chat_redis_sync", lambda _chat_id, user_id=None: None)
 
     resp = client.delete(f"/api/chat/{chat.id}", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200

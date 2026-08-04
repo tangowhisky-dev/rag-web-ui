@@ -108,7 +108,6 @@ from app.services.agentic_rag.prompts import (
     ANSWER_SYSTEM_PROMPT_BASE,
     LAST_ANSWER_EXTRACT_PROMPT,
     PLAN_SYSTEM_PROMPT,
-    REFLECT_SYSTEM_PROMPT,
     THINK_SYSTEM_PROMPT,
 )
 from app.services.agentic_rag.schemas import LastAnswerObject, Observation, Plan, Subtask
@@ -588,7 +587,15 @@ async def think_node(state: AgentState, ctx: ToolContext) -> dict:
     
         if state.get("force_finalize"):
             return {"iteration": iteration, "tool_calls": [], "precomputed_answer": ""}
-    
+
+        # Pre-think sufficiency check: if the plan is already deterministically
+        # satisfied, don't spend an LLM call asking the model whether to stop —
+        # it isn't reliable at noticing this on its own (see tool_node's matching
+        # post-round check for the same reasoning).
+        ready, _reasoning = _verify_execution(_build_execution_summary(state))
+        if ready:
+            return {"iteration": iteration, "tool_calls": [], "precomputed_answer": ""}
+
         precomputed = state.get("precomputed_tool_calls", [])
         if precomputed:
             return {"iteration": iteration, "tool_calls": list(precomputed), "precomputed_tool_calls": []}
@@ -734,6 +741,13 @@ def route_think(state: AgentState) -> str:
     return "reflect_final"
 
 
+def route_tool(state: AgentState) -> str:
+    """After a tool round: skip reflect+think entirely if already satisfied."""
+    if state.get("force_finalize"):
+        return "reflect_final"
+    return "reflect"
+
+
 def route_reflect_final(state: AgentState) -> str:
     """Route after final verification: ready → finalize, not ready → think."""
     reflection = state.get("reflection_final", {})
@@ -866,7 +880,22 @@ async def tool_node(state: AgentState, ctx: ToolContext) -> dict:
         if merged_docs:
             state_update["retrieved_docs"] = merged_docs
             state_update["retrieval_confidence"] = best_confidence
-    
+
+        # Root cause: the acting LLM alone decides when to stop calling tools,
+        # and small/local models don't reliably follow "stop once sufficient"
+        # / "don't repeat calls" prompt rules — they keep re-emitting tool_calls
+        # (often exact duplicates) past the point the plan is already
+        # deterministically satisfied. reflect_final already verifies this
+        # deterministically, but only once the LLM itself stops requesting
+        # tools. Run the same check here after every tool round so a
+        # completed plan short-circuits immediately instead of waiting on
+        # the LLM to notice.
+        probe_state = {**state, **state_update}
+        ready, reasoning = _verify_execution(_build_execution_summary(probe_state))
+        if ready:
+            logger.info("[tool_node] plan deterministically satisfied after this tool round — forcing finalize: %s", reasoning[:200])
+            state_update["force_finalize"] = True
+
         return state_update
     
     
@@ -1035,7 +1064,7 @@ async def save_memory_node(state: AgentState, ctx: ToolContext) -> dict:
     
     
 async def reflect_node(state: AgentState, ctx: ToolContext) -> dict:
-    """Periodic reflection: concrete replanning rules + LLM discretion."""
+    """Periodic reflection: concrete deterministic recovery rules only."""
     with _agent_step("reflect"):
         iteration = state.get("iteration", 0)
         if iteration == 0 or iteration % settings.AGENT_REFLECT_EVERY != 0:
@@ -1075,49 +1104,12 @@ async def reflect_node(state: AgentState, ctx: ToolContext) -> dict:
                 "reflection": {"action": "retry", "reasoning": "Concrete replanning rule triggered."},
                 "precomputed_tool_calls": precomputed,
             }
-    
-        # LLM discretion ============================================================
-        plan = state.get("plan") or Plan()
-        system = AGENT_SYSTEM_PROMPT + "\n\n" + REFLECT_SYSTEM_PROMPT
-        user = (
-            f"Iteration: {iteration}/{settings.AGENT_MAX_ITERATIONS}\n"
-            f"Plan: {json.dumps(plan.model_dump() if isinstance(plan, Plan) else plan, default=str)}\n"
-            f"Observations:\n{_observations_text(observations)}\n\n"
-            "Return a JSON object with: { 'action': 'continue|finalize', 'reasoning': '...' }"
-        )
 
-        # Runtime compaction before the reflect LLM call.
-        compaction_updates = await _compact_if_needed(
-            state, user, system_overhead=count_tokens(system),
-            api_base=ctx.org_llm_config.get("api_base"),
-        )
-        if compaction_updates:
-            state = {**state, **compaction_updates}
-            observations = state.get("observations", [])
-            user = (
-                f"Iteration: {iteration}/{settings.AGENT_MAX_ITERATIONS}\n"
-                f"Plan: {json.dumps(plan.model_dump() if isinstance(plan, Plan) else plan, default=str)}\n"
-                f"Observations:\n{_observations_text(observations)}\n\n"
-                "Return a JSON object with: { 'action': 'continue|finalize', 'reasoning': '...' }"
-            )
-
-        action = "continue"
-        reasoning = ""
-        try:
-            llm = build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)
-            resp = await llm.ainvoke([{"role": "system", "content": system}, {"role": "user", "content": user}])
-            raw = str(resp.content)
-            block = _extract_json_block(raw)
-            if block:
-                parsed = json.loads(block)
-                action = parsed.get("action", "continue")
-                reasoning = parsed.get("reasoning", "")
-        except Exception as exc:
-            logger.warning("[reflect_node] reflection failed: %s", exc)
-
-        writer = _writer()
-        writer({"event": "progress", "phase": "reflect", "action": action, "reasoning": reasoning})
-        return {**compaction_updates, "reflection": {"action": action, "reasoning": reasoning}, "force_finalize": action == "finalize"}
+        # No concrete rule fired — nothing to do. Termination is decided
+        # deterministically (tool_node's post-round check and think_node's
+        # pre-think check, both backed by _verify_execution), not by LLM
+        # discretion here.
+        return {}
     
     
 async def clarify_interrupt_node(state: AgentState) -> dict:
@@ -1165,8 +1157,10 @@ def _build_execution_summary(state: AgentState) -> dict:
     subtask_status = []
     for st in plan.subtasks:
         hint = st.tool_hint
-        if hint == "any":
-            has_obs = len(coerced) > 0
+        if hint in ("any", "none"):
+            # "none" means the subtask needs no tool call (e.g. pure
+            # conversation); "any" is satisfied by any successful observation.
+            has_obs = hint == "none" or len(coerced) > 0
         else:
             has_obs = any(o.tool == hint and not o.error for o in coerced)
         subtask_status.append({
@@ -1302,7 +1296,7 @@ def build_agent_graph(ctx: ToolContext):
     graph.add_conditional_edges("plan", route_plan)
     graph.add_edge("clarify_interrupt", "plan")
     graph.add_conditional_edges("think", route_think)
-    graph.add_edge("tool", "reflect")
+    graph.add_conditional_edges("tool", route_tool)
     graph.add_edge("reflect", "think")
     graph.add_conditional_edges("reflect_final", route_reflect_final)
     graph.add_edge("finalize", "answer_scoring")
