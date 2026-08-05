@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import List, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class AnswerEvaluation(BaseModel):
@@ -46,6 +46,17 @@ class CitationRef(BaseModel):
     document_id: int
     chunk_index: int
 
+    @field_validator("document_id", "chunk_index", mode="before")
+    @classmethod
+    def _coerce_kb_label(cls, v):
+        # The extraction LLM often copies the answer's own citation label
+        # verbatim, e.g. "KB-2" instead of the numeric id it refers to.
+        if isinstance(v, str):
+            digits = "".join(ch for ch in v if ch.isdigit())
+            if digits:
+                return int(digits)
+        return v
+
 
 class LastAnswerObject(BaseModel):
     """Structured representation of the assistant's last answer."""
@@ -54,7 +65,8 @@ class LastAnswerObject(BaseModel):
     key_points: List[str] = Field(default_factory=list, description="Bullet points.")
     data: Optional[List[DataPoint]] = Field(default=None, description="Numbers and statistics mentioned.")
     citations: List[CitationRef] = Field(default_factory=list, description="Chunk refs used.")
-    chart_option: Optional[dict] = Field(default=None, description="ECharts option JSON, if any.")
+    chart_option: Optional[dict] = Field(default=None, description="Deprecated: first entry of chart_options, kept for backward compatibility with older stored messages.")
+    chart_options: List[dict] = Field(default_factory=list, description="ECharts option JSON for each chart_generate call this turn, if any.")
     followups: List[str] = Field(default_factory=list, description="Suggested follow-up questions.")
 
 

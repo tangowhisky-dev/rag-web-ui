@@ -112,6 +112,101 @@ class TestChartGenerateTool:
         result = asyncio.run(tool.arun({"chart_type": "bar", "data": []}))
         assert result["ok"] is False
 
+    def test_radar_chart(self):
+        tool = self._tool()
+        result = asyncio.run(
+            tool.arun(
+                {
+                    "chart_type": "radar",
+                    "data": [{"label": "Speed", "value": 80}, {"label": "Power", "value": 60}],
+                    "title": "Demo",
+                }
+            )
+        )
+        assert result["ok"] is True
+        assert result["result"]["chart_option"]["series"][0]["type"] == "radar"
+        assert len(result["result"]["chart_option"]["radar"]["indicator"]) == 2
+
+    def test_gauge_chart(self):
+        tool = self._tool()
+        result = asyncio.run(
+            tool.arun({"chart_type": "gauge", "data": [{"label": "Completion", "value": 72}], "title": "Demo"})
+        )
+        assert result["ok"] is True
+        assert result["result"]["chart_option"]["series"][0]["type"] == "gauge"
+
+    def test_funnel_chart(self):
+        tool = self._tool()
+        result = asyncio.run(
+            tool.arun(
+                {
+                    "chart_type": "funnel",
+                    "data": [{"label": "Visit", "value": 100}, {"label": "Signup", "value": 40}],
+                    "title": "Demo",
+                }
+            )
+        )
+        assert result["ok"] is True
+        assert result["result"]["chart_option"]["series"][0]["type"] == "funnel"
+
+    def test_effect_scatter_chart(self):
+        tool = self._tool()
+        result = asyncio.run(
+            tool.arun(
+                {
+                    "chart_type": "effectScatter",
+                    "data": [{"label": "A", "value": 10}, {"label": "B", "value": 20}],
+                    "title": "Demo",
+                }
+            )
+        )
+        assert result["ok"] is True
+        assert result["result"]["chart_option"]["series"][0]["type"] == "effectScatter"
+
+    def test_unsupported_type_still_errors(self):
+        tool = self._tool()
+        result = asyncio.run(tool.arun({"chart_type": "sankey", "data": [{"label": "A", "value": 1}]}))
+        assert result["ok"] is False
+        assert "Unsupported chart type" in result["error"]
+
+
+class TestSubstituteChartMarkers:
+    def test_replaces_marker_inline(self):
+        from app.services.agentic_rag.agent_graph import _substitute_chart_markers
+
+        text = "Here is the chart: [[CHART_1]]\n\nDone."
+        result = _substitute_chart_markers(text, [{"series": [{"type": "bar"}]}])
+        assert "[[CHART_1]]" not in result
+        assert "```echarts" in result
+        assert result.index("```echarts") < result.index("Done.")
+
+    def test_appends_when_marker_missing(self):
+        from app.services.agentic_rag.agent_graph import _substitute_chart_markers
+
+        text = "No marker here."
+        result = _substitute_chart_markers(text, [{"series": [{"type": "bar"}]}])
+        assert result.startswith("No marker here.")
+        assert "```echarts" in result
+
+    def test_multiple_charts_each_substituted(self):
+        from app.services.agentic_rag.agent_graph import _substitute_chart_markers
+
+        text = "First [[CHART_1]] then [[CHART_2]]."
+        result = _substitute_chart_markers(
+            text,
+            [{"series": [{"type": "bar"}]}, {"series": [{"type": "pie"}]}],
+        )
+        assert "[[CHART_1]]" not in result
+        assert "[[CHART_2]]" not in result
+        assert result.count("```echarts") == 2
+        assert result.index('"bar"') < result.index('"pie"')
+
+    def test_no_charts_returns_text_unchanged(self):
+        from app.services.agentic_rag.agent_graph import _substitute_chart_markers
+
+        text = "No charts this turn."
+        assert _substitute_chart_markers(text, []) == text
+
 
 class TestCodeExecuteTool:
     def test_simple_math(self):

@@ -73,12 +73,18 @@ def normalize_citations(answer: str, docs: list) -> tuple[str, list[int]]:
     if not docs:
         cleaned = re.sub(r"\[citation\]\(\d+\)\(\d+\)", "", answer)
         cleaned = re.sub(r"\[citation\]\(\d+\)", "", cleaned)
-        cleaned = re.sub(r"\[\d+\]\(\d+\)", "", cleaned)
+        cleaned = re.sub(r"\[(?:KB-)?\d+\]\((?:KB-)?\d+\)", "", cleaned, flags=re.IGNORECASE)
         return cleaned.strip(), []
 
     # Normalize common malformed variants emitted by some models to [N](N).
     answer = re.sub(r"\[citation\]\((\d+)\)\((\d+)\)", r"[\1](\1)", answer)
     answer = re.sub(r"\[citation\]\((\d+)\)", r"[\1](\1)", answer)
+    # Some models cite using the full "KB-N" label instead of the bare
+    # numeral (e.g. [KB-2](KB-2)) despite being instructed otherwise —
+    # strip the prefix on either side so it's treated as a normal [N](N).
+    answer = re.sub(r"\[KB-(\d+)\]\(KB-(\d+)\)", r"[\1](\2)", answer, flags=re.IGNORECASE)
+    answer = re.sub(r"\[KB-(\d+)\]\((\d+)\)", r"[\1](\2)", answer, flags=re.IGNORECASE)
+    answer = re.sub(r"\[(\d+)\]\(KB-(\d+)\)", r"[\1](\2)", answer, flags=re.IGNORECASE)
 
     max_index = len(docs)
     valid_cited: list[int] = []

@@ -13,6 +13,7 @@ interface AgentLoopPanelProps {
   toolObservations?: Array<Record<string, unknown>>;
   lastAnswerObject?: Record<string, unknown>;
   chartOption?: Record<string, unknown>;
+  chartOptions?: Array<Record<string, unknown>>;
 }
 
 export function AgentLoopPanel({
@@ -21,10 +22,13 @@ export function AgentLoopPanel({
   toolObservations,
   lastAnswerObject,
   chartOption,
+  chartOptions,
 }: AgentLoopPanelProps) {
   const subtasks = (plan?.subtasks as Array<Record<string, unknown>>) ?? [];
+  // Older messages only ever had a single chart_option; fall back to it.
+  const charts = chartOptions && chartOptions.length > 0 ? chartOptions : chartOption ? [chartOption] : [];
 
-  if (!plan && !toolCalls?.length && !toolObservations?.length && !chartOption) {
+  if (!plan && !toolCalls?.length && !toolObservations?.length && charts.length === 0) {
     return null;
   }
 
@@ -90,11 +94,11 @@ export function AgentLoopPanel({
         </details>
       )}
 
-      {chartOption && (
-        <div className="rounded border border-zinc-200 dark:border-zinc-800 p-2">
-          <EChartsDiagramDynamic code={JSON.stringify(chartOption)} />
+      {charts.map((option, idx) => (
+        <div key={idx} className="rounded border border-zinc-200 dark:border-zinc-800 p-2">
+          <EChartsDiagramDynamic code={JSON.stringify(option)} />
         </div>
-      )}
+      ))}
     </div>
   );
 }

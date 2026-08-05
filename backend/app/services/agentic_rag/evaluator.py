@@ -144,19 +144,16 @@ async def evaluate_answer(
     Args:
         query: The original user query.
         answer: The generated answer text.
-        context_preview: First 2000 chars of retrieved context (for faithfulness check).
+        context_preview: Retrieved context (for faithfulness check), full text, not truncated.
         confidence_level: Retrieval confidence level (very_high/high/medium/low/none).
 
     Returns:
         AnswerEvaluation with quality metrics.
     """
-    # Truncate context to keep the evaluation prompt manageable
-    truncated_context = context_preview[:2000]
-
     user_prompt = f"""Query: {query}
 
-Retrieved Context (excerpt):
-{truncated_context}
+Retrieved Context:
+{context_preview}
 
 Generated Answer:
 {answer}

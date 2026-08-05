@@ -108,14 +108,15 @@ async def compaction_node(state: AgentState) -> dict:
     # overflows the window.
     from app.services.agentic_rag.prompts import (
         AGENT_SYSTEM_PROMPT,
-        ANSWER_SYSTEM_PROMPT_BASE,
+        FINALIZE_ANSWER_PROMPT,
+        FINALIZE_GUARDRAIL_PROMPT,
         PLAN_SYSTEM_PROMPT,
         THINK_SYSTEM_PROMPT,
     )
     sys_overhead = (
         count_tokens(AGENT_SYSTEM_PROMPT) + count_tokens(PLAN_SYSTEM_PROMPT)
         + count_tokens(AGENT_SYSTEM_PROMPT) + count_tokens(THINK_SYSTEM_PROMPT)
-        + count_tokens(AGENT_SYSTEM_PROMPT) + count_tokens(ANSWER_SYSTEM_PROMPT_BASE)
+        + count_tokens(FINALIZE_GUARDRAIL_PROMPT) + count_tokens(FINALIZE_ANSWER_PROMPT)
     )
     budget.add(sys_overhead)
     if not budget.needs_compaction():
@@ -620,7 +621,7 @@ async def answer_evaluation_node(
         from .evaluator import evaluate_answer
 
         answer = state.get("answer", "")
-        query = state.get("original_query", "")
+        query = state.get("rewritten_query", "") or state.get("original_query", "")
         docs = state.get("retrieved_docs", [])
         retrieval_conf = state.get("retrieval_confidence", 0.0)
 

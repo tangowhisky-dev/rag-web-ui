@@ -14,7 +14,7 @@ from app.models.chat import Chat, Message, ToolCallAudit
 from app.models.organisation import Organisation
 from app.models.user import User, UserRole
 from app.services.agentic_rag.agent_graph import save_memory_node
-from app.services.agentic_rag.schemas import LastAnswerObject, Observation
+from app.services.agentic_rag.schemas import CitationRef, LastAnswerObject, Observation
 from app.services.agentic_rag.tool_context import ToolContext
 
 engine = _session_mod.engine
@@ -78,6 +78,38 @@ def test_last_answer_object_tolerates_extra_keys():
     }
     lao = LastAnswerObject.model_validate(payload)
     assert lao.summary == "s"
+
+
+def test_chart_options_defaults_empty_and_reads_legacy_singular_field():
+    # Old stored messages only ever have chart_option (singular); the new
+    # chart_options field must default to empty rather than error.
+    lao = LastAnswerObject.model_validate({"summary": "s", "chart_option": {"series": []}})
+    assert lao.chart_option == {"series": []}
+    assert lao.chart_options == []
+
+
+def test_chart_options_holds_multiple_charts():
+    lao = LastAnswerObject(
+        summary="s",
+        chart_options=[{"series": [{"type": "bar"}]}, {"series": [{"type": "pie"}]}],
+    )
+    assert len(lao.chart_options) == 2
+    assert lao.chart_options[0]["series"][0]["type"] == "bar"
+    assert lao.chart_options[1]["series"][0]["type"] == "pie"
+
+
+def test_citation_ref_coerces_kb_label_string():
+    # The extraction LLM often copies the answer's own "[KB-2](KB-2)" label
+    # verbatim instead of the bare numeric id CitationRef expects.
+    ref = CitationRef.model_validate({"document_id": "KB-2", "chunk_index": "KB-2"})
+    assert ref.document_id == 2
+    assert ref.chunk_index == 2
+
+
+def test_citation_ref_accepts_plain_ints():
+    ref = CitationRef(document_id=5, chunk_index=0)
+    assert ref.document_id == 5
+    assert ref.chunk_index == 0
 
 
 def test_save_memory_persists_final_answer_and_object(db):

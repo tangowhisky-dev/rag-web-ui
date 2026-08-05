@@ -161,7 +161,8 @@ export const Answer: FC<{
   toolObservations?: Array<Record<string, unknown>>;
   lastAnswerObject?: Record<string, unknown>;
   chartOption?: Record<string, unknown>;
-}> = ({ messageId, chatId, markdown, citations = [], rewrittenQuery, confidence, confidenceScore, confidenceBreakdown, suggestion, failedLegs, queryClassification, toolTrace, agentSteps, taskList, progressMessages, synthesisMode, isStreaming = false, onDelete, finalConfidence, finalConfidenceLevel, faithfulness, completeness, retrievalScore, plan, toolCalls, toolObservations, lastAnswerObject, chartOption }) => {
+  chartOptions?: Array<Record<string, unknown>>;
+}> = ({ messageId, chatId, markdown, citations = [], rewrittenQuery, confidence, confidenceScore, confidenceBreakdown, suggestion, failedLegs, queryClassification, toolTrace, agentSteps, taskList, progressMessages, synthesisMode, isStreaming = false, onDelete, finalConfidence, finalConfidenceLevel, faithfulness, completeness, retrievalScore, plan, toolCalls, toolObservations, lastAnswerObject, chartOption, chartOptions }) => {
   const [citationInfoMap, setCitationInfoMap] = useState<
     Record<string, CitationInfo>
   >({});
@@ -177,16 +178,19 @@ export const Answer: FC<{
   citationInfoMapRef.current = citationInfoMap;
 
   // renderKey forces <Markdown> to remount when citations become ready.
+  // Only bump on the citations-empty -> citations-present transition itself
+  // (already captured by the "with-citations"/"no-citations" key segment
+  // below) — do NOT also bump on the isStreaming edge, since answer_rewrite
+  // now delivers citations well before streaming ends, and remounting again
+  // at stream-end caused a redundant visible "refresh" with no content change.
   const [renderKey, setRenderKey] = useState(0);
-  const wasStreamingRef = useRef(false);
+  const hadCitationsRef = useRef(citations.length > 0);
   useEffect(() => {
-    if (isStreaming) {
-      wasStreamingRef.current = true;
-    } else if (wasStreamingRef.current) {
-      wasStreamingRef.current = false;
+    if (citations.length > 0 && !hadCitationsRef.current) {
+      hadCitationsRef.current = true;
       setRenderKey((k) => k + 1);
     }
-  }, [isStreaming]);
+  }, [citations.length]);
 
   // Extract generate_answer latency from agentSteps
   const generateAnswerLatencyMs = useMemo(() => {
@@ -681,7 +685,11 @@ export const Answer: FC<{
         toolCalls={toolCalls}
         toolObservations={toolObservations}
         lastAnswerObject={lastAnswerObject}
-        chartOption={chartOption}
+        // New messages already have the chart(s) inlined as ```echarts fences
+        // by finalize_node's marker substitution — only fall back to the
+        // panel's own render for older messages that never got one.
+        chartOption={markdown.includes("```echarts") ? undefined : chartOption}
+        chartOptions={markdown.includes("```echarts") ? undefined : chartOptions}
       />
     </div>
   );

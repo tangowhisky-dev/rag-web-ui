@@ -35,3 +35,27 @@ def append_chart_instructions(system_prompt: str) -> str:
     if "echarts" in system_prompt.lower():
         return system_prompt
     return f"{system_prompt}\n\n## Chart Generation\n{chart_instructions}"
+
+
+def append_chart_placeholder_instructions(system_prompt: str, chart_count: int) -> str:
+    """Append instructions telling the model to place chart markers, not JSON.
+
+    Used when chart_generate already produced valid chart_option(s) this turn:
+    the model never needs to write ECharts JSON itself, it only marks where
+    each chart belongs. finalize_node substitutes the markers deterministically.
+    """
+    if chart_count <= 0:
+        return system_prompt
+    if chart_count == 1:
+        markers = "the literal marker [[CHART_1]]"
+    else:
+        markers = "the literal markers " + ", ".join(f"[[CHART_{i}]]" for i in range(1, chart_count + 1))
+    instructions = (
+        f"\n\n## Chart Placement\n"
+        f"{chart_count} chart(s) have already been generated for this answer. "
+        f"Do NOT write any chart JSON or ```echarts code yourself. "
+        f"Instead, insert {markers} at the point(s) in your answer where each "
+        f"chart is most relevant, each marker exactly once. The markers will be "
+        f"replaced with the actual charts automatically."
+    )
+    return f"{system_prompt}{instructions}"

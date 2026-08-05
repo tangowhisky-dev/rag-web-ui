@@ -15,14 +15,14 @@ from app.services.agentic_rag.graph_state import AgentState
 from app.services.agentic_rag.llm_factory import get_org_llm
 from app.services.agentic_rag.prompts import (
     AGENT_SYSTEM_PROMPT,
-    ANSWER_SYSTEM_PROMPT_BASE,
+    FINALIZE_ANSWER_PROMPT,
+    FINALIZE_GUARDRAIL_PROMPT,
     PLAN_SYSTEM_PROMPT,
     THINK_SYSTEM_PROMPT,
 )
 from app.services.agentic_rag.redis_memory import get_redis_memory
 from app.services.agentic_rag.token_budget import count_tokens
 from app.services.agentic_rag.tool_context import ToolContext
-from app.services.agentic_rag.utils import normalize_citations
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +92,13 @@ async def run_agent_loop(
                     if token:
                         full_answer += token
                         yield payload
+                elif payload.get("event") == "answer_rewrite":
+                    # Emitted by finalize_node right after generation, before
+                    # Call 4 (last_answer_object extraction) or Call 5
+                    # (confidence scoring) — keep full_answer in sync for the
+                    # token accounting below.
+                    full_answer = payload.get("content", full_answer)
+                    yield payload
                 else:
                     yield payload
                 continue
@@ -120,6 +127,10 @@ async def run_agent_loop(
                     think_iterations = max(think_iterations, update.get("iteration", 0))
 
                 elif node == "finalize":
+                    # Citation-normalized content already arrived via the
+                    # earlier "answer_rewrite" custom event (emitted by
+                    # finalize_node itself, before Call 4/5) — this update
+                    # only carries retrieved_docs for token accounting.
                     final = update.get("final_answer", "")
                     if final:
                         full_answer = final
@@ -148,10 +159,7 @@ async def run_agent_loop(
 
     if not full_answer:
         full_answer = "I'm sorry, I could not produce an answer."
-
-    full_answer, cited_doc_indices = normalize_citations(full_answer, citations)
-    cited_docs = [citations[i - 1] for i in cited_doc_indices]
-    yield {"event": "answer_rewrite", "content": full_answer, "citations": cited_docs}
+        yield {"event": "answer_rewrite", "content": full_answer, "citations": []}
 
     # ── Token accounting ────────────────────────────────────────────────
     # Count the total prompt context sent to the LLM across all calls.
@@ -162,7 +170,7 @@ async def run_agent_loop(
     # System prompt overhead (constant per call type)
     plan_sys_tokens = count_tokens(AGENT_SYSTEM_PROMPT) + count_tokens(PLAN_SYSTEM_PROMPT)
     think_sys_tokens = count_tokens(AGENT_SYSTEM_PROMPT) + count_tokens(THINK_SYSTEM_PROMPT)
-    finalize_sys_tokens = count_tokens(AGENT_SYSTEM_PROMPT) + count_tokens(ANSWER_SYSTEM_PROMPT_BASE)
+    finalize_sys_tokens = count_tokens(FINALIZE_GUARDRAIL_PROMPT) + count_tokens(FINALIZE_ANSWER_PROMPT)
 
     prompt_tokens = plan_sys_tokens  # 1 plan call
     prompt_tokens += think_sys_tokens * max(think_iterations, 1)  # think calls

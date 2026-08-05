@@ -39,6 +39,11 @@ interface AgentStep {
 
 interface Message {
   id: string;
+  // Stable identity for React keys — unlike `id`, this never changes even
+  // when `id` is swapped from a client UUID to the persisted DB id on the
+  // "done" event (that swap previously caused the whole answer, including
+  // any embedded chart, to remount once confidence scoring finished).
+  clientId: string;
   role: "assistant" | "user" | "system" | "data";
   content: string;
   citations?: Citation[];
@@ -77,6 +82,7 @@ interface Message {
   toolObservations?: Array<Record<string, unknown>>;
   lastAnswerObject?: Record<string, unknown>;
   chartOption?: Record<string, unknown>;
+  chartOptions?: Array<Record<string, unknown>>;
 }
 
 interface ChatMessage {
@@ -296,6 +302,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     if (msg.role !== "assistant" || !msg.content)
       return {
         id: msg.id.toString(),
+        clientId: msg.id.toString(),
         role: msg.role,
         content: msg.content,
         file_name: msg.file_name ?? undefined,
@@ -306,6 +313,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     // Assistant message — citations come from the API, content is the raw answer text
     return {
       id: msg.id.toString(),
+      clientId: msg.id.toString(),
       role: msg.role,
       content: msg.content,
       citations: msg.citations ?? [],
@@ -685,6 +693,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
           ...message,
           lastAnswerObject: payload.last_answer_object,
           chartOption: payload.last_answer_object?.chart_option as Record<string, unknown> | undefined,
+          chartOptions: payload.last_answer_object?.chart_options as Array<Record<string, unknown>> | undefined,
         }));
       } catch (e) {
         console.error("Failed to parse last_answer event:", e);
@@ -846,14 +855,17 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     }
 
     const assistantId = generateId();
+    const userId = generateId();
     const userMessage: Message = {
-      id: generateId(),
+      id: userId,
+      clientId: userId,
       role: "user",
       content: trimmedInput,
       ...(uploadedFile ? { file_name: uploadedFile.file_name, file_id: uploadedFile.id } : {}),
     };
     const assistantMessage: Message = {
       id: assistantId,
+      clientId: assistantId,
       role: "assistant",
       content: "",
       citations: [],
@@ -946,6 +958,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       // Insert new assistant placeholder right after user message
       result.splice(userIdx + 1, 0, {
         id: newAssistantId,
+        clientId: newAssistantId,
         role: "assistant" as const,
         content: "",
         citations: [],
@@ -987,8 +1000,10 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     const { assistantId, clarificationId } = clarificationState;
 
     // Add user's clarification as a message
+    const clarificationId2 = generateId();
     const clarificationMessage: Message = {
-      id: generateId(),
+      id: clarificationId2,
+      clientId: clarificationId2,
       role: "user",
       content: response,
     };
@@ -1152,7 +1167,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
             <div className="max-w-3xl mx-auto px-4 py-6 space-y-6 pb-8">
               {processedMessages.map((message) =>
                 message.role === "assistant" ? (
-                  <div key={message.id} className="flex items-start gap-3">
+                  <div key={message.clientId} className="flex items-start gap-3">
                     {/* Avatar */}
                     <img
                       src={APP_LOGO_SRC}
@@ -1171,7 +1186,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                         </div>
                       ) : (
                         <Answer
-                          key={message.id}
+                          key={message.clientId}
                           messageId={message.id}
                           chatId={params.id}
                           markdown={message.content}
@@ -1200,12 +1215,13 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                           toolObservations={message.toolObservations}
                           lastAnswerObject={message.lastAnswerObject}
                           chartOption={message.chartOption}
+                          chartOptions={message.chartOptions}
                         />
                       )}
                     </div>
                   </div>
                 ) : (
-                  <div key={message.id} className="flex justify-end items-start gap-2 group">
+                  <div key={message.clientId} className="flex justify-end items-start gap-2 group">
                     <div className="flex flex-col items-end gap-1 max-w-[70%]">
                       <div className="flex flex-row items-center gap-2">
                         {message.file_name && message.file_id && (

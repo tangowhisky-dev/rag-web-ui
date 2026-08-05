@@ -84,6 +84,23 @@ def _extract_balanced(text: str, chars: tuple[str, str]) -> str | None:
     return None
 
 
+def _substitute_chart_markers(text: str, chart_options: list[dict]) -> str:
+    """Replace [[CHART_N]] placeholders with the real ECharts fence.
+
+    Any chart whose marker the model omitted is appended at the end, so a
+    chart is never silently dropped even if placement wasn't followed.
+    """
+    result = text
+    for i, option in enumerate(chart_options, start=1):
+        marker = f"[[CHART_{i}]]"
+        fence = f"```echarts\n{json.dumps(option)}\n```"
+        if marker in result:
+            result = result.replace(marker, fence, 1)
+        else:
+            result = f"{result}\n\n{fence}"
+    return result
+
+
 def _extract_json_block(text: str) -> str | None:
     """Return the first well-formed JSON object or array string from *text*.
 
@@ -105,7 +122,8 @@ from app.services.agentic_rag.llm_factory import build_chat_llm
 from app.services.agentic_rag.nodes import _agent_step, answer_evaluation_node, compaction_node, rewrite_query_node, select_recent_history
 from app.services.agentic_rag.prompts import (
     AGENT_SYSTEM_PROMPT,
-    ANSWER_SYSTEM_PROMPT_BASE,
+    FINALIZE_ANSWER_PROMPT,
+    FINALIZE_GUARDRAIL_PROMPT,
     LAST_ANSWER_EXTRACT_PROMPT,
     PLAN_SYSTEM_PROMPT,
     THINK_SYSTEM_PROMPT,
@@ -115,7 +133,7 @@ from app.services.agentic_rag.tool_call_parser import parse_think_response
 from app.services.agentic_rag.tool_context import ToolContext, write_audit
 from app.services.agentic_rag.tools import applicable_tools
 from app.services.agentic_rag.token_budget import count_tokens
-from app.services.agentic_rag.utils import format_context_string
+from app.services.agentic_rag.utils import format_context_string, normalize_citations
 
 from .graph_state import AgentState
 
@@ -284,6 +302,63 @@ def _observations_text(observations: list[Observation], full: bool = False) -> s
             if docs and isinstance(docs[0], dict):
                 preview = str(docs[0].get("page_content", ""))[:300]
                 parts.append(f"  top_doc_preview: {preview}")
+    return "\n".join(parts)
+
+
+def _non_retrieval_observations_text(observations: list[Observation]) -> str:
+    """Format only non-retrieval tool results (code_execute, chart_generate,
+    extract_data, file_read, etc.).
+
+    Retrieval (rag_retrieve) results are already in ``retrieved_docs`` via
+    ``format_context_string``; including them again here would duplicate the
+    same chunks in a different format. Non-retrieval tool outputs are NOT in
+    ``retrieved_docs`` and must be surfaced to the LLM for answer synthesis.
+    """
+    parts = []
+    for i, raw_obs in enumerate(observations, 1):
+        obs = _coerce_observation(raw_obs)
+        result = obs.result if isinstance(obs.result, dict) else {}
+        if "docs" in result:
+            continue  # retrieval — already in retrieved_docs
+        parts.append(f"Observation {i}: tool={obs.tool} args={obs.arguments}")
+        if obs.error:
+            parts.append(f"  error: {obs.error}")
+            continue
+        summary = json.dumps(result, default=str)
+        parts.append(f"  result: {summary}")
+    return "\n".join(parts)
+
+
+def _observations_metadata_text(observations: list[Observation]) -> str:
+    """Format observations for think_node: metadata-only for rag_retrieve,
+    full result for non-retrieval tools.
+
+    rag_retrieve: the reranker already determined relevance. think_node only
+    needs to know *what was found* (doc_count, confidence, sufficient) to
+    decide whether to call another tool or finalize — not the chunk content.
+
+    Non-retrieval tools (code_execute, chart_generate, extract_data, file_read):
+    the LLM needs the full result to decide the next step.
+    """
+    parts = []
+    for i, raw_obs in enumerate(observations, 1):
+        obs = _coerce_observation(raw_obs)
+        parts.append(f"Observation {i}: tool={obs.tool} args={obs.arguments}")
+        if obs.error:
+            parts.append(f"  error: {obs.error}")
+            continue
+        result = obs.result if isinstance(obs.result, dict) else {}
+        if "docs" not in result:
+            # Non-retrieval tool — full result needed for next-step reasoning.
+            summary = json.dumps(result, default=str)
+            parts.append(f"  result: {summary}")
+            continue
+        # rag_retrieve — metadata only, no chunk content.
+        doc_count = len(result.get("docs", []))
+        confidence = result.get("confidence", "N/A")
+        sufficient = result.get("sufficient")
+        sufficient_text = f" sufficient={sufficient}" if sufficient is not None else ""
+        parts.append(f"  doc_count={doc_count} confidence={confidence}{sufficient_text}")
     return "\n".join(parts)
 
 
@@ -535,8 +610,7 @@ async def plan_node(state: AgentState, ctx: ToolContext) -> dict:
     """Produce a structured plan for the current turn."""
     with _agent_step("plan"):
         writer = _writer()
-        original = state.get("original_query", "")
-        rewritten = state.get("rewritten_query", original)
+        rewritten = state.get("rewritten_query", "") or state.get("original_query", "")
     
         file_meta = []
         if ctx.chat_id:
@@ -553,8 +627,7 @@ async def plan_node(state: AgentState, ctx: ToolContext) -> dict:
     
         system = AGENT_SYSTEM_PROMPT + "\n\n" + PLAN_SYSTEM_PROMPT
         user = (
-            f"Original query: {original}\n"
-            f"Rewritten query: {rewritten}\n"
+            f"Query: {rewritten}\n"
             f"Previous answer summary: {last_summary}\n"
             f"Recalled long-term memory:\n{recalled_text}\n\n"
             f"Attached files: {json.dumps(file_meta)}\n\n"
@@ -588,7 +661,7 @@ async def plan_node(state: AgentState, ctx: ToolContext) -> dict:
                 plan = Plan.model_validate_json(block) if block else Plan()
             except Exception as parse_exc:
                 logger.warning("[plan_node] JSON parse failed: %s", parse_exc)
-                plan = Plan(intent="rag", subtasks=[Subtask(id="a", description=original, tool_hint="rag_retrieve")])
+                plan = Plan(intent="rag", subtasks=[Subtask(id="a", description=rewritten, tool_hint="rag_retrieve")])
     
         writer({"event": "plan", "plan": plan.model_dump() if isinstance(plan, Plan) else plan})
     
@@ -617,7 +690,7 @@ async def think_node(state: AgentState, ctx: ToolContext) -> dict:
         if precomputed:
             return {"iteration": iteration, "tool_calls": list(precomputed), "precomputed_tool_calls": []}
     
-        original = state.get("original_query", "")
+        query = state.get("rewritten_query", "") or state.get("original_query", "")
         plan = state.get("plan") or Plan()
         observations = state.get("observations", [])
         # Expose current state to tools so applicable_tools() and tool reads
@@ -626,13 +699,13 @@ async def think_node(state: AgentState, ctx: ToolContext) -> dict:
         tools = applicable_tools(ctx)
         tools_text = _tool_descriptions_text(tools)
 
-        # Build conversation context so the agent can handle multi-turn references.
+        # Build conversation context — full content, no truncation. Arbitrary
+        # char caps damage coherence (mid-sentence cuts confuse the LLM).
         recent = select_recent_history(state.get("messages", []), max_pairs=3)
         history_text = ""
         for msg in recent:
             role = "User" if msg.type == "human" else "Assistant"
-            content = str(msg.content)[:500]
-            history_text += f"  {role}: {content}\n"
+            history_text += f"  {role}: {msg.content}\n"
 
         # Include last_answer_object summary so "summarize it" / "chart it" work.
         lao = state.get("last_answer_object")
@@ -660,18 +733,22 @@ async def think_node(state: AgentState, ctx: ToolContext) -> dict:
             f"  Already tried (do NOT resubmit these exact strings to rag_retrieve): {tried_queries}\n"
             if tried_queries else ""
         )
-        user = (
-            f"Iteration: {iteration}/{max_iter}\n"
-            f"User query: {original}\n"
-            f"Conversation history (recent turns):\n{history_text or '  (none)'}\n"
-            f"Previous answer context:\n{lao_text or '  (none)'}\n"
-            f"Verification feedback:\n{reflection_text or '  (none)'}\n"
-            f"{tried_queries_text}"
-            f"Plan: {json.dumps(plan.model_dump() if isinstance(plan, Plan) else plan, default=str)}\n"
-            f"Observations so far:\n{_observations_text(observations, full=True)}\n\n"
-            f"Available tools:\n{tools_text}\n\n"
-            "Emit either {\"tool_calls\": [...]} or {\"final_answer\": true}."
-        )
+
+        def _build_think_user_prompt() -> str:
+            return (
+                f"Iteration: {iteration}/{max_iter}\n"
+                f"User query: {query}\n"
+                f"Conversation history (recent turns):\n{history_text or '  (none)'}\n"
+                f"Previous answer context:\n{lao_text or '  (none)'}\n"
+                f"Verification feedback:\n{reflection_text or '  (none)'}\n"
+                f"{tried_queries_text}"
+                f"Plan: {json.dumps(plan.model_dump() if isinstance(plan, Plan) else plan, default=str)}\n"
+                f"Observations so far:\n{_observations_metadata_text(observations)}\n\n"
+                f"Available tools:\n{tools_text}\n\n"
+                "Emit either {\"tool_calls\": [...]} or {\"final_answer\": true}."
+            )
+
+        user = _build_think_user_prompt()
 
         # Runtime compaction: check if the prompt exceeds the context budget.
         # If so, compact observations (deterministic) and/or messages (LLM call),
@@ -686,25 +763,13 @@ async def think_node(state: AgentState, ctx: ToolContext) -> dict:
             history_text = ""
             for msg in recent:
                 role = "User" if msg.type == "human" else "Assistant"
-                content = str(msg.content)[:500]
-                history_text += f"  {role}: {content}\n"
+                history_text += f"  {role}: {msg.content}\n"
             tried_queries = _tried_rag_retrieve_queries(observations)
             tried_queries_text = (
                 f"  Already tried (do NOT resubmit these exact strings to rag_retrieve): {tried_queries}\n"
                 if tried_queries else ""
             )
-            user = (
-                f"Iteration: {iteration}/{max_iter}\n"
-                f"User query: {original}\n"
-                f"Conversation history (recent turns):\n{history_text or '  (none)'}\n"
-                f"Previous answer context:\n{lao_text or '  (none)'}\n"
-                f"Verification feedback:\n{reflection_text or '  (none)'}\n"
-                f"{tried_queries_text}"
-                f"Plan: {json.dumps(plan.model_dump() if isinstance(plan, Plan) else plan, default=str)}\n"
-                f"Observations so far:\n{_observations_text(observations, full=True)}\n\n"
-                f"Available tools:\n{tools_text}\n\n"
-                "Emit either {\"tool_calls\": [...]} or {\"final_answer\": true}."
-            )
+            user = _build_think_user_prompt()
     
         mode = settings.TOOL_CALL_MODE
         try:
@@ -946,28 +1011,54 @@ async def finalize_node(state: AgentState, ctx: ToolContext) -> dict:
     with _agent_step("finalize"):
         writer = _writer()
         precomputed = state.get("precomputed_answer", "")
-        original = state.get("original_query", "")
+        query = state.get("rewritten_query", "") or state.get("original_query", "")
         observations = state.get("observations", [])
         docs = state.get("retrieved_docs", [])
+        plan = state.get("plan")
         compaction_updates: dict = {}
+
+        # Collect every valid chart_generate result up front so both the
+        # prompt instructions and the post-generation substitution use the
+        # same list, regardless of the precomputed/streamed branch below.
+        chart_options: list[dict] = []
+        for raw_obs in observations:
+            obs = _coerce_observation(raw_obs)
+            if obs.tool == "chart_generate" and obs.result.get("chart_option"):
+                chart_options.append(obs.result["chart_option"])
 
         if precomputed:
             final = precomputed
         else:
             context_text = format_context_string(docs, state.get("file_markdown"))
-            system = (
-                AGENT_SYSTEM_PROMPT
-                + "\n\n"
-                + ANSWER_SYSTEM_PROMPT_BASE
-                + "\n\n"
-                + "You are the final answer synthesizer. Use the retrieved context and tool observations below to answer the user query."
-            )
-            user = (
-                f"User query: {original}\n\n"
-                f"Retrieved context:\n{context_text}\n\n"
-                f"Tool observations:\n{_observations_text(observations)}\n\n"
-                "Provide a concise, accurate answer. Cite the retrieved document chunks that support each factual claim."
-            )
+            # Non-retrieval tool results (code_execute, chart_generate, etc.)
+            # are not in retrieved_docs; surface them separately. Retrieval
+            # results are already in context_text — don't duplicate.
+            non_rag_text = _non_retrieval_observations_text(observations)
+
+            # Chart docs are only appended when the plan intent is "chart" or
+            # a chart_generate observation exists.
+            plan_intent = plan.intent if isinstance(plan, Plan) else ""
+            include_charts = plan_intent == "chart" or bool(chart_options)
+
+            answer_prompt = FINALIZE_ANSWER_PROMPT
+            if chart_options:
+                # Valid chart JSON already exists — have the model place a
+                # marker instead of freehand-writing (and risking malformed) JSON.
+                from app.services.prompts.loader import append_chart_placeholder_instructions
+                answer_prompt = append_chart_placeholder_instructions(answer_prompt, len(chart_options))
+            elif include_charts:
+                from app.services.prompts.loader import append_chart_instructions
+                answer_prompt = append_chart_instructions(answer_prompt)
+
+            system = FINALIZE_GUARDRAIL_PROMPT + "\n\n" + answer_prompt
+            user_parts = [
+                f"User query: {query}\n\n",
+                f"Retrieved context:\n{context_text}\n\n",
+            ]
+            if non_rag_text:
+                user_parts.append(f"Tool results:\n{non_rag_text}\n\n")
+            user_parts.append("Provide a concise, accurate answer.")
+            user = "".join(user_parts)
 
             # Runtime compaction before the generation LLM call.
             compaction_updates = await _compact_if_needed(
@@ -979,12 +1070,15 @@ async def finalize_node(state: AgentState, ctx: ToolContext) -> dict:
                 observations = state.get("observations", [])
                 docs = state.get("retrieved_docs", docs)
                 context_text = format_context_string(docs, state.get("file_markdown"))
-                user = (
-                    f"User query: {original}\n\n"
-                    f"Retrieved context:\n{context_text}\n\n"
-                    f"Tool observations:\n{_observations_text(observations)}\n\n"
-                    "Provide a concise, accurate answer. Cite the retrieved document chunks that support each factual claim."
-                )
+                non_rag_text = _non_retrieval_observations_text(observations)
+                user_parts = [
+                    f"User query: {query}\n\n",
+                    f"Retrieved context:\n{context_text}\n\n",
+                ]
+                if non_rag_text:
+                    user_parts.append(f"Tool results:\n{non_rag_text}\n\n")
+                user_parts.append("Provide a concise, accurate answer.")
+                user = "".join(user_parts)
             try:
                 llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=0.7, streaming=True)
                 final = ""
@@ -1001,7 +1095,18 @@ async def finalize_node(state: AgentState, ctx: ToolContext) -> dict:
             except Exception as exc:
                 logger.warning("[finalize_node] generation failed: %s", exc)
                 final = "I'm sorry, I couldn't generate a response at this time."
-    
+
+        # Extraction (Call 4, below) wants the raw marker text — not the
+        # substituted chart JSON — so it isn't fed a large embedded blob.
+        # Keep that copy before substituting, then rewrite citations and
+        # stream the display-ready answer immediately, without waiting on
+        # Call 4 (last_answer_object extraction) or Call 5 (confidence score).
+        raw_for_extraction = final
+        final = _substitute_chart_markers(final, chart_options)
+        final, cited_doc_indices = normalize_citations(final, docs)
+        cited_docs = [docs[i - 1] for i in cited_doc_indices]
+        writer({"event": "answer_rewrite", "content": final, "citations": cited_docs})
+
         # Build a lightweight LastAnswerObject. Try LLM extraction for data/chart.
         lao = LastAnswerObject(
             summary=final[:500],
@@ -1009,6 +1114,7 @@ async def finalize_node(state: AgentState, ctx: ToolContext) -> dict:
             data=None,
             citations=[],
             chart_option=None,
+            chart_options=[],
             followups=[],
         )
     
@@ -1018,7 +1124,7 @@ async def finalize_node(state: AgentState, ctx: ToolContext) -> dict:
         for attempt in range(2):
             try:
                 raw = await llm_query.ainvoke([
-                    {"role": "user", "content": LAST_ANSWER_EXTRACT_PROMPT.format(answer=final[:3000])},
+                    {"role": "user", "content": LAST_ANSWER_EXTRACT_PROMPT.format(answer=raw_for_extraction[:3000])},
                 ])
                 block = _extract_json_block(str(raw.content))
                 if block:
@@ -1028,13 +1134,9 @@ async def finalize_node(state: AgentState, ctx: ToolContext) -> dict:
                 logger.debug("[finalize_node] last_answer_object extraction attempt %d failed: %s", attempt + 1, exc)
         if extracted:
             lao = extracted
-    
-        # Preserve chart from chart_generate observation if present.
-        for raw_obs in observations:
-            obs = _coerce_observation(raw_obs)
-            if obs.tool == "chart_generate" and obs.result.get("chart_option"):
-                lao.chart_option = obs.result["chart_option"]
-                break
+
+        lao.chart_options = chart_options
+        lao.chart_option = chart_options[0] if chart_options else None
     
         writer({"event": "last_answer", "last_answer_object": lao.model_dump()})
     

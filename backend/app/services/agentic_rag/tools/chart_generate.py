@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 class ChartGenerateInput(BaseModel):
-    chart_type: str = Field(default="bar", description="pie, bar, line, scatter, area")
+    chart_type: str = Field(default="bar", description="pie, bar, line, scatter, area, effectScatter, radar, gauge, funnel")
     data: list[dict] = Field(default_factory=list, description="List of {label, value} or {name, value}.")
     title: Optional[str] = Field(default=None)
     x_label: Optional[str] = Field(default=None)
@@ -26,7 +26,7 @@ class ChartGenerateTool(BaseAgentTool):
     name: str = "chart_generate"
     description: str = (
         "Generate an ECharts option JSON from structured data. "
-        "Use after extract_data to create pie/bar/line charts."
+        "Use after extract_data to create pie/bar/line/scatter/radar/gauge/funnel charts."
     )
     args_schema: type[BaseModel] = ChartGenerateInput
 
@@ -98,13 +98,38 @@ class ChartGenerateTool(BaseAgentTool):
                 "yAxis": {"type": "value", "name": input_obj.y_label or ""},
                 "series": [series],
             }
-        elif chart_type == "scatter":
+        elif chart_type in ("scatter", "effectscatter"):
+            series_type = "effectScatter" if chart_type == "effectscatter" else "scatter"
             scatter = [[i, v] for i, v in enumerate(values)]
             option = {
                 "title": {"text": title},
                 "xAxis": {"type": "value"},
                 "yAxis": {"type": "value"},
-                "series": [{"type": "scatter", "data": scatter}],
+                "series": [{"type": series_type, "data": scatter}],
+            }
+        elif chart_type == "radar":
+            max_value = max(values) * 1.2 if values else 100
+            option = {
+                "title": {"text": title},
+                "tooltip": {"trigger": "item"},
+                "radar": {"indicator": [{"name": n, "max": max_value} for n in names]},
+                "series": [{"type": "radar", "data": [{"value": values, "name": title}]}],
+            }
+        elif chart_type == "gauge":
+            # Gauge shows a single value; use the first data point.
+            option = {
+                "title": {"text": title},
+                "series": [{
+                    "type": "gauge",
+                    "data": [{"name": names[0], "value": values[0]}],
+                    "detail": {"formatter": "{value}"},
+                }],
+            }
+        elif chart_type == "funnel":
+            option = {
+                "title": {"text": title, "left": "center"},
+                "tooltip": {"trigger": "item"},
+                "series": [{"type": "funnel", "data": normalized, "sort_": "descending"}],
             }
         else:
             return {"ok": False, "result": {}, "error": f"Unsupported chart type: {chart_type}", "tokens": 0}

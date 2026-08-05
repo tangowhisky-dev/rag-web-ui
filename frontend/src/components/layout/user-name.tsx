@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import { api } from '@/lib/api';
 
 interface CurrentUser {
-  sub: string;
+  username: string;
   role: string;
 }
 
@@ -17,7 +17,7 @@ export function UserName() {
       .catch(() => setUser(null));
   }, []);
 
-  const username = user?.sub ?? null;
+  const username = user?.username ?? null;
 
   if (!username || !user) return null;
 
