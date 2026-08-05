@@ -1,9 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import { Menu, CircuitBoard } from "lucide-react";
 import ChatSidebar from "@/components/chat/chat-sidebar";
-import { ChatProvider, useChatContext } from "@/contexts/chat-context";
+import { useChatContext } from "@/contexts/chat-context";
 import Breadcrumb from "@/components/ui/breadcrumb";
 import { NavActions } from "./nav-actions";
 
@@ -18,6 +18,8 @@ function ChatLayoutInner({ children }: ChatLayoutProps) {
   const chatTitle = activeChat
     ? (chatList.find((c) => c.id === activeChat)?.title ?? undefined)
     : undefined;
+
+  const handleCloseSidebar = useCallback(() => setIsChatSidebarOpen(false), []);
 
   return (
     <div className="relative h-screen bg-background overflow-hidden">
@@ -50,7 +52,7 @@ function ChatLayoutInner({ children }: ChatLayoutProps) {
         <div className="pt-12 flex-shrink-0 h-full">
           <ChatSidebar
             isOpen={isChatSidebarOpen}
-            onClose={() => setIsChatSidebarOpen(false)}
+            onClose={handleCloseSidebar}
           />
         </div>
         <main className="flex-1 min-w-0 overflow-hidden">
@@ -62,9 +64,5 @@ function ChatLayoutInner({ children }: ChatLayoutProps) {
 }
 
 export default function ChatLayout({ children }: ChatLayoutProps) {
-  return (
-    <ChatProvider>
-      <ChatLayoutInner>{children}</ChatLayoutInner>
-    </ChatProvider>
-  );
+  return <ChatLayoutInner>{children}</ChatLayoutInner>;
 }

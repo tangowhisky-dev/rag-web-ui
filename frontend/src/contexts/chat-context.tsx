@@ -1,6 +1,6 @@
 "use client";
 
-import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
+import React, { createContext, useContext, useEffect, useLayoutEffect, useState, useCallback, useMemo } from "react";
 import { api } from "@/lib/api";
 
 export interface Folder {
@@ -14,6 +14,7 @@ export interface Chat {
   id: number;
   title: string;
   created_at: string;
+  updated_at?: string;
   pinned: boolean;
   folder_id: number | null;
 }
@@ -23,6 +24,7 @@ interface ChatContextValue {
   activeChat: number | null;
   folderList: Folder[];
   graphRagActive: boolean;
+  chatListLoaded: boolean;
   setChatList: React.Dispatch<React.SetStateAction<Chat[]>>;
   setActiveChat: React.Dispatch<React.SetStateAction<number | null>>;
   setGraphRagActive: React.Dispatch<React.SetStateAction<boolean>>;
@@ -30,6 +32,7 @@ interface ChatContextValue {
   deleteChat: (id: number) => Promise<void>;
   patchChat: (id: number, patch: Partial<Chat>) => Promise<void>;
   addChat: (chat: Chat) => void;
+  bumpChatToTop: (chatId: number) => void;
   fetchFolders: () => Promise<void>;
   createFolder: (name: string) => Promise<Folder>;
   renameFolder: (id: number, name: string) => Promise<void>;
@@ -51,9 +54,44 @@ function saveChatListCache(list: Chat[]) {
   try { sessionStorage.setItem(CHAT_LIST_CACHE_KEY, JSON.stringify(list)); } catch {}
 }
 
+// Read cached chat list from module-level cache, falling back to sessionStorage.
+// This ensures that even if the module is re-evaluated (e.g. after a full
+// page reload), the sidebar doesn't flash empty while the API fetch is in-flight.
+function loadCachedChatList(): Chat[] {
+  if (_chatListCache.length > 0) return _chatListCache;
+  try {
+    const stored = sessionStorage.getItem(CHAT_LIST_CACHE_KEY);
+    if (stored) {
+      _chatListCache = JSON.parse(stored);
+      return _chatListCache;
+    }
+  } catch {}
+  return [];
+}
+
 export function ChatProvider({ children }: { children: React.ReactNode }) {
-  // Initialize from module-level cache so remounts never flash empty.
+  // Initialize from module-level cache. On the client, also try sessionStorage
+  // synchronously — but only after the first render to avoid hydration
+  // mismatches. We use a lazy initializer that checks the module cache first,
+  // then a useSyncExternalStore-like pattern to load sessionStorage ASAP.
   const [chatList, _setChatList] = useState<Chat[]>(_chatListCache);
+  const [chatListLoaded, setChatListLoaded] = useState(_chatListCache.length > 0);
+  const [hydrated, setHydrated] = useState(false);
+
+  // Load from sessionStorage synchronously before paint — useLayoutEffect
+  // fires before the browser paints, so the sidebar never flashes empty
+  // if sessionStorage has cached data.
+  useLayoutEffect(() => {
+    if (hydrated) return;
+    setHydrated(true);
+    if (_chatListCache.length === 0) {
+      const cached = loadCachedChatList();
+      if (cached.length > 0) {
+        _setChatList(cached);
+        setChatListLoaded(true);
+      }
+    }
+  }, [hydrated]);
 
   const setChatList: React.Dispatch<React.SetStateAction<Chat[]>> = useCallback(
     (action) => {
@@ -79,14 +117,29 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
+    // Skip re-fetching if we already have cached data — prevents the
+    // sidebar from flashing empty during chat-to-chat navigation.
+    if (_chatListCache.length > 0) return;
     api
       .get("/api/chat")
-      .then((data: Chat[]) => setChatList([...data].sort((a, b) => b.id - a.id)))
+      .then((data: Chat[]) => {
+        const sorted = [...data].sort((a, b) => {
+          // Sort by updated_at descending (most recently active first),
+          // falling back to created_at, then id.
+          const aTime = a.updated_at ?? a.created_at;
+          const bTime = b.updated_at ?? b.created_at;
+          if (aTime && bTime) return bTime.localeCompare(aTime);
+          return b.id - a.id;
+        });
+        setChatList(sorted);
+        setChatListLoaded(true);
+      })
       .catch(() => {
         // silently ignore; user may not be authenticated yet
+        setChatListLoaded(true);
       });
     fetchFolders();
-  }, [fetchFolders]);
+  }, [fetchFolders, setChatList]);
 
   const renameChat = useCallback(async (id: number, title: string) => {
     await api.patch(`/api/chat/${id}`, { title });
@@ -110,6 +163,20 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   // Prepend a newly created chat to the sorted list
   const addChat = useCallback((chat: Chat) => {
     setChatList((prev) => [chat, ...prev]);
+  }, []);
+
+  // Move a chat to the top of the unpinned list (called when a message is sent).
+  // Pinned chats stay pinned — only unpinned chats are reordered.
+  const bumpChatToTop = useCallback((chatId: number) => {
+    setChatList((prev) => {
+      const chat = prev.find((c) => c.id === chatId);
+      if (!chat) return prev;
+      const updated = { ...chat, updated_at: new Date().toISOString() };
+      const pinned = prev.filter((c) => c.pinned);
+      const unpinned = prev.filter((c) => !c.pinned && c.id !== chatId);
+      // Bumped chat goes to top of unpinned
+      return [...pinned, updated, ...unpinned];
+    });
   }, []);
 
   const createFolder = useCallback(async (name: string): Promise<Folder> => {
@@ -144,27 +211,18 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     []
   );
 
+  const value = useMemo(() => ({
+    chatList, activeChat, folderList, graphRagActive, chatListLoaded,
+    setChatList, setActiveChat, setGraphRagActive,
+    renameChat, deleteChat, patchChat, addChat, bumpChatToTop,
+    fetchFolders, createFolder, renameFolder, deleteFolder, assignChatToFolder,
+  }), [chatList, activeChat, folderList, graphRagActive, chatListLoaded,
+       setChatList, setActiveChat, setGraphRagActive,
+       renameChat, deleteChat, patchChat, addChat, bumpChatToTop,
+       fetchFolders, createFolder, renameFolder, deleteFolder, assignChatToFolder]);
+
   return (
-    <ChatContext.Provider
-      value={{
-        chatList,
-        activeChat,
-        folderList,
-        graphRagActive,
-        setChatList,
-        setActiveChat,
-        setGraphRagActive,
-        renameChat,
-        deleteChat,
-        patchChat,
-        addChat,
-        fetchFolders,
-        createFolder,
-        renameFolder,
-        deleteFolder,
-        assignChatToFolder,
-      }}
-    >
+    <ChatContext.Provider value={value}>
       {children}
     </ChatContext.Provider>
   );

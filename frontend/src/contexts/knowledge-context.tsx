@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useEffect, useState, useCallback, useRef } from "react";
+import { createContext, useContext, useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { api } from "@/lib/api";
 
 export interface KnowledgeBase {
@@ -60,10 +60,12 @@ export function KnowledgeProvider({ children }: { children: React.ReactNode }) {
     setKbList((prev) => prev.filter((k) => k.id !== id));
   }, []);
 
+  const value = useMemo(() => ({
+    kbList, setKbList, activeKbId, setActiveKbId, refreshKbList, renameKb, deleteKb,
+  }), [kbList, activeKbId, refreshKbList, renameKb, deleteKb]);
+
   return (
-    <KnowledgeContext.Provider
-      value={{ kbList, setKbList, activeKbId, setActiveKbId, refreshKbList, renameKb, deleteKb }}
-    >
+    <KnowledgeContext.Provider value={value}>
       {children}
     </KnowledgeContext.Provider>
   );

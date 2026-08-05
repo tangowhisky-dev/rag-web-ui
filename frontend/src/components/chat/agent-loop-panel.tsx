@@ -4,7 +4,7 @@ import dynamic from "next/dynamic";
 
 const EChartsDiagramDynamic = dynamic(
   () => import("./echarts-diagram"),
-  { ssr: false }
+  { ssr: false, loading: () => <div className="h-72 w-full animate-pulse bg-muted rounded" /> }
 );
 
 interface AgentLoopPanelProps {

@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
+import { motion } from "framer-motion";
 import {
   Plus, Pencil, Trash2, X, MessageSquare, Pin, Search,
   Settings, Download, PanelLeftClose, PanelLeftOpen, FolderPlus,
@@ -36,9 +37,14 @@ function DraggableChatItem({
   // Pass drag listeners down so only the handle area activates drag
   const dragHandleProps = { ...listeners, ...attributes, style: { cursor: isDragging ? "grabbing" : "grab" } };
   return (
-    <div ref={setNodeRef} style={style}>
+    <motion.div
+      ref={setNodeRef}
+      style={style}
+      layout
+      transition={{ type: "spring", stiffness: 500, damping: 35, mass: 0.3 }}
+    >
       {children(dragHandleProps)}
-    </div>
+    </motion.div>
   );
 }
 
@@ -56,6 +62,7 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
     renameFolder,
     deleteFolder,
     assignChatToFolder,
+    chatListLoaded,
   } = useChatContext();
 
   const [collapsed, setCollapsed] = useState(false);
@@ -463,7 +470,11 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
 
               {filtered.length === 0 && folderList.length === 0 && (
                 <p className="text-xs text-muted-foreground text-center mt-6 px-4">
-                  {searchQuery ? "No matching chats." : "No conversations yet."}
+                  {searchQuery
+                    ? "No matching chats."
+                    : chatListLoaded
+                    ? "No conversations yet."
+                    : "Loading chats…"}
                 </p>
               )}
 

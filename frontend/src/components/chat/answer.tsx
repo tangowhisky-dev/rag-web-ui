@@ -28,11 +28,11 @@ import dynamic from "next/dynamic";
 
 const MermaidDiagramDynamic = dynamic(
   () => import("./mermaid-diagram"),
-  { ssr: false }
+  { ssr: false, loading: () => <div className="h-48 w-full animate-pulse bg-muted rounded" /> }
 );
 const EChartsDiagramDynamic = dynamic(
   () => import("./echarts-diagram"),
-  { ssr: false }
+  { ssr: false, loading: () => <div className="h-72 w-full animate-pulse bg-muted rounded" /> }
 );
 import { api } from "@/lib/api";
 import { cleanChunkText } from "@/lib/utils";
@@ -162,7 +162,7 @@ export const Answer: FC<{
   lastAnswerObject?: Record<string, unknown>;
   chartOption?: Record<string, unknown>;
   chartOptions?: Array<Record<string, unknown>>;
-}> = ({ messageId, chatId, markdown, citations = [], rewrittenQuery, confidence, confidenceScore, confidenceBreakdown, suggestion, failedLegs, queryClassification, toolTrace, agentSteps, taskList, progressMessages, synthesisMode, isStreaming = false, onDelete, finalConfidence, finalConfidenceLevel, faithfulness, completeness, retrievalScore, plan, toolCalls, toolObservations, lastAnswerObject, chartOption, chartOptions }) => {
+}> = React.memo(({ messageId, chatId, markdown, citations = [], rewrittenQuery, confidence, confidenceScore, confidenceBreakdown, suggestion, failedLegs, queryClassification, toolTrace, agentSteps, taskList, progressMessages, synthesisMode, isStreaming = false, onDelete, finalConfidence, finalConfidenceLevel, faithfulness, completeness, retrievalScore, plan, toolCalls, toolObservations, lastAnswerObject, chartOption, chartOptions }) => {
   const [citationInfoMap, setCitationInfoMap] = useState<
     Record<string, CitationInfo>
   >({});
@@ -184,6 +184,9 @@ export const Answer: FC<{
   // now delivers citations well before streaming ends, and remounting again
   // at stream-end caused a redundant visible "refresh" with no content change.
   const [renderKey, setRenderKey] = useState(0);
+  // Bumped by the "Refresh citations" button to re-trigger the fetch effect
+  // without remounting the entire Markdown tree.
+  const [citationRefreshTick, setCitationRefreshTick] = useState(0);
   const hadCitationsRef = useRef(citations.length > 0);
   useEffect(() => {
     if (citations.length > 0 && !hadCitationsRef.current) {
@@ -272,50 +275,65 @@ export const Answer: FC<{
     }, [markdown]);
 
   useEffect(() => {
-    const fetchCitationInfo = async () => {
-      const infoMap: Record<string, CitationInfo> = {};
+    let cancelled = false;
 
+    const fetchCitationInfo = async () => {
+      // Build the list of unique (kbId, docId) pairs to fetch.
+      const seen = new Set<string>();
+      const pairs: Array<{ key: string; kbId: number; docId: number }> = [];
       for (const citation of debouncedCitations) {
-        // During streaming, kb_id/document_id are nested in citation.metadata.
-        // After reload via API, they are flattened to the top level.
         const top = citation as Record<string, any>;
         const meta = (citation.metadata as Record<string, any>) || {};
-        const effectiveKbId = top.kb_id ?? top.kb_id ?? meta.kb_id;
-        const effectiveDocId = top.document_id ?? top.document_id ?? meta.document_id;
+        const effectiveKbId = top.kb_id ?? meta.kb_id;
+        const effectiveDocId = top.document_id ?? meta.document_id;
         if (!effectiveKbId || !effectiveDocId) continue;
-
         const key = `${effectiveKbId}-${effectiveDocId}`;
-        if (infoMap[key]) continue;
-
-        try {
-          const [kb, doc] = await Promise.all([
-            api.get(`/api/knowledge-base/${effectiveKbId}`),
-            api.get(`/api/knowledge-base/${effectiveKbId}/documents/${effectiveDocId}`),
-          ]);
-
-          infoMap[key] = {
-            knowledge_base: {
-              name: kb.name,
-            },
-            document: {
-              file_name: doc.file_name,
-              knowledge_base: {
-                name: kb.name,
-              },
-            },
-          };
-        } catch (error) {
-          console.error("Failed to fetch citation info:", error);
-        }
+        if (seen.has(key)) continue;
+        seen.add(key);
+        pairs.push({ key, kbId: effectiveKbId, docId: effectiveDocId });
       }
 
+      // Fetch all citation infos in parallel — previously this was a
+      // sequential loop, causing N round-trips for N citations.
+      const results = await Promise.all(
+        pairs.map(async ({ key, kbId, docId }) => {
+          try {
+            const [kb, doc] = await Promise.all([
+              api.get(`/api/knowledge-base/${kbId}`),
+              api.get(`/api/knowledge-base/${kbId}/documents/${docId}`),
+            ]);
+            return {
+              key,
+              info: {
+                knowledge_base: { name: kb.name },
+                document: {
+                  file_name: doc.file_name,
+                  knowledge_base: { name: kb.name },
+                },
+              } as CitationInfo,
+            };
+          } catch (error) {
+            console.error("Failed to fetch citation info:", error);
+            return null;
+          }
+        })
+      );
+
+      if (cancelled) return;
+
+      const infoMap: Record<string, CitationInfo> = {};
+      for (const r of results) {
+        if (r) infoMap[r.key] = r.info;
+      }
       setCitationInfoMap(infoMap);
     };
 
     if (debouncedCitations.length > 0) {
       fetchCitationInfo();
     }
-  }, [debouncedCitations]);
+
+    return () => { cancelled = true; };
+  }, [debouncedCitations, citationRefreshTick]);
 
   // Stable component reference — never recreated, reads current data from refs.
   const CitationLink = useCallback(
@@ -614,7 +632,7 @@ export const Answer: FC<{
             </button>
             {citations.length > 0 && !isStreaming && (
               <button
-                onClick={() => setRenderKey((k) => k + 1)}
+                onClick={() => setCitationRefreshTick((t) => t + 1)}
                 title="Refresh citations"
                 className="flex items-center gap-1 px-2 py-1 rounded text-xs text-zinc-500 hover:text-zinc-800 hover:bg-zinc-100 dark:hover:text-zinc-200 dark:hover:bg-zinc-800 transition-colors"
               >
@@ -693,7 +711,7 @@ export const Answer: FC<{
       />
     </div>
   );
-};
+});
 
 // ── SubtaskList: live TODO checklist for complex multi-subtask queries ────────
 

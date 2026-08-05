@@ -247,6 +247,11 @@ async def generate_response(
         # ── Persist user message ───────────────────────────────────────────
         user_message = Message(content=display_query or query, role="user", chat_id=chat_id)
         db.add(user_message)
+        # Bump chat.updated_at so the sidebar can sort by last activity
+        chat = db.query(Chat).filter(Chat.id == chat_id).first()
+        if chat:
+            from datetime import datetime, timezone
+            chat.updated_at = datetime.now(timezone.utc)
         db.commit()
 
         # Link chat_file to the user message so UI can show the filename
@@ -501,6 +506,12 @@ async def generate_response(
 
         # ── Persist final answer ───────────────────────────────────────────
         bot_message.content = full_response
+
+        # Bump chat.updated_at so sidebar sorts by last activity
+        _chat = db.query(Chat).filter(Chat.id == chat_id).first()
+        if _chat:
+            from datetime import datetime, timezone
+            _chat.updated_at = datetime.now(timezone.utc)
 
         # Persist retrieval confidence for this message
         if _confidence_level is not None:

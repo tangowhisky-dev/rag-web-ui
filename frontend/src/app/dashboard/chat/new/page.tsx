@@ -56,6 +56,7 @@ export default function NewChatPage() {
         id: data.id,
         title: data.title,
         created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
         pinned: false,
         folder_id: null,
       });

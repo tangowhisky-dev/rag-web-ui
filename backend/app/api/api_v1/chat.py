@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import func
 from app.db.session import get_db
 from app.models.user import User
 from app.models.chat import Chat, Message, ChatFile
@@ -75,9 +76,21 @@ def get_chats(
     skip: int = 0,
     limit: int = 100
 ) -> Any:
+    # Sort by latest message timestamp, falling back to chat creation date.
+    # Chats with no messages sort by created_at.
+    latest_msg_subq = (
+        db.query(
+            Message.chat_id.label("chat_id"),
+            func.max(Message.created_at).label("last_msg_at"),
+        )
+        .group_by(Message.chat_id)
+        .subquery()
+    )
     chats = (
         db.query(Chat)
+        .outerjoin(latest_msg_subq, latest_msg_subq.c.chat_id == Chat.id)
         .filter(_chat_owner_filter(current_user))
+        .order_by(func.coalesce(latest_msg_subq.c.last_msg_at, Chat.created_at).desc())
         .offset(skip)
         .limit(limit)
         .all()

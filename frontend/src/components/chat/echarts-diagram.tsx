@@ -47,21 +47,20 @@ export default function EChartsDiagram({ code }: EChartsDiagramProps) {
         const echarts = await import('echarts');
         const dom = containerRef.current!;
 
-        // Dispose existing instance if any
-        if (echartsInstanceRef.current) {
-          const existing = echartsInstanceRef.current as { dispose: () => void };
-          existing.dispose();
-          echartsInstanceRef.current = null;
+        // Reuse existing instance if present — ECharts supports in-place
+        // updates via setOption without dispose/recreate.
+        let instance = echartsInstanceRef.current as any;
+        if (!instance) {
+          instance = echarts.init(dom, undefined, { renderer: 'canvas' });
+          echartsInstanceRef.current = instance;
         }
-
-        const instance = echarts.init(dom, undefined, { renderer: 'canvas' });
         if (cancelled) {
           instance.dispose();
+          echartsInstanceRef.current = null;
           return;
         }
 
-        instance.setOption(option! as Record<string, unknown>);
-        echartsInstanceRef.current = instance;
+        instance.setOption(option! as Record<string, unknown>, true);
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : String(err));
@@ -73,13 +72,19 @@ export default function EChartsDiagram({ code }: EChartsDiagramProps) {
 
     return () => {
       cancelled = true;
+    };
+  }, [option]);
+
+  // Dispose chart instance on unmount
+  useEffect(() => {
+    return () => {
       if (echartsInstanceRef.current) {
         const instance = echartsInstanceRef.current as { dispose: () => void };
         instance.dispose();
         echartsInstanceRef.current = null;
       }
     };
-  }, [option]);
+  }, []);
 
   // Resize handling
   useEffect(() => {

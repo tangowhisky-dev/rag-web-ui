@@ -73,7 +73,7 @@ interface Message {
   // Final evaluation metrics (from answer_evaluation_node)
   finalConfidence?: number;
   finalConfidenceLevel?: "very_high" | "high" | "medium" | "low" | "none";
-  retrievalConfidence?: number;
+  retrievalScore?: number;
   faithfulness?: number;
   completeness?: number;
   // Enterprise agent loop per-turn state
@@ -120,7 +120,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const { toast } = useToast();
-  const { setActiveChat, setGraphRagActive } = useChatContext();
+  const { setActiveChat, setGraphRagActive, bumpChatToTop } = useChatContext();
   const [isInitialLoad, setIsInitialLoad] = useState(true);
   const [chatTitle, setChatTitle] = useState<string | undefined>();
   const [temperature, setTemperature] = useState(0.7);
@@ -237,65 +237,14 @@ function ChatPageInner({ params }: { params: { id: string } }) {
 
   useEffect(() => {
     setActiveChat(Number(params.id));
-    return () => { setActiveChat(null); setGraphRagActive(false); };
+    // Only reset graphRagActive on unmount — don't clear activeChat.
+    // Clearing activeChat causes a brief null state that triggers an
+    // extra context re-render of all consumers (including the sidebar)
+    // during chat-to-chat navigation. The new page sets activeChat
+    // immediately in its effect, so the old value persists harmlessly
+    // until then.
+    return () => { setGraphRagActive(false); };
   }, [params.id, setActiveChat, setGraphRagActive]);
-
-  useEffect(() => {
-    if (isInitialLoad) {
-      fetchChat();
-      // NOTE: do NOT setIsInitialLoad(false) here — fetchChat does it in its finally block
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Restore scroll position after prepending older messages (must be synchronous pre-paint)
-  useLayoutEffect(() => {
-    if (pendingScrollAdjustRef.current !== null && scrollContainerRef.current) {
-      const delta = scrollContainerRef.current.scrollHeight - pendingScrollAdjustRef.current;
-      scrollContainerRef.current.scrollTop += delta;
-      pendingScrollAdjustRef.current = null;
-    }
-  }, [messages]);
-
-  // Scroll to bottom only on initial load (once messages first arrive)
-  useEffect(() => {
-    if (!isInitialLoad && messages.length > 0 && scrollContainerRef.current) {
-      scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isInitialLoad]);
-
-  // Track scroll position and auto-scroll during streaming
-  useEffect(() => {
-    const container = scrollContainerRef.current;
-    if (!container) return;
-
-    const nearBottom = () => {
-      const threshold = 80;
-      return container.scrollHeight - container.scrollTop - container.clientHeight <= threshold;
-    };
-
-    const onScroll = () => {
-      const atBottom = nearBottom();
-      setIsAtBottom(atBottom);
-      if (!atBottom) {
-        setAutoScrollLocked(true);
-      } else if (atBottom && autoScrollLocked) {
-        setAutoScrollLocked(false);
-      }
-    };
-
-    container.addEventListener("scroll", onScroll, { passive: true });
-    return () => container.removeEventListener("scroll", onScroll);
-  }, [autoScrollLocked]);
-
-  // Auto-scroll during streaming while not locked
-  useEffect(() => {
-    if (!isLoading || autoScrollLocked) return;
-    const container = scrollContainerRef.current;
-    if (!container) return;
-    container.scrollTop = container.scrollHeight;
-  }, [messages, isLoading, autoScrollLocked, progressMessages, taskList, thinkingContent]);
 
   // ── Message formatter (shared by initial load and paginated load) ───────────
   const formatMessage = useCallback((msg: ChatMessage): Message => {
@@ -332,7 +281,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     };
   }, []);
 
-  const fetchChat = async () => {
+  const fetchChat = useCallback(async () => {
     try {
       // Fetch metadata (no messages) and first page in parallel
       const [meta, page] = await Promise.all([
@@ -353,7 +302,69 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     } finally {
       setIsInitialLoad(false);
     }
-  };
+  }, [params.id, formatMessage, toast, router]);
+
+  useEffect(() => {
+    if (isInitialLoad) {
+      fetchChat();
+      // NOTE: do NOT setIsInitialLoad(false) here — fetchChat does it in its finally block
+    }
+  }, [isInitialLoad, fetchChat]);
+
+  // Restore scroll position after prepending older messages (must be synchronous pre-paint)
+  useLayoutEffect(() => {
+    if (pendingScrollAdjustRef.current !== null && scrollContainerRef.current) {
+      const delta = scrollContainerRef.current.scrollHeight - pendingScrollAdjustRef.current;
+      scrollContainerRef.current.scrollTop += delta;
+      pendingScrollAdjustRef.current = null;
+    }
+  }, [messages]);
+
+  // Scroll to bottom only on initial load (once messages first arrive)
+  useEffect(() => {
+    if (!isInitialLoad && messages.length > 0 && scrollContainerRef.current) {
+      scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isInitialLoad]);
+
+  // Ref mirror of autoScrollLocked so the scroll listener can read the
+  // current value without being re-created on every change.
+  const autoScrollLockedRef = useRef(false);
+  useEffect(() => { autoScrollLockedRef.current = autoScrollLocked; }, [autoScrollLocked]);
+
+  // Track scroll position and auto-scroll during streaming.
+  // Listener is attached once (empty deps) — no churn on every scroll event.
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+
+    const nearBottom = () => {
+      const threshold = 80;
+      return container.scrollHeight - container.scrollTop - container.clientHeight <= threshold;
+    };
+
+    const onScroll = () => {
+      const atBottom = nearBottom();
+      setIsAtBottom(atBottom);
+      if (!atBottom) {
+        setAutoScrollLocked(true);
+      } else if (atBottom && autoScrollLockedRef.current) {
+        setAutoScrollLocked(false);
+      }
+    };
+
+    container.addEventListener("scroll", onScroll, { passive: true });
+    return () => container.removeEventListener("scroll", onScroll);
+  }, []);
+
+  // Auto-scroll during streaming while not locked
+  useEffect(() => {
+    if (!isLoading || autoScrollLocked) return;
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    container.scrollTop = container.scrollHeight;
+  }, [messages, isLoading, autoScrollLocked, progressMessages, taskList, thinkingContent]);
 
   const loadMoreMessages = useCallback(async () => {
     if (isLoadingMore || !hasMoreMessages || !messages.length) return;
@@ -388,11 +399,17 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     return () => observer.disconnect();
   }, [loadMoreMessages]);
 
-  const scrollToBottom = () => {
+  const scrollToBottom = useCallback(() => {
     if (scrollContainerRef.current) {
       scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
     }
-  };
+  }, []);
+
+  // Stable callback for Answer's onDelete — prevents re-rendering every
+  // Answer when the parent re-renders during streaming.
+  const handleDeleteMessage = useCallback((id: string) => {
+    setMessages((prev) => prev.filter((m) => m.id !== id));
+  }, []);
 
   const markdownParse = (text: string) => {
     return text
@@ -402,6 +419,11 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       .replace(/\[[cC]itation:(\d+)]/g, "[citation]($1)")
       // Agentic pipeline emits [KB-N] labels instead of [N](N).
       .replace(/\[KB-(\d+)\]/g, "[citation]($1)")
+      // Agentic pipeline also emits combined [KB-N, KB-M] labels.
+      // Split into separate [citation](N) links.
+      .replace(/\[KB-([\d,\s]+)\]/g, (match, ids: string) =>
+        ids.split(",").map((id: string) => `[citation](${id.trim()})`).join("")
+      )
       // Fallback: plain [N] that the model emits instead of [citation:N].
       // Only match standalone bracketed numbers (not part of markdown list
       // syntax "1." or already-converted "[citation](N)").
@@ -871,6 +893,9 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       citations: [],
     };
 
+    // Bump this chat to the top of the sidebar (unpinned section)
+    bumpChatToTop(Number(params.id));
+
     const requestMessages = messages
       .filter((message) => message.role === "user" || message.role === "assistant")
       .map((message) => ({
@@ -1088,20 +1113,40 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     setIsLoading(false);
   };
 
+  // Cache parsed markdown per message so non-streaming messages keep stable
+  // object references — prevents re-rendering every Answer on every token.
+  // Keyed by message object identity: if the message object hasn't been
+  // replaced by a setMessages update, ALL its fields are unchanged, so we
+  // can safely reuse the cached result. This correctly handles cases where
+  // citations, lastAnswerObject, or confidence change without content changing.
+  const parsedCacheRef = useRef<Map<Message, Message>>(new Map());
+  const parsedContentCache = useRef<Map<string, string>>(new Map());
   const processedMessages = useMemo(() => {
+    const objCache = parsedCacheRef.current;
+    const strCache = parsedContentCache.current;
     return messages.map((message) => {
       if (message.role !== "assistant" || !message.content) return message;
-
-      return {
-        ...message,
-        content: markdownParse(message.content),
-      };
+      const cached = objCache.get(message);
+      if (cached) return cached;
+      // Only re-run markdownParse if content string changed; reuse parsed string otherwise.
+      const prevParsed = strCache.get(message.id);
+      const parsed = prevParsed !== undefined && message.content === strCache.get(message.id + "_raw")
+        ? prevParsed
+        : markdownParse(message.content);
+      strCache.set(message.id, parsed);
+      strCache.set(message.id + "_raw", message.content);
+      const result = { ...message, content: parsed };
+      objCache.set(message, result);
+      return result;
     });
   }, [messages]);
 
   const lastAssistantId = useMemo(() => {
-    const assistants = processedMessages.filter((m) => m.role === "assistant");
-    return assistants[assistants.length - 1]?.id;
+    let last: string | undefined;
+    for (const m of processedMessages) {
+      if (m.role === "assistant") last = m.id;
+    }
+    return last;
   }, [processedMessages]);
 
   const handleExport = async () => {
@@ -1204,7 +1249,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                           progressMessages={message.id === lastAssistantId && isLoading ? progressMessages : undefined}
                           synthesisMode={message.synthesisMode}
                           isStreaming={isLoading && message.id === lastAssistantId}
-                          onDelete={(id) => setMessages((prev) => prev.filter((m) => m.id !== id))}
+                          onDelete={handleDeleteMessage}
                           finalConfidence={message.finalConfidence}
                           finalConfidenceLevel={message.finalConfidenceLevel}
                           faithfulness={message.faithfulness}
