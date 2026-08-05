@@ -49,6 +49,23 @@ class TestParseThinkResponse:
         parsed = parse_think_response(resp, mode="auto")
         assert parsed.final_answer == "I don't know."
 
+    def test_json_text_extra_closing_brace_is_repaired(self):
+        # Some local models emit one stray '}' before the array close.
+        resp = _msg(
+            '{ "tool_calls": [ { "tool": "rag_retrieve", "arguments": '
+            '{ "query": "CPU scheduling" } } } ] }'
+        )
+        parsed = parse_think_response(resp, mode="json_text")
+        assert len(parsed.tool_calls) == 1
+        assert parsed.tool_calls[0]["tool"] == "rag_retrieve"
+        assert parsed.tool_calls[0]["arguments"]["query"] == "CPU scheduling"
+
+    def test_json_text_missing_closing_brace_is_repaired(self):
+        resp = _msg('{ "tool": "chart_generate", "arguments": { "chart_type": "pie" }')
+        parsed = parse_think_response(resp, mode="json_text")
+        assert len(parsed.tool_calls) == 1
+        assert parsed.tool_calls[0]["tool"] == "chart_generate"
+
     def test_malformed_json_fallback(self):
         resp = _msg("not { valid json")
         parsed = parse_think_response(resp, mode="json_text")

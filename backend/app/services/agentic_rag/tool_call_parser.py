@@ -26,6 +26,46 @@ class ParsedThinkResponse:
         self.tool_calls = tool_calls or []
 
 
+def _repair_json_brackets(text: str) -> str:
+    """Best-effort repair for the extra/missing closing bracket local models
+    sometimes emit (e.g. one stray '}' before the final ']'). Drops closing
+    brackets that don't match any open scope and appends closers for any
+    scope still open at the end.
+    """
+    pairs = {"}": "{", "]": "["}
+    stack: list[str] = []
+    out: list[str] = []
+    in_string = False
+    escape = False
+    for ch in text:
+        if in_string:
+            out.append(ch)
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+        elif ch in "{[":
+            stack.append(ch)
+            out.append(ch)
+        elif ch in "}]":
+            if stack and stack[-1] == pairs[ch]:
+                stack.pop()
+                out.append(ch)
+            # else: unmatched closing bracket — drop it silently.
+        else:
+            out.append(ch)
+    while stack:
+        opener = stack.pop()
+        out.append("}" if opener == "{" else "]")
+    return "".join(out)
+
+
 def _extract_json_block(text: str) -> Optional[str]:
     """Extract the first JSON object or array from a markdown/code-fenced string."""
     # Try code fences first.
@@ -80,7 +120,10 @@ def parse_think_response(
         try:
             block = _extract_json_block(raw)
             if block:
-                parsed = json.loads(block)
+                try:
+                    parsed = json.loads(block)
+                except json.JSONDecodeError:
+                    parsed = json.loads(_repair_json_brackets(block))
                 if "tool_calls" in parsed:
                     tool_calls = _normalize_tool_calls(parsed["tool_calls"])
                     if tool_calls:
