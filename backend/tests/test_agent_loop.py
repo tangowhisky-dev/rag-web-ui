@@ -264,3 +264,66 @@ class TestConvergence:
         result = asyncio.run(think_node(self._satisfied_state(), ctx))
         assert result["tool_calls"] == []
         assert result["precomputed_answer"] == ""
+
+
+class TestLoadContextNodeResetsPerTurnState:
+    """The checkpointer restores turn 1's full state at the start of turn 2.
+    load_context_node must reset per-turn loop state (observations, iteration,
+    tool_call_count, force_finalize, ...) so turn 2 starts clean, while leaving
+    conversation-level state (messages, last_answer_object) untouched."""
+
+    def _turn1_leftover_state(self) -> dict:
+        return {
+            "original_query": "what's next?",
+            "observations": [
+                Observation(
+                    tool="rag_retrieve",
+                    arguments={"query": "turn 1 query"},
+                    result={"docs": [{"page_content": "turn 1 doc chunk"}]},
+                    error=None,
+                    tokens=10,
+                )
+            ],
+            "iteration": 3,
+            "tool_call_count": {"rag_retrieve": 2},
+            "force_finalize": True,
+            "reflection_final": {"ready": False, "reasoning": "turn 1 reasoning"},
+            "precomputed_answer": "turn 1 answer",
+            "tool_calls": [{"tool": "chart_generate", "arguments": {}}],
+            "all_scored_docs": [{"page_content": "turn 1 scored doc"}],
+            "retrieval_confidence": 0.9,
+            "compaction_triggered": True,
+            "answer_evaluation_attempts": 2,
+            "evaluation_flags": ["low_confidence"],
+            "adaptive_reran": True,
+        }
+
+    def test_resets_loop_state_at_start_of_next_turn(self):
+        from app.services.agentic_rag.agent_graph import load_context_node
+        from app.services.agentic_rag.graph_state import accumulate
+
+        ctx = ToolContext(
+            db=MagicMock(), user_id=1, org_id=1, chat_id=None, message_id=None,
+            redis_memory=None, org_llm_config={},
+        )
+
+        update = asyncio.run(load_context_node(self._turn1_leftover_state(), ctx))
+
+        assert update["iteration"] == 0
+        assert update["tool_call_count"] == {}
+        assert update["force_finalize"] is False
+        assert update["reflection_final"] is None
+        assert update["precomputed_answer"] == ""
+        assert update["tool_calls"] == []
+        assert update["all_scored_docs"] == []
+        assert update["retrieval_confidence"] == 0.0
+        assert update["compaction_triggered"] is False
+        assert update["answer_evaluation_attempts"] == 0
+        assert update["evaluation_flags"] == []
+        assert update["adaptive_reran"] is False
+
+        # observations uses the accumulate reducer; applying the __reset__
+        # marker on top of turn 1's list must clear it, not append to it.
+        turn1_observations = self._turn1_leftover_state()["observations"]
+        merged = accumulate(turn1_observations, update["observations"])
+        assert merged == []

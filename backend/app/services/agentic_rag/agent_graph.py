@@ -511,6 +511,23 @@ async def load_context_node(state: AgentState, ctx: ToolContext) -> dict:
             "chat_id": ctx.chat_id,
             "message_id": ctx.message_id,
             "started_at": time.monotonic(),
+            # Reset per-turn loop state; the checkpointer otherwise carries it
+            # over from the previous turn (e.g. force_finalize would silently
+            # kill tool calls this turn; observations would leak last turn's
+            # doc chunks into this turn's think_node prompt).
+            "observations": [{"__reset__": True}],
+            "iteration": 0,
+            "tool_call_count": {},
+            "force_finalize": False,
+            "reflection_final": None,
+            "precomputed_answer": "",
+            "tool_calls": [],
+            "all_scored_docs": [],
+            "retrieval_confidence": 0.0,
+            "compaction_triggered": False,
+            "answer_evaluation_attempts": 0,
+            "evaluation_flags": [],
+            "adaptive_reran": False,
         }
     
     
