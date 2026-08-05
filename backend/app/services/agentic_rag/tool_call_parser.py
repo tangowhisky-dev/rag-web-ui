@@ -144,6 +144,15 @@ def parse_think_response(
                     (name, args), = parsed.items()
                     if isinstance(args, dict):
                         return ParsedThinkResponse(tool_calls=[{"tool": name, "arguments": args}])
+                elif isinstance(parsed, dict) and "chart_type" in parsed and "data" in parsed:
+                    # Some local models, asked for a chart, write the
+                    # chart_generate *arguments* directly as the answer body
+                    # instead of an actual tool call — e.g.
+                    # {"chart_type": "bar", "data": [...], "title": "..."}.
+                    # Recognize the tool's own argument shape and dispatch it
+                    # as a real chart_generate call instead of letting this
+                    # raw JSON leak into the final answer text verbatim.
+                    return ParsedThinkResponse(tool_calls=[{"tool": "chart_generate", "arguments": parsed}])
         except Exception as exc:
             logger.warning("[tool_call_parser] JSON fallback parse failed: %s", exc)
 

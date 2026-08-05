@@ -80,3 +80,33 @@ class TestParseThinkResponse:
         assert len(parsed.tool_calls) == 1
         assert parsed.tool_calls[0]["tool"] == "rag_retrieve"
         assert parsed.tool_calls[0]["arguments"]["query"] == "race condition definition"
+
+    def test_chart_generate_args_written_as_prose_answer(self):
+        # Some local models, asked for a chart, write chart_generate's own
+        # argument shape directly into the answer body (surrounded by prose)
+        # instead of emitting an actual tool call. Must be recognized and
+        # dispatched as a real chart_generate call, not leaked as raw JSON
+        # text in the final answer.
+        resp = _msg(
+            "Based on the provided documents, here is the comparison:\n\n"
+            "```\n"
+            '{\n'
+            '  "chart_type": "bar",\n'
+            '  "title": "Comparison of Average Waiting Times",\n'
+            '  "x_label": "Scheduling Algorithm",\n'
+            '  "y_label": "Average Waiting Time (ms)",\n'
+            '  "data": [\n'
+            '    {"label": "FCFS", "value": 28},\n'
+            '    {"label": "SJF", "value": 13},\n'
+            '    {"label": "Round Robin", "value": 23}\n'
+            '  ]\n'
+            '}\n'
+            "```\n\n"
+            "### Data Summary\n- FCFS: 28ms\n"
+        )
+        parsed = parse_think_response(resp, mode="json_text")
+        assert parsed.final_answer is None
+        assert len(parsed.tool_calls) == 1
+        assert parsed.tool_calls[0]["tool"] == "chart_generate"
+        assert parsed.tool_calls[0]["arguments"]["chart_type"] == "bar"
+        assert len(parsed.tool_calls[0]["arguments"]["data"]) == 3
