@@ -5,13 +5,15 @@ Public API:
 
 The agent operates via a loop of LangGraph nodes:
 1. Load conversation context (load_context)
-2. Rewrite query using chat history (rewrite_query_node)
-3. Compact conversation history when it grows too long (compaction_node)
-4. Plan the reasoning steps (plan_node)
-5. Think / reason through each step (think_node)
-6. Execute tools, including retrieval (tool_node)
-7. Reflect on tool results (reflect_node)
-8. Finalize and stream the answer (finalize_node)
+2. Resolve the retrieval query from chat history (rewrite_query_node)
+3. Plan the reasoning steps (plan_node)
+4. Think / reason through each step (think_node)
+5. Execute tools, including retrieval (tool_node)
+6. Reflect on tool results (reflect_node)
+7. Finalize and stream the answer (finalize_node)
+
+Context compaction is not a node: it runs as a budget guard immediately
+before any LLM call with variable-length context (think, finalize).
 
 All tokens, progress, thinking traces, tool calls, and final answers stream in real-time.
 
@@ -19,7 +21,7 @@ LangGraph components:
   agent_graph.py   - Main agent graph definition and node wiring
   agent_runner.py  - Graph execution runner
   graph_state.py   - AgentState with accumulator reducers
-  nodes.py         - Node implementations (rewrite, compaction, retrieve, evaluate, etc.)
+  nodes.py         - Node implementations (query resolution, retrieval, evaluation, etc.)
   prompts.py       - System/user prompts for planning, reasoning, and evaluation
   schemas.py       - Pydantic models for state and tool schemas
   streaming.py     - v3 stream transformer to SSE events

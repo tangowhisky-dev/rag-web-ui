@@ -78,16 +78,15 @@ For long conversations, the system automatically compacts older messages to save
 **Configuration:**
 ```env
 COMPACTION_ENABLED=true
-COMPACTION_HISTORY_THRESHOLD=50
 COMPACTION_KEEP_RECENT=10
 COMPACTION_SUMMARY_MAX_CHARS=2000
-COMPACTION_ASSISTANT_MAX_CHARS=1000
+COMPACTION_ASSISTANT_MAX_CHARS=600
 ```
 
 **How it works:**
-- When message count exceeds threshold, older messages are summarized
-- Recent messages (configurable count) are kept in full
-- Summaries are stored in `history_summary` field
+- Compaction is a budget guard, not a message-count trigger: it runs immediately before any LLM call whose prompt would exceed `CONTEXT_COMPACTION_TRIGGER_RATIO` of the usable window
+- Stage 1 shrinks tool observations, stage 2 drops the lowest-scoring retrieved chunks (finalize only), stage 3 summarizes the oldest turns
+- Recent messages (`COMPACTION_KEEP_RECENT`) are kept verbatim; older ones are replaced by a single summary message with a stable id, so repeated compactions replace rather than stack
 - LLM uses summary + recent messages for context
 
 ### Full-Text Search Across Messages

@@ -99,31 +99,6 @@ def _strip_think(text: str) -> str:
     return strip_reasoning_tags(text)
 
 
-# ── Query rewrite ──────────────────────────────────────────────────────────────
-
-async def _rewrite_query(
-    query: str,
-    recent_history: List,  # LangChain message objects
-    api_base: Optional[str] = None,
-    query_model: Optional[str] = None,
-    memory_context: str = "",
-) -> str:
-    """Rewrite query into a self-contained search query using chat history.
-
-    Delegates to the shared ``rewrite_query`` in agentic_rag/utils.py.
-    """
-    from app.services.agentic_rag.utils import rewrite_query as _rewrite_query_impl
-
-    return _rewrite_query_impl(
-        query=query,
-        recent_history=recent_history,
-        memory_context=memory_context,
-        api_base=api_base,
-        query_model=query_model,
-        openai_api_key=settings.OPENAI_API_KEY,
-        openai_api_base=settings.OPENAI_API_BASE,
-    )
-
 async def classify_query(query: str, api_base: Optional[str] = None, query_model: Optional[str] = None) -> "QueryClassification":
     """
     Classify a query into one of 4 types using LLM-based zero-shot classification.
@@ -324,11 +299,7 @@ async def generate_response(
             db=db,
             chat_id=chat_id,
             knowledge_base_ids=knowledge_base_ids,
-            temperature=temperature,
-            model_name=model_name,
             display_query=display_query,
-            api_base=api_base,
-            query_model=query_model,
             org_id=org_id,
             user_id=user_id,
             message_id=_bot_message_id,

@@ -98,10 +98,9 @@ async def query(
 
     async for event in run_agentic_rag(
         query=body.question,
-        kb_ids=body.kb_ids,
+        knowledge_base_ids=body.kb_ids,
         db=db,
         chat_id=transient_chat_id,
-        generate_answer=body.generate_answer,
     ):
         if event.get("event") == "context":
             docs = event.get("docs", docs)

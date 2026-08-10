@@ -6,12 +6,11 @@ accumulator reducers for automatic accumulation across nodes.
 
 from __future__ import annotations
 
-import operator
-from typing import Annotated, Any, List, Literal, Optional, Union
+from typing import Annotated, Any, List, Optional
 
 from langgraph.graph import MessagesState
 
-from app.services.agentic_rag.schemas import Plan, LastAnswerObject, Observation, Artifact
+from app.services.agentic_rag.schemas import Plan, LastAnswerObject, Observation
 
 
 def accumulate(existing: list, new: list) -> list:
@@ -22,13 +21,11 @@ def accumulate(existing: list, new: list) -> list:
     """
     has_reset = any(isinstance(item, dict) and item.get("__reset__") for item in new)
     if has_reset:
-        return [item for item in new if not item.get("__reset__")]
+        return [
+            item for item in new
+            if not (isinstance(item, dict) and item.get("__reset__"))
+        ]
     return existing + new
-
-
-def set_union(a: set, b: set) -> set:
-    """Union reducer: merge two sets."""
-    return a | b
 
 
 def _last_value(_old: Any, new: Any) -> Any:
@@ -44,10 +41,14 @@ class AgentState(MessagesState):
     """State for the agent graph. Extends MessagesState with agentic fields."""
 
     # ── Query state ─────────────────────────────────────────────────────
-    # Annotated with last-value reducer because parallel Send() branches to
-    # agent_subgraph each write these keys in the same step.
+    # ``original_query`` is the user's exact wording and is authoritative for
+    # planning, finalization and evaluation. ``rewritten_query`` is the
+    # standalone retrieval string and is used only by retrieval/reranking.
     original_query: Annotated[str, _last_value] = ""
     rewritten_query: Annotated[str, _last_value] = ""
+    # Where each reference in rewritten_query was resolved from, or the
+    # reason resolution was skipped/rejected.
+    resolution_provenance: Annotated[Optional[dict], _last_value] = None
 
     # ── Per-leg retrieval state (separated for observability) ───────────
     dense_docs: Annotated[List[dict], accumulate] = []
@@ -67,49 +68,36 @@ class AgentState(MessagesState):
     # All scored docs (with _reranker_score) — used by adaptive reranking.
     all_scored_docs: Annotated[List[dict], _last_value] = []
     # Filtered docs after applying threshold — used for generation.
+    # Citable evidence ONLY: never seed this with recalled conversational
+    # memory (see recalled_memories).
     retrieved_docs: Annotated[List[dict], _last_value] = []
-    retrieval_keys: Annotated[set, set_union] = set()  # Track what we've already retrieved
-    # Annotated with last-value reducer so parallel subgraphs can each write
-    # without LangGraph throwing "Can receive only one value per step".
-    retrieval_iterations: Annotated[int, _last_value] = 0
     retrieval_confidence: Annotated[float, _last_value] = 0.0
 
-    # ── Sufficiency check state ─────────────────────────────────────────
-    sufficiency_met: Annotated[bool, _last_value] = False
-    sufficiency_message: Annotated[str, _last_value] = ""
-    needs_graph_expansion: Annotated[bool, _last_value] = False
+    # ── Conversational memory (NOT citable evidence) ────────────────────
+    # Hits from the long-term semantic store. May inform reference
+    # resolution and planning; must never enter retrieved_docs, citations,
+    # retrieval confidence, or faithfulness scoring.
+    recalled_memories: Annotated[List[dict], _last_value] = []
 
     # ── Compaction state ──────────────────────────────────────────────────
-    # Structured summary of older conversation turns, generated when the
-    # message history grows beyond COMPACTION_HISTORY_THRESHOLD.
+    # Structured summary of older conversation turns, produced when the
+    # rendered prompt exceeds the context budget.
     compaction_summary: Annotated[Optional[str], _last_value] = None
     compaction_triggered: Annotated[bool, _last_value] = False
 
     # ── Generation state ────────────────────────────────────────────────
     answer: str = ""
-    answer_usage: Optional[dict] = None  # Token usage captured during streaming
+    answer_usage: Annotated[Optional[dict], _last_value] = None  # Provider token usage captured during streaming
     cited_doc_indices: List[int] = []  # 1-based doc indices cited by the final answer, in display order
-    thinking_chunks: List[str] = []
-    is_chart_query: bool = False
-    chart_data: Optional[Any] = None
-    chart_retries: int = 0
 
     # ── Retry budget state ──────────────────────────────────────────────
     # Annotated with last-value reducer so parallel subgraphs can each write
     # without LangGraph throwing "Can receive only one value per step".
-    needs_retry: Annotated[bool, _last_value] = False
     adaptive_reran: Annotated[bool, _last_value] = False
-    adaptive_rerunning: Annotated[bool, _last_value] = False  # True only when adaptive actually expanded
     answer_evaluation_attempts: Annotated[int, _last_value] = 0
     graph_expansion_done: Annotated[bool, _last_value] = False
 
-    # ── Subtask context state ───────────────────────────────────────────
-    # Each subagent accumulates its retrieved context here; the main
-    # orchestrator uses these bundles to generate the final answer.
-    subtask_contexts: Annotated[List[dict], accumulate] = []  # {question, retrieved_docs, retrieved_contexts, retrieval_confidence, leg_results, failed_legs}
-
     # ── Synthesis state ─────────────────────────────────────────────────
-    subtask_answers: Annotated[List[dict], accumulate] = []  # legacy field, kept for compatibility
     final_answer: str = ""
 
     # ── Final evaluation state ──────────────────────────────────────────
@@ -142,16 +130,28 @@ class AgentState(MessagesState):
     precomputed_answer: Annotated[str, _last_value] = ""
     tool_call_count: Annotated[dict, _last_value] = {}
     last_answer_object: Annotated[Optional[LastAnswerObject], _last_value] = None
-    artifacts: Annotated[List[Artifact], accumulate] = []
     needs_clarification: Annotated[bool, _last_value] = False
     clarification_question: Annotated[Optional[str], _last_value] = None
     reflection_final: Annotated[Optional[dict], _last_value] = None  # {ready: bool, reasoning: str} from reflect_final_node
-    clarification_question: Annotated[Optional[str], _last_value] = None
+
+    # Wall-clock start of the current turn (time.monotonic()). Must be
+    # declared: LangGraph silently drops updates for undeclared keys, which
+    # previously made AGENT_MAX_WALL_SECONDS a no-op.
+    started_at: Annotated[Optional[float], _last_value] = None
+    # Set by tool_node when _verify_execution is already satisfied so
+    # route_tool can short-circuit straight to reflect_final.
+    force_finalize: Annotated[bool, _last_value] = False
+    # Recovery tool calls injected by reflect_node for the next think round.
+    precomputed_tool_calls: Annotated[List[dict], _last_value] = []
+
+    # ── Clarification state ─────────────────────────────────────────────
+    # Number of clarification rounds already spent this turn; capped by
+    # AGENT_MAX_CLARIFICATIONS so plan → clarify → plan cannot loop.
+    clarification_count: Annotated[int, _last_value] = 0
+    # The user's answer to the clarification question, merged into query
+    # resolution on resume.
+    clarification_response: Annotated[str, _last_value] = ""
 
     # ── Metadata ────────────────────────────────────────────────────────
     latency_ms: int = 0
     model_used: str = ""
-
-    # ── Streaming / event data ──────────────────────────────────────────
-    _task_list: Optional[List[dict]] = None  # Subtask list for task_list events
-    _confidence: str = ""  # Confidence level for context events

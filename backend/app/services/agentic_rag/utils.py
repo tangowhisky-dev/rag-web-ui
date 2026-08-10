@@ -115,72 +115,162 @@ def normalize_citations(answer: str, docs: list) -> tuple[str, list[int]]:
     return normalized, valid_cited
 
 
-def rewrite_query(
+# Markers that indicate the message may depend on earlier turns. Only these
+# trigger the resolver LLM call; everything else passes through unchanged.
+_REFERENCE_MARKERS = re.compile(
+    r"\b("
+    r"it|its|it's|they|them|their|this|that|these|those|there|"
+    r"he|she|his|her|him|"
+    r"one|ones|former|latter|above|previous|prior|earlier|"
+    r"first|second|third|fourth|fifth|last|next|"
+    r"same|other|others|another|else|"
+    r"instead|also|too|again|more|further|"
+    r"yours?|you\s+said|you\s+mentioned|mentioned"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Elliptical fragments ("what about X?", "and Y?", "why?") are context-dependent
+# even without an explicit anaphor.
+_ELLIPSIS_MARKERS = re.compile(
+    r"^\s*(and|but|or|so|what about|how about|why|why not|what if|ok|okay|yes|no)\b",
+    re.IGNORECASE,
+)
+
+_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "by", "can", "did", "do", "does",
+    "for", "from", "had", "has", "have", "how", "in", "is", "it", "its", "of",
+    "on", "or", "that", "the", "their", "them", "there", "these", "they", "this",
+    "those", "to", "was", "were", "what", "when", "where", "which", "who", "why",
+    "will", "with", "you", "your", "about", "into", "than", "then", "explain",
+    "describe", "tell", "me", "give", "list", "show", "summarise", "summarize",
+}
+
+
+def _content_tokens(text: str) -> set[str]:
+    """Lowercase alphanumeric tokens with stopwords and short tokens removed."""
+    return {
+        t for t in re.findall(r"[a-z0-9]+", (text or "").lower())
+        if len(t) > 2 and t not in _STOPWORDS
+    }
+
+
+def needs_reference_resolution(query: str, has_history: bool) -> bool:
+    """True if *query* plausibly refers to something from an earlier turn."""
+    if not has_history:
+        return False
+    if not query or not query.strip():
+        return False
+    return bool(_REFERENCE_MARKERS.search(query) or _ELLIPSIS_MARKERS.match(query))
+
+
+def validate_resolution_provenance(
+    original_query: str,
+    rewritten: str,
+    provenance_sources: list[str],
+) -> tuple[bool, list[str]]:
+    """Check that every term introduced by the rewrite is traceable.
+
+    Resolving "it" legitimately *adds* an entity, so a "no new words" rule is
+    wrong. The correct invariant is provenance: any content token present in
+    the rewrite but absent from the original query must appear in one of the
+    supplied sources (recent turns, compaction summary, previous answer,
+    clarification text).
+
+    Returns (ok, unsupported_tokens).
+    """
+    added = _content_tokens(rewritten) - _content_tokens(original_query)
+    if not added:
+        return True, []
+    supported = set()
+    for source in provenance_sources:
+        supported |= _content_tokens(source)
+    unsupported = sorted(added - supported)
+    return not unsupported, unsupported
+
+
+def resolve_retrieval_query(
     query: str,
+    original_query: str,
     recent_history: list,
-    memory_context: str = "",
+    provenance_sources: list[str] | None = None,
     api_base: str | None = None,
     query_model: str | None = None,
     openai_api_key: str = "",
     openai_api_base: str = "",
-) -> str:
-    """Rewrite *query* into a self-contained search query using chat history.
+) -> tuple[str, dict]:
+    """Resolve *query* into a standalone retrieval string.
 
-    Uses the recent conversation turns plus any relevant long-term memory
-    context (from the Redis store) to resolve pronouns and references.
-    Returns the original query on failure or when the model echoes an answer
-    instead of rewriting.
+    Returns ``(retrieval_query, provenance)``. ``provenance`` records whether
+    resolution ran and, when it did, which tokens it introduced — so a bad
+    rewrite is auditable rather than silently authoritative.
+
+    Falls back to *query* on skip, timeout, LLM error, or failed provenance
+    validation. The retrieval query is never allowed to become free text the
+    pipeline cannot account for.
     """
-    if not recent_history and not memory_context:
-        return query
+    provenance_sources = provenance_sources or []
+    has_history = bool(recent_history)
 
-    memory_section = ""
-    if memory_context:
-        memory_section = (
-            "\n\nRelevant past context (older conversation turns):\n"
-            f"{memory_context}\n\n"
-            "Use this past context to resolve references that go beyond the recent messages."
+    if not needs_reference_resolution(query, has_history):
+        return query, {"resolved": False, "reason": "self_contained"}
+
+    try:
+        raw_rewrite = _call_rewriter(
+            query=query,
+            recent_history=recent_history,
+            api_base=api_base,
+            query_model=query_model,
+            openai_api_key=openai_api_key,
+            openai_api_base=openai_api_base,
         )
+    except Exception as exc:  # network, timeout, provider error
+        return query, {"resolved": False, "reason": f"resolver_failed: {exc}"}
 
-    system_msg = REWRITE_SYSTEM_PROMPT.format(memory_section=memory_section)
+    standalone = _clean_rewrite(raw_rewrite) or query
+    if standalone == query:
+        return query, {"resolved": False, "reason": "unchanged"}
 
-    messages: list[dict] = [{"role": "system", "content": system_msg}]
-    from langchain_core.messages import HumanMessage, AIMessage
-
-    for m in recent_history:
-        if isinstance(m, HumanMessage):
-            messages.append({"role": "user", "content": m.content})
-        elif isinstance(m, AIMessage):
-            messages.append({"role": "assistant", "content": m.content[:400]})
-    messages.append({"role": "user", "content": query})
-
-    from openai import OpenAI as _OAI
-    client = _OAI(api_key=openai_api_key, base_url=api_base or openai_api_base)
-    resp = client.chat.completions.create(
-        model=query_model or "default",
-        messages=messages,
-        max_tokens=60,
-        temperature=0,
-        stream=False,
-        extra_body={"thinking": {"type": "disabled"}},
+    ok, unsupported = validate_resolution_provenance(
+        original_query=query,
+        rewritten=standalone,
+        provenance_sources=provenance_sources,
     )
-    raw_rewrite = (resp.choices[0].message.content or "").strip()
-    standalone = strip_reasoning_tags(raw_rewrite) or query
+    if not ok:
+        return query, {
+            "resolved": False,
+            "reason": "provenance_rejected",
+            "unsupported_terms": unsupported,
+            "rejected_query": standalone,
+        }
 
-    # Strip meta-commentary preamble that some models emit
-    if re.search(
-        r"\buser\b.*\rewrite\b|\brewritten\b|\bstandalone\b",
-        standalone, re.IGNORECASE,
-    ):
-        if ":" in standalone:
-            candidate = standalone.rsplit(":", 1)[-1].strip()
-        else:
-            sentences = re.split(r"(?<=[.?!])\s+", standalone)
-            candidate = sentences[-1].strip()
+    return standalone, {
+        "resolved": True,
+        "reason": "reference_resolved",
+        "original_query": original_query,
+    }
+
+
+def _clean_rewrite(raw_rewrite: str) -> str:
+    """Strip reasoning tags, meta-commentary preambles, and answer echoes."""
+    standalone = strip_reasoning_tags(raw_rewrite).strip()
+    if not standalone:
+        return ""
+
+    # Strip a meta-commentary preamble ("Rewritten standalone query: ...").
+    # Only split on a colon that is part of such a preamble prefix, so a
+    # legitimate query containing a colon is left intact.
+    meta_prefix = re.match(
+        r"^[^:\n]{0,80}?\b(rewritten|standalone|search)\s+(query|question)?\s*:\s*",
+        standalone,
+        re.IGNORECASE,
+    )
+    if meta_prefix:
+        candidate = standalone[meta_prefix.end():].strip()
         if len(candidate) > 5:
             standalone = candidate
 
-    # Guard: if the rewriter echoed the previous assistant response
+    # Guard: the rewriter echoed an answer instead of rewriting.
     answer_patterns = [
         r"\bthere\s+is\s+no\s+information\b",
         r"\bthe\s+context\s+does?\s+not\s+contain\b",
@@ -189,6 +279,43 @@ def rewrite_query(
         r"\bno\s+information\s+found\b",
     ]
     if any(re.search(p, standalone, re.IGNORECASE) for p in answer_patterns):
-        standalone = query
+        return ""
 
-    return standalone
+    return standalone.strip().strip('"')
+
+
+def _call_rewriter(
+    query: str,
+    recent_history: list,
+    api_base: str | None,
+    query_model: str | None,
+    openai_api_key: str,
+    openai_api_base: str,
+) -> str:
+    """Single rewriter LLM call. Raises on provider failure."""
+    system_msg = REWRITE_SYSTEM_PROMPT.format(memory_section="")
+
+    messages: list[dict] = [{"role": "system", "content": system_msg}]
+    from langchain_core.messages import HumanMessage, AIMessage
+
+    for m in recent_history:
+        if isinstance(m, HumanMessage):
+            messages.append({"role": "user", "content": m.content})
+        elif isinstance(m, AIMessage):
+            messages.append({"role": "assistant", "content": m.content})
+    messages.append({"role": "user", "content": query})
+
+    from openai import OpenAI as _OAI
+    client = _OAI(api_key=openai_api_key, base_url=api_base or openai_api_base)
+    resp = client.chat.completions.create(
+        model=query_model or "default",
+        # 60 tokens truncated rewrites mid-phrase; the prompt caps output at
+        # 30 words, so 160 leaves headroom without inviting an essay.
+        max_tokens=160,
+        messages=messages,
+        temperature=0,
+        stream=False,
+        extra_body={"thinking": {"type": "disabled"}},
+    )
+    return (resp.choices[0].message.content or "").strip()
+

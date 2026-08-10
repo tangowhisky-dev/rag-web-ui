@@ -32,17 +32,18 @@ async def run_agent_loop(
     kb_ids: list[int],
     db: Any,
     file_markdown: Optional[str] = None,
-    temperature: float = 0.0,
-    model_name: Optional[str] = None,
-    api_base: Optional[str] = None,
     org_id: Optional[int] = None,
     chat_id: Optional[int] = None,
     user_id: Optional[int] = None,
     message_id: Optional[int] = None,
     display_query: Optional[str] = None,
-    query_model: Optional[str] = None,
 ) -> AsyncGenerator[dict, None]:
-    """Run the new enterprise agent loop and stream SSE-style events."""
+    """Run the new enterprise agent loop and stream SSE-style events.
+
+    Model, temperature and endpoint are resolved per organization by
+    ``build_chat_llm`` / ``get_org_llm``; there are deliberately no
+    per-call overrides here.
+    """
     memory = await get_redis_memory()
     thread_id = f"chat-{chat_id}" if chat_id else f"anon-{uuid.uuid4().hex}"
     config = {"configurable": {"thread_id": thread_id}}
@@ -78,6 +79,7 @@ async def run_agent_loop(
     observations: list[dict] = []
     plan_obj = None
     think_iterations = 0
+    provider_usage: dict | None = None
     usage = {"promptTokens": 0, "completionTokens": 0, "messageId": message_id}
 
     try:
@@ -105,6 +107,18 @@ async def run_agent_loop(
 
             if kind != "updates" or not isinstance(payload, dict):
                 continue
+
+            # Human-in-the-loop clarification. `astream` does NOT raise
+            # GraphInterrupt — it emits an `__interrupt__` update once the
+            # interrupt checkpoint has been persisted. Surfacing the event from
+            # here (rather than from a custom writer call inside the node) is
+            # what makes `Command(resume=...)` have something to resume.
+            if "__interrupt__" in payload:
+                interrupts = payload["__interrupt__"]
+                value = interrupts[0].value if interrupts else None
+                question = value.get("question", "") if isinstance(value, dict) else str(value or "")
+                yield {"event": "interrupt", "question": question, "thread_id": thread_id}
+                return
 
             for node, update in payload.items():
                 if not isinstance(update, dict):
@@ -135,6 +149,8 @@ async def run_agent_loop(
                     if final:
                         full_answer = final
                     citations = update.get("retrieved_docs", [])
+                    if isinstance(update.get("answer_usage"), dict):
+                        provider_usage = update["answer_usage"]
                     yield {"event": "progress", "phase": "finalize", "message": "Finalising answer"}
 
                 elif node == "answer_scoring":
@@ -162,10 +178,17 @@ async def run_agent_loop(
         yield {"event": "answer_rewrite", "content": full_answer, "citations": []}
 
     # ── Token accounting ────────────────────────────────────────────────
-    # Count the total prompt context sent to the LLM across all calls.
-    # Components: system prompts (constant per call), user query, all
-    # retrieved docs, tool observations, plan, and file markdown.
-    # This is used for usage reporting and context budget tracking.
+    # Prefer provider-reported usage from the generation call. When the
+    # backend doesn't report usage, fall back to a reconstruction and mark it
+    # as an estimate — it counts system prompts, the query, all retrieved
+    # docs and observations once each, which is a lower bound, not a measured
+    # figure.
+    if provider_usage:
+        usage["promptTokens"] = provider_usage.get("input_tokens", 0)
+        usage["completionTokens"] = provider_usage.get("output_tokens", 0)
+        usage["estimated"] = False
+        yield {"event": "done", "usage": usage}
+        return
 
     # System prompt overhead (constant per call type)
     plan_sys_tokens = count_tokens(AGENT_SYSTEM_PROMPT) + count_tokens(PLAN_SYSTEM_PROMPT)
@@ -202,6 +225,7 @@ async def run_agent_loop(
     completion_tokens = count_tokens(full_answer)
     usage["promptTokens"] = prompt_tokens
     usage["completionTokens"] = completion_tokens
+    usage["estimated"] = True
     yield {
         "event": "done",
         "usage": usage,

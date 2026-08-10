@@ -1,7 +1,7 @@
 """Agent loop graph for the enterprise agent.
 
 Replaces the rigid RAG pipeline with a tool-calling loop:
-  load_context → rewrite_query → compaction → plan → think → [tool → think ...] → finalize → save_memory
+  load_context → rewrite_query → plan → think → [tool → think ...] → finalize → save_memory
 """
 
 from __future__ import annotations
@@ -119,7 +119,13 @@ def _extract_json_block(text: str) -> str | None:
 
 
 from app.services.agentic_rag.llm_factory import build_chat_llm
-from app.services.agentic_rag.nodes import _agent_step, answer_evaluation_node, compaction_node, rewrite_query_node, select_recent_history
+from app.services.agentic_rag.nodes import (
+    _agent_step,
+    answer_evaluation_node,
+    history_to_text,
+    rewrite_query_node,
+    select_recent_history,
+)
 from app.services.agentic_rag.prompts import (
     AGENT_SYSTEM_PROMPT,
     FINALIZE_ANSWER_PROMPT,
@@ -212,18 +218,20 @@ def _prune_contiguous_overlaps(docs: list[dict]) -> list[dict]:
     for doc_id, group in by_doc.items():
         group.sort(key=lambda d: d.get("metadata", {}).get("chunk_index", 0))
         prev_text = None
+        prev_idx = None
         for doc in group:
             chunk_idx = doc.get("metadata", {}).get("chunk_index", 0)
             content = doc.get("page_content", "")
-            if prev_text is not None:
-                # Check if contiguous (previous chunk_index + 1 == current).
-                prev_idx = group[group.index(doc) - 1].get("metadata", {}).get("chunk_index", 0)
-                if prev_idx + 1 == chunk_idx:
-                    pruned = _strip_overlap(prev_text, content, max_overlap)
-                    pruned_content[id(doc)] = pruned
-                    prev_text = pruned
-                    continue
-            prev_text = content
+            # Position must come from enumeration order: list.index() resolves
+            # by dict equality and returns the wrong neighbour when two chunk
+            # dicts compare equal.
+            if prev_text is not None and prev_idx is not None and prev_idx + 1 == chunk_idx:
+                pruned = _strip_overlap(prev_text, content, max_overlap)
+                pruned_content[id(doc)] = pruned
+                prev_text = pruned
+            else:
+                prev_text = content
+            prev_idx = chunk_idx
 
     if not pruned_content:
         return docs
@@ -390,6 +398,9 @@ _COMPACT_KEEP_DOCS = 5
 _COMPACT_DOC_PREVIEW_CHARS = 200
 # How many stdout lines to keep for code_execute when compacting.
 _COMPACT_KEEP_STDOUT_LINES = 20
+# Stable id for the conversation-summary message so repeated compactions
+# replace the previous summary instead of stacking summaries.
+_COMPACTION_SUMMARY_ID = "agentic-compaction-summary"
 
 
 def _compact_observations(observations: list[Observation]) -> list[Observation]:
@@ -439,64 +450,119 @@ def _compact_observations(observations: list[Observation]) -> list[Observation]:
     return compacted
 
 
-async def _compact_messages_llm(messages: list, api_base: str | None = None) -> tuple[list, str | None]:
-    """Stage 2 (LLM call): summarize oldest messages into a structured summary.
+async def _compact_messages_llm(
+    messages: list,
+    ctx: Optional["ToolContext"] = None,
+) -> tuple[list, list, str | None]:
+    """Summarize the oldest messages into one structured summary message.
 
-    Keeps the most recent COMPACTION_KEEP_RECENT messages verbatim.
-    Returns (compacted_messages, summary_text).
+    Returns ``(message_updates, resolved_messages, summary_text)``.
+    ``message_updates`` is a LangGraph message-channel update that *replaces*
+    the history — the ``add_messages`` reducer appends, so a plain
+    ``[summary] + recent`` list would grow the checkpoint instead of shrinking
+    it. Uses ``RemoveMessage(REMOVE_ALL_MESSAGES)`` plus a stable summary id so
+    repeated compactions replace the previous summary rather than stacking.
     """
+    from langchain_core.messages import RemoveMessage
+    from langgraph.graph.message import REMOVE_ALL_MESSAGES
+
     from app.services.agentic_rag.nodes import _messages_to_conversation_text
     from app.services.agentic_rag.prompts import COMPACTION_SYSTEM_PROMPT, COMPACTION_USER_PROMPT
-    from app.services.agentic_rag.nodes import _get_llm
 
     keep_recent = settings.COMPACTION_KEEP_RECENT
-    recent = messages[-keep_recent:]
-    old = messages[:len(messages) - keep_recent]
+    recent = messages[-keep_recent:] if keep_recent else []
+    old = messages[:len(messages) - len(recent)]
+    # Drop a previous summary from *old* so it is re-summarised rather than
+    # quoted verbatim inside the new summary.
+    old = [m for m in old if getattr(m, "id", None) != _COMPACTION_SUMMARY_ID]
     if not old:
-        return messages, None
+        return [], list(messages), None
 
     conversation_text = _messages_to_conversation_text(old)
     try:
-        llm = _get_llm(
-            model_name=settings.effective_query_model,
-            temperature=0.0,
-            streaming=False,
-            api_base=api_base,
-        )
-        response = llm.invoke([
+        llm = _build_compaction_llm(ctx)
+        response = await llm.ainvoke([
             {"role": "system", "content": COMPACTION_SYSTEM_PROMPT},
             {"role": "user", "content": COMPACTION_USER_PROMPT.format(conversation=conversation_text)},
         ])
         summary = str(response.content).strip()
         if len(summary) > settings.COMPACTION_SUMMARY_MAX_CHARS:
             summary = summary[:settings.COMPACTION_SUMMARY_MAX_CHARS] + "\n\n[...summary truncated]"
-        # Prepend the summary as a system-like HumanMessage so the LLM sees it.
-        compacted = [HumanMessage(content=f"[Conversation summary]\n{summary}")] + recent
-        return compacted, summary
+        summary_msg = HumanMessage(
+            content=f"[Conversation summary]\n{summary}", id=_COMPACTION_SUMMARY_ID
+        )
+        resolved = [summary_msg, *recent]
+        return [RemoveMessage(id=REMOVE_ALL_MESSAGES), *resolved], resolved, summary
     except Exception as exc:
         logger.warning("[_compact_messages_llm] failed: %s — keeping full history", exc)
-        return messages, None
+        return [], list(messages), None
+
+
+def _build_compaction_llm(ctx: Optional["ToolContext"]):
+    """Return the org-configured summarisation LLM, falling back to globals."""
+    if ctx is not None:
+        try:
+            return build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)
+        except Exception as exc:
+            logger.warning("[compaction] org LLM unavailable (%s) — falling back to global config", exc)
+    from app.services.agentic_rag.nodes import _get_llm
+
+    return _get_llm(model_name=settings.effective_query_model, temperature=0.0, streaming=False)
+
+
+def _trim_docs_to_budget(docs: list[dict], overflow_tokens: int) -> list[dict]:
+    """Drop the lowest-scoring chunks until roughly *overflow_tokens* are freed.
+
+    ``finalize_node``'s prompt is dominated by ``retrieved_docs``; summarising
+    conversation history cannot fix an evidence-payload overflow. Chunks are
+    removed lowest ``_reranker_score`` first so the strongest evidence — and
+    therefore the citation set — survives.
+    """
+    if not docs or overflow_tokens <= 0:
+        return docs
+
+    scored = sorted(
+        enumerate(docs),
+        key=lambda pair: pair[1].get("_reranker_score", pair[1].get("score", 0.0) or 0.0),
+    )
+    drop: set[int] = set()
+    freed = 0
+    # Always keep at least one chunk — an empty context guarantees a refusal.
+    for idx, doc in scored[:-1]:
+        if freed >= overflow_tokens:
+            break
+        freed += count_tokens(str(doc.get("page_content", "")))
+        drop.add(idx)
+
+    if not drop:
+        return docs
+    logger.info("[_trim_docs_to_budget] dropped %d/%d chunks (~%d tokens)", len(drop), len(docs), freed)
+    return [d for i, d in enumerate(docs) if i not in drop]
 
 
 async def _compact_if_needed(
     state: AgentState,
     prompt_text: str,
     system_overhead: int = 0,
-    api_base: str | None = None,
-) -> dict:
-    """Runtime compaction referral. Called before any LLM call with variable-length context.
+    ctx: Optional["ToolContext"] = None,
+    trim_docs: bool = False,
+) -> tuple[dict, dict]:
+    """Single context-budget guard. Called before any LLM call with variable context.
 
-    Checks if system_overhead + prompt_text exceeds the context budget.
-    If so, applies two stages:
-      1. Deterministic: compact tool observations (keep top 5 docs, trim stdout).
-      2. LLM call: summarize oldest messages (only if stage 1 wasn't enough).
+    Stages, applied only while the rebuilt prompt is still over budget:
+      1. Deterministic: shrink tool observations (keep top docs, trim stdout).
+      2. Evidence packing: drop the lowest-scoring retrieved chunks
+         (``trim_docs=True``, i.e. the finalize prompt only).
+      3. LLM call: summarise the oldest messages into one summary message.
 
-    Returns a state update dict (observations and/or messages) that the caller
-    should merge into its local state before building the LLM prompt.
-    Empty dict if no compaction was needed.
+    Returns ``(graph_updates, local_view)``. ``graph_updates`` is returned from
+    the node and speaks the channels' reducer contracts (``__reset__`` markers,
+    ``RemoveMessage``). ``local_view`` holds the same data already resolved, so
+    the caller can rebuild its prompt without having to interpret reducer
+    markers. Both are empty when no compaction was needed.
     """
     if not settings.COMPACTION_ENABLED:
-        return {}
+        return {}, {}
 
     from app.services.agentic_rag.token_budget import ContextBudget
 
@@ -505,46 +571,62 @@ async def _compact_if_needed(
     budget.add(system_overhead)
 
     if not budget.needs_compaction():
-        return {}
+        return {}, {}
 
     logger.info(
         "[_compact_if_needed] over budget | used=%d threshold=%d — compacting",
         budget.used, budget.compaction_threshold,
     )
 
-    updates: dict[str, Any] = {}
+    updates: dict[str, Any] = {"compaction_triggered": True}
+    local: dict[str, Any] = {}
 
-    # Stage 1: Compact observations (deterministic, no LLM call).
-    observations = list(state.get("observations", []))
+    # Stage 1: compact observations (deterministic, no LLM call).
+    # The `observations` channel uses the append-style `accumulate` reducer,
+    # so a replacement must be sent through the `__reset__` marker contract.
+    observations = [_coerce_observation(o) for o in state.get("observations", [])]
     compacted_obs = _compact_observations(observations)
-
-    # Re-check budget with compacted observations.
-    # We need to recompute the prompt text with the compacted observations
-    # to see if stage 1 was sufficient. The caller will rebuild the prompt
-    # from the updated state, so we estimate the savings.
-    obs_tokens_before = sum(count_tokens(json.dumps(_coerce_observation(o).result, default=str)) for o in observations)
+    obs_tokens_before = sum(count_tokens(json.dumps(o.result, default=str)) for o in observations)
     obs_tokens_after = sum(count_tokens(json.dumps(o.result, default=str)) for o in compacted_obs)
     savings = obs_tokens_before - obs_tokens_after
-
     if savings > 0:
-        updates["observations"] = compacted_obs
+        updates["observations"] = [{"__reset__": True}, *compacted_obs]
+        local["observations"] = compacted_obs
         budget.used -= savings
         logger.info("[_compact_if_needed] stage 1 (observations) saved %d tokens", savings)
 
     if not budget.needs_compaction():
-        return updates
+        return updates, local
 
-    # Stage 2: Compact messages (LLM call).
+    # Stage 2: evidence packing — only meaningful where retrieved_docs are
+    # actually rendered into the prompt (finalize).
+    if trim_docs:
+        docs = list(state.get("retrieved_docs", []) or [])
+        overflow = budget.used - budget.compaction_threshold
+        trimmed = _trim_docs_to_budget(docs, overflow)
+        if len(trimmed) < len(docs):
+            freed = count_tokens(format_context_string(docs)) - count_tokens(format_context_string(trimmed))
+            updates["retrieved_docs"] = trimmed
+            local["retrieved_docs"] = trimmed
+            budget.used -= max(freed, 0)
+            logger.info("[_compact_if_needed] stage 2 (evidence) saved %d tokens", freed)
+
+    if not budget.needs_compaction():
+        return updates, local
+
+    # Stage 3: summarise old messages (LLM call).
     messages = list(state.get("messages", []))
     if len(messages) > settings.COMPACTION_KEEP_RECENT:
-        compacted_msgs, summary = await _compact_messages_llm(messages, api_base=api_base)
+        message_updates, resolved, summary = await _compact_messages_llm(messages, ctx=ctx)
         if summary is not None:
-            updates["messages"] = compacted_msgs
+            updates["messages"] = message_updates
             updates["compaction_summary"] = summary
-            logger.info("[_compact_if_needed] stage 2 (messages) summarized %d old messages",
-                        len(messages) - settings.COMPACTION_KEEP_RECENT)
+            local["messages"] = resolved
+            local["compaction_summary"] = summary
+            logger.info("[_compact_if_needed] stage 3 (messages) summarized %d old messages",
+                        len(messages) - len(resolved) + 1)
 
-    return updates
+    return updates, local
 
 
 async def load_context_node(state: AgentState, ctx: ToolContext) -> dict:
@@ -580,7 +662,10 @@ async def load_context_node(state: AgentState, ctx: ToolContext) -> dict:
     
         return {
             "last_answer_object": last_obj,
-            "retrieved_docs": recalled,
+            # Recalled conversational memory is NOT citable evidence: it stays
+            # out of retrieved_docs so it can never be rendered as a [KB-n]
+            # chunk, cited, or scored for faithfulness.
+            "recalled_memories": recalled,
             "org_id": ctx.org_id,
             "user_id": ctx.user_id,
             "chat_id": ctx.chat_id,
@@ -594,15 +679,25 @@ async def load_context_node(state: AgentState, ctx: ToolContext) -> dict:
             "iteration": 0,
             "tool_call_count": {},
             "force_finalize": False,
+            "precomputed_tool_calls": [],
             "reflection_final": None,
             "precomputed_answer": "",
             "tool_calls": [],
+            "retrieved_docs": [],
             "all_scored_docs": [],
+            "cited_doc_indices": [],
             "retrieval_confidence": 0.0,
             "compaction_triggered": False,
             "answer_evaluation_attempts": 0,
             "evaluation_flags": [],
             "adaptive_reran": False,
+            "answer_usage": None,
+            "final_answer": "",
+            "answer": "",
+            "clarification_count": 0,
+            "clarification_response": "",
+            "needs_clarification": False,
+            "resolution_provenance": None,
         }
     
     
@@ -610,7 +705,8 @@ async def plan_node(state: AgentState, ctx: ToolContext) -> dict:
     """Produce a structured plan for the current turn."""
     with _agent_step("plan"):
         writer = _writer()
-        rewritten = state.get("rewritten_query", "") or state.get("original_query", "")
+        original = state.get("original_query", "")
+        rewritten = state.get("rewritten_query", "") or original
     
         file_meta = []
         if ctx.chat_id:
@@ -622,14 +718,17 @@ async def plan_node(state: AgentState, ctx: ToolContext) -> dict:
         if lao and hasattr(lao, "summary"):
             last_summary = lao.summary
     
-        recalled = state.get("retrieved_docs", [])
+        recalled = state.get("recalled_memories", []) or []
         recalled_text = "\n".join(d.get("page_content", "") for d in recalled[:3])
+        clarification = (state.get("clarification_response") or "").strip()
     
         system = AGENT_SYSTEM_PROMPT + "\n\n" + PLAN_SYSTEM_PROMPT
         user = (
-            f"Query: {rewritten}\n"
-            f"Previous answer summary: {last_summary}\n"
-            f"Recalled long-term memory:\n{recalled_text}\n\n"
+            f"User message: {original}\n"
+            f"Retrieval query: {rewritten}\n"
+            + (f"User clarification: {clarification}\n" if clarification else "")
+            + f"Previous answer summary: {last_summary}\n"
+            f"Recalled long-term memory (context only, not evidence):\n{recalled_text}\n\n"
             f"Attached files: {json.dumps(file_meta)}\n\n"
             "Produce a plan JSON matching the schema."
         )
@@ -664,8 +763,22 @@ async def plan_node(state: AgentState, ctx: ToolContext) -> dict:
                 plan = Plan(intent="rag", subtasks=[Subtask(id="a", description=rewritten, tool_hint="rag_retrieve")])
     
         writer({"event": "plan", "plan": plan.model_dump() if isinstance(plan, Plan) else plan})
-    
-        return {"plan": plan, "needs_clarification": plan.needs_clarification}
+
+        # Clarification budget: without a cap, a model that keeps setting
+        # needs_clarification=true loops plan → clarify → plan until the
+        # recursion limit. Past the cap, answer with the ambiguity stated.
+        needs_clarification = bool(getattr(plan, "needs_clarification", False))
+        if needs_clarification and state.get("clarification_count", 0) >= settings.AGENT_MAX_CLARIFICATIONS:
+            logger.info("[plan_node] clarification budget exhausted — proceeding without asking")
+            needs_clarification = False
+            if isinstance(plan, Plan):
+                plan.needs_clarification = False
+
+        return {
+            "plan": plan,
+            "needs_clarification": needs_clarification,
+            "clarification_question": getattr(plan, "clarification_question", None),
+        }
     
     
 async def think_node(state: AgentState, ctx: ToolContext) -> dict:
@@ -691,6 +804,7 @@ async def think_node(state: AgentState, ctx: ToolContext) -> dict:
             return {"iteration": iteration, "tool_calls": list(precomputed), "precomputed_tool_calls": []}
     
         query = state.get("rewritten_query", "") or state.get("original_query", "")
+        original = state.get("original_query", "") or query
         plan = state.get("plan") or Plan()
         observations = state.get("observations", [])
         # Expose current state to tools so applicable_tools() and tool reads
@@ -699,13 +813,12 @@ async def think_node(state: AgentState, ctx: ToolContext) -> dict:
         tools = applicable_tools(ctx)
         tools_text = _tool_descriptions_text(tools)
 
-        # Build conversation context — full content, no truncation. Arbitrary
-        # char caps damage coherence (mid-sentence cuts confuse the LLM).
-        recent = select_recent_history(state.get("messages", []), max_pairs=3)
-        history_text = ""
-        for msg in recent:
-            role = "User" if msg.type == "human" else "Assistant"
-            history_text += f"  {role}: {msg.content}\n"
+        # Build conversation context from the same shared projection every
+        # other node uses (select_recent_history), so rewrite/think/finalize
+        # can't disagree about what "recent history" means.
+        recent = select_recent_history(state.get("messages", []))
+        history_text = history_to_text(recent)
+        summary_text = state.get("compaction_summary") or ""
 
         # Include last_answer_object summary so "summarize it" / "chart it" work.
         lao = state.get("last_answer_object")
@@ -737,8 +850,10 @@ async def think_node(state: AgentState, ctx: ToolContext) -> dict:
         def _build_think_user_prompt() -> str:
             return (
                 f"Iteration: {iteration}/{max_iter}\n"
-                f"User query: {query}\n"
-                f"Conversation history (recent turns):\n{history_text or '  (none)'}\n"
+                f"User message: {original}\n"
+                f"Retrieval query: {query}\n"
+                + (f"Earlier conversation summary:\n{summary_text}\n" if summary_text else "")
+                + f"Conversation history (recent turns):\n{history_text or '  (none)'}\n"
                 f"Previous answer context:\n{lao_text or '  (none)'}\n"
                 f"Verification feedback:\n{reflection_text or '  (none)'}\n"
                 f"{tried_queries_text}"
@@ -753,17 +868,15 @@ async def think_node(state: AgentState, ctx: ToolContext) -> dict:
         # Runtime compaction: check if the prompt exceeds the context budget.
         # If so, compact observations (deterministic) and/or messages (LLM call),
         # then rebuild the prompt from the compacted state.
-        compaction_updates = await _compact_if_needed(
-            state, user, system_overhead=count_tokens(system), api_base=ctx.org_llm_config.get("api_base"),
+        compaction_updates, compaction_local = await _compact_if_needed(
+            state, user, system_overhead=count_tokens(system), ctx=ctx,
         )
-        if compaction_updates:
-            state = {**state, **compaction_updates}
+        if compaction_local:
+            state = {**state, **compaction_local}
             observations = state.get("observations", [])
-            recent = select_recent_history(state.get("messages", []), max_pairs=3)
-            history_text = ""
-            for msg in recent:
-                role = "User" if msg.type == "human" else "Assistant"
-                history_text += f"  {role}: {msg.content}\n"
+            recent = select_recent_history(state.get("messages", []))
+            history_text = history_to_text(recent)
+            summary_text = state.get("compaction_summary") or ""
             tried_queries = _tried_rag_retrieve_queries(observations)
             tried_queries_text = (
                 f"  Already tried (do NOT resubmit these exact strings to rag_retrieve): {tried_queries}\n"
@@ -773,12 +886,14 @@ async def think_node(state: AgentState, ctx: ToolContext) -> dict:
     
         mode = settings.TOOL_CALL_MODE
         try:
+            # Tool selection is a classification decision — temperature 0.
+            # Creative sampling belongs in finalize_node's prose, not here.
             if mode == "json_text":
-                llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=0.7)
+                llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=0.0)
                 resp = await llm.ainvoke([{"role": "system", "content": system}, {"role": "user", "content": user}])
             else:
                 # native or auto: bind tools; parser falls back to JSON-text if native call absent.
-                llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=0.7)
+                llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=0.0)
                 resp = await llm.bind_tools(tools).ainvoke([{"role": "system", "content": system}, {"role": "user", "content": user}])
         except Exception as exc:
             logger.warning("[think_node] LLM call failed: %s", exc)
@@ -809,7 +924,7 @@ async def think_node(state: AgentState, ctx: ToolContext) -> dict:
     
 def _wall_clock_exceeded(state: AgentState) -> bool:
     started_at = state.get("started_at")
-    if not started_at:
+    if started_at is None:
         return False
     return (time.monotonic() - started_at) >= settings.AGENT_MAX_WALL_SECONDS
 
@@ -852,7 +967,8 @@ async def tool_node(state: AgentState, ctx: ToolContext) -> dict:
         # retrieved_docs, kb_ids, file_markdown, message_id, iteration, etc.
         ctx.state = state
         tools = {t.name: t for t in applicable_tools(ctx)}
-        observations = list(state.get("observations", []))
+        prior_observations = [_coerce_observation(o) for o in state.get("observations", [])]
+        new_observations: list[Observation] = []
         counts = dict(state.get("tool_call_count", {}))
 
         # Idempotency guard: the think LLM sometimes re-emits an identical
@@ -863,8 +979,7 @@ async def tool_node(state: AgentState, ctx: ToolContext) -> dict:
             return (name, json.dumps(args, sort_keys=True, default=str))
 
         prior_signatures: dict[tuple[str, str], Observation] = {}
-        for raw_obs in observations:
-            obs = _coerce_observation(raw_obs)
+        for obs in prior_observations:
             prior_signatures.setdefault(_call_signature(obs.tool, obs.arguments), obs)
 
         async def _budget_exceeded(name, args, cap):
@@ -921,7 +1036,7 @@ async def tool_node(state: AgentState, ctx: ToolContext) -> dict:
                     error=res.get("error"),
                     tokens=res.get("tokens", 0),
                 )
-            observations.append(obs)
+            new_observations.append(obs)
             writer({"event": "tool_observation", **obs.model_dump()})
             counts[obs.tool] = counts.get(obs.tool, 0) + 1
     
@@ -930,13 +1045,24 @@ async def tool_node(state: AgentState, ctx: ToolContext) -> dict:
         # extract_data(source="retrieved_docs"), and the citations payload in
         # agent_runner all see the full set of retrieved chunks — not just the
         # first call's docs.
-        state_update: dict = {"tool_calls": [], "observations": observations, "tool_call_count": counts}
+        #
+        # `observations` uses the append-style `accumulate` reducer, so this
+        # node must return ONLY the observations it created. Returning
+        # prior + new made the channel grow 1 → 3 → 7 → 15 across tool rounds.
+        state_update: dict = {
+            "tool_calls": [],
+            "observations": new_observations,
+            "tool_call_count": counts,
+        }
+        all_observations = prior_observations + new_observations
         from app.services.infrastructure import content_hash as _ch
         merged_docs: list[dict] = []
         seen_hashes: set[str] = set()
         best_confidence = 0.0
-        # Seed with recalled memory docs from load_context_node so a fresh
-        # rag_retrieve call doesn't silently discard them — merge, don't overwrite.
+        # Seed with docs already promoted this turn so a later rag_retrieve
+        # call doesn't discard earlier ones. Recalled conversational memory is
+        # deliberately NOT seeded here — it lives in `recalled_memories` and
+        # must never become citable evidence.
         for doc in state.get("retrieved_docs", []) or []:
             if not isinstance(doc, dict):
                 continue
@@ -944,8 +1070,7 @@ async def tool_node(state: AgentState, ctx: ToolContext) -> dict:
             if h not in seen_hashes:
                 seen_hashes.add(h)
                 merged_docs.append(doc)
-        for raw_obs in observations:
-            obs = _coerce_observation(raw_obs)
+        for obs in all_observations:
             if obs.tool == "rag_retrieve" and not obs.error:
                 docs = obs.result.get("docs")
                 if isinstance(docs, list):
@@ -972,7 +1097,7 @@ async def tool_node(state: AgentState, ctx: ToolContext) -> dict:
         # tools. Run the same check here after every tool round so a
         # completed plan short-circuits immediately instead of waiting on
         # the LLM to notice.
-        probe_state = {**state, **state_update}
+        probe_state = {**state, **state_update, "observations": all_observations}
         ready, reasoning = _verify_execution(_build_execution_summary(probe_state))
         if ready:
             logger.info("[tool_node] plan deterministically satisfied after this tool round — forcing finalize: %s", reasoning[:200])
@@ -1011,11 +1136,15 @@ async def finalize_node(state: AgentState, ctx: ToolContext) -> dict:
     with _agent_step("finalize"):
         writer = _writer()
         precomputed = state.get("precomputed_answer", "")
-        query = state.get("rewritten_query", "") or state.get("original_query", "")
+        # The answer model always sees the user's exact wording; only
+        # retrieval sees the resolved standalone query.
+        query = state.get("original_query", "") or state.get("rewritten_query", "")
+        retrieval_query = state.get("rewritten_query", "") or query
         observations = state.get("observations", [])
         docs = state.get("retrieved_docs", [])
         plan = state.get("plan")
         compaction_updates: dict = {}
+        answer_usage: Optional[dict] = None
 
         # Collect every valid chart_generate result up front so both the
         # prompt instructions and the post-generation substitution use the
@@ -1051,34 +1180,49 @@ async def finalize_node(state: AgentState, ctx: ToolContext) -> dict:
                 answer_prompt = append_chart_instructions(answer_prompt)
 
             system = FINALIZE_GUARDRAIL_PROMPT + "\n\n" + answer_prompt
-            user_parts = [
-                f"User query: {query}\n\n",
-                f"Retrieved context:\n{context_text}\n\n",
-            ]
-            if non_rag_text:
-                user_parts.append(f"Tool results:\n{non_rag_text}\n\n")
-            user_parts.append("Provide a concise, accurate answer.")
-            user = "".join(user_parts)
 
-            # Runtime compaction before the generation LLM call.
-            compaction_updates = await _compact_if_needed(
-                state, user, system_overhead=count_tokens(system),
-                api_base=ctx.org_llm_config.get("api_base"),
+            def _build_finalize_user_prompt() -> str:
+                # Priority order is explicit: retrieved documents are the
+                # evidence, the conversation is the intent. Without this block
+                # conversational instructions ("shorter", "in a table",
+                # "compare with your last answer") are unanswerable.
+                parts = [f"User query: {query}\n\n"]
+                if retrieval_query and retrieval_query != query:
+                    parts.append(f"Resolved retrieval query: {retrieval_query}\n\n")
+                if summary_text:
+                    parts.append(f"Earlier conversation summary:\n{summary_text}\n\n")
+                if history_text:
+                    parts.append(
+                        "Conversation so far (intent only — cite nothing from here):\n"
+                        f"{history_text}\n\n"
+                    )
+                parts.append(f"Retrieved context (the only citable evidence):\n{context_text}\n\n")
+                if non_rag_text:
+                    parts.append(f"Tool results:\n{non_rag_text}\n\n")
+                parts.append("Provide a concise, accurate answer.")
+                return "".join(parts)
+
+            recent = select_recent_history(state.get("messages", []))
+            history_text = history_to_text(recent)
+            summary_text = state.get("compaction_summary") or ""
+            user = _build_finalize_user_prompt()
+
+            # Runtime compaction before the generation LLM call. trim_docs=True
+            # because this prompt is dominated by retrieved_docs — summarising
+            # conversation history cannot fix an evidence-payload overflow.
+            compaction_updates, compaction_local = await _compact_if_needed(
+                state, user, system_overhead=count_tokens(system), ctx=ctx, trim_docs=True,
             )
-            if compaction_updates:
-                state = {**state, **compaction_updates}
+            if compaction_local:
+                state = {**state, **compaction_local}
                 observations = state.get("observations", [])
                 docs = state.get("retrieved_docs", docs)
                 context_text = format_context_string(docs, state.get("file_markdown"))
                 non_rag_text = _non_retrieval_observations_text(observations)
-                user_parts = [
-                    f"User query: {query}\n\n",
-                    f"Retrieved context:\n{context_text}\n\n",
-                ]
-                if non_rag_text:
-                    user_parts.append(f"Tool results:\n{non_rag_text}\n\n")
-                user_parts.append("Provide a concise, accurate answer.")
-                user = "".join(user_parts)
+                recent = select_recent_history(state.get("messages", []))
+                history_text = history_to_text(recent)
+                summary_text = state.get("compaction_summary") or ""
+                user = _build_finalize_user_prompt()
             try:
                 llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=0.7, streaming=True)
                 final = ""
@@ -1086,6 +1230,15 @@ async def finalize_node(state: AgentState, ctx: ToolContext) -> dict:
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ]):
+                    # Capture provider-reported usage when the backend sends
+                    # it, so reported tokens are measured rather than guessed.
+                    chunk_usage = getattr(chunk, "usage_metadata", None)
+                    if chunk_usage:
+                        answer_usage = {
+                            "input_tokens": chunk_usage.get("input_tokens", 0),
+                            "output_tokens": chunk_usage.get("output_tokens", 0),
+                            "total_tokens": chunk_usage.get("total_tokens", 0),
+                        }
                     content = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
                     if content:
                         writer({"event": "token", "content": content})
@@ -1139,14 +1292,32 @@ async def finalize_node(state: AgentState, ctx: ToolContext) -> dict:
         lao.chart_option = chart_options[0] if chart_options else None
     
         writer({"event": "last_answer", "last_answer_object": lao.model_dump()})
-    
-        return {
+
+        # Persist the assistant turn into the checkpointed conversation.
+        # Without this the thread holds user questions only, so every
+        # downstream consumer of history (reference resolution, think,
+        # compaction) reads half a conversation and invents the rest.
+        # The `add_messages` reducer appends, and the id is stable per
+        # assistant message row so a resume-after-interrupt replaces rather
+        # than duplicates the turn.
+        message_id = state.get("message_id")
+        answer_message = AIMessage(
+            content=final,
+            id=f"assistant-{message_id}" if message_id else None,
+        )
+
+        updates = {
             **compaction_updates,
             "final_answer": final,
             "answer": final,
             "last_answer_object": lao,
             "retrieved_docs": docs,
+            "cited_doc_indices": cited_doc_indices,
+            "messages": [*compaction_updates.get("messages", []), answer_message],
         }
+        if answer_usage:
+            updates["answer_usage"] = answer_usage
+        return updates
     
     
 async def save_memory_node(state: AgentState, ctx: ToolContext) -> dict:
@@ -1219,10 +1390,7 @@ async def reflect_node(state: AgentState, ctx: ToolContext) -> dict:
                     })
     
         if precomputed:
-            return {
-                "reflection": {"action": "retry", "reasoning": "Concrete replanning rule triggered."},
-                "precomputed_tool_calls": precomputed,
-            }
+            return {"precomputed_tool_calls": precomputed}
 
         # No concrete rule fired — nothing to do. Termination is decided
         # deterministically (tool_node's post-round check and think_node's
@@ -1240,20 +1408,23 @@ async def clarify_interrupt_node(state: AgentState) -> dict:
             question = plan.clarification_question or ""
         if not question:
             question = "Could you clarify what you need?"
-    
-        writer = _writer()
-        writer({"event": "interrupt", "question": question})
-    
-        try:
-            user_response = interrupt({"question": question})
-        except Exception as exc:
-            logger.warning("[clarify_interrupt_node] interrupt not supported or failed: %s", exc)
-            user_response = ""
-    
-        if not user_response:
-            user_response = ""
+
+        # No try/except and no pre-emitted custom event here.
+        # `interrupt()` raises GraphInterrupt, which subclasses Exception —
+        # catching it swallowed the pause and let the graph run on with an
+        # empty answer. Emitting a custom "interrupt" event *before* the call
+        # also let the consumer close the stream before LangGraph could
+        # persist the interrupt checkpoint, so the resume had nothing to
+        # resume. The interrupt is surfaced from the graph's own
+        # `__interrupt__` update in agent_runner instead.
+        user_response = interrupt({"question": question})
+
+        response_text = str(user_response) if user_response else ""
         return {
-            "messages": list(state.get("messages", [])) + [HumanMessage(content=str(user_response))],
+            # add_messages appends: return only the new message.
+            "messages": [HumanMessage(content=response_text)],
+            "clarification_response": response_text,
+            "clarification_count": state.get("clarification_count", 0) + 1,
             "needs_clarification": False,
         }
     
@@ -1272,21 +1443,39 @@ def _build_execution_summary(state: AgentState) -> dict:
     iteration = state.get("iteration", 0)
 
     # Map subtask tool_hints to whether we have a matching observation.
+    # Matching is by *count*, not by mere presence: three subtasks that all
+    # hint rag_retrieve need three distinct successful retrievals. Matching on
+    # presence alone marked a three-part question complete after one retrieval
+    # and silently capped multi-hop questions at a single hop.
     coerced = [_coerce_observation(o) for o in observations]
+    successful_by_tool: dict[str, int] = {}
+    for o in coerced:
+        if not o.error:
+            successful_by_tool[o.tool] = successful_by_tool.get(o.tool, 0) + 1
+    any_successful = sum(successful_by_tool.values())
+
+    consumed: dict[str, int] = {}
+    consumed_any = 0
     subtask_status = []
     for st in plan.subtasks:
         hint = st.tool_hint
-        if hint in ("any", "none"):
-            # "none" means the subtask needs no tool call (e.g. pure
-            # conversation); "any" is satisfied by any successful observation.
-            has_obs = hint == "none" or len(coerced) > 0
+        if hint == "none":
+            # The subtask needs no tool call (e.g. pure conversation).
+            completed = True
+        elif hint == "any":
+            completed = consumed_any < any_successful
+            if completed:
+                consumed_any += 1
         else:
-            has_obs = any(o.tool == hint and not o.error for o in coerced)
+            used = consumed.get(hint, 0)
+            completed = used < successful_by_tool.get(hint, 0)
+            if completed:
+                consumed[hint] = used + 1
         subtask_status.append({
             "id": st.id,
             "description": st.description,
             "tool_hint": hint,
-            "completed": has_obs,
+            "completed": completed,
         })
 
     # Retrieval stats.
@@ -1397,7 +1586,6 @@ def build_agent_graph(ctx: ToolContext):
 
     graph.add_node("load_context", partial(load_context_node, ctx=ctx))
     graph.add_node("rewrite_query", partial(rewrite_query_node, api_base=ctx.org_llm_config.get("api_base")))
-    graph.add_node("compaction", compaction_node)
     graph.add_node("plan", partial(plan_node, ctx=ctx))
     graph.add_node("clarify_interrupt", clarify_interrupt_node)
     graph.add_node("think", partial(think_node, ctx=ctx))
@@ -1410,10 +1598,12 @@ def build_agent_graph(ctx: ToolContext):
 
     graph.set_entry_point("load_context")
     graph.add_edge("load_context", "rewrite_query")
-    graph.add_edge("rewrite_query", "compaction")
-    graph.add_edge("compaction", "plan")
+    graph.add_edge("rewrite_query", "plan")
     graph.add_conditional_edges("plan", route_plan)
-    graph.add_edge("clarify_interrupt", "plan")
+    # Back through query resolution, not straight to plan: the clarification
+    # answer has to reach the retrieval query, which was computed from the
+    # original ambiguous message.
+    graph.add_edge("clarify_interrupt", "rewrite_query")
     graph.add_conditional_edges("think", route_think)
     graph.add_conditional_edges("tool", route_tool)
     graph.add_edge("reflect", "think")

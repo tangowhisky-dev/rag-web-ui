@@ -334,9 +334,6 @@ class Settings(BaseSettings):
     # structured checkpoint so the LLM retains session continuity without
     # exceeding its context window.
     COMPACTION_ENABLED: bool = os.getenv("COMPACTION_ENABLED", "true").lower() == "true"
-    # Number of messages (user + assistant turns) after which compaction
-    # triggers. Set to 0 to disable compaction.
-    COMPACTION_HISTORY_THRESHOLD: int = int(os.getenv("COMPACTION_HISTORY_THRESHOLD", "20"))
     # Number of recent messages to keep after compaction. Older messages
     # are summarized into a structured checkpoint.
     COMPACTION_KEEP_RECENT: int = int(os.getenv("COMPACTION_KEEP_RECENT", "10"))
@@ -360,6 +357,13 @@ class Settings(BaseSettings):
     AGENT_MAX_CODE_EXEC: int = int(os.getenv("AGENT_MAX_CODE_EXEC", "3"))
     AGENT_MAX_REFLECTIONS: int = int(os.getenv("AGENT_MAX_REFLECTIONS", "2"))
     AGENT_REFLECT_EVERY: int = int(os.getenv("AGENT_REFLECT_EVERY", "2"))
+    # Clarification rounds allowed per turn. Beyond this the planner's
+    # needs_clarification flag is ignored and the agent answers with the
+    # ambiguity stated, instead of looping plan -> clarify -> plan.
+    AGENT_MAX_CLARIFICATIONS: int = int(os.getenv("AGENT_MAX_CLARIFICATIONS", "1"))
+    # Recent user/assistant turn pairs shown to query resolution, think and
+    # finalize.
+    AGENT_HISTORY_PAIRS: int = int(os.getenv("AGENT_HISTORY_PAIRS", "3"))
     SANDBOX_BACKEND: str = os.getenv("SANDBOX_BACKEND", "restrictedpython")
     SANDBOX_TIMEOUT_S: int = int(os.getenv("SANDBOX_TIMEOUT_S", "10"))
     CONTEXT_RESERVED_GENERATION: int = int(os.getenv("CONTEXT_RESERVED_GENERATION", "4096"))

@@ -28,11 +28,7 @@ from app.services.retrieval import (
 from app.services.retrieval.reranker import _get_cross_encoder
 
 from .graph_state import AgentState
-from .prompts import (
-    COMPACTION_SYSTEM_PROMPT,
-    COMPACTION_USER_PROMPT,
-    EVALUATION_SYSTEM_PROMPT,
-)
+from .prompts import EVALUATION_SYSTEM_PROMPT
 from .redis_memory import get_redis_memory
 from .token_budget import ContextBudget, count_tokens
 from .utils import format_context_string
@@ -40,12 +36,18 @@ from .utils import format_context_string
 logger = logging.getLogger(__name__)
 
 
-def select_recent_history(messages: list, max_pairs: int = 3) -> list:
+def select_recent_history(messages: list, max_pairs: int | None = None) -> list:
     """Return up to ``max_pairs`` of recent user/assistant turns.
 
     The last message is assumed to be the current user query and is excluded.
+    Assistant turns are capped at ``COMPACTION_ASSISTANT_MAX_CHARS`` so a very
+    long previous answer cannot dominate the prompt.
     """
     from langchain_core.messages import HumanMessage, AIMessage
+
+    if max_pairs is None:
+        max_pairs = settings.AGENT_HISTORY_PAIRS
+    assistant_cap = settings.COMPACTION_ASSISTANT_MAX_CHARS
 
     history: list = []
     # Skip the final message (current query).
@@ -53,125 +55,37 @@ def select_recent_history(messages: list, max_pairs: int = 3) -> list:
         if isinstance(m, HumanMessage):
             history.append(HumanMessage(content=m.content))
         elif isinstance(m, AIMessage):
-            history.append(AIMessage(content=m.content[:400]))
+            history.append(AIMessage(content=str(m.content)[:assistant_cap]))
     # Keep the most recent max_pairs * 2 messages.
     return history[-(max_pairs * 2):]
 
 
+def history_to_text(messages: list) -> str:
+    """Render selected history messages as a ``User:``/``Assistant:`` block."""
+    lines = []
+    for msg in messages:
+        role = "User" if getattr(msg, "type", "") == "human" else "Assistant"
+        lines.append(f"  {role}: {msg.content}")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
-# Compaction / Summarization Node
+# Conversation text helper (shared by the single compaction implementation)
 # ---------------------------------------------------------------------------
 
 def _messages_to_conversation_text(messages: list) -> str:
-    """Convert LangChain messages to a readable conversation text for summarization."""
+    """Convert LangChain messages to readable conversation text for summarization.
+
+    No per-turn truncation: the summarizer cannot preserve facts that were
+    removed before it ever saw them.
+    """
     parts = []
     for m in messages:
         if isinstance(m, HumanMessage):
-            content = str(m.content)
-            if len(content) > 500:
-                content = content[:500] + "..."
-            parts.append(f"User: {content}")
+            parts.append(f"User: {m.content}")
         elif isinstance(m, AIMessage):
-            content = str(m.content)
-            if len(content) > 800:
-                content = content[:800] + "..."
-            parts.append(f"Assistant: {content}")
+            parts.append(f"Assistant: {m.content}")
     return "\n\n".join(parts)
-
-
-async def compaction_node(state: AgentState) -> dict:
-    """Compact conversation history when it grows too long.
-
-    When the number of messages exceeds COMPACTION_HISTORY_THRESHOLD,
-    summarize older messages into a structured checkpoint. The checkpoint
-    preserves RAG-specific context (topics covered, documents retrieved,
-    key findings) so the model can continue the conversation fluently.
-
-    This node runs after rewrite_query but before classification/routing,
-    so the query rewriter still sees full history.
-    """
-    if not settings.COMPACTION_ENABLED:
-        return {"compaction_summary": None, "compaction_triggered": False}
-
-    keep_recent = settings.COMPACTION_KEEP_RECENT
-    max_summary_chars = settings.COMPACTION_SUMMARY_MAX_CHARS
-
-    messages = state.get("messages", [])
-    budget = ContextBudget()
-    # Count conversation history
-    budget.add(count_tokens(_messages_to_conversation_text(messages)))
-    # Account for constant system prompt overhead per LLM call.
-    # The agent makes at least 3 calls (plan + think + finalize), each
-    # sending AGENT_SYSTEM_PROMPT plus a node-specific prompt. Without
-    # this, compaction triggers too late — the conversation history alone
-    # may fit, but the total context (history + system prompts + retrieval)
-    # overflows the window.
-    from app.services.agentic_rag.prompts import (
-        AGENT_SYSTEM_PROMPT,
-        FINALIZE_ANSWER_PROMPT,
-        FINALIZE_GUARDRAIL_PROMPT,
-        PLAN_SYSTEM_PROMPT,
-        THINK_SYSTEM_PROMPT,
-    )
-    sys_overhead = (
-        count_tokens(AGENT_SYSTEM_PROMPT) + count_tokens(PLAN_SYSTEM_PROMPT)
-        + count_tokens(AGENT_SYSTEM_PROMPT) + count_tokens(THINK_SYSTEM_PROMPT)
-        + count_tokens(FINALIZE_GUARDRAIL_PROMPT) + count_tokens(FINALIZE_ANSWER_PROMPT)
-    )
-    budget.add(sys_overhead)
-    if not budget.needs_compaction():
-        return {"compaction_summary": None, "compaction_triggered": False}
-
-    # Split: keep recent messages, summarize older ones
-    recent_messages = messages[-keep_recent:]
-    old_messages = messages[:len(messages) - keep_recent]
-
-    if not old_messages:
-        return {"compaction_summary": None, "compaction_triggered": False}
-
-    logger.info(
-        "[COMPACTION] triggered | total_tokens=%d | total_msgs=%d | recent=%d | summarizing=%d",
-        budget.used, len(messages), len(recent_messages), len(old_messages),
-    )
-
-    # Build conversation text from old messages
-    conversation_text = _messages_to_conversation_text(old_messages)
-
-    # Build the prompt
-    user_prompt = COMPACTION_USER_PROMPT.format(conversation=conversation_text)
-
-    # Call LLM for summarization
-    try:
-        llm = _get_llm(
-            model_name=settings.effective_query_model,  # Use query model for cheaper summarization
-            temperature=0.0,
-            streaming=False,
-        )
-
-        response = llm.invoke([
-            {"role": "system", "content": COMPACTION_SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ])
-
-        summary = str(response.content).strip()
-
-        # Truncate summary if too long
-        if len(summary) > max_summary_chars:
-            summary = summary[:max_summary_chars] + "\n\n[...summary truncated for space]"
-
-        logger.info(
-            "[COMPACTION] summary generated | chars=%d",
-            len(summary),
-        )
-
-        return {
-            "compaction_summary": summary,
-            "compaction_triggered": True,
-        }
-
-    except Exception as exc:
-        logger.warning("[COMPACTION] failed: %s — continuing without summary", exc)
-        return {"compaction_summary": None, "compaction_triggered": False}
 
 
 @contextmanager
@@ -229,30 +143,68 @@ async def rewrite_query_node(
     state: AgentState,
     api_base: Optional[str] = None,
 ) -> dict:
-    """Rewrite query using recent checkpoint history."""
-    from .utils import rewrite_query as _rewrite_query
+    """Resolve the user's message into a standalone *retrieval* query.
+
+    The rewrite is conditional and provenance-bound:
+    - Self-contained messages pass through byte-for-byte (no LLM call).
+    - Otherwise the resolver may only introduce terms that appear in the
+      original query, the recent verbatim turns, the compaction summary,
+      or the previous answer object. A rewrite that invents terms is
+      rejected and the original query is used.
+    """
+    from .utils import resolve_retrieval_query
 
     with _agent_step("rewrite_query"):
         messages = state.get("messages", [])
         query = state.get("original_query", "")
-        recent_history = select_recent_history(messages, max_pairs=3)
+        recent_history = select_recent_history(messages)
 
-        rewritten = _rewrite_query(
-            query=query,
+        # A clarification answer is part of the request, not a new turn:
+        # fold it into the text sent to the resolver.
+        clarification = (state.get("clarification_response") or "").strip()
+        resolver_input = query
+        if clarification:
+            resolver_input = f"{query}\n\n[User clarification: {clarification}]"
+
+        # Sources a resolved reference may legitimately draw terms from.
+        lao = state.get("last_answer_object")
+        provenance_sources = [history_to_text(recent_history)]
+        if clarification:
+            provenance_sources.append(clarification)
+        if state.get("compaction_summary"):
+            provenance_sources.append(str(state["compaction_summary"]))
+        if lao is not None:
+            summary = getattr(lao, "summary", "") or ""
+            key_points = getattr(lao, "key_points", None) or []
+            provenance_sources.append(summary)
+            provenance_sources.extend(str(k) for k in key_points)
+        for doc in state.get("recalled_memories", []) or []:
+            if isinstance(doc, dict):
+                provenance_sources.append(str(doc.get("page_content", "")))
+
+        rewritten, provenance = resolve_retrieval_query(
+            query=resolver_input,
+            original_query=query,
             recent_history=recent_history,
-            memory_context="",
+            provenance_sources=provenance_sources,
             api_base=api_base,
             query_model=settings.effective_query_model,
             openai_api_key=settings.OPENAI_API_KEY,
             openai_api_base=settings.OPENAI_API_BASE,
         )
 
+        if provenance.get("reason") == "provenance_rejected":
+            logger.warning(
+                "[rewrite_query] rejected rewrite %r — unsupported terms %s; using original query",
+                provenance.get("rejected_query"), provenance.get("unsupported_terms"),
+            )
+
         # Stream the rewritten query so the UI can display it immediately.
         writer = _safe_writer()
         if writer:
             writer({"event": "rewritten_query", "query": rewritten})
 
-        return {"rewritten_query": rewritten}
+        return {"rewritten_query": rewritten, "resolution_provenance": provenance}
 
 
 # ---------------------------------------------------------------------------
@@ -621,7 +573,9 @@ async def answer_evaluation_node(
         from .evaluator import evaluate_answer
 
         answer = state.get("answer", "")
-        query = state.get("rewritten_query", "") or state.get("original_query", "")
+        # Evaluate against the user's exact request, not the retrieval rewrite:
+        # completeness is a property of what was asked, not what was searched.
+        query = state.get("original_query", "") or state.get("rewritten_query", "")
         docs = state.get("retrieved_docs", [])
         retrieval_conf = state.get("retrieval_confidence", 0.0)
 

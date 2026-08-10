@@ -84,7 +84,7 @@ def test_query_returns_answer_and_contexts(client, db, monkeypatch):
 
     import app.api.api_v1.query as query_module
 
-    async def _mock_run(*, query, kb_ids, db, chat_id, generate_answer=True):
+    async def _mock_run(*, query, knowledge_base_ids, db, chat_id):
         yield {
             "event": "context",
             "docs": [
