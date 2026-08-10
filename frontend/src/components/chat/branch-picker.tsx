@@ -60,6 +60,12 @@ export function BranchPicker({
     setDraft(content);
   }, [content]);
 
+  // Fetch siblings on mount so navigation arrows appear for branched messages
+  useEffect(() => {
+    fetchSiblings(messageId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messageId]);
+
   // Auto-focus textarea when entering edit mode
   useEffect(() => {
     if (isEditing) {

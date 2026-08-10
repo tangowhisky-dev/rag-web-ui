@@ -1075,11 +1075,30 @@ function ChatPageInner({ params }: { params: { id: string } }) {
             citations: (targetAssistantMsg.citations as Message["citations"]) ?? [],
             confidence: targetAssistantMsg.confidence_level as Message["confidence"] | undefined,
             confidenceScore: targetAssistantMsg.confidence_score as number | undefined,
+            confidenceBreakdown: targetAssistantMsg.confidence_breakdown
+              ? typeof targetAssistantMsg.confidence_breakdown === "string"
+                ? JSON.parse(targetAssistantMsg.confidence_breakdown as string)
+                : targetAssistantMsg.confidence_breakdown
+              : undefined,
             finalConfidence: targetAssistantMsg.final_confidence as number | undefined,
             finalConfidenceLevel: targetAssistantMsg.final_confidence_level as Message["finalConfidenceLevel"] | undefined,
             faithfulness: targetAssistantMsg.faithfulness as number | undefined,
             completeness: targetAssistantMsg.completeness as number | undefined,
             retrievalScore: targetAssistantMsg.retrieval_score as number | undefined,
+            // Clear streaming-only fields from the previous branch
+            agentSteps: undefined,
+            toolCalls: undefined,
+            toolObservations: undefined,
+            toolTrace: undefined,
+            plan: undefined,
+            queryClassification: undefined,
+            synthesisMode: undefined,
+            rewrittenQuery: undefined,
+            suggestion: undefined,
+            failedLegs: undefined,
+            lastAnswerObject: undefined,
+            chartOption: undefined,
+            chartOptions: undefined,
           };
         } else {
           // No assistant reply for this branch — show placeholder

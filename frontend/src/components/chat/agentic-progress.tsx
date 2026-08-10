@@ -182,18 +182,17 @@ export const AgenticProgress = ({ agentSteps, isStreaming, toolCalls, toolObserv
   if (lines.length === 0) return null;
 
   return (
-    <div className="flex flex-col justify-end gap-0 overflow-hidden">
-      <AnimatePresence initial={false}>
+    <div className="flex flex-col justify-end gap-0 overflow-hidden" style={{ minHeight: `${lines.length * 16}px` }}>
+      <AnimatePresence initial={false} mode="popLayout">
         {lines.map((line, i) => {
           const isCurrent = i === lines.length - 1;
           return (
             <motion.span
-              key={`${line}-${i}`}
-              layout
+              key={line}
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
-              exit={{ opacity: 0, height: 0 }}
-              transition={{ type: "spring", stiffness: 500, damping: 35, mass: 0.3 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.2 }}
               className={
                 isCurrent
                   ? "text-[12px] font-semibold text-zinc-600 dark:text-zinc-300 leading-tight"
