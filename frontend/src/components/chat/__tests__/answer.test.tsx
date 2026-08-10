@@ -17,20 +17,6 @@ jest.mock('@/lib/api', () => ({
   },
 }));
 
-// Mock AgentTimeline (integration test covers it separately)
-jest.mock('../agent-timeline', () => ({
-  AgentTimeline: ({ rewrittenQuery, retrievedContext, queryClassification, toolTrace, failedLegs, isStreaming }: any) => {
-    if (!rewrittenQuery && !retrievedContext && !queryClassification && !toolTrace && !failedLegs) return null;
-    return <div data-testid="agent-timeline">
-      {rewrittenQuery && <span>Query Rewrite</span>}
-      {retrievedContext && <span>Retrieve</span>}
-      {queryClassification && <span>Classification</span>}
-      {toolTrace && <span>Tool Calls</span>}
-      {failedLegs && <span>Failed Legs</span>}
-    </div>;
-  },
-}));
-
 // Mock react-markdown and its plugins
 jest.mock('react-markdown', () => {
   return function MockMarkdown({ children }: { children: string }) {

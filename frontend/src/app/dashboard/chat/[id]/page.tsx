@@ -571,7 +571,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       return;
     }
 
-    // 4: agent_step — LangGraph node start/finish events for AgentTimeline
+    // 4: agent_step — LangGraph node start/finish events for AgenticProgress
     if (trimmedLine.startsWith("4:")) {
       try {
         const step = JSON.parse(trimmedLine.slice(2)) as AgentStep;
