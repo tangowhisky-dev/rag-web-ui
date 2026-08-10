@@ -654,7 +654,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     // th: thinking — chain-of-thought from reasoning models (new agentic agent)
     if (trimmedLine.startsWith("th:")) {
       try {
-        const payload = JSON.parse(trimmedLine.slice(2)) as {
+        const payload = JSON.parse(trimmedLine.slice(3)) as {
           content: string;
           done: boolean;
         };
@@ -668,7 +668,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     // pl: plan — enterprise agent subtask plan
     if (trimmedLine.startsWith("pl:")) {
       try {
-        const payload = JSON.parse(trimmedLine.slice(2)) as { plan?: Record<string, unknown> };
+        const payload = JSON.parse(trimmedLine.slice(3)) as { plan?: Record<string, unknown> };
         appendAssistantChunk(assistantId, (message) => ({
           ...message,
           plan: payload.plan,
@@ -682,7 +682,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     // tc: tool_call — enterprise agent tool invocation
     if (trimmedLine.startsWith("tc:")) {
       try {
-        const payload = JSON.parse(trimmedLine.slice(2)) as Record<string, unknown>;
+        const payload = JSON.parse(trimmedLine.slice(3)) as Record<string, unknown>;
         appendAssistantChunk(assistantId, (message) => ({
           ...message,
           toolCalls: [...(message.toolCalls ?? []), payload],
@@ -696,7 +696,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     // to: tool_observation — enterprise agent tool result
     if (trimmedLine.startsWith("to:")) {
       try {
-        const payload = JSON.parse(trimmedLine.slice(2)) as Record<string, unknown>;
+        const payload = JSON.parse(trimmedLine.slice(3)) as Record<string, unknown>;
         appendAssistantChunk(assistantId, (message) => ({
           ...message,
           toolObservations: [...(message.toolObservations ?? []), payload],
@@ -710,7 +710,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     // tr: tool_retry — tool call failed, being retried
     if (trimmedLine.startsWith("tr:")) {
       try {
-        const payload = JSON.parse(trimmedLine.slice(2)) as {
+        const payload = JSON.parse(trimmedLine.slice(3)) as {
           tool: string;
           attempt: number;
           max_retries: number;
@@ -734,7 +734,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     // la: last_answer — enterprise agent structured summary + chart option
     if (trimmedLine.startsWith("la:")) {
       try {
-        const payload = JSON.parse(trimmedLine.slice(2)) as { last_answer_object?: Record<string, unknown> };
+        const payload = JSON.parse(trimmedLine.slice(3)) as { last_answer_object?: Record<string, unknown> };
         appendAssistantChunk(assistantId, (message) => ({
           ...message,
           lastAnswerObject: payload.last_answer_object,
