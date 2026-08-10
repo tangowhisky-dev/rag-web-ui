@@ -117,9 +117,10 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
-    // Skip re-fetching if we already have cached data — prevents the
-    // sidebar from flashing empty during chat-to-chat navigation.
-    if (_chatListCache.length > 0) return;
+    // Always refetch on mount — the cached data (from _chatListCache or
+    // sessionStorage) is used as the initial state to avoid a flash, but
+    // we still hit the API to pick up chats created outside the frontend
+    // (e.g. via API calls, another tab, or a previous session).
     api
       .get("/api/chat")
       .then((data: Chat[]) => {
