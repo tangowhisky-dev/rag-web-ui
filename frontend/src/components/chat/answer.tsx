@@ -780,9 +780,6 @@ export const Answer: FC<{
 
       <AgentLoopPanel
         plan={plan}
-        toolCalls={toolCalls}
-        toolObservations={toolObservations}
-        lastAnswerObject={lastAnswerObject}
         // New messages already have the chart(s) inlined as ```echarts fences
         // by finalize_node's marker substitution — only fall back to the
         // panel's own render for older messages that never got one.
