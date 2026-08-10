@@ -27,6 +27,7 @@ class FileSummarizeInput(BaseModel):
 
 class FileSummarizeTool(BaseAgentTool):
     name: str = "file_summarize"
+    ui_label: str = "Summarizing file"
     description: str = (
         "Summarize a large attached file. Use when the user says 'summarise this file' "
         "or the file is too big to fit in the context window."

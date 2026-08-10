@@ -83,6 +83,7 @@ class _ExtractResult(BaseModel):
 
 class ExtractDataTool(BaseAgentTool):
     name: str = "extract_data"
+    ui_label: str = "Extracting data"
     description: str = (
         "Extract structured numbers and statistics from the previous answer, "
         "retrieved documents, an attached file, or a specified message. "

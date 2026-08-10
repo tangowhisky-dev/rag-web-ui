@@ -26,6 +26,7 @@ class FileReadInput(BaseModel):
 
 class FileReadTool(BaseAgentTool):
     name: str = "file_read"
+    ui_label: str = "Reading file"
     description: str = (
         "Read content from an attached file. Use for questions about a specific "
         "section or when the user says 'this file' without asking for a summary."

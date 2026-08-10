@@ -586,7 +586,7 @@ export const Answer: FC<{
           Single source of truth for status text; raw per-leg progress
           events (dense/sparse/exact/neo4j) are folded into "Gathering
           sources …" here instead of also being shown verbatim. */}
-      <AgenticProgress agentSteps={filteredAgentSteps} isStreaming={isStreaming} />
+      <AgenticProgress agentSteps={filteredAgentSteps} isStreaming={isStreaming} toolCalls={toolCalls} />
 
       {/* Confidence warning (no confidence) */}
       {confidence === "none" && suggestion && (

@@ -707,6 +707,30 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       return;
     }
 
+    // tr: tool_retry — tool call failed, being retried
+    if (trimmedLine.startsWith("tr:")) {
+      try {
+        const payload = JSON.parse(trimmedLine.slice(2)) as {
+          tool: string;
+          attempt: number;
+          max_retries: number;
+          success: boolean;
+          error?: string;
+        };
+        setProgressMessages((prev) => [
+          ...prev,
+          {
+            phase: "tool_retry",
+            message: `Retrying ${payload.tool} (attempt ${payload.attempt}/${payload.max_retries})`,
+            details: payload,
+          },
+        ]);
+      } catch (e) {
+        console.error("Failed to parse tool_retry event:", e);
+      }
+      return;
+    }
+
     // la: last_answer — enterprise agent structured summary + chart option
     if (trimmedLine.startsWith("la:")) {
       try {

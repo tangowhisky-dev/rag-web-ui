@@ -400,6 +400,10 @@ async def generate_response(
                 yield f'to:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
                 await asyncio.sleep(0)
 
+            elif event_type == "tool_retry":
+                yield f'tr:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
+                await asyncio.sleep(0)
+
             elif event_type == "last_answer":
                 yield f'la:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
                 await asyncio.sleep(0)

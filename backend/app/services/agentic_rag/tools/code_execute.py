@@ -66,6 +66,7 @@ def _inplacevar_(op, x, y):
 
 class CodeExecuteTool(BaseAgentTool):
     name: str = "code_execute"
+    ui_label: str = "Executing Python code"
     description: str = (
         "Execute Python code in a restricted sandbox for computation, "
         "data transformation, or statistics. Use with data from extract_data or file_extract_table. "

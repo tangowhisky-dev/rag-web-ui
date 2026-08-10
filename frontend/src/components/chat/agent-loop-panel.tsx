@@ -57,7 +57,7 @@ export function AgentLoopPanel({
           <ul className="mt-2 space-y-1">
             {toolCalls.map((tc, idx) => (
               <li key={idx}>
-                <span className="font-semibold">{tc.tool as string}</span>{" "}
+                <span className="font-semibold">{(tc.label as string) ?? (tc.tool as string)}</span>{" "}
                 <code className="text-[10px] break-all">
                   {JSON.stringify(tc.arguments ?? tc)}
                 </code>
@@ -73,16 +73,20 @@ export function AgentLoopPanel({
             Observations ({toolObservations.length})
           </summary>
           <ul className="mt-2 space-y-1">
-            {toolObservations.map((obs, idx) => (
-              <li key={idx}>
-                <span className="font-semibold">{obs.tool as string}</span>:{" "}
-                {obs.error ? (
-                  <span className="text-red-600">{obs.error as string}</span>
-                ) : (
-                  <span className="text-emerald-600">ok</span>
-                )}
-              </li>
-            ))}
+            {toolObservations.map((obs, idx) => {
+              const tc = toolCalls?.find((tc) => tc.tool === obs.tool);
+              const label = (tc?.label as string) ?? (obs.tool as string);
+              return (
+                <li key={idx}>
+                  <span className="font-semibold">{label}</span>:{" "}
+                  {obs.error ? (
+                    <span className="text-red-600">{obs.error as string}</span>
+                  ) : (
+                    <span className="text-emerald-600">ok</span>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         </details>
       )}

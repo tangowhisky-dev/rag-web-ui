@@ -23,6 +23,7 @@ class FileExtractTableInput(BaseModel):
 
 class FileExtractTableTool(BaseAgentTool):
     name: str = "file_extract_table"
+    ui_label: str = "Extracting table from file"
     description: str = (
         "Extract a structured table from a CSV, Excel, or HTML table in an "
         "attached file. Returns JSON columns and rows for chart_generate or code_execute."

@@ -14,6 +14,9 @@ class BaseAgentTool(BaseTool):
     """BaseTool subclass that receives a ToolContext and dispatches to _execute."""
 
     ctx: Optional[ToolContext] = Field(default=None, exclude=True)
+    # Human-readable label shown in the frontend during tool execution.
+    # Short, action-oriented, third-person: "Retrieving from knowledge base".
+    ui_label: str = "Running tool"
 
     async def _arun(self, *args: Any, **kwargs: Any) -> Any:
         """Parse validated input and call the concrete implementation."""

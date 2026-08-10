@@ -49,6 +49,7 @@ class _RagRetrieveTool(BaseTool):
     """Search the knowledge base using dense, sparse, exact and graph legs."""
 
     name: str = "rag_retrieve"
+    ui_label: str = "Retrieving from knowledge base"
     description: str = (
         "Search the attached knowledge bases. Returns ranked document chunks, "
         "confidence, and sufficiency. Use when the user needs facts from documents."

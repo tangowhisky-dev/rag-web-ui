@@ -26,6 +26,7 @@ class SummarizeAnswerInput(BaseModel):
 
 class SummarizeAnswerTool(BaseAgentTool):
     name: str = "summarize_answer"
+    ui_label: str = "Summarizing answer"
     description: str = (
         "Summarize the previous assistant answer or a file. "
         "Use for 'summarize it in 10 points' or 'tl;dr' requests."

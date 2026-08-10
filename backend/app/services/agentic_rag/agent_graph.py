@@ -1079,7 +1079,9 @@ async def tool_node(state: AgentState, ctx: ToolContext) -> dict:
         for tc in tool_calls:
             name = tc.get("tool")
             args = tc.get("arguments", {})
-            writer({"event": "tool_call", "tool": name, "arguments": args})
+            tool_obj = tools.get(name)
+            label = getattr(tool_obj, "ui_label", None) if tool_obj else None
+            writer({"event": "tool_call", "tool": name, "arguments": args, "label": label or name})
             prior = prior_signatures.get(_call_signature(name, args))
             if prior is not None:
                 logger.info("[tool_node] duplicate call skipped, reusing prior observation: tool=%s args=%s", name, args)

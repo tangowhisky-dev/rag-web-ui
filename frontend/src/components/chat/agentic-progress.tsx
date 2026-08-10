@@ -56,11 +56,12 @@ export interface AgentStepEvent {
 export interface AgenticProgressProps {
   agentSteps?: AgentStepEvent[];
   isStreaming: boolean;
+  toolCalls?: Array<Record<string, unknown>>;
 }
 
 // ── Component ────────────────────────────────────────────────────────────────
 
-export const AgenticProgress = ({ agentSteps, isStreaming }: AgenticProgressProps) => {
+export const AgenticProgress = ({ agentSteps, isStreaming, toolCalls }: AgenticProgressProps) => {
   // Track unique phases in order of appearance
   const [phases, setPhases] = useState<string[]>([]);
   const dismissRef = useRef<ReturnType<typeof setTimeout>>();
@@ -114,7 +115,17 @@ export const AgenticProgress = ({ agentSteps, isStreaming }: AgenticProgressProp
 
   if (phases.length === 0) return null;
 
-  const currentPhase = phases[phases.length - 1];
+  let currentPhase = phases[phases.length - 1];
+
+  // When in the "Using tools …" phase, show the specific tool label
+  // (e.g. "Retrieving from knowledge base") instead of the generic text.
+  if (currentPhase === "Using tools …" && toolCalls && toolCalls.length > 0) {
+    const latest = toolCalls[toolCalls.length - 1];
+    const label = latest?.label as string | undefined;
+    if (label) {
+      currentPhase = `${label} …`;
+    }
+  }
 
   return (
     <div>

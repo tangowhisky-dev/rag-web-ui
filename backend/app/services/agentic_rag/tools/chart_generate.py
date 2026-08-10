@@ -24,6 +24,7 @@ class ChartGenerateInput(BaseModel):
 
 class ChartGenerateTool(BaseAgentTool):
     name: str = "chart_generate"
+    ui_label: str = "Generating chart"
     description: str = (
         "Generate an ECharts option JSON from structured data. "
         "Use after extract_data to create pie/bar/line/scatter/radar/gauge/funnel charts."
