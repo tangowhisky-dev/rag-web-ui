@@ -700,6 +700,106 @@ async def get_document(
     return document
 
 
+def _check_document_access(db: Session, document: Document, current_user: User) -> bool:
+    """Check if the current user can access this document.
+
+    - KB documents: user must own the KB.
+    - Data store documents: user must own a KB linked to the data store.
+    """
+    if document.knowledge_base_id is not None:
+        kb = db.query(KnowledgeBase).filter(
+            KnowledgeBase.id == document.knowledge_base_id,
+            _kb_owner_filter(current_user),
+        ).first()
+        return kb is not None
+
+    if document.data_store_id is not None:
+        # Check if user owns any KB linked to this data store
+        linked_kb = (
+            db.query(KnowledgeBase)
+            .join(KnowledgeBaseDataStore, KnowledgeBaseDataStore.knowledge_base_id == KnowledgeBase.id)
+            .filter(
+                KnowledgeBaseDataStore.data_store_id == document.data_store_id,
+                _kb_owner_filter(current_user),
+            )
+            .first()
+        )
+        return linked_kb is not None
+
+    return False
+
+
+@router.get("/documents/{doc_id}")
+async def get_document_by_id(
+    *,
+    db: Session = Depends(get_db),
+    doc_id: int,
+    current_user: User = Depends(get_current_user),
+) -> Any:
+    """
+    Get document details by document ID alone (works for KB and data store docs).
+    Used by citation popups that only have document_id from citation metadata.
+    """
+    document = db.query(Document).filter(Document.id == doc_id).first()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    if not _check_document_access(db, document, current_user):
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Build a response that includes the parent name (KB or data store)
+    parent_name = None
+    if document.knowledge_base_id is not None:
+        kb = db.query(KnowledgeBase).filter(KnowledgeBase.id == document.knowledge_base_id).first()
+        parent_name = kb.name if kb else None
+    elif document.data_store_id is not None:
+        from app.models.datastore import DataStore
+        ds = db.query(DataStore).filter(DataStore.id == document.data_store_id).first()
+        parent_name = ds.name if ds else None
+
+    return {
+        "id": document.id,
+        "file_name": document.file_name,
+        "file_path": document.file_path,
+        "file_size": document.file_size,
+        "content_type": document.content_type,
+        "knowledge_base_id": document.knowledge_base_id,
+        "data_store_id": document.data_store_id,
+        "parent_name": parent_name,
+    }
+
+
+@router.get("/documents/{doc_id}/download")
+def download_document_by_id(
+    doc_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Download a document by ID alone (works for KB and data store docs)."""
+    document = db.query(Document).filter(Document.id == doc_id).first()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    if not _check_document_access(db, document, current_user):
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    if not document.file_path:
+        raise HTTPException(status_code=404, detail="File no longer available on disk")
+
+    file_path = document.file_path
+    if not os.path.isabs(file_path):
+        file_path = os.path.join(settings.UPLOAD_DIR, file_path)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File no longer available on disk")
+
+    from fastapi.responses import FileResponse
+    return FileResponse(
+        path=file_path,
+        filename=document.file_name,
+        media_type=document.content_type or "application/octet-stream",
+    )
+
+
 @router.get("/{kb_id}/documents/{doc_id}/download")
 def download_document(
     kb_id: int,

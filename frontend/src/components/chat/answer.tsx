@@ -88,6 +88,13 @@ interface CitationInfo {
   document: DocumentInfo;
 }
 
+// Minimal shape returned by the generic /api/knowledge-base/documents/{id} endpoint.
+// Used for data store documents that don't have a kb_id.
+interface GenericDocInfo {
+  file_name: string;
+  parent_name: string | null;
+}
+
 // ── CodeBlock: renders mermaid/echarts fences as diagrams, others as <code> ───
 
 const CodeBlock: FC<React.HTMLAttributes<HTMLElement> & { inline?: boolean }> = ({
@@ -166,6 +173,10 @@ export const Answer: FC<{
   const [citationInfoMap, setCitationInfoMap] = useState<
     Record<string, CitationInfo>
   >({});
+  // Map for data store documents (no kb_id) — keyed by doc_id
+  const [genericDocMap, setGenericDocMap] = useState<
+    Record<string, GenericDocInfo>
+  >({});
 
   // Debounce citations to prevent rapid API calls during streaming
   const debouncedCitations = useDebouncedValue(citations, 300);
@@ -174,8 +185,10 @@ export const Answer: FC<{
   // identity (avoiding react-markdown remounting all <a> elements every render).
   const citationsRef = useRef(citations);
   const citationInfoMapRef = useRef(citationInfoMap);
+  const genericDocMapRef = useRef(genericDocMap);
   citationsRef.current = citations;
   citationInfoMapRef.current = citationInfoMap;
+  genericDocMapRef.current = genericDocMap;
 
   // renderKey forces <Markdown> to remount when citations become ready.
   // Only bump on the citations-empty -> citations-present transition itself
@@ -278,25 +291,37 @@ export const Answer: FC<{
     let cancelled = false;
 
     const fetchCitationInfo = async () => {
-      // Build the list of unique (kbId, docId) pairs to fetch.
-      const seen = new Set<string>();
-      const pairs: Array<{ key: string; kbId: number; docId: number }> = [];
+      // Split citations into two groups:
+      // 1. KB documents (have kb_id) — fetch via KB-specific endpoints
+      // 2. Data store / orphan documents (no kb_id) — fetch via generic endpoint
+      const seenKb = new Set<string>();
+      const kbPairs: Array<{ key: string; kbId: number; docId: number }> = [];
+      const seenGeneric = new Set<string>();
+      const genericDocIds: Array<{ key: string; docId: number }> = [];
+
       for (const citation of debouncedCitations) {
         const top = citation as Record<string, any>;
         const meta = (citation.metadata as Record<string, any>) || {};
         const effectiveKbId = top.kb_id ?? meta.kb_id;
         const effectiveDocId = top.document_id ?? meta.document_id;
-        if (!effectiveKbId || !effectiveDocId) continue;
-        const key = `${effectiveKbId}-${effectiveDocId}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        pairs.push({ key, kbId: effectiveKbId, docId: effectiveDocId });
+        if (!effectiveDocId) continue;
+
+        if (effectiveKbId) {
+          const key = `${effectiveKbId}-${effectiveDocId}`;
+          if (seenKb.has(key)) continue;
+          seenKb.add(key);
+          kbPairs.push({ key, kbId: effectiveKbId, docId: effectiveDocId });
+        } else {
+          const key = `doc-${effectiveDocId}`;
+          if (seenGeneric.has(key)) continue;
+          seenGeneric.add(key);
+          genericDocIds.push({ key, docId: effectiveDocId });
+        }
       }
 
-      // Fetch all citation infos in parallel — previously this was a
-      // sequential loop, causing N round-trips for N citations.
-      const results = await Promise.all(
-        pairs.map(async ({ key, kbId, docId }) => {
+      // Fetch KB citation infos in parallel
+      const kbResults = await Promise.all(
+        kbPairs.map(async ({ key, kbId, docId }) => {
           try {
             const [kb, doc] = await Promise.all([
               api.get(`/api/knowledge-base/${kbId}`),
@@ -319,13 +344,38 @@ export const Answer: FC<{
         })
       );
 
+      // Fetch generic doc infos in parallel
+      const genericResults = await Promise.all(
+        genericDocIds.map(async ({ key, docId }) => {
+          try {
+            const doc = await api.get(`/api/knowledge-base/documents/${docId}`);
+            return {
+              key,
+              info: {
+                file_name: doc.file_name,
+                parent_name: doc.parent_name,
+              } as GenericDocInfo,
+            };
+          } catch (error) {
+            console.error("Failed to fetch generic doc info:", error);
+            return null;
+          }
+        })
+      );
+
       if (cancelled) return;
 
       const infoMap: Record<string, CitationInfo> = {};
-      for (const r of results) {
+      for (const r of kbResults) {
         if (r) infoMap[r.key] = r.info;
       }
       setCitationInfoMap(infoMap);
+
+      const gMap: Record<string, GenericDocInfo> = {};
+      for (const r of genericResults) {
+        if (r) gMap[r.key] = r.info;
+      }
+      setGenericDocMap(gMap);
     };
 
     if (debouncedCitations.length > 0) {
@@ -360,6 +410,20 @@ export const Answer: FC<{
         citationInfoMapRef.current[
           `${effectiveKbId}-${effectiveDocId}`
         ];
+      // For data store docs (no kb_id), look up generic doc info by doc_id
+      const genericInfo = effectiveDocId
+        ? genericDocMapRef.current[`doc-${effectiveDocId}`]
+        : null;
+
+      // Resolve display fields: prefer KB citationInfo, fall back to genericInfo
+      const displayFileName = citationInfo?.document.file_name ?? genericInfo?.file_name;
+      const displayParentName = citationInfo?.knowledge_base.name ?? genericInfo?.parent_name ?? "Unknown";
+      // Build download URL: KB docs use kb_id path, data store docs use generic path
+      const downloadUrl = effectiveKbId && effectiveDocId
+        ? `/api/knowledge-base/${effectiveKbId}/documents/${effectiveDocId}/download`
+        : effectiveDocId
+          ? `/api/knowledge-base/documents/${effectiveDocId}/download`
+          : null;
 
       return (
         <Popover>
@@ -379,32 +443,32 @@ export const Answer: FC<{
             className="max-w-2xl w-[calc(100vw-100px)] p-0 rounded-lg shadow-lg overflow-hidden"
           >
             <div className="text-sm space-y-3 max-h-[min(70vh,520px)] overflow-y-auto p-4" style={{ scrollbarGutter: "stable" }}>
-              {citationInfo && (
+              {displayFileName && (
                 <div className="flex items-center gap-2 text-xs font-medium text-foreground bg-muted p-2 rounded">
                   <div className="w-5 h-5 flex items-center justify-center shrink-0">
                     <FileIcon
                       extension={
-                        citationInfo.document.file_name.split(".").pop() || ""
+                        displayFileName.split(".").pop() || ""
                       }
                       color="#E2E8F0"
                       labelColor="#94A3B8"
                     />
                   </div>
-                  {citation.kb_id && citation.document_id ? (
+                  {downloadUrl ? (
                     <a
-                      href={`/api/knowledge-base/${citation.kb_id}/documents/${citation.document_id}/download`}
+                      href={downloadUrl}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="truncate hover:underline text-primary"
-                      title={`Open ${citationInfo.document.file_name}`}
+                      title={`Open ${displayFileName}`}
                     >
-                      {citationInfo.knowledge_base.name} /{" "}
-                      {citationInfo.document.file_name}
+                      {displayParentName} /{" "}
+                      {displayFileName}
                     </a>
                   ) : (
                     <span className="truncate">
-                      {citationInfo.knowledge_base.name} /{" "}
-                      {citationInfo.document.file_name}
+                      {displayParentName} /{" "}
+                      {displayFileName}
                     </span>
                   )}
                 </div>
