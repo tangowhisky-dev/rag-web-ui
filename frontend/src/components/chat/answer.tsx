@@ -8,7 +8,7 @@ import React, {
   ClassAttributes,
 } from "react";
 import { AnchorHTMLAttributes } from "react";
-import { Copy, Trash2, FileText, FileImage, FileType, RefreshCw, Brain } from "lucide-react";
+import { Copy, Trash2, FileText, FileImage, FileType, Brain } from "lucide-react";
 import { AgenticProgress, AgentStepEvent } from "./agentic-progress";
 import { AgentLoopPanel } from "./agent-loop-panel";
 import {
@@ -940,7 +940,8 @@ const CONFIDENCE_COLORS: Record<ConfidenceLevel, { bar: string; text: string; bg
   none:      { bar: "bg-[hsl(var(--confidence-none))]",      text: "text-[hsl(var(--confidence-none))]",      bg: "bg-[hsl(var(--confidence-none)/10%)]",       border: "border-[hsl(var(--confidence-none)/30%)]"      },
 };
 
-const RETRY_THRESHOLD = 0.4;
+// Obsolete: retry threshold — used by the commented-out retry button below.
+// const RETRY_THRESHOLD = 0.4;
 
 // Score quartiles (≤25/≤50/≤75/>75) drive both the bar color and the
 // Very Low/Low/High/Very High label, independent of the backend's
@@ -979,7 +980,8 @@ const ConfidenceCollapsible: FC<{
   const displayPct = Math.min(100, Math.max(0, Math.round(displayConfidence * 100)));
   const { key: displayLevel, label } = getScoreBucket(displayPct);
   const cfg = CONFIDENCE_COLORS[displayLevel];
-  const showRetry = finalConfidence !== undefined && finalConfidence < RETRY_THRESHOLD;
+  // Obsolete: showRetry — used by the commented-out retry button below.
+  // const showRetry = finalConfidence !== undefined && finalConfidence < RETRY_THRESHOLD;
 
   return (
     <div className={`rounded-md border ${cfg.border} ${cfg.bg} text-xs not-prose`}>
@@ -1000,6 +1002,10 @@ const ConfidenceCollapsible: FC<{
         <span className={`font-medium shrink-0 ${cfg.text}`}>
           Confidence: {label}{displayPct > 0 ? ` · ${displayPct}/100` : ""}
         </span>
+        {/* Obsolete: retry button — no backend retry API exists; the
+            onClick only collapsed the panel, which the user can already
+            do by clicking the header. Re-enable if a real retry endpoint
+            is added.
         {showRetry && (
           <button
             onClick={(e) => {
@@ -1011,7 +1017,7 @@ const ConfidenceCollapsible: FC<{
           >
             <RefreshCw className="h-3 w-3" />
           </button>
-        )}
+        )} */}
       </button>
 
       {/* progress bar */}
