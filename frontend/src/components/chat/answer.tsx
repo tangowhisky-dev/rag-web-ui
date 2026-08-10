@@ -393,7 +393,8 @@ export const Answer: FC<{
     ) => {
       const citationId = props.href?.match(/^(\d+)$/)?.[1];
       const citation = citationId
-        ? citationsRef.current[parseInt(citationId) - 1]
+        ? citationsRef.current.find((c: any) => c.id === parseInt(citationId)) ??
+          citationsRef.current[parseInt(citationId) - 1]
         : null;
 
       if (!citation) {
