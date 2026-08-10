@@ -48,6 +48,16 @@ const NODE_PHASE: Record<string, string> = {
   answer_evaluation: "Calculating confidence …",
 };
 
+// Major phases that should override a sticky tool label.
+// When one of these becomes the current phase, the tool label is cleared.
+const MAJOR_PHASES = new Set([
+  "Analyzing query …",
+  "Thinking …",
+  "Finalizing answer …",
+  "Generating answer …",
+  "Calculating confidence …",
+]);
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 export interface AgentStepEvent {
@@ -67,20 +77,19 @@ export interface AgenticProgressProps {
 // ── Component ────────────────────────────────────────────────────────────────
 
 export const AgenticProgress = ({ agentSteps, isStreaming, toolCalls, toolObservations }: AgenticProgressProps) => {
-  // Track unique phases in order of appearance
   const [phases, setPhases] = useState<string[]>([]);
   const dismissRef = useRef<ReturnType<typeof setTimeout>>();
+  // Sticky tool label: persists after the tool observation arrives,
+  // until a major phase (Thinking, Finalizing, etc.) takes over.
+  const stickyToolLabelRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!agentSteps?.length) {
       setPhases([]);
+      stickyToolLabelRef.current = null;
       return;
     }
 
-    // Deduplicate phases while preserving order.
-    // Phases 1 (Analyzing query), 4 (Generating answer), and 5 (Calculating confidence) appear once.
-    // Phases 2 (Gathering sources) and 3 (Removing clutter) appear per-task
-    // in complex queries, so we allow duplicates for those.
     const dedupPhases = new Set(["Analyzing query …", "Thinking …", "Reflecting …", "Finalizing answer …", "Generating answer …", "Calculating confidence …"]);
     const seen = new Set<string>();
     const unique: string[] = [];
@@ -93,7 +102,6 @@ export const AgenticProgress = ({ agentSteps, isStreaming, toolCalls, toolObserv
           unique.push(phase);
         }
       } else {
-        // Allow duplicates for gathering/sources phases
         unique.push(phase);
       }
     }
@@ -118,43 +126,45 @@ export const AgenticProgress = ({ agentSteps, isStreaming, toolCalls, toolObserv
     };
   }, []);
 
-  // Determine the tool label if a tool call is still in flight
-  // (hasn't received an observation yet).  This is shown in place of
-  // the generic phase text and takes priority over everything else
-  // while streaming.
-  let toolLabel: string | null = null;
+  // ── Compute display text ──────────────────────────────────────────────────
+
+  // 1. If a tool call is in flight, show its label (fresh or updated).
+  let activeToolLabel: string | null = null;
   if (isStreaming && toolCalls && toolCalls.length > 0) {
     const obsCount = toolObservations?.length ?? 0;
     if (toolCalls.length > obsCount) {
       const latest = toolCalls[toolCalls.length - 1];
       const label = latest?.label as string | undefined;
       if (label) {
-        toolLabel = `${label} …`;
+        activeToolLabel = `${label} …`;
       }
     }
   }
 
-  // If we have a tool label, show it — even if phases is empty (the
-  // tool node is not in NODE_PHASE, so phases may be empty during
-  // tool execution).
-  if (toolLabel) {
-    return (
-      <div>
-        <span className="text-[12px] text-zinc-500 dark:text-zinc-400 leading-tight">
-          {toolLabel}
-        </span>
-      </div>
-    );
+  // 2. Update the sticky label.
+  //    - When a tool is in flight, set the sticky label.
+  //    - When no tool is in flight, keep the sticky label UNLESS the
+  //      current phase is a major phase (Thinking, Finalizing, etc.).
+  //      Intermediate phases (Gathering sources, Reflecting, Removing
+  //      clutter) do NOT clear the sticky label — this prevents the
+  //      rapid flash of intermediate text after a tool completes.
+  const currentPhase = phases.length > 0 ? phases[phases.length - 1] : null;
+
+  if (activeToolLabel) {
+    stickyToolLabelRef.current = activeToolLabel;
+  } else if (currentPhase && MAJOR_PHASES.has(currentPhase)) {
+    stickyToolLabelRef.current = null;
   }
 
-  if (phases.length === 0) return null;
+  // 3. Decide what to show: sticky tool label > current phase.
+  const displayText = stickyToolLabelRef.current ?? currentPhase;
 
-  const currentPhase = phases[phases.length - 1];
+  if (!displayText) return null;
 
   return (
     <div>
       <span className="text-[12px] text-zinc-500 dark:text-zinc-400 leading-tight">
-        {currentPhase}
+        {displayText}
       </span>
     </div>
   );

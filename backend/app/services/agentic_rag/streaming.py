@@ -186,7 +186,7 @@ class AgenticRAGTransformer(StreamTransformer):
         elif kind == "plan":
             self.events.push({"event": "plan", "plan": data.get("plan", {})})
         elif kind == "tool_call":
-            self.events.push({"event": "tool_call", "tool": data.get("tool"), "arguments": data.get("arguments", {})})
+            self.events.push({"event": "tool_call", **{k: v for k, v in data.items() if k != "event"}})
         elif kind == "tool_observation":
             self.events.push({"event": "tool_observation", **{k: v for k, v in data.items() if k != "event"}})
         elif kind == "last_answer":
