@@ -395,7 +395,7 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
     # Query KB documents (direct uploads)
     kb_sql = text(
         """
-        SELECT chunk_text, chunk_metadata, kb_id,
+        SELECT chunk_text, chunk_metadata, kb_id, document_id, chunk_index,
                MATCH(chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE) AS fts_score
         FROM   document_chunks
         WHERE  kb_id IN :kb_ids
@@ -409,7 +409,7 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
     # Query DataStore documents
     ds_sql = text(
         """
-        SELECT chunk_text, chunk_metadata, kb_id,
+        SELECT chunk_text, chunk_metadata, kb_id, document_id, chunk_index,
                MATCH(chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE) AS fts_score
         FROM   document_chunks
         WHERE  data_store_id IN :ds_ids
@@ -482,6 +482,14 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
                 meta = raw_meta
             else:
                 meta = {}
+            # Ensure document_id and chunk_index are in metadata —
+            # they're columns on document_chunks but not always in
+            # the chunk_metadata JSON. Without these, citations from
+            # exact-retrieval docs can't be stored in message_citations.
+            if "document_id" not in meta and hasattr(row, "document_id"):
+                meta["document_id"] = row.document_id
+            if "chunk_index" not in meta and hasattr(row, "chunk_index"):
+                meta["chunk_index"] = row.chunk_index
             result[h] = _Candidate(
                 doc=LangchainDocument(
                     page_content=chunk_text,

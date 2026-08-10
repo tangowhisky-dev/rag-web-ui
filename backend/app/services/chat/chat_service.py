@@ -369,18 +369,23 @@ async def generate_response(
                 # Buffer only the citations actually used by the normalized answer,
                 # in display order (1..M).  Each item already carries the doc's
                 # metadata from graph_runner.
+                # Use a separate counter (not enumerate) so that docs without
+                # document_id/chunk_index are skipped without creating gaps
+                # in the citation_index sequence.
                 buffered_citations = []
-                for idx, doc in enumerate(event.get("citations", []), start=1):
+                citation_idx = 0
+                for doc in event.get("citations", []):
                     document_id = doc.get("metadata", {}).get("document_id")
                     chunk_index = doc.get("metadata", {}).get("chunk_index")
                     if document_id is not None and chunk_index is not None:
+                        citation_idx += 1
                         meta = {**(doc.get("metadata", {}) or {})}
                         for rk in ("score", "dense_rank", "sparse_rank", "exact_rank", "retrieval_leg"):
                             v = doc.get(rk)
                             if v is not None:
                                 meta[rk] = v
                         buffered_citations.append((
-                            bot_message.id, document_id, chunk_index, idx, meta,
+                            bot_message.id, document_id, chunk_index, citation_idx, meta,
                         ))
 
                 # Forward normalized content + cited docs to the frontend so the
