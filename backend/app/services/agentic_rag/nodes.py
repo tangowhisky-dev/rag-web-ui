@@ -579,7 +579,7 @@ async def answer_evaluation_node(
         docs = state.get("retrieved_docs", [])
         retrieval_conf = state.get("retrieval_confidence", 0.0)
 
-        if not answer or not docs:
+        if not answer:
             return {
                 "answer_evaluation_attempts": state.get("answer_evaluation_attempts", 0) + 1,
                 "final_confidence": 0.0,

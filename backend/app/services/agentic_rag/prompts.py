@@ -380,9 +380,12 @@ Rules:
 - faithfulness (0-100): What percentage of the answer is actually supported by the retrieved context?
   - 100 = everything cited or clearly supported by context
   - 0 = answer is mostly or entirely external knowledge
-- completeness (0-100): How thoroughly does the answer address the query?
+  - If the retrieved context is empty or irrelevant, faithfulness MUST be 0
+- completeness (0-100): How thoroughly does the answer addresses the query?
   - 100 = all aspects of the query are fully addressed
   - 0 = answer misses key parts of the query
+  - Completeness is independent of faithfulness: a correct answer from general knowledge
+    can still score 100 on completeness
 - confidence_match (boolean): Does the confidence level match the answer quality?
   - true = high quality answer with high confidence, or low quality with low confidence
   - false = mismatch between answer quality and confidence
