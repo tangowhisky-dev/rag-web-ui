@@ -87,6 +87,7 @@ export const AgenticProgress = ({ agentSteps, isStreaming, toolCalls, toolObserv
     if (!agentSteps?.length) {
       setPhases([]);
       stickyToolLabelRef.current = null;
+      setHistory([]);
       return;
     }
 
@@ -116,7 +117,10 @@ export const AgenticProgress = ({ agentSteps, isStreaming, toolCalls, toolObserv
         dismissRef.current = undefined;
       }
     } else if (phases.length > 0) {
-      dismissRef.current = setTimeout(() => setPhases([]), 1500);
+      dismissRef.current = setTimeout(() => {
+        setPhases([]);
+        setHistory([]);
+      }, 1500);
     }
   }, [isStreaming, phases.length]);
 
@@ -159,13 +163,40 @@ export const AgenticProgress = ({ agentSteps, isStreaming, toolCalls, toolObserv
   // 3. Decide what to show: sticky tool label > current phase.
   const displayText = stickyToolLabelRef.current ?? currentPhase;
 
-  if (!displayText) return null;
+  // 4. Track history of display texts (last 3) for the 3-line display.
+  //    Adjusting state during render — React's recommended pattern for
+  //    derived state. Avoids an extra render cycle vs useEffect.
+  const [history, setHistory] = useState<string[]>([]);
+  if (displayText && history[history.length - 1] !== displayText) {
+    setHistory(prev => [...prev, displayText].slice(-3));
+  }
+
+  if (history.length === 0 && !displayText) return null;
+
+  // Show up to 3 lines: oldest two in thin grey, current in bold grey.
+  const lines = displayText
+    ? [...history.slice(0, -1), displayText].slice(-3)
+    : history;
+
+  if (lines.length === 0) return null;
 
   return (
-    <div>
-      <span className="text-[12px] text-zinc-500 dark:text-zinc-400 leading-tight">
-        {displayText}
-      </span>
+    <div className="flex flex-col gap-0">
+      {lines.map((line, i) => {
+        const isCurrent = i === lines.length - 1;
+        return (
+          <span
+            key={`${line}-${i}`}
+            className={
+              isCurrent
+                ? "text-[12px] font-semibold text-zinc-600 dark:text-zinc-300 leading-tight"
+                : "text-[11px] font-normal text-zinc-400 dark:text-zinc-500 leading-tight"
+            }
+          >
+            {line}
+          </span>
+        );
+      })}
     </div>
   );
 };
