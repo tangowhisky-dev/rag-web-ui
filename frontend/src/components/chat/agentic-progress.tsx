@@ -25,7 +25,11 @@ const NODE_PHASE: Record<string, string> = {
 
   // Phase 4: Thinking & tools
   think: "Thinking …",
-  tool: "Using tools …",
+  // Note: the "tool" node is intentionally NOT mapped here. Tool call
+  // labels (e.g. "Retrieving from knowledge base") are shown directly
+  // from the toolCalls prop when tools are running — see the render
+  // body below. This avoids a generic "Using tools …" flash before the
+  // specific label arrives.
 
   // Phase 5: Reflecting
   reflect: "Reflecting …",
@@ -77,7 +81,7 @@ export const AgenticProgress = ({ agentSteps, isStreaming, toolCalls, toolObserv
     // Phases 1 (Analyzing query), 4 (Generating answer), and 5 (Calculating confidence) appear once.
     // Phases 2 (Gathering sources) and 3 (Removing clutter) appear per-task
     // in complex queries, so we allow duplicates for those.
-    const dedupPhases = new Set(["Analyzing query …", "Thinking …", "Using tools …", "Reflecting …", "Finalizing answer …", "Generating answer …", "Calculating confidence …"]);
+    const dedupPhases = new Set(["Analyzing query …", "Thinking …", "Reflecting …", "Finalizing answer …", "Generating answer …", "Calculating confidence …"]);
     const seen = new Set<string>();
     const unique: string[] = [];
     for (const step of agentSteps) {
@@ -114,25 +118,38 @@ export const AgenticProgress = ({ agentSteps, isStreaming, toolCalls, toolObserv
     };
   }, []);
 
-  if (phases.length === 0) return null;
-
-  let currentPhase = phases[phases.length - 1];
-
-  // If the latest tool call hasn't received an observation yet, it's
-  // still running — show its specific label (e.g. "Retrieving from
-  // knowledge base") instead of the generic phase text.  This takes
-  // priority over retrieval sub-node phases ("Gathering sources …")
-  // that fire while the tool node is active.
+  // Determine the tool label if a tool call is still in flight
+  // (hasn't received an observation yet).  This is shown in place of
+  // the generic phase text and takes priority over everything else
+  // while streaming.
+  let toolLabel: string | null = null;
   if (isStreaming && toolCalls && toolCalls.length > 0) {
     const obsCount = toolObservations?.length ?? 0;
     if (toolCalls.length > obsCount) {
       const latest = toolCalls[toolCalls.length - 1];
       const label = latest?.label as string | undefined;
       if (label) {
-        currentPhase = `${label} …`;
+        toolLabel = `${label} …`;
       }
     }
   }
+
+  // If we have a tool label, show it — even if phases is empty (the
+  // tool node is not in NODE_PHASE, so phases may be empty during
+  // tool execution).
+  if (toolLabel) {
+    return (
+      <div>
+        <span className="text-[12px] text-zinc-500 dark:text-zinc-400 leading-tight">
+          {toolLabel}
+        </span>
+      </div>
+    );
+  }
+
+  if (phases.length === 0) return null;
+
+  const currentPhase = phases[phases.length - 1];
 
   return (
     <div>
