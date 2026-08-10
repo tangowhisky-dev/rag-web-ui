@@ -1,4 +1,5 @@
 import { useEffect, useState, useRef } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 
 // ── Node → Phase mapping ─────────────────────────────────────────────────────
 
@@ -181,22 +182,29 @@ export const AgenticProgress = ({ agentSteps, isStreaming, toolCalls, toolObserv
   if (lines.length === 0) return null;
 
   return (
-    <div className="flex flex-col gap-0">
-      {lines.map((line, i) => {
-        const isCurrent = i === lines.length - 1;
-        return (
-          <span
-            key={`${line}-${i}`}
-            className={
-              isCurrent
-                ? "text-[12px] font-semibold text-zinc-600 dark:text-zinc-300 leading-tight"
-                : "text-[11px] font-normal text-zinc-400 dark:text-zinc-500 leading-tight"
-            }
-          >
-            {line}
-          </span>
-        );
-      })}
+    <div className="flex flex-col gap-0 overflow-hidden">
+      <AnimatePresence initial={false}>
+        {lines.map((line, i) => {
+          const isCurrent = i === lines.length - 1;
+          return (
+            <motion.span
+              key={`${line}-${i}`}
+              layout
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: "auto" }}
+              exit={{ opacity: 0, height: 0 }}
+              transition={{ type: "spring", stiffness: 500, damping: 35, mass: 0.3 }}
+              className={
+                isCurrent
+                  ? "text-[12px] font-semibold text-zinc-600 dark:text-zinc-300 leading-tight"
+                  : "text-[11px] font-normal text-zinc-400 dark:text-zinc-500 leading-tight"
+              }
+            >
+              {line}
+            </motion.span>
+          );
+        })}
+      </AnimatePresence>
     </div>
   );
 };
