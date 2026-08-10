@@ -893,9 +893,10 @@ def set_active_branch(
         .first()
     )
     if not chat:
+        logger.warning("[ACTIVE_BRANCH] chat %s not found", chat_id)
         raise HTTPException(status_code=404, detail="Chat not found")
 
-    branches = chat.active_branches or {}
+    branches = dict(chat.active_branches or {})
     branches[str(body.parent_message_id)] = body.selected_message_id
     chat.active_branches = branches
     db.commit()

@@ -1121,10 +1121,11 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     });
 
     // Persist the active branch selection so reload picks the right branch
+    console.log("[NAVIGATE] about to PUT", { chatId: params.id, parent: parseInt(parentMessageId), selected: parseInt(targetUserMsg.id) });
     api.put(`/api/chat/${params.id}/active-branch`, {
       parent_message_id: parseInt(parentMessageId),
       selected_message_id: parseInt(targetUserMsg.id),
-    }).catch(() => {});
+    }).then(() => console.log("[NAVIGATE] PUT success")).catch((e) => console.error("[NAVIGATE] PUT failed", e));
   };
 
   /** Handle user's clarification response */

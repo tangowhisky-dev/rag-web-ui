@@ -80,11 +80,13 @@ export function BranchPicker({
       const data: SiblingPair[] = await api.get(
         `/api/chat/${chatId}/messages/${forMessageId}/siblings`
       );
+      console.log("[BP] fetchSiblings", { forMessageId, count: data.length, ids: data.map(d => d.user.id) });
       if (data.length > 1) {
         setSiblings(data);
         // Determine which sibling is currently displayed
         const idx = data.findIndex((s) => s.user.id.toString() === forMessageId);
         setCurrentIndex(idx >= 0 ? idx : data.length - 1);
+        console.log("[BP] set currentIndex", idx >= 0 ? idx : data.length - 1);
       }
     } catch {
       // Silently ignore — siblings are optional UX enhancement
