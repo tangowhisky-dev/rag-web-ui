@@ -340,10 +340,6 @@ class Settings(BaseSettings):
     # Maximum characters for the compaction summary. Longer summaries
     # preserve more detail but consume more context tokens.
     COMPACTION_SUMMARY_MAX_CHARS: int = int(os.getenv("COMPACTION_SUMMARY_MAX_CHARS", "2000"))
-    # Max chars to include per assistant response in generation messages.
-    # Prevents context poisoning from very long previous answers while
-    # still letting the model reference its own prior output.
-    COMPACTION_ASSISTANT_MAX_CHARS: int = int(os.getenv("COMPACTION_ASSISTANT_MAX_CHARS", "600"))
 
     @property
     def graphrag_model(self) -> str:
@@ -357,6 +353,12 @@ class Settings(BaseSettings):
     AGENT_MAX_CODE_EXEC: int = int(os.getenv("AGENT_MAX_CODE_EXEC", "3"))
     AGENT_MAX_REFLECTIONS: int = int(os.getenv("AGENT_MAX_REFLECTIONS", "2"))
     AGENT_REFLECT_EVERY: int = int(os.getenv("AGENT_REFLECT_EVERY", "2"))
+    # Per-failed-call retry budget (separate from the per-tool call caps above).
+    # When a tool call returns an error, the tool_node retries up to this many
+    # times: transient errors retry with the same args + backoff; argument
+    # errors call the correction LLM to generate new args.
+    AGENT_MAX_TOOL_RETRIES: int = int(os.getenv("AGENT_MAX_TOOL_RETRIES", "3"))
+    AGENT_RETRY_BACKOFF_BASE: float = float(os.getenv("AGENT_RETRY_BACKOFF_BASE", "0.5"))
     # Clarification rounds allowed per turn. Beyond this the planner's
     # needs_clarification flag is ignored and the agent answers with the
     # ambiguity stated, instead of looping plan -> clarify -> plan.

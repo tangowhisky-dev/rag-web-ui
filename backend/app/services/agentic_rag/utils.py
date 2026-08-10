@@ -189,7 +189,7 @@ def validate_resolution_provenance(
     return not unsupported, unsupported
 
 
-def resolve_retrieval_query(
+async def resolve_retrieval_query(
     query: str,
     original_query: str,
     recent_history: list,
@@ -216,7 +216,7 @@ def resolve_retrieval_query(
         return query, {"resolved": False, "reason": "self_contained"}
 
     try:
-        raw_rewrite = _call_rewriter(
+        raw_rewrite = await _call_rewriter(
             query=query,
             recent_history=recent_history,
             api_base=api_base,
@@ -284,7 +284,7 @@ def _clean_rewrite(raw_rewrite: str) -> str:
     return standalone.strip().strip('"')
 
 
-def _call_rewriter(
+async def _call_rewriter(
     query: str,
     recent_history: list,
     api_base: str | None,
@@ -305,9 +305,9 @@ def _call_rewriter(
             messages.append({"role": "assistant", "content": m.content})
     messages.append({"role": "user", "content": query})
 
-    from openai import OpenAI as _OAI
-    client = _OAI(api_key=openai_api_key, base_url=api_base or openai_api_base)
-    resp = client.chat.completions.create(
+    from openai import AsyncOpenAI as _AsyncOAI
+    client = _AsyncOAI(api_key=openai_api_key, base_url=api_base or openai_api_base)
+    resp = await client.chat.completions.create(
         model=query_model or "default",
         # 60 tokens truncated rewrites mid-phrase; the prompt caps output at
         # 30 words, so 160 leaves headroom without inviting an essay.

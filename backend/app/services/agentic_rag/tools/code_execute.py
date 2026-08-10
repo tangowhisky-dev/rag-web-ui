@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import logging
+import operator
 import signal
 import time
 import traceback
@@ -19,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 class CodeExecuteInput(BaseModel):
-    code: str = Field(description="Python code to execute.")
+    code: str = Field(description="Python code to execute. Set the 'result' variable to return a value, or use print() to capture stdout.")
     data: Optional[dict] = Field(default=None, description="Variables to inject.")
     timeout_s: int = Field(default=10, ge=1, le=60)
 
@@ -51,12 +52,35 @@ def _write_(ob):
     return ob
 
 
+_INPLACE_OPS = {
+    "+=": operator.add, "-=": operator.sub, "*=": operator.mul,
+    "/=": operator.truediv, "%=": operator.mod, "//=": operator.floordiv,
+    "**=": operator.pow, "&=": operator.and_, "|=": operator.or_,
+    "^=": operator.xor, "<<=": operator.lshift, ">>=": operator.rshift,
+}
+
+
+def _inplacevar_(op, x, y):
+    return _INPLACE_OPS[op](x, y)
+
+
 class CodeExecuteTool(BaseAgentTool):
     name: str = "code_execute"
     description: str = (
         "Execute Python code in a restricted sandbox for computation, "
         "data transformation, or statistics. Use with data from extract_data or file_extract_table. "
-        "Do NOT use this to build chart/ECharts options — use chart_generate for that."
+        "Do NOT use this to build chart/ECharts options — use chart_generate for that.\n"
+        "Sandbox details:\n"
+        "- Available builtins: sum, min, max, len, print, list, dict, set, tuple, range, enumerate, "
+        "sorted, reversed, all, any, abs, round, int, float, str, bool, map, filter, zip, type, isinstance.\n"
+        "- Importable packages: math, statistics, json, re, io, collections, itertools, functools, "
+        "decimal, datetime, csv, numpy (as np), pandas (as pd), matplotlib.pyplot (as plt).\n"
+        "- Supported: list/dict/set comprehensions, for-loops, tuple unpacking, augmented assignment (+=, *=, etc.), "
+        "f-strings, lambda, def, classes, try/except, with-statement.\n"
+        "- NOT available: open(), eval(), exec(), getattr(), setattr(), globals(), locals(), __import__ of non-whitelisted packages, "
+        "os, sys, subprocess, socket, pathlib, shutil, pickle, ctypes.\n"
+        "- Output: set the 'result' variable to return a value, or use print() to capture stdout. "
+        "Example: result = sum([1, 2, 3]) or print('hello')."
     )
     args_schema: type[BaseModel] = CodeExecuteInput
 
@@ -76,7 +100,13 @@ class CodeExecuteTool(BaseAgentTool):
         # guarded __import__ that only allows whitelisted top-level packages.
         try:
             from RestrictedPython import safe_builtins
-            from RestrictedPython.Guards import safer_getattr, guarded_setattr, guarded_delattr
+            from RestrictedPython.Guards import (
+                safer_getattr,
+                guarded_setattr,
+                guarded_delattr,
+                guarded_iter_unpack_sequence,
+                guarded_unpack_sequence,
+            )
             from RestrictedPython.PrintCollector import PrintCollector
         except ImportError:
             return {"ok": False, "result": {}, "error": "RestrictedPython is not installed; code execution disabled.", "tokens": 0}
@@ -84,8 +114,10 @@ class CodeExecuteTool(BaseAgentTool):
         restricted_builtins = dict(safe_builtins)
         for name, fn in [
             ("sum", sum), ("min", min), ("max", max), ("print", print),
-            ("list", list), ("dict", dict), ("enumerate", enumerate),
-            ("all", all), ("any", any), ("__import__", _safe_import),
+            ("list", list), ("dict", dict), ("set", set), ("enumerate", enumerate),
+            ("all", all), ("any", any), ("reversed", reversed),
+            ("map", map), ("filter", filter), ("type", type),
+            ("__import__", _safe_import),
         ]:
             restricted_builtins[name] = fn
 
@@ -98,6 +130,9 @@ class CodeExecuteTool(BaseAgentTool):
             "_print_": PrintCollector,
             "setattr": guarded_setattr,
             "delattr": guarded_delattr,
+            "_iter_unpack_sequence_": guarded_iter_unpack_sequence,
+            "_unpack_sequence_": guarded_unpack_sequence,
+            "_inplacevar_": _inplacevar_,
         }
 
         try:

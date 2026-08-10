@@ -185,13 +185,9 @@ async def generate_response(
     knowledge_base_ids: List[int],
     chat_id: int,
     db: Session,
-    temperature:   float = 0.0,
-    model_name:    Optional[str] = None,
     display_query: Optional[str] = None,
     file_id: Optional[int] = None,
     file_markdown: Optional[str] = None,
-    api_base: Optional[str] = None,
-    query_model: Optional[str] = None,
     org_id: Optional[int] = None,
     user_id: Optional[int] = None,
 ) -> AsyncGenerator[str, None]:
@@ -214,8 +210,6 @@ async def generate_response(
     """
     logger.info("=" * 70)
     logger.info("[CHAT] chat_id=%s | kb_ids=%s | query=%r", chat_id, knowledge_base_ids, query)
-    if api_base is not None:
-        logger.info("[CHAT] api_base=%s", api_base)
 
     try:
         _bot_message_id: int = 0  # cached before db.close() so error handler can use it

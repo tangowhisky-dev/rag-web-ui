@@ -54,6 +54,47 @@ _TOOL_CALL_BUDGET = {
     "code_execute": settings.AGENT_MAX_CODE_EXEC,
 }
 
+# Error patterns that indicate a transient infrastructure failure rather
+# than a bad-argument error.  Transient failures retry with the same
+# arguments (plus backoff); argument failures call the correction LLM.
+_TRANSIENT_ERROR_PATTERNS = (
+    "timeout", "timed out", "connection", "network", "unreachable",
+    "temporarily", "broken pipe", "reset by peer", "i/o error",
+    "errno 5", "errno 11", "errno 104", "errno 110",
+)
+
+# Tool-specific hints appended to the correction prompt so the LLM knows
+# how to fix common errors without guessing.
+_TOOL_ERROR_HINTS: dict[str, dict[str, str]] = {
+    "code_execute": {
+        "_iter_unpack_sequence_": "List comprehensions and tuple unpacking in for-loops are not supported. Rewrite as explicit for-loops with .append().",
+        "_unpack_sequence_": "Tuple unpacking (a, b = ...) is not supported. Use indexing: a = x[0]; b = x[1].",
+        "_inplacevar_": "Augmented assignment (+=, *=) is not supported. Use explicit assignment: x = x + 1.",
+    },
+    "chart_generate": {
+        "No numeric values": "Each data item must have a 'value' key with a numeric value. Check your data items.",
+        "No data provided": "The 'data' field must be a non-empty list of objects with 'label' and 'value' keys.",
+    },
+    "extract_data": {
+        "JSON": "Try a different source or simplify the focus parameter.",
+    },
+    "file_read": {
+        "not found": "Check the file_id and section parameter.",
+    },
+}
+
+
+def _is_transient_error(error: str) -> bool:
+    return any(p in (error or "").lower() for p in _TRANSIENT_ERROR_PATTERNS)
+
+
+def _correction_hints(tool_name: str, error: str) -> str:
+    hints = _TOOL_ERROR_HINTS.get(tool_name, {})
+    matched = [h for pat, h in hints.items() if pat in (error or "")]
+    if matched:
+        return "\n".join(matched)
+    return "Fix the arguments based on the error message."
+
 
 def _extract_balanced(text: str, chars: tuple[str, str]) -> str | None:
     """Return the first balanced *chars* region in *text* while respecting strings."""
@@ -717,6 +758,8 @@ async def plan_node(state: AgentState, ctx: ToolContext) -> dict:
         lao = state.get("last_answer_object")
         if lao and hasattr(lao, "summary"):
             last_summary = lao.summary
+            if getattr(lao, "chart_options", None):
+                last_summary += f" (Previous answer includes {len(lao.chart_options)} chart(s) with structured data.)"
     
         recalled = state.get("recalled_memories", []) or []
         recalled_text = "\n".join(d.get("page_content", "") for d in recalled[:3])
@@ -955,6 +998,44 @@ def route_reflect_final(state: AgentState) -> str:
     return "finalize"
 
 
+async def _correct_tool_args(
+    tool_name: str,
+    original_args: dict,
+    error: str,
+    tools: dict,
+    ctx: "ToolContext",
+) -> dict | None:
+    """Call the correction LLM to produce fixed arguments for a failed tool call."""
+    tool = tools.get(tool_name)
+    if tool is None:
+        return None
+    schema = {}
+    try:
+        schema = tool.args_schema.model_json_schema()
+    except Exception:
+        pass
+    prompt = (
+        f"The {tool_name} tool failed with this error:\n{error}\n\n"
+        f"Original arguments: {json.dumps(original_args, default=str)}\n\n"
+        f"Tool schema: {json.dumps(schema, default=str)}\n\n"
+        f"Generate corrected arguments as a JSON object matching the schema.\n"
+        f"{_correction_hints(tool_name, error)}\n"
+        "Return ONLY the JSON object, no explanation."
+    )
+    try:
+        llm = build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)
+        response = await llm.ainvoke([{"role": "user", "content": prompt}])
+        raw = str(response.content)
+        block = _extract_json_block(raw)
+        if block:
+            corrected = json.loads(block)
+            if isinstance(corrected, dict):
+                return corrected
+    except Exception as exc:
+        logger.debug("[_correct_tool_args] correction LLM failed: %s", exc)
+    return None
+
+
 async def tool_node(state: AgentState, ctx: ToolContext) -> dict:
     """Dispatch tool calls, run them (in parallel when independent), record observations."""
     with _agent_step("tool"):
@@ -1039,6 +1120,52 @@ async def tool_node(state: AgentState, ctx: ToolContext) -> dict:
             new_observations.append(obs)
             writer({"event": "tool_observation", **obs.model_dump()})
             counts[obs.tool] = counts.get(obs.tool, 0) + 1
+
+        # Retry failed tool calls: transient errors retry with the same
+        # arguments + backoff; argument errors call the correction LLM to
+        # generate new arguments.  Retries do NOT count against the per-tool
+        # call budget (_TOOL_CALL_BUDGET) — that budget limits how many times
+        # the *think* LLM can choose to call a tool, not how many times a
+        # single failed call can be retried.
+        max_retries = settings.AGENT_MAX_TOOL_RETRIES
+        if max_retries > 0:
+            for idx, obs in enumerate(new_observations):
+                if obs.error is None:
+                    continue
+                tool_name = obs.tool
+                tool = tools.get(tool_name)
+                if tool is None:
+                    continue
+                for attempt in range(max_retries):
+                    if _is_transient_error(obs.error):
+                        await asyncio.sleep(settings.AGENT_RETRY_BACKOFF_BASE * (2 ** attempt))
+                        retry_args = obs.arguments
+                    else:
+                        retry_args = await _correct_tool_args(
+                            tool_name, obs.arguments, obs.error, tools, ctx,
+                        )
+                        if retry_args is None:
+                            break
+                    retry_result = await _run_tool(tool, tool_name, retry_args)
+                    retry_obs = Observation(
+                        tool=retry_result["tool"],
+                        arguments=retry_result["arguments"],
+                        result=retry_result.get("result", {}),
+                        error=retry_result.get("error"),
+                        tokens=retry_result.get("tokens", 0),
+                    )
+                    writer({
+                        "event": "tool_retry",
+                        "tool": tool_name,
+                        "attempt": attempt + 1,
+                        "max_retries": max_retries,
+                        "success": retry_obs.error is None,
+                        "error": retry_obs.error,
+                    })
+                    if retry_obs.error is None:
+                        new_observations[idx] = retry_obs
+                        break
+                    obs = retry_obs
     
         # Promote all rag_retrieve docs into graph state (deduplicated across
         # observations by content_hash) so finalize_node, answer_evaluation_node,
@@ -1255,6 +1382,22 @@ async def finalize_node(state: AgentState, ctx: ToolContext) -> dict:
         # stream the display-ready answer immediately, without waiting on
         # Call 4 (last_answer_object extraction) or Call 5 (confidence score).
         raw_for_extraction = final
+        # Append a readable summary of chart data so the extraction LLM can
+        # see the actual values (the marker text alone says "[[CHART_1]]").
+        if chart_options:
+            chart_parts: list[str] = []
+            for i, opt in enumerate(chart_options, 1):
+                series = opt.get("series", [])
+                xaxis = opt.get("xAxis", {})
+                labels = xaxis.get("data", []) if isinstance(xaxis, dict) else []
+                for s in series:
+                    values = s.get("data", [])
+                    pairs = ", ".join(
+                        f"{labels[j]}={values[j]}"
+                        for j in range(min(len(labels), len(values)))
+                    )
+                    chart_parts.append(f"Chart {i} ({s.get('type', 'chart')}): {pairs}")
+            raw_for_extraction += "\n\nChart data:\n" + "\n".join(chart_parts)
         final = _substitute_chart_markers(final, chart_options)
         final, cited_doc_indices = normalize_citations(final, docs)
         cited_docs = [docs[i - 1] for i in cited_doc_indices]

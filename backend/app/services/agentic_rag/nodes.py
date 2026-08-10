@@ -40,14 +40,14 @@ def select_recent_history(messages: list, max_pairs: int | None = None) -> list:
     """Return up to ``max_pairs`` of recent user/assistant turns.
 
     The last message is assumed to be the current user query and is excluded.
-    Assistant turns are capped at ``COMPACTION_ASSISTANT_MAX_CHARS`` so a very
-    long previous answer cannot dominate the prompt.
+    Assistant turns are not truncated: the resolver, think and finalize nodes
+    need the full prior answer to resolve references and compare approaches.
+    Truncating here loses facts that cannot be recovered downstream.
     """
     from langchain_core.messages import HumanMessage, AIMessage
 
     if max_pairs is None:
         max_pairs = settings.AGENT_HISTORY_PAIRS
-    assistant_cap = settings.COMPACTION_ASSISTANT_MAX_CHARS
 
     history: list = []
     # Skip the final message (current query).
@@ -55,7 +55,7 @@ def select_recent_history(messages: list, max_pairs: int | None = None) -> list:
         if isinstance(m, HumanMessage):
             history.append(HumanMessage(content=m.content))
         elif isinstance(m, AIMessage):
-            history.append(AIMessage(content=str(m.content)[:assistant_cap]))
+            history.append(AIMessage(content=m.content))
     # Keep the most recent max_pairs * 2 messages.
     return history[-(max_pairs * 2):]
 
@@ -182,7 +182,7 @@ async def rewrite_query_node(
             if isinstance(doc, dict):
                 provenance_sources.append(str(doc.get("page_content", "")))
 
-        rewritten, provenance = resolve_retrieval_query(
+        rewritten, provenance = await resolve_retrieval_query(
             query=resolver_input,
             original_query=query,
             recent_history=recent_history,

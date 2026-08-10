@@ -6,7 +6,7 @@ import json
 import logging
 import re
 import time
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -17,6 +17,8 @@ from app.services.agentic_rag.tool_context import ToolContext, enforce_rbac, wri
 from app.services.agentic_rag.tools.base import BaseAgentTool
 
 logger = logging.getLogger(__name__)
+
+_MAX_LLM_RETRIES = 3
 
 
 class ExtractDataInput(BaseModel):
@@ -51,6 +53,34 @@ def _rule_based_extract(text: str, focus: Optional[str] = None) -> list[dict]:
     return points[:20]
 
 
+def _extract_from_chart_options(chart_options: list[dict]) -> list[dict]:
+    """Extract {label, value} pairs deterministically from ECharts option dicts."""
+    points: list[dict] = []
+    for opt in chart_options:
+        labels = opt.get("xAxis", {}).get("data", []) if isinstance(opt.get("xAxis"), dict) else []
+        series_list = opt.get("series", [])
+        if not series_list:
+            continue
+        values = series_list[0].get("data", [])
+        for j in range(min(len(labels), len(values))):
+            try:
+                val = float(values[j]) if isinstance(values[j], (int, float)) else values[j]
+            except (TypeError, ValueError):
+                continue
+            points.append({
+                "label": str(labels[j]),
+                "value": val,
+                "unit": None,
+                "context": f"Chart data point {j + 1}",
+            })
+    return points
+
+
+class _ExtractResult(BaseModel):
+    """Structured output schema for LLM-based extraction."""
+    data: List[DataPoint] = Field(default_factory=list, description="Extracted data points.")
+
+
 class ExtractDataTool(BaseAgentTool):
     name: str = "extract_data"
     description: str = (
@@ -77,6 +107,11 @@ class ExtractDataTool(BaseAgentTool):
                     for dp in lao.data
                 ]
                 return self._finish(input_obj, points, 0, t0)
+            # No structured data in lao.data — check chart_options as fallback.
+            if lao and isinstance(lao, LastAnswerObject) and lao.chart_options:
+                points = _extract_from_chart_options(lao.chart_options)
+                if points:
+                    return self._finish(input_obj, points, 0, t0)
             if lao and hasattr(lao, "summary"):
                 text = lao.summary + "\n" + "\n".join(lao.key_points or [])
             if not text:
@@ -117,14 +152,36 @@ class ExtractDataTool(BaseAgentTool):
         points: list[dict] = []
         try:
             llm = build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)
-            response = await llm.ainvoke([{"role": "user", "content": prompt}])
-            raw = str(response.content)
-            # Try to find a JSON list in the response.
-            match = re.search(r"\[.*\]", raw, re.DOTALL)
-            if match:
-                points = json.loads(match.group(0))
-                if not isinstance(points, list):
-                    points = []
+
+            # Primary path: structured output (forces valid JSON from the LLM).
+            for attempt in range(_MAX_LLM_RETRIES):
+                try:
+                    structured = llm.with_structured_output(_ExtractResult, method="json_schema")
+                    result = await structured.ainvoke([{"role": "user", "content": prompt}])
+                    if result and result.data:
+                        points = [
+                            {"label": dp.label, "value": dp.value, "unit": dp.unit, "context": dp.context}
+                            for dp in result.data
+                        ]
+                        break
+                except Exception as exc:
+                    logger.debug("[extract_data] structured output attempt %d failed: %s", attempt + 1, exc)
+
+            # Fallback: plain ainvoke + _extract_json_block + json_repair
+            # for gateways without structured output support.
+            if not points:
+                from app.services.agentic_rag.agent_graph import _extract_json_block
+                response = await llm.ainvoke([{"role": "user", "content": prompt}])
+                raw = str(response.content)
+                block = _extract_json_block(raw)
+                if block:
+                    try:
+                        points = json.loads(block)
+                    except json.JSONDecodeError:
+                        from json_repair import repair_json
+                        points = json.loads(repair_json(block))
+                    if not isinstance(points, list):
+                        points = []
         except Exception as exc:
             logger.warning("[extract_data] LLM extraction failed: %s", exc)
 

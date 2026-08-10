@@ -68,6 +68,29 @@ class TestToolRegistry:
         assert "chart_generate" in names
         assert "extract_data" in names
 
+    def test_applicable_tools_includes_chart_after_code_execute(self):
+        """A successful code_execute observation should make chart_generate
+        available even without retrieved_docs or last_answer_object.data."""
+        ctx = _make_ctx(has_file=True, has_data=False)
+        ctx.state["observations"] = [
+            Observation(tool="code_execute", arguments={"code": "print([1,2,3])"}, result={"stdout": "[1, 2, 3]"}),
+        ]
+        tools = applicable_tools(ctx)
+        names = {t.name for t in tools}
+        assert "chart_generate" in names
+        assert "extract_data" in names
+
+    def test_applicable_tools_excludes_chart_after_failed_code_execute(self):
+        """A failed code_execute observation should NOT make chart_generate available."""
+        ctx = _make_ctx(has_file=True, has_data=False)
+        ctx.state["observations"] = [
+            Observation(tool="code_execute", arguments={"code": "error"}, result={}, error="SyntaxError"),
+        ]
+        tools = applicable_tools(ctx)
+        names = {t.name for t in tools}
+        assert "chart_generate" not in names
+        assert "extract_data" not in names
+
 
 class TestChartGenerateTool:
     def _tool(self):
@@ -300,6 +323,116 @@ class TestExtractDataTool:
         assert result["ok"] is True
         assert result["result"]["count"] >= 1
         assert any("100" in str(d["value"]) for d in result["result"]["data"])
+
+
+class TestCodeExecuteGuards:
+    """Tests for the RestrictedPython guard functions added to fix list
+    comprehension, tuple unpacking, and augmented assignment failures."""
+
+    def test_list_comprehension_works(self):
+        tool = CodeExecuteTool()
+        tool.ctx = _make_ctx()
+        result = asyncio.run(tool.arun({
+            "code": "fibs = [0, 1]\n[fibs.append(fibs[-1] + fibs[-2]) for _ in range(10)]\nresult = fibs",
+        }))
+        assert result["ok"] is True
+        assert result["result"]["result"] == [0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89]
+
+    def test_for_loop_with_unpacking_works(self):
+        tool = CodeExecuteTool()
+        tool.ctx = _make_ctx()
+        result = asyncio.run(tool.arun({
+            "code": "pairs = [(1, 2), (3, 4)]\ntotal = 0\nfor a, b in pairs:\n    total += a + b\nresult = total",
+        }))
+        assert result["ok"] is True
+        assert result["result"]["result"] == 10
+
+    def test_augmented_assignment_works(self):
+        tool = CodeExecuteTool()
+        tool.ctx = _make_ctx()
+        result = asyncio.run(tool.arun({"code": "x = 5\nx += 3\nx *= 2\nresult = x"}))
+        assert result["ok"] is True
+        assert result["result"]["result"] == 16
+
+
+class TestExtractDataChartFallback:
+    """Tests for extract_data reading chart_options when lao.data is empty."""
+
+    def test_extract_from_chart_options(self):
+        from app.services.agentic_rag.tools.extract_data import _extract_from_chart_options
+
+        chart_opts = [{
+            "xAxis": {"data": ["A", "B", "C"]},
+            "series": [{"type": "bar", "data": [10, 20, 30]}],
+        }]
+        points = _extract_from_chart_options(chart_opts)
+        assert len(points) == 3
+        assert points[0] == {"label": "A", "value": 10.0, "unit": None, "context": "Chart data point 1"}
+        assert points[2] == {"label": "C", "value": 30.0, "unit": None, "context": "Chart data point 3"}
+
+    def test_extract_from_empty_chart_options(self):
+        from app.services.agentic_rag.tools.extract_data import _extract_from_chart_options
+
+        assert _extract_from_chart_options([]) == []
+        assert _extract_from_chart_options([{"series": []}]) == []
+
+    def test_extract_data_uses_chart_options_when_no_data(self):
+        from app.services.agentic_rag.schemas import LastAnswerObject
+
+        tool = ExtractDataTool()
+        ctx = _make_ctx(has_file=False, has_data=False)
+        ctx.state["last_answer_object"] = LastAnswerObject(
+            summary="Here is a chart.",
+            key_points=[],
+            data=None,
+            chart_options=[{
+                "xAxis": {"data": ["Q1", "Q2"]},
+                "series": [{"type": "bar", "data": [100, 200]}],
+            }],
+        )
+        tool.ctx = ctx
+        result = asyncio.run(tool.arun({"source": "last_answer"}))
+        assert result["ok"] is True
+        assert result["result"]["count"] == 2
+        assert result["result"]["data"][0]["label"] == "Q1"
+        assert result["result"]["data"][0]["value"] == 100.0
+
+
+class TestRetryHelpers:
+    """Tests for the tool_node retry infrastructure."""
+
+    def test_is_transient_error_detects_network_errors(self):
+        from app.services.agentic_rag.agent_graph import _is_transient_error
+
+        assert _is_transient_error("Connection timed out")
+        assert _is_transient_error("network unreachable")
+        assert _is_transient_error("Connection reset by peer")
+        assert _is_transient_error("I/O error on network share")
+
+    def test_is_transient_error_rejects_argument_errors(self):
+        from app.services.agentic_rag.agent_graph import _is_transient_error
+
+        assert not _is_transient_error("name '_iter_unpack_sequence_' is not defined")
+        assert not _is_transient_error("No numeric values found")
+        assert not _is_transient_error("Tool not available")
+
+    def test_correction_hints_for_code_execute(self):
+        from app.services.agentic_rag.agent_graph import _correction_hints
+
+        hints = _correction_hints("code_execute", "_iter_unpack_sequence_ is not defined")
+        assert "for-loops" in hints
+
+    def test_correction_hints_for_chart_generate(self):
+        from app.services.agentic_rag.agent_graph import _correction_hints
+
+        hints = _correction_hints("chart_generate", "No numeric values found")
+        assert "value" in hints
+
+    def test_correction_hints_default(self):
+        from app.services.agentic_rag.agent_graph import _correction_hints
+
+        hints = _correction_hints("unknown_tool", "some error")
+        assert "Fix the arguments" in hints
 
 
 class TestTokenBudget:

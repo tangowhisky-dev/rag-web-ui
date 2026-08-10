@@ -467,12 +467,12 @@ class TestQueryResolution:
         from app.services.agentic_rag.utils import resolve_retrieval_query
 
         query = "What is a mutex?"
-        resolved, provenance = resolve_retrieval_query(
+        resolved, provenance = asyncio.run(resolve_retrieval_query(
             query=query,
             original_query=query,
             recent_history=[HumanMessage(content="tell me about Linux")],
             provenance_sources=["tell me about Linux"],
-        )
+        ))
         assert resolved == query
         assert provenance["resolved"] is False
         assert provenance["reason"] == "self_contained"
@@ -480,11 +480,11 @@ class TestQueryResolution:
     def test_no_history_means_no_resolver_call(self):
         from app.services.agentic_rag.utils import resolve_retrieval_query
 
-        resolved, provenance = resolve_retrieval_query(
+        resolved, provenance = asyncio.run(resolve_retrieval_query(
             query="what are its limitations?",
             original_query="what are its limitations?",
             recent_history=[],
-        )
+        ))
         assert resolved == "what are its limitations?"
         assert provenance["resolved"] is False
 
@@ -513,16 +513,16 @@ class TestQueryResolution:
     def test_resolver_failure_falls_back_to_the_original_query(self, monkeypatch):
         from app.services.agentic_rag import utils
 
-        def _boom(**_kwargs):
+        async def _boom(**_kwargs):
             raise RuntimeError("provider down")
 
         monkeypatch.setattr(utils, "_call_rewriter", _boom)
-        resolved, provenance = utils.resolve_retrieval_query(
+        resolved, provenance = asyncio.run(utils.resolve_retrieval_query(
             query="what about its limitations?",
             original_query="what about its limitations?",
             recent_history=[HumanMessage(content="tell me about StreamVC")],
             provenance_sources=["tell me about StreamVC"],
-        )
+        ))
         assert resolved == "what about its limitations?"
         assert provenance["reason"].startswith("resolver_failed")
 

@@ -45,7 +45,9 @@ def applicable_tools(ctx: "ToolContext") -> list:
     """Filter tools based on the current turn context.
 
     - File tools only if a file is attached.
-    - Chart only if there is data to chart (last_answer_object.data or retrieved docs).
+    - Chart only if there is data to chart (last_answer_object.data,
+      retrieved docs, or a successful code_execute / extract_data
+      observation earlier in the same turn).
     """
     tools = build_tools(ctx)
     state = ctx.state
@@ -54,6 +56,21 @@ def applicable_tools(ctx: "ToolContext") -> list:
     if state is not None:
         lao = state.get("last_answer_object")
         has_data = (lao is not None and getattr(lao, "data", None)) or bool(state.get("retrieved_docs"))
+        # A successful code_execute or extract_data observation earlier in
+        # this turn produces data that chart_generate can consume. Without
+        # this check, a plan that runs code_execute → chart_generate fails
+        # because chart_generate is filtered out after code_execute succeeds.
+        if not has_data:
+            for raw_obs in state.get("observations") or []:
+                if isinstance(raw_obs, dict):
+                    tool = raw_obs.get("tool", "")
+                    err = raw_obs.get("error")
+                else:
+                    tool = getattr(raw_obs, "tool", "")
+                    err = getattr(raw_obs, "error", None)
+                if tool in ("code_execute", "extract_data") and not err:
+                    has_data = True
+                    break
     else:
         has_data = False
 

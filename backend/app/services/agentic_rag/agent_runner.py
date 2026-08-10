@@ -82,96 +82,82 @@ async def run_agent_loop(
     provider_usage: dict | None = None
     usage = {"promptTokens": 0, "completionTokens": 0, "messageId": message_id}
 
-    try:
-        async for chunk in graph.astream(initial_state, config, stream_mode=["updates", "custom"]):
-            kind, payload = chunk if isinstance(chunk, tuple) else ("updates", chunk)
+    async for chunk in graph.astream(initial_state, config, stream_mode=["updates", "custom"]):
+        kind, payload = chunk if isinstance(chunk, tuple) else ("updates", chunk)
 
-            if kind == "custom":
-                if not isinstance(payload, dict):
-                    continue
-                if payload.get("event") == "token":
-                    token = payload.get("content", "")
-                    if token:
-                        full_answer += token
-                        yield payload
-                elif payload.get("event") == "answer_rewrite":
-                    # Emitted by finalize_node right after generation, before
-                    # Call 4 (last_answer_object extraction) or Call 5
-                    # (confidence scoring) — keep full_answer in sync for the
-                    # token accounting below.
-                    full_answer = payload.get("content", full_answer)
-                    yield payload
-                else:
-                    yield payload
+        if kind == "custom":
+            if not isinstance(payload, dict):
                 continue
+            if payload.get("event") == "token":
+                token = payload.get("content", "")
+                if token:
+                    full_answer += token
+                    yield payload
+            elif payload.get("event") == "answer_rewrite":
+                # Emitted by finalize_node right after generation, before
+                # Call 4 (last_answer_object extraction) or Call 5
+                # (confidence scoring) — keep full_answer in sync for the
+                # token accounting below.
+                full_answer = payload.get("content", full_answer)
+                yield payload
+            else:
+                yield payload
+            continue
 
-            if kind != "updates" or not isinstance(payload, dict):
-                continue
+        if kind != "updates" or not isinstance(payload, dict):
+            continue
 
-            # Human-in-the-loop clarification. `astream` does NOT raise
-            # GraphInterrupt — it emits an `__interrupt__` update once the
-            # interrupt checkpoint has been persisted. Surfacing the event from
-            # here (rather than from a custom writer call inside the node) is
-            # what makes `Command(resume=...)` have something to resume.
-            if "__interrupt__" in payload:
-                interrupts = payload["__interrupt__"]
-                value = interrupts[0].value if interrupts else None
-                question = value.get("question", "") if isinstance(value, dict) else str(value or "")
-                yield {"event": "interrupt", "question": question, "thread_id": thread_id}
-                return
-
-            for node, update in payload.items():
-                if not isinstance(update, dict):
-                    continue
-
-                # plan, tool_call, and tool_observation events are emitted via
-                # the custom stream (writer() calls in agent_graph nodes). The
-                # update stream is used only to accumulate state needed for
-                # token accounting below — no events yielded here to avoid
-                # duplicating every pl:/tc:/to: event on the frontend.
-                if node == "tool" and update.get("observations"):
-                    for obs in update["observations"]:
-                        observation_payload = obs.model_dump() if hasattr(obs, "model_dump") else obs
-                        observations.append(observation_payload)
-
-                elif node == "plan":
-                    plan_obj = update.get("plan")
-
-                elif node == "think":
-                    think_iterations = max(think_iterations, update.get("iteration", 0))
-
-                elif node == "finalize":
-                    # Citation-normalized content already arrived via the
-                    # earlier "answer_rewrite" custom event (emitted by
-                    # finalize_node itself, before Call 4/5) — this update
-                    # only carries retrieved_docs for token accounting.
-                    final = update.get("final_answer", "")
-                    if final:
-                        full_answer = final
-                    citations = update.get("retrieved_docs", [])
-                    if isinstance(update.get("answer_usage"), dict):
-                        provider_usage = update["answer_usage"]
-                    yield {"event": "progress", "phase": "finalize", "message": "Finalising answer"}
-
-                elif node == "answer_scoring":
-                    usage["final_confidence"] = update.get("final_confidence")
-                    usage["confidence_level"] = update.get("confidence_level")
-                    usage["faithfulness"] = update.get("faithfulness")
-                    usage["completeness"] = update.get("completeness")
-                    usage["retrieval_score"] = update.get("retrieval_score")
-
-    except Exception as exc:
-        # Handle LangGraph interrupts for human-in-the-loop clarification.
-        exc_name = type(exc).__name__
-        if exc_name == "GraphInterrupt":
-            value = getattr(exc, "value", None)
-            if isinstance(value, list) and value:
-                value = value[0]
-            ivalue = getattr(value, "value", value)
-            question = ivalue.get("question", "") if isinstance(ivalue, dict) else str(ivalue)
-            yield {"event": "interrupt", "question": question}
+        # Human-in-the-loop clarification. `astream` does NOT raise
+        # GraphInterrupt — it emits an `__interrupt__` update once the
+        # interrupt checkpoint has been persisted. Surfacing the event from
+        # here (rather than from a custom writer call inside the node) is
+        # what makes `Command(resume=...)` have something to resume.
+        if "__interrupt__" in payload:
+            interrupts = payload["__interrupt__"]
+            value = interrupts[0].value if interrupts else None
+            question = value.get("question", "") if isinstance(value, dict) else str(value or "")
+            yield {"event": "interrupt", "question": question, "thread_id": thread_id}
             return
-        raise
+
+        for node, update in payload.items():
+            if not isinstance(update, dict):
+                continue
+
+            # plan, tool_call, and tool_observation events are emitted via
+            # the custom stream (writer() calls in agent_graph nodes). The
+            # update stream is used only to accumulate state needed for
+            # token accounting below — no events yielded here to avoid
+            # duplicating every pl:/tc:/to: event on the frontend.
+            if node == "tool" and update.get("observations"):
+                for obs in update["observations"]:
+                    observation_payload = obs.model_dump() if hasattr(obs, "model_dump") else obs
+                    observations.append(observation_payload)
+
+            elif node == "plan":
+                plan_obj = update.get("plan")
+
+            elif node == "think":
+                think_iterations = max(think_iterations, update.get("iteration", 0))
+
+            elif node == "finalize":
+                # Citation-normalized content already arrived via the
+                # earlier "answer_rewrite" custom event (emitted by
+                # finalize_node itself, before Call 4/5) — this update
+                # only carries retrieved_docs for token accounting.
+                final = update.get("final_answer", "")
+                if final:
+                    full_answer = final
+                citations = update.get("retrieved_docs", [])
+                if isinstance(update.get("answer_usage"), dict):
+                    provider_usage = update["answer_usage"]
+                yield {"event": "progress", "phase": "finalize", "message": "Finalising answer"}
+
+            elif node == "answer_scoring":
+                usage["final_confidence"] = update.get("final_confidence")
+                usage["confidence_level"] = update.get("confidence_level")
+                usage["faithfulness"] = update.get("faithfulness")
+                usage["completeness"] = update.get("completeness")
+                usage["retrieval_score"] = update.get("retrieval_score")
 
     if not full_answer:
         full_answer = "I'm sorry, I could not produce an answer."

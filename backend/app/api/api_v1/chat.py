@@ -25,7 +25,7 @@ from app.schemas.chat import (
     SearchResult,
 )
 from app.core.security import get_current_user
-from app.services.chat import generate_response, get_effective_llm_config
+from app.services.chat import generate_response
 from app.services.infrastructure import set_cancel_token
 from app.services.ingestion import SUPPORTED_EXTENSIONS
 from app.services.ingestion import MAX_FILE_SIZE, _convert_to_markdown
@@ -357,8 +357,6 @@ async def create_message(
         raise HTTPException(status_code=400, detail="Last message must be from user")
 
     # Optional per-request overrides
-    temperature: float = float(messages.get("temperature", 0.0))
-    model_name: Optional[str] = messages.get("model_name") or None
     file_id: Optional[int] = messages.get("file_id") or None
 
     # ── File context injection ─────────────────────────────────────────────────
@@ -406,7 +404,6 @@ async def create_message(
         query_text = "\n\n".join(file_context_parts) + "\n\n" + query_text
 
     knowledge_base_ids = [kb.id for kb in chat.knowledge_bases]
-    llm_cfg = get_effective_llm_config(current_user.org_id, db)
 
     async def response_stream():
         async for chunk in generate_response(
@@ -415,13 +412,9 @@ async def create_message(
             knowledge_base_ids=knowledge_base_ids,
             chat_id=chat_id,
             db=db,
-            temperature=temperature,
-            model_name=model_name,
             display_query=display_query,
             file_id=file_id,
             file_markdown=current_file_markdown,
-            api_base=llm_cfg["api_base"],
-            query_model=llm_cfg["query_model"],
             org_id=current_user.org_id,
             user_id=current_user.id,
         ):
@@ -503,7 +496,6 @@ async def create_message_with_file(
         raise HTTPException(status_code=400, detail="'messages' must be valid JSON.")
 
     knowledge_base_ids = [kb.id for kb in chat.knowledge_bases]
-    llm_cfg = get_effective_llm_config(current_user.org_id, db)
 
     async def response_stream():
         async for chunk in generate_response(
@@ -513,8 +505,6 @@ async def create_message_with_file(
             chat_id=chat_id,
             db=db,
             display_query=message,
-            api_base=llm_cfg["api_base"],
-            query_model=llm_cfg["query_model"],
             org_id=current_user.org_id,
             user_id=current_user.id,
         ):
