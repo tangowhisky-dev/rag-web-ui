@@ -599,7 +599,7 @@ export const Answer: FC<{
           Single source of truth for status text; raw per-leg progress
           events (dense/sparse/exact/neo4j) are folded into "Gathering
           sources …" here instead of also being shown verbatim. */}
-      <AgenticProgress agentSteps={filteredAgentSteps} isStreaming={isStreaming} toolCalls={toolCalls} />
+      <AgenticProgress agentSteps={filteredAgentSteps} isStreaming={isStreaming} toolCalls={toolCalls} toolObservations={toolObservations} />
 
       {/* Confidence warning (no confidence) */}
       {confidence === "none" && suggestion && (
@@ -643,6 +643,9 @@ export const Answer: FC<{
               <Copy className="h-3.5 w-3.5" />
               <span>{copied ? "Copied" : "Copy"}</span>
             </button>
+            {/* Obsolete: "Refresh Citations" button — citation metadata is
+                fetched automatically in the useEffect above. Removed to
+                reduce UI clutter. Re-enable if manual re-fetch is needed.
             {citations.length > 0 && !isStreaming && (
               <button
                 onClick={() => setCitationRefreshTick((t) => t + 1)}
@@ -652,7 +655,7 @@ export const Answer: FC<{
                 <RefreshCw className="h-3.5 w-3.5" />
                 <span>Citations</span>
               </button>
-            )}
+            )} */}
             <button
               onClick={() => handleExport("word")}
               title="Export as Word"

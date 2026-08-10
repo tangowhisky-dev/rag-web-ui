@@ -57,11 +57,12 @@ export interface AgenticProgressProps {
   agentSteps?: AgentStepEvent[];
   isStreaming: boolean;
   toolCalls?: Array<Record<string, unknown>>;
+  toolObservations?: Array<Record<string, unknown>>;
 }
 
 // ── Component ────────────────────────────────────────────────────────────────
 
-export const AgenticProgress = ({ agentSteps, isStreaming, toolCalls }: AgenticProgressProps) => {
+export const AgenticProgress = ({ agentSteps, isStreaming, toolCalls, toolObservations }: AgenticProgressProps) => {
   // Track unique phases in order of appearance
   const [phases, setPhases] = useState<string[]>([]);
   const dismissRef = useRef<ReturnType<typeof setTimeout>>();
@@ -117,13 +118,19 @@ export const AgenticProgress = ({ agentSteps, isStreaming, toolCalls }: AgenticP
 
   let currentPhase = phases[phases.length - 1];
 
-  // When in the "Using tools …" phase, show the specific tool label
-  // (e.g. "Retrieving from knowledge base") instead of the generic text.
-  if (currentPhase === "Using tools …" && toolCalls && toolCalls.length > 0) {
-    const latest = toolCalls[toolCalls.length - 1];
-    const label = latest?.label as string | undefined;
-    if (label) {
-      currentPhase = `${label} …`;
+  // If the latest tool call hasn't received an observation yet, it's
+  // still running — show its specific label (e.g. "Retrieving from
+  // knowledge base") instead of the generic phase text.  This takes
+  // priority over retrieval sub-node phases ("Gathering sources …")
+  // that fire while the tool node is active.
+  if (isStreaming && toolCalls && toolCalls.length > 0) {
+    const obsCount = toolObservations?.length ?? 0;
+    if (toolCalls.length > obsCount) {
+      const latest = toolCalls[toolCalls.length - 1];
+      const label = latest?.label as string | undefined;
+      if (label) {
+        currentPhase = `${label} …`;
+      }
     }
   }
 
