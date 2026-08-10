@@ -182,7 +182,7 @@ export const AgenticProgress = ({ agentSteps, isStreaming, toolCalls, toolObserv
   if (lines.length === 0) return null;
 
   return (
-    <div className="flex flex-col gap-0 overflow-hidden">
+    <div className="flex flex-col justify-end gap-0 overflow-hidden">
       <AnimatePresence initial={false}>
         {lines.map((line, i) => {
           const isCurrent = i === lines.length - 1;
@@ -190,8 +190,8 @@ export const AgenticProgress = ({ agentSteps, isStreaming, toolCalls, toolObserv
             <motion.span
               key={`${line}-${i}`}
               layout
-              initial={{ opacity: 0, height: 0 }}
-              animate={{ opacity: 1, height: "auto" }}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
               exit={{ opacity: 0, height: 0 }}
               transition={{ type: "spring", stiffness: 500, damping: 35, mass: 0.3 }}
               className={
