@@ -1029,6 +1029,13 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     });
 
     setIsLoading(true);
+
+    // Persist the active branch so reload picks the new branch
+    api.put(`/api/chat/${params.id}/active-branch`, {
+      parent_message_id: parseInt(originalId),
+      selected_message_id: parseInt(newMessageId),
+    }).catch(() => {});
+
     try {
       await streamFromMessages(requestMessages, newAssistantId, undefined, newMessageId);
     } catch (error) {
