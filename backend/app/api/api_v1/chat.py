@@ -694,10 +694,11 @@ def delete_chat(
     delete_chat_redis_sync(chat_id, user_id=current_user.id)
     return {"status": "success"}
 
-@router.patch("/messages/{message_id}", response_model=MessageResponse)
+@router.patch("/{chat_id}/messages/{message_id}", response_model=MessageResponse)
 def edit_message(
     *,
     db: Session = Depends(get_db),
+    chat_id: int,
     message_id: int,
     body: MessageEditRequest,
     current_user: User = Depends(get_current_user),
@@ -713,7 +714,7 @@ def edit_message(
     original = (
         db.query(Message)
         .join(Chat, Chat.id == Message.chat_id)
-        .filter(Message.id == message_id, _chat_owner_filter(current_user))
+        .filter(Message.id == message_id, Message.chat_id == chat_id, _chat_owner_filter(current_user))
         .first()
     )
     if not original:
@@ -751,10 +752,11 @@ def edit_message(
     return new_message
 
 
-@router.get("/messages/{message_id}/siblings", response_model=List[MessageResponse])
+@router.get("/{chat_id}/messages/{message_id}/siblings", response_model=List[MessageResponse])
 def get_message_siblings(
     *,
     db: Session = Depends(get_db),
+    chat_id: int,
     message_id: int,
     current_user: User = Depends(get_current_user),
 ) -> Any:
@@ -766,7 +768,7 @@ def get_message_siblings(
     target = (
         db.query(Message)
         .join(Chat, Chat.id == Message.chat_id)
-        .filter(Message.id == message_id, _chat_owner_filter(current_user))
+        .filter(Message.id == message_id, Message.chat_id == chat_id, _chat_owner_filter(current_user))
         .first()
     )
     if not target:

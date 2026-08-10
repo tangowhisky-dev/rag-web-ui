@@ -1,7 +1,7 @@
 """
 Tests for the message-branching endpoints:
-  PATCH /api/chat/messages/{message_id}
-  GET   /api/chat/messages/{message_id}/siblings
+  PATCH /api/chat/{chat_id}/messages/{message_id}
+  GET   /api/chat/{chat_id}/messages/{message_id}/siblings
 """
 import pytest
 from sqlalchemy.orm import sessionmaker
@@ -98,14 +98,14 @@ def _seed_chat_and_message(db, user_id: int, content: str = "Hello") -> tuple[Ch
 
 
 # ---------------------------------------------------------------------------
-# PATCH /api/chat/messages/{message_id}
+# PATCH /api/chat/{chat_id}/messages/{message_id}
 # ---------------------------------------------------------------------------
 
 class TestEditMessage:
     def test_creates_new_branch_message(self, client, db, fake_user):
-        _, msg = _seed_chat_and_message(db, fake_user.id, content="Original")
+        chat, msg = _seed_chat_and_message(db, fake_user.id, content="Original")
         resp = client.patch(
-            f"/api/chat/messages/{msg.id}",
+            f"/api/chat/{chat.id}/messages/{msg.id}",
             json={"content": "Edited"},
         )
         assert resp.status_code == 200, resp.text
@@ -116,28 +116,28 @@ class TestEditMessage:
         assert data["parent_message_id"] == msg.id
 
     def test_original_message_preserved(self, client, db, fake_user):
-        _, msg = _seed_chat_and_message(db, fake_user.id, content="Original")
-        client.patch(f"/api/chat/messages/{msg.id}", json={"content": "Edited"})
+        chat, msg = _seed_chat_and_message(db, fake_user.id, content="Original")
+        client.patch(f"/api/chat/{chat.id}/messages/{msg.id}", json={"content": "Edited"})
         original = db.query(Message).filter(Message.id == msg.id).first()
         assert original is not None
         assert original.content == "Original"
         assert original.branch_index == 0
 
     def test_second_edit_increments_branch_index(self, client, db, fake_user):
-        _, msg = _seed_chat_and_message(db, fake_user.id, content="Original")
-        r1 = client.patch(f"/api/chat/messages/{msg.id}", json={"content": "Edit 1"})
-        r2 = client.patch(f"/api/chat/messages/{msg.id}", json={"content": "Edit 2"})
+        chat, msg = _seed_chat_and_message(db, fake_user.id, content="Original")
+        r1 = client.patch(f"/api/chat/{chat.id}/messages/{msg.id}", json={"content": "Edit 1"})
+        r2 = client.patch(f"/api/chat/{chat.id}/messages/{msg.id}", json={"content": "Edit 2"})
         assert r1.json()["branch_index"] == 1
         assert r2.json()["branch_index"] == 2
 
     def test_edit_on_already_branched_message_shares_parent(self, client, db, fake_user):
         """Editing a branch message (branch_index=1) should share the same parent."""
-        _, original = _seed_chat_and_message(db, fake_user.id, content="Original")
+        chat, original = _seed_chat_and_message(db, fake_user.id, content="Original")
         branch1 = client.patch(
-            f"/api/chat/messages/{original.id}", json={"content": "Edit 1"}
+            f"/api/chat/{chat.id}/messages/{original.id}", json={"content": "Edit 1"}
         ).json()
         branch2 = client.patch(
-            f"/api/chat/messages/{branch1['id']}", json={"content": "Edit 2"}
+            f"/api/chat/{chat.id}/messages/{branch1['id']}", json={"content": "Edit 2"}
         ).json()
         # Both branches should share the same parent (the original message id)
         assert branch1["parent_message_id"] == original.id
@@ -145,23 +145,23 @@ class TestEditMessage:
         assert branch2["branch_index"] == 2
 
     def test_edit_returns_404_for_unknown_message(self, client):
-        resp = client.patch("/api/chat/messages/999999", json={"content": "x"})
+        resp = client.patch("/api/chat/1/messages/999999", json={"content": "x"})
         assert resp.status_code == 404
 
     def test_edit_rejects_missing_content(self, client, db, fake_user):
-        _, msg = _seed_chat_and_message(db, fake_user.id)
-        resp = client.patch(f"/api/chat/messages/{msg.id}", json={})
+        chat, msg = _seed_chat_and_message(db, fake_user.id)
+        resp = client.patch(f"/api/chat/{chat.id}/messages/{msg.id}", json={})
         assert resp.status_code == 422
 
 
 # ---------------------------------------------------------------------------
-# GET /api/chat/messages/{message_id}/siblings
+# GET /api/chat/{chat_id}/messages/{message_id}/siblings
 # ---------------------------------------------------------------------------
 
 class TestGetSiblings:
     def test_siblings_of_root_message_returns_itself_only(self, client, db, fake_user):
-        _, msg = _seed_chat_and_message(db, fake_user.id)
-        resp = client.get(f"/api/chat/messages/{msg.id}/siblings")
+        chat, msg = _seed_chat_and_message(db, fake_user.id)
+        resp = client.get(f"/api/chat/{chat.id}/messages/{msg.id}/siblings")
         assert resp.status_code == 200, resp.text
         data = resp.json()
         assert len(data) == 1
@@ -169,12 +169,12 @@ class TestGetSiblings:
         assert data[0]["branch_index"] == 0
 
     def test_siblings_after_one_edit(self, client, db, fake_user):
-        _, msg = _seed_chat_and_message(db, fake_user.id, content="Original")
+        chat, msg = _seed_chat_and_message(db, fake_user.id, content="Original")
         branch = client.patch(
-            f"/api/chat/messages/{msg.id}", json={"content": "Edit 1"}
+            f"/api/chat/{chat.id}/messages/{msg.id}", json={"content": "Edit 1"}
         ).json()
         # Query siblings from the original
-        resp = client.get(f"/api/chat/messages/{msg.id}/siblings")
+        resp = client.get(f"/api/chat/{chat.id}/messages/{msg.id}/siblings")
         assert resp.status_code == 200
         ids = {s["id"] for s in resp.json()}
         assert msg.id in ids
@@ -182,24 +182,24 @@ class TestGetSiblings:
         assert len(ids) == 2
 
     def test_siblings_from_branch_same_as_from_root(self, client, db, fake_user):
-        _, msg = _seed_chat_and_message(db, fake_user.id, content="Original")
+        chat, msg = _seed_chat_and_message(db, fake_user.id, content="Original")
         branch = client.patch(
-            f"/api/chat/messages/{msg.id}", json={"content": "Edit 1"}
+            f"/api/chat/{chat.id}/messages/{msg.id}", json={"content": "Edit 1"}
         ).json()
-        resp_from_root = client.get(f"/api/chat/messages/{msg.id}/siblings").json()
-        resp_from_branch = client.get(f"/api/chat/messages/{branch['id']}/siblings").json()
+        resp_from_root = client.get(f"/api/chat/{chat.id}/messages/{msg.id}/siblings").json()
+        resp_from_branch = client.get(f"/api/chat/{chat.id}/messages/{branch['id']}/siblings").json()
         assert {s["id"] for s in resp_from_root} == {s["id"] for s in resp_from_branch}
 
     def test_siblings_ordered_by_branch_index(self, client, db, fake_user):
-        _, msg = _seed_chat_and_message(db, fake_user.id, content="Original")
-        client.patch(f"/api/chat/messages/{msg.id}", json={"content": "Edit 1"})
-        client.patch(f"/api/chat/messages/{msg.id}", json={"content": "Edit 2"})
-        resp = client.get(f"/api/chat/messages/{msg.id}/siblings").json()
+        chat, msg = _seed_chat_and_message(db, fake_user.id, content="Original")
+        client.patch(f"/api/chat/{chat.id}/messages/{msg.id}", json={"content": "Edit 1"})
+        client.patch(f"/api/chat/{chat.id}/messages/{msg.id}", json={"content": "Edit 2"})
+        resp = client.get(f"/api/chat/{chat.id}/messages/{msg.id}/siblings").json()
         indices = [s["branch_index"] for s in resp]
         assert indices == sorted(indices)
 
     def test_siblings_returns_404_for_unknown_message(self, client):
-        resp = client.get("/api/chat/messages/999999/siblings")
+        resp = client.get("/api/chat/1/messages/999999/siblings")
         assert resp.status_code == 404
 
 
@@ -210,9 +210,9 @@ class TestGetSiblings:
 class TestBranchCreationLog:
     def test_branch_created_log_emitted(self, client, db, fake_user, caplog):
         import logging
-        _, msg = _seed_chat_and_message(db, fake_user.id, content="Original")
+        chat, msg = _seed_chat_and_message(db, fake_user.id, content="Original")
         with caplog.at_level(logging.INFO, logger="app.api.api_v1.chat"):
-            client.patch(f"/api/chat/messages/{msg.id}", json={"content": "Edited"})
+            client.patch(f"/api/chat/{chat.id}/messages/{msg.id}", json={"content": "Edited"})
         log_text = " ".join(caplog.messages)
         assert "message.branch_created" in log_text
         assert f"original_id={msg.id}" in log_text

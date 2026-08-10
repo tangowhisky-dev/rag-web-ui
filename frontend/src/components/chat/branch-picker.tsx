@@ -66,7 +66,7 @@ export function BranchPicker({
   const fetchSiblings = async (forMessageId: string) => {
     try {
       const data: Sibling[] = await api.get(
-        `/api/chat/messages/${forMessageId}/siblings`
+        `/api/chat/${chatId}/messages/${forMessageId}/siblings`
       );
       if (data.length > 1) {
         setSiblings(data);
@@ -96,7 +96,7 @@ export function BranchPicker({
     setIsSaving(true);
     try {
       const newMsg: { id: number; content: string; branch_index: number } =
-        await api.patch(`/api/chat/messages/${messageId}`, {
+        await api.patch(`/api/chat/${chatId}/messages/${messageId}`, {
           content: trimmed,
         });
       setIsEditing(false);
