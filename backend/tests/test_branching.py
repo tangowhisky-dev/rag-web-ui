@@ -165,8 +165,9 @@ class TestGetSiblings:
         assert resp.status_code == 200, resp.text
         data = resp.json()
         assert len(data) == 1
-        assert data[0]["id"] == msg.id
-        assert data[0]["branch_index"] == 0
+        assert data[0]["user"]["id"] == msg.id
+        assert data[0]["user"]["branch_index"] == 0
+        assert data[0]["assistant"] is None  # no assistant reply seeded
 
     def test_siblings_after_one_edit(self, client, db, fake_user):
         chat, msg = _seed_chat_and_message(db, fake_user.id, content="Original")
@@ -176,10 +177,10 @@ class TestGetSiblings:
         # Query siblings from the original
         resp = client.get(f"/api/chat/{chat.id}/messages/{msg.id}/siblings")
         assert resp.status_code == 200
-        ids = {s["id"] for s in resp.json()}
-        assert msg.id in ids
-        assert branch["id"] in ids
-        assert len(ids) == 2
+        user_ids = {s["user"]["id"] for s in resp.json()}
+        assert msg.id in user_ids
+        assert branch["id"] in user_ids
+        assert len(user_ids) == 2
 
     def test_siblings_from_branch_same_as_from_root(self, client, db, fake_user):
         chat, msg = _seed_chat_and_message(db, fake_user.id, content="Original")
@@ -188,14 +189,16 @@ class TestGetSiblings:
         ).json()
         resp_from_root = client.get(f"/api/chat/{chat.id}/messages/{msg.id}/siblings").json()
         resp_from_branch = client.get(f"/api/chat/{chat.id}/messages/{branch['id']}/siblings").json()
-        assert {s["id"] for s in resp_from_root} == {s["id"] for s in resp_from_branch}
+        root_ids = {s["user"]["id"] for s in resp_from_root}
+        branch_ids = {s["user"]["id"] for s in resp_from_branch}
+        assert root_ids == branch_ids
 
     def test_siblings_ordered_by_branch_index(self, client, db, fake_user):
         chat, msg = _seed_chat_and_message(db, fake_user.id, content="Original")
         client.patch(f"/api/chat/{chat.id}/messages/{msg.id}", json={"content": "Edit 1"})
         client.patch(f"/api/chat/{chat.id}/messages/{msg.id}", json={"content": "Edit 2"})
         resp = client.get(f"/api/chat/{chat.id}/messages/{msg.id}/siblings").json()
-        indices = [s["branch_index"] for s in resp]
+        indices = [s["user"]["branch_index"] for s in resp]
         assert indices == sorted(indices)
 
     def test_siblings_returns_404_for_unknown_message(self, client):

@@ -4,10 +4,9 @@ import { useState, useRef, useEffect } from "react";
 import { ChevronLeft, ChevronRight, Pencil, Check, X } from "lucide-react";
 import { api } from "@/lib/api";
 
-interface Sibling {
-  id: number;
-  content: string;
-  branch_index: number;
+interface SiblingPair {
+  user: { id: number; content: string; branch_index: number };
+  assistant: { id: number; content: string; [key: string]: unknown } | null;
 }
 
 interface BranchPickerProps {
@@ -22,8 +21,15 @@ interface BranchPickerProps {
    * swap the message in its local state and stream an assistant reply.
    */
   onBranch: (newMessageId: string, newContent: string) => void;
-  /** Called when the user navigates to a different sibling branch */
-  onNavigate: (siblingMessageId: string, siblingContent: string) => void;
+  /** Called when the user navigates to a different sibling branch.
+   *  Receives the target user message, its paired assistant (or null),
+   *  the current user message id, and the shared parent message id. */
+  onNavigate: (
+    targetUser: { id: string; content: string },
+    targetAssistant: { id: string; content: string; [key: string]: unknown } | null,
+    currentUserMsgId: string,
+    parentMessageId: string,
+  ) => void;
   disabled?: boolean;
 }
 
@@ -45,8 +51,8 @@ export function BranchPicker({
   const [isEditing, setIsEditing] = useState(false);
   const [draft, setDraft] = useState(content);
   const [isSaving, setIsSaving] = useState(false);
-  const [siblings, setSiblings] = useState<Sibling[]>([]);
-  const [currentIndex, setCurrentIndex] = useState<number>(0); // index into siblings[]
+  const [siblings, setSiblings] = useState<SiblingPair[]>([]);
+  const [currentIndex, setCurrentIndex] = useState<number>(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Keep draft in sync if content prop changes (e.g. after navigation)
@@ -65,13 +71,13 @@ export function BranchPicker({
 
   const fetchSiblings = async (forMessageId: string) => {
     try {
-      const data: Sibling[] = await api.get(
+      const data: SiblingPair[] = await api.get(
         `/api/chat/${chatId}/messages/${forMessageId}/siblings`
       );
       if (data.length > 1) {
         setSiblings(data);
         // Determine which sibling is currently displayed
-        const idx = data.findIndex((s) => s.id.toString() === forMessageId);
+        const idx = data.findIndex((s) => s.user.id.toString() === forMessageId);
         setCurrentIndex(idx >= 0 ? idx : data.length - 1);
       }
     } catch {
@@ -114,14 +120,30 @@ export function BranchPicker({
     if (currentIndex <= 0) return;
     const prev = siblings[currentIndex - 1];
     setCurrentIndex(currentIndex - 1);
-    onNavigate(prev.id.toString(), prev.content);
+    const parentId = siblings[0].user.id.toString();
+    onNavigate(
+      { id: prev.user.id.toString(), content: prev.user.content },
+      prev.assistant
+        ? { ...prev.assistant, id: prev.assistant.id.toString(), content: prev.assistant.content }
+        : null,
+      messageId,
+      parentId,
+    );
   };
 
   const handleNext = () => {
     if (currentIndex >= siblings.length - 1) return;
     const next = siblings[currentIndex + 1];
     setCurrentIndex(currentIndex + 1);
-    onNavigate(next.id.toString(), next.content);
+    const parentId = siblings[0].user.id.toString();
+    onNavigate(
+      { id: next.user.id.toString(), content: next.user.content },
+      next.assistant
+        ? { ...next.assistant, id: next.assistant.id.toString(), content: next.assistant.content }
+        : null,
+      messageId,
+      parentId,
+    );
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {

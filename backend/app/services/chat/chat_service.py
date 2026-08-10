@@ -190,6 +190,7 @@ async def generate_response(
     file_markdown: Optional[str] = None,
     org_id: Optional[int] = None,
     user_id: Optional[int] = None,
+    parent_message_id: Optional[int] = None,
 ) -> AsyncGenerator[str, None]:
     """
     Stream a chat response for the given query.
@@ -214,25 +215,39 @@ async def generate_response(
     try:
         _bot_message_id: int = 0  # cached before db.close() so error handler can use it
         # ── Persist user message ───────────────────────────────────────────
-        user_message = Message(content=display_query or query, role="user", chat_id=chat_id)
-        db.add(user_message)
-        # Bump chat.updated_at so the sidebar can sort by last activity
-        chat = db.query(Chat).filter(Chat.id == chat_id).first()
-        if chat:
-            from datetime import datetime, timezone
-            chat.updated_at = datetime.now(timezone.utc)
-        db.commit()
+        # When branching (parent_message_id provided), the user message already
+        # exists — it was created by edit_message. Skip creation and link the
+        # assistant reply to it directly.
+        if parent_message_id is not None:
+            user_message = db.query(Message).filter(Message.id == parent_message_id).first()
+            if not user_message:
+                yield f'3:{json.dumps({"error": "parent_message_id not found"})}\n'
+                return
+        else:
+            user_message = Message(content=display_query or query, role="user", chat_id=chat_id)
+            db.add(user_message)
+            # Bump chat.updated_at so the sidebar can sort by last activity
+            chat = db.query(Chat).filter(Chat.id == chat_id).first()
+            if chat:
+                from datetime import datetime, timezone
+                chat.updated_at = datetime.now(timezone.utc)
+            db.commit()
 
-        # Link chat_file to the user message so UI can show the filename
-        if file_id:
-            from app.models.chat import ChatFile
-            chat_file = db.query(ChatFile).filter(ChatFile.id == file_id).first()
-            if chat_file:
-                chat_file.message_id = user_message.id
-                db.commit()
+            # Link chat_file to the user message so UI can show the filename
+            if file_id:
+                from app.models.chat import ChatFile
+                chat_file = db.query(ChatFile).filter(ChatFile.id == file_id).first()
+                if chat_file:
+                    chat_file.message_id = user_message.id
+                    db.commit()
 
         # ── Persist bot placeholder ────────────────────────────────────────
-        bot_message = Message(content="", role="assistant", chat_id=chat_id)
+        # Link assistant reply to the user message via parent_message_id so
+        # branch navigation can find the correct reply for each user branch.
+        bot_message = Message(
+            content="", role="assistant", chat_id=chat_id,
+            parent_message_id=user_message.id,
+        )
         db.add(bot_message)
         db.commit()
 

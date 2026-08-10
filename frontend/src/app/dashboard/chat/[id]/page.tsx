@@ -834,7 +834,8 @@ function ChatPageInner({ params }: { params: { id: string } }) {
   const streamFromMessages = async (
     requestMessages: Array<{ role: string; content: string }>,
     assistantId: string,
-    fileId?: number
+    fileId?: number,
+    parentMessageId?: string,
   ) => {
     // Reset transient state for new query
     setProgressMessages([]);
@@ -853,6 +854,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       body: JSON.stringify({
         messages: requestMessages,
         ...(fileId ? { file_id: fileId } : {}),
+        ...(parentMessageId ? { parent_message_id: parentMessageId } : {}),
       }),
       signal: controller.signal,
     });
@@ -1017,7 +1019,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
 
     setIsLoading(true);
     try {
-      await streamFromMessages(requestMessages, newAssistantId);
+      await streamFromMessages(requestMessages, newAssistantId, undefined, newMessageId);
     } catch (error) {
       console.error("Failed to stream after branch:", error);
       setMessages((prev) => prev.filter((m) => m.id !== newAssistantId));
@@ -1031,15 +1033,60 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     }
   };
 
-  /** Called by BranchPicker when the user navigates to a sibling branch. */
-  const handleNavigate = (targetMessageId: string, targetContent: string, currentMessageId: string) => {
-    setMessages((prev) =>
-      prev.map((m) =>
-        m.id === currentMessageId
-          ? { ...m, id: targetMessageId, content: targetContent }
+  /** Called by BranchPicker when the user navigates to a sibling branch.
+   *  Swaps both the user message and its paired assistant reply. */
+  const handleNavigate = (
+    targetUserMsg: { id: string; content: string },
+    targetAssistantMsg: { id: string; content: string; [key: string]: unknown } | null,
+    currentUserMsgId: string,
+    parentMessageId: string,
+  ) => {
+    setMessages((prev) => {
+      const userIdx = prev.findIndex((m) => m.id === currentUserMsgId);
+      if (userIdx < 0) return prev;
+
+      const updated = prev.map((m) =>
+        m.id === currentUserMsgId
+          ? { ...m, id: targetUserMsg.id, content: targetUserMsg.content }
           : m
-      )
-    );
+      );
+
+      // Find the assistant message right after the user message and swap it
+      const result = [...updated];
+      const newUserIdx = result.findIndex((m) => m.id === targetUserMsg.id);
+      if (newUserIdx >= 0 && newUserIdx + 1 < result.length && result[newUserIdx + 1].role === "assistant") {
+        if (targetAssistantMsg) {
+          result[newUserIdx + 1] = {
+            ...result[newUserIdx + 1],
+            id: targetAssistantMsg.id,
+            clientId: targetAssistantMsg.id,
+            content: targetAssistantMsg.content,
+            citations: (targetAssistantMsg.citations as Message["citations"]) ?? [],
+            confidence: targetAssistantMsg.confidence_level as Message["confidence"] | undefined,
+            confidenceScore: targetAssistantMsg.confidence_score as number | undefined,
+            finalConfidence: targetAssistantMsg.final_confidence as number | undefined,
+            finalConfidenceLevel: targetAssistantMsg.final_confidence_level as Message["finalConfidenceLevel"] | undefined,
+            faithfulness: targetAssistantMsg.faithfulness as number | undefined,
+            completeness: targetAssistantMsg.completeness as number | undefined,
+            retrievalScore: targetAssistantMsg.retrieval_score as number | undefined,
+          };
+        } else {
+          // No assistant reply for this branch — show placeholder
+          result[newUserIdx + 1] = {
+            ...result[newUserIdx + 1],
+            content: "",
+            citations: [],
+          };
+        }
+      }
+      return result;
+    });
+
+    // Persist the active branch selection so reload picks the right branch
+    api.put(`/api/chat/${params.id}/active-branch`, {
+      parent_message_id: parseInt(parentMessageId),
+      selected_message_id: parseInt(targetUserMsg.id),
+    }).catch(() => {});
   };
 
   /** Handle user's clarification response */
@@ -1313,8 +1360,8 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                           onBranch={(newMsgId, newContent) =>
                             handleBranch(message.id, newMsgId, newContent)
                           }
-                          onNavigate={(siblingId, siblingContent) =>
-                            handleNavigate(siblingId, siblingContent, message.id)
+                          onNavigate={(targetUser, targetAssistant, currentMsgId, parentId) =>
+                            handleNavigate(targetUser, targetAssistant, currentMsgId, parentId)
                           }
                           disabled={isLoading}
                         />

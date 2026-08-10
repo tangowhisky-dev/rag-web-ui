@@ -36,6 +36,11 @@ class Chat(Base, TimestampMixin):
     pinned        = Column(Boolean, nullable=False, default=False, server_default="0")
     folder_id     = Column(Integer, ForeignKey("folders.id", ondelete="SET NULL"), nullable=True, index=True)
     org_id        = Column(Integer, ForeignKey('organisations.id'), nullable=True, index=True)
+    # JSON map of {parent_message_id: selected_child_message_id} tracking which
+    # branch the user is currently viewing for each branching point.
+    # On reload, the message loader uses this to pick the right branch.
+    # Defaults to the latest branch (highest branch_index) when not set.
+    active_branches = Column(JSON, nullable=True)
 
     # Relationships
     messages = relationship("Message", back_populates="chat", cascade="all, delete-orphan")

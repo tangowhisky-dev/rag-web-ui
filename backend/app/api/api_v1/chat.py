@@ -249,6 +249,12 @@ def get_messages_paginated(
     Returns up to `limit` messages ending just before `before_id` (cursor).
     Messages are returned in ascending ID order (oldest first).
     `has_more=True` means there are older messages available.
+
+    Branch handling: when a user message has branch siblings (edited
+    variants), only the active branch is returned — the one selected by
+    the user (tracked in chat.active_branches), or the latest branch
+    (highest branch_index) by default. The paired assistant reply (linked
+    via parent_message_id) is included right after each user message.
     """
     chat = (
         db.query(Chat)
@@ -258,26 +264,75 @@ def get_messages_paginated(
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
 
-    q = db.query(Message).filter(Message.chat_id == chat_id)
+    active_branches = chat.active_branches or {}
+
+    # ── Build the list of "turns" (user message + paired assistant) ──────
+    # A "turn root" is a user message that is either:
+    #   - a root message (parent_message_id is None), or
+    #   - a branch child (parent_message_id points to another user message)
+    # For branch groups, only the active/latest branch is included.
+
+    # Step 1: find all user messages in this chat
+    user_msgs_q = db.query(Message).filter(
+        Message.chat_id == chat_id,
+        Message.role == "user",
+    )
     if before_id is not None:
-        q = q.filter(Message.id < before_id)
+        user_msgs_q = user_msgs_q.filter(Message.id < before_id)
+    all_user_msgs = user_msgs_q.order_by(Message.id.asc()).all()
 
-    # Fetch newest-first so we get the correct page, then reverse for display
-    messages = q.order_by(Message.id.desc()).limit(limit).all()
-    messages = list(reversed(messages))  # chronological order
+    # Step 2: group by branch parent and pick active branch per group
+    # Branch parent = parent_message_id if set, else the message itself
+    branch_groups: dict[int, list[Message]] = {}
+    for um in all_user_msgs:
+        group_key = um.parent_message_id if um.parent_message_id is not None else um.id
+        branch_groups.setdefault(group_key, []).append(um)
 
-    # has_more = there exist messages older than what we just returned
-    has_more = False
-    if messages:
-        oldest_id = messages[0].id
-        has_more = (
-            db.query(Message.id)
-            .filter(Message.chat_id == chat_id, Message.id < oldest_id)
+    selected_user_msgs: list[Message] = []
+    for group_key, siblings in branch_groups.items():
+        if len(siblings) == 1:
+            # No branching — just use the single message
+            selected_user_msgs.append(siblings[0])
+        else:
+            # Pick the active branch, or default to latest (highest branch_index)
+            active_id = active_branches.get(str(group_key))
+            selected = None
+            if active_id:
+                for s in siblings:
+                    if s.id == active_id:
+                        selected = s
+                        break
+            if selected is None:
+                selected = max(siblings, key=lambda m: m.branch_index)
+            selected_user_msgs.append(selected)
+
+    # Step 3: sort by id (chronological) and apply limit
+    selected_user_msgs.sort(key=lambda m: m.id)
+    # Paginate: take the last `limit` turns (newest), then reverse for chronological
+    paged_user_msgs = selected_user_msgs[-limit:]
+
+    # has_more: are there older turns beyond what we returned?
+    has_more = len(selected_user_msgs) > len(paged_user_msgs)
+
+    # Step 4: for each selected user message, find its paired assistant reply
+    result_msgs: list[Message] = []
+    for um in paged_user_msgs:
+        result_msgs.append(um)
+        assistant = (
+            db.query(Message)
+            .filter(
+                Message.parent_message_id == um.id,
+                Message.chat_id == chat_id,
+                Message.role == "assistant",
+            )
+            .order_by(Message.id.desc())
             .first()
-        ) is not None
+        )
+        if assistant:
+            result_msgs.append(assistant)
 
-    # Build file_map for this page only
-    msg_ids = [m.id for m in messages]
+    # Step 5: build file_map and serialize (same as before)
+    msg_ids = [m.id for m in result_msgs]
     file_map: dict[int, tuple[int, str]] = {}
     if msg_ids:
         chat_files = (
@@ -293,7 +348,7 @@ def get_messages_paginated(
     from app.models.chat import MessageCitation
     from app.models.knowledge import DocumentChunk
     result = []
-    for msg in messages:
+    for msg in result_msgs:
         msg_dict = MessageResponse.model_validate(msg).model_dump()
         info = file_map.get(msg.id)
         msg_dict["file_name"] = info[1] if info else None
@@ -309,7 +364,6 @@ def get_messages_paginated(
         if citations:
             msg_dict["citations"] = []
             for cit in citations:
-                # Look up chunk by (document_id, chunk_index) for the citation text
                 chunk = (
                     db.query(DocumentChunk)
                     .filter(
@@ -319,8 +373,6 @@ def get_messages_paginated(
                     .first()
                 )
                 if chunk:
-                    # Keep citation_metadata as-is from DB (raw fields from 2: event)
-                    # Only add "text" for the citation content
                     entry = {**(cit.citation_metadata or {})}  # type: ignore[misc]
                     entry["text"] = chunk.chunk_text
                     msg_dict["citations"].append(entry)
@@ -358,6 +410,9 @@ async def create_message(
 
     # Optional per-request overrides
     file_id: Optional[int] = messages.get("file_id") or None
+    # When branching (edit), the frontend sends the branched user message's
+    # DB id so the assistant reply can be linked to it via parent_message_id.
+    parent_message_id: Optional[int] = messages.get("parent_message_id") or None
 
     # ── File context injection ─────────────────────────────────────────────────
     # Build augmented query from: attached file (current turn) + any files from
@@ -417,6 +472,7 @@ async def create_message(
             file_markdown=current_file_markdown,
             org_id=current_user.org_id,
             user_id=current_user.id,
+            parent_message_id=parent_message_id,
         ):
             yield chunk
 
@@ -752,7 +808,7 @@ def edit_message(
     return new_message
 
 
-@router.get("/{chat_id}/messages/{message_id}/siblings", response_model=List[MessageResponse])
+@router.get("/{chat_id}/messages/{message_id}/siblings")
 def get_message_siblings(
     *,
     db: Session = Depends(get_db),
@@ -760,10 +816,11 @@ def get_message_siblings(
     message_id: int,
     current_user: User = Depends(get_current_user),
 ) -> Any:
-    """Return all branch siblings of a message (messages sharing the same parent).
+    """Return all branch siblings of a user message, each paired with its
+    assistant reply.
 
-    The response includes the original message (branch_index=0) and all
-    edited variants, ordered by branch_index ascending.
+    Response: list of {user: MessageResponse, assistant: MessageResponse|null}
+    ordered by branch_index ascending.
     """
     target = (
         db.query(Message)
@@ -777,31 +834,72 @@ def get_message_siblings(
     # The root of the branch group
     shared_parent_id = target.parent_message_id if target.parent_message_id is not None else target.id
 
-    # If target IS the root (no parent), include itself + all children
-    if target.parent_message_id is None:
-        siblings = (
-            db.query(Message)
-            .filter(
-                (Message.id == shared_parent_id) |
-                (Message.parent_message_id == shared_parent_id),
-                Message.chat_id == target.chat_id,
-            )
-            .order_by(Message.branch_index)
-            .all()
+    # All user-message siblings (the original + edited branches)
+    user_siblings = (
+        db.query(Message)
+        .filter(
+            (Message.id == shared_parent_id) |
+            (Message.parent_message_id == shared_parent_id),
+            Message.chat_id == target.chat_id,
+            Message.role == "user",
         )
-    else:
-        siblings = (
-            db.query(Message)
-            .filter(
-                (Message.id == shared_parent_id) |
-                (Message.parent_message_id == shared_parent_id),
-                Message.chat_id == target.chat_id,
-            )
-            .order_by(Message.branch_index)
-            .all()
-        )
+        .order_by(Message.branch_index)
+        .all()
+    )
 
-    return siblings
+    # For each user sibling, find its paired assistant reply
+    result = []
+    for user_msg in user_siblings:
+        assistant_msg = (
+            db.query(Message)
+            .filter(
+                Message.parent_message_id == user_msg.id,
+                Message.chat_id == chat_id,
+                Message.role == "assistant",
+            )
+            .order_by(Message.id.desc())
+            .first()
+        )
+        from app.schemas.chat import MessageResponse
+        result.append({
+            "user": MessageResponse.model_validate(user_msg).model_dump(),
+            "assistant": MessageResponse.model_validate(assistant_msg).model_dump() if assistant_msg else None,
+        })
+
+    return result
+
+
+class SetActiveBranchRequest(BaseModel):
+    parent_message_id: int
+    selected_message_id: int
+
+
+@router.put("/{chat_id}/active-branch")
+def set_active_branch(
+    *,
+    db: Session = Depends(get_db),
+    chat_id: int,
+    body: SetActiveBranchRequest,
+    current_user: User = Depends(get_current_user),
+) -> Any:
+    """Record which branch the user is currently viewing for a branching point.
+
+    Stored in chat.active_branches as {parent_message_id: selected_message_id}.
+    Used on reload to pick the right branch.
+    """
+    chat = (
+        db.query(Chat)
+        .filter(Chat.id == chat_id, _chat_owner_filter(current_user))
+        .first()
+    )
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    branches = chat.active_branches or {}
+    branches[str(body.parent_message_id)] = body.selected_message_id
+    chat.active_branches = branches
+    db.commit()
+    return {"ok": True}
 
 
 # ── Clarification State Machine ─────────────────────────────────────────────────
