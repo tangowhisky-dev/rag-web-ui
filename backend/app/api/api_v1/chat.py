@@ -6,7 +6,7 @@ import tempfile
 from datetime import datetime, timezone
 from typing import List, Any, Literal, Optional
 from pydantic import BaseModel
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form, Request
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func

@@ -291,6 +291,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       setChatTitle(meta.title);
       setTemperature((meta as any).temperature ?? 0.7);
       setModelName((meta as any).model_name ?? "gpt-4o");
+      console.log("[FETCH] paginated messages:", page.messages.map((m: any) => ({ id: m.id, role: m.role, content: m.content?.slice(0, 30) })));
       setMessages(page.messages.map(formatMessage));
       setHasMoreMessages(page.has_more);
     } catch (error) {
