@@ -757,6 +757,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       try {
         const payload = JSON.parse(trimmedLine.slice(2)) as {
           messageId?: number;
+          userMessageId?: number;
           usage?: {
             final_confidence?: number;
             confidence_level?: string;
@@ -766,21 +767,31 @@ function ChatPageInner({ params }: { params: { id: string } }) {
           };
         };
         const usage = payload.usage;
-        setMessages((prev) =>
-          prev.map((message) =>
-            message.id === assistantId
-              ? {
-                  ...message,
-                  id: payload.messageId?.toString() ?? message.id,
-                  finalConfidence: usage?.final_confidence,
-                  finalConfidenceLevel: usage?.confidence_level as Message["finalConfidenceLevel"],
-                  faithfulness: usage?.faithfulness,
-                  completeness: usage?.completeness,
-                  retrievalScore: usage?.retrieval_score,
-                }
-              : message
-          )
-        );
+        setMessages((prev) => {
+          // Find the user message preceding this assistant message
+          const assistantIdx = prev.findIndex((m) => m.id === assistantId);
+          const userId = assistantIdx > 0 ? prev[assistantIdx - 1].id : null;
+
+          return prev.map((message) => {
+            // Update assistant message ID
+            if (message.id === assistantId) {
+              return {
+                ...message,
+                id: payload.messageId?.toString() ?? message.id,
+                finalConfidence: usage?.final_confidence,
+                finalConfidenceLevel: usage?.confidence_level as Message["finalConfidenceLevel"],
+                faithfulness: usage?.faithfulness,
+                completeness: usage?.completeness,
+                retrievalScore: usage?.retrieval_score,
+              };
+            }
+            // Update preceding user message ID
+            if (userId && message.id === userId && payload.userMessageId) {
+              return { ...message, id: payload.userMessageId.toString() };
+            }
+            return message;
+          });
+        });
       } catch (e) {
         console.error("Failed to parse done event:", e);
       }

@@ -255,7 +255,7 @@ async def generate_response(
         if _is_identity_question(query):
             logger.info("[CHAT] identity shortcut — skipping RAG")
             yield f'0:{json.dumps(_IDENTITY_RESPONSE)}\n'
-            yield f'd:{{"finishReason":"stop","usage":{{"promptTokens":0,"completionTokens":0}},"messageId":{bot_message.id}}}\n'
+            yield f'd:{{"finishReason":"stop","usage":{{"promptTokens":0,"completionTokens":0}},"messageId":{bot_message.id},"userMessageId":{_user_message_id}}}\n'
             bot_message.content = _IDENTITY_RESPONSE
             db.commit()
             return
@@ -296,6 +296,7 @@ async def generate_response(
         # Cache the message ID so the error handler can reference it even if
         # the bot_message instance becomes detached.
         _bot_message_id = getattr(bot_message, "id", 0) or 0
+        _user_message_id = getattr(user_message, "id", 0) or 0
         buffered_citations: list[tuple[int, int, int, int, dict]] = []
         # (message_id, document_id, chunk_index, citation_index, metadata)
 
@@ -399,7 +400,7 @@ async def generate_response(
                 _faithfulness = usage.get("faithfulness")
                 _completeness = usage.get("completeness")
                 _retrieval_score = usage.get("retrieval_score")
-                yield f'd:{json.dumps({"finishReason": "stop", "usage": usage, "messageId": _bot_message_id})}\n'
+                yield f'd:{json.dumps({"finishReason": "stop", "usage": usage, "messageId": _bot_message_id, "userMessageId": _user_message_id})}\n'
                 await asyncio.sleep(0)
 
             # ── Enterprise agent loop SSE events ──────────────────────────────
@@ -561,7 +562,7 @@ async def generate_response(
         error_message = f"Error generating response: {str(e)}"
         logger.error(error_message, exc_info=True)
         yield f'3:{json.dumps(error_message)}\n'
-        yield f'd:{{"finishReason":"error","messageId":{_bot_message_id}}}\n'
+        yield f'd:{{"finishReason":"error","messageId":{_bot_message_id},"userMessageId":{_user_message_id}}}\n'
         if 'bot_message' in locals() and db.is_active:
             try:
                 bot_message.content = error_message
