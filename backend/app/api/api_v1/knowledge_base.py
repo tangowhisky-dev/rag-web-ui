@@ -699,6 +699,46 @@ async def get_document(
     
     return document
 
+
+@router.get("/{kb_id}/documents/{doc_id}/download")
+def download_document(
+    kb_id: int,
+    doc_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Download the original uploaded document file."""
+    document = (
+        db.query(Document)
+        .join(KnowledgeBase)
+        .filter(
+            Document.id == doc_id,
+            Document.knowledge_base_id == kb_id,
+            _kb_owner_filter(current_user),
+        )
+        .first()
+    )
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    if not document.file_path:
+        raise HTTPException(status_code=404, detail="File no longer available on disk")
+
+    # file_path is stored relative to UPLOAD_DIR.
+    file_path = document.file_path
+    if not os.path.isabs(file_path):
+        file_path = os.path.join(settings.UPLOAD_DIR, file_path)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File no longer available on disk")
+
+    from fastapi.responses import FileResponse
+    return FileResponse(
+        path=file_path,
+        filename=document.file_name,
+        media_type=document.content_type or "application/octet-stream",
+    )
+
+
 @router.post("/test-retrieval")
 async def test_retrieval(
     request: TestRetrievalRequest,

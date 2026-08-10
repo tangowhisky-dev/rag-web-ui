@@ -381,7 +381,7 @@ export const Answer: FC<{
             <div className="text-sm space-y-3 max-h-[min(70vh,520px)] overflow-y-auto p-4" style={{ scrollbarGutter: "stable" }}>
               {citationInfo && (
                 <div className="flex items-center gap-2 text-xs font-medium text-foreground bg-muted p-2 rounded">
-                  <div className="w-5 h-5 flex items-center justify-center">
+                  <div className="w-5 h-5 flex items-center justify-center shrink-0">
                     <FileIcon
                       extension={
                         citationInfo.document.file_name.split(".").pop() || ""
@@ -390,10 +390,23 @@ export const Answer: FC<{
                       labelColor="#94A3B8"
                     />
                   </div>
-                  <span className="truncate">
-                    {citationInfo.knowledge_base.name} /{" "}
-                    {citationInfo.document.file_name}
-                  </span>
+                  {citation.kb_id && citation.document_id ? (
+                    <a
+                      href={`/api/knowledge-base/${citation.kb_id}/documents/${citation.document_id}/download`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="truncate hover:underline text-primary"
+                      title={`Open ${citationInfo.document.file_name}`}
+                    >
+                      {citationInfo.knowledge_base.name} /{" "}
+                      {citationInfo.document.file_name}
+                    </a>
+                  ) : (
+                    <span className="truncate">
+                      {citationInfo.knowledge_base.name} /{" "}
+                      {citationInfo.document.file_name}
+                    </span>
+                  )}
                 </div>
               )}
               {/* Score + retrieval leg */}
