@@ -553,7 +553,7 @@ def _build_compaction_llm(ctx: Optional["ToolContext"]):
             logger.warning("[compaction] org LLM unavailable (%s) — falling back to global config", exc)
     from app.services.agentic_rag.nodes import _get_llm
 
-    return _get_llm(model_name=settings.effective_query_model, temperature=0.0, streaming=False)
+    return _get_llm(model_name=settings.QUERY_MODEL or settings.OPENAI_MODEL, temperature=0.0, streaming=False)
 
 
 def _trim_docs_to_budget(docs: list[dict], overflow_tokens: int) -> list[dict]:
@@ -1603,10 +1603,10 @@ async def clarify_interrupt_node(state: AgentState) -> dict:
         }
     
     
-async def answer_scoring_node(state: AgentState) -> dict:
+async def answer_scoring_node(state: AgentState, ctx: "ToolContext") -> dict:
     """Evaluate the final answer quality."""
     with _agent_step("answer_scoring"):
-        return await answer_evaluation_node(state)
+        return await answer_evaluation_node(state, ctx=ctx)
     
     
 def _build_execution_summary(state: AgentState) -> dict:
@@ -1769,7 +1769,13 @@ def build_agent_graph(ctx: ToolContext):
     graph = StateGraph(AgentState)
 
     graph.add_node("load_context", partial(load_context_node, ctx=ctx))
-    graph.add_node("rewrite_query", partial(rewrite_query_node, api_base=ctx.org_llm_config.get("api_base")))
+    # Resolve query-role LLM config for rewrite_query_node
+    from app.services.agentic_rag.llm_factory import get_org_llm
+    query_cfg = get_org_llm(ctx.org_id, ctx.db, role="query")
+    graph.add_node("rewrite_query", partial(rewrite_query_node,
+                                            api_base=query_cfg["api_base"],
+                                            api_key=query_cfg["api_key"],
+                                            query_model=query_cfg["model_name"]))
     graph.add_node("plan", partial(plan_node, ctx=ctx))
     graph.add_node("clarify_interrupt", clarify_interrupt_node)
     graph.add_node("think", partial(think_node, ctx=ctx))
@@ -1777,7 +1783,7 @@ def build_agent_graph(ctx: ToolContext):
     graph.add_node("reflect", partial(reflect_node, ctx=ctx))
     graph.add_node("reflect_final", partial(reflect_final_node, ctx=ctx))
     graph.add_node("finalize", partial(finalize_node, ctx=ctx))
-    graph.add_node("answer_scoring", answer_scoring_node)
+    graph.add_node("answer_scoring", partial(answer_scoring_node, ctx=ctx))
     graph.add_node("save_memory", partial(save_memory_node, ctx=ctx))
 
     graph.set_entry_point("load_context")

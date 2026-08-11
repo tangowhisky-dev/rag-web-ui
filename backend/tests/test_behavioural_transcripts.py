@@ -209,7 +209,7 @@ def _setup_graph(monkeypatch, scripted_llm: _ScriptedLLM, ctx: ToolContext,
     )
 
     # Mock answer_evaluation_node to skip the LLM eval call.
-    async def _mock_eval_node(state):
+    async def _mock_eval_node(state, ctx=None):
         return {
             "final_confidence": 80,
             "confidence_level": "high",

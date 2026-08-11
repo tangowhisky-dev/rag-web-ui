@@ -20,7 +20,6 @@ import app.models.user  # noqa
 import app.models.knowledge  # noqa
 import app.models.chat  # noqa
 import app.models.organisation  # noqa
-import app.models.org_llm_config  # noqa
 from app.models.organisation import Organisation
 from app.models.knowledge import KnowledgeBase, ProcessingTask
 from app.core.security import get_password_hash

@@ -29,7 +29,6 @@ import app.models.chat  # noqa
 import app.models.organisation  # noqa
 import app.models.datastore  # noqa
 import app.models.setting  # noqa
-import app.models.org_llm_config  # noqa
 from app.models.organisation import Organisation
 from app.services.settings_service import clear_cache
 

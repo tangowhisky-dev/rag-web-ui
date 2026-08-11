@@ -98,9 +98,19 @@ async def _embed_texts_batch(
     progress_cb(pct, msg) is called after each batch, with pct mapped between
     progress_start and progress_end so callers can slot this into a larger bar.
     """
+    # Embeddings API key/base are super_admin-only (app scope).
+    from app.services.settings_service import get_setting
+    from app.db.session import SessionLocal
+    _db = SessionLocal()
+    try:
+        api_key = get_setting(_db, "EMBEDDING_API_KEY", None) or get_setting(_db, "OPENAI_API_KEY", None)
+        api_base = get_setting(_db, "EMBEDDING_API_BASE", None) or get_setting(_db, "OPENAI_API_BASE", None)
+        embed_model = get_setting(_db, "DENSE_EMBEDDINGS_MODEL", None)
+    finally:
+        _db.close()
     client = AsyncOpenAI(
-        api_key=settings.OPENAI_API_KEY,
-        base_url=settings.OPENAI_API_BASE,
+        api_key=api_key,
+        base_url=api_base,
     )
     all_embeddings: List[List[float]] = []
     total_batches = max(1, (len(texts) + _EMBED_BATCH_SIZE - 1) // _EMBED_BATCH_SIZE)
@@ -108,7 +118,7 @@ async def _embed_texts_batch(
         batch = texts[i : i + _EMBED_BATCH_SIZE]
         response = await client.embeddings.create(
             input=batch,
-            model=settings.DENSE_EMBEDDINGS_MODEL,
+            model=embed_model,
         )
         all_embeddings.extend(r.embedding for r in response.data)
         if progress_cb is not None:

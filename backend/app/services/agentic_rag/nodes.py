@@ -124,13 +124,20 @@ def _get_llm(
     model_name: Optional[str] = None,
     temperature: float = 0.0,
     api_base: Optional[str] = None,
+    api_key: Optional[str] = None,
     streaming: bool = False,
 ) -> ChatOpenAI:
+    """Build a ChatOpenAI from explicit overrides or .env defaults.
+
+    Prefer build_chat_llm() / get_org_llm() for per-org resolution.
+    This fallback path is used when org context is unavailable (e.g. compaction
+    fallback in agent_graph.py).
+    """
     return ChatOpenAI(
         model=model_name or settings.OPENAI_MODEL,
         temperature=temperature,
         openai_api_base=api_base or settings.OPENAI_API_BASE,
-        openai_api_key=settings.OPENAI_API_KEY,
+        openai_api_key=api_key or settings.OPENAI_API_KEY,
         streaming=streaming,
     )
 
@@ -142,6 +149,8 @@ def _get_llm(
 async def rewrite_query_node(
     state: AgentState,
     api_base: Optional[str] = None,
+    api_key: Optional[str] = None,
+    query_model: Optional[str] = None,
 ) -> dict:
     """Resolve the user's message into a standalone *retrieval* query.
 
@@ -188,9 +197,9 @@ async def rewrite_query_node(
             recent_history=recent_history,
             provenance_sources=provenance_sources,
             api_base=api_base,
-            query_model=settings.effective_query_model,
-            openai_api_key=settings.OPENAI_API_KEY,
-            openai_api_base=settings.OPENAI_API_BASE,
+            query_model=query_model or settings.QUERY_MODEL or settings.OPENAI_MODEL,
+            openai_api_key=api_key or settings.OPENAI_API_KEY,
+            openai_api_base=api_base or settings.OPENAI_API_BASE,
         )
 
         if provenance.get("reason") == "provenance_rejected":
@@ -567,6 +576,7 @@ def merge_node(
 async def answer_evaluation_node(
     state: AgentState,
     llm: ChatOpenAI | None = None,
+    ctx: Any = None,
 ) -> dict:
     """Evaluate final answer quality and compute final confidence score."""
     with _agent_step("answer_evaluation"):
@@ -596,12 +606,27 @@ async def answer_evaluation_node(
             "medium" if retrieval_conf > 0.3 else "low"
         )
 
+        # Resolve query-role LLM config for evaluation
+        eval_kwargs = {}
+        if ctx is not None:
+            try:
+                from app.services.agentic_rag.llm_factory import get_org_llm
+                query_cfg = get_org_llm(ctx.org_id, ctx.db, role="query")
+                eval_kwargs = {
+                    "api_base": query_cfg["api_base"],
+                    "api_key": query_cfg["api_key"],
+                    "query_model": query_cfg["model_name"],
+                }
+            except Exception:
+                pass
+
         try:
             evaluation = await evaluate_answer(
                 query=query,
                 answer=answer,
                 context_preview=context_text,
                 confidence_level=conf_level,
+                **eval_kwargs,
             )
             faithfulness = evaluation.faithfulness
             completeness = evaluation.completeness

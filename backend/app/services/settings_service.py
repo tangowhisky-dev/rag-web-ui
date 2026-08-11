@@ -1,5 +1,5 @@
 """
-settings_service.py — 3-tier settings resolution + CRUD + cache.
+settings_service.py — 3-tier settings resolution + CRUD + cache + secret encryption.
 
 Resolution precedence (per org, per key):
   1. Org override (scope='org', org_id=<id>) — if key is org-overridable
@@ -7,6 +7,10 @@ Resolution precedence (per org, per key):
   3. .env / config.py default (from the registry / global settings singleton)
 
 When RUNTIME_SETTINGS_ENABLED is false, all reads fall back to config.py (Tier 0 only).
+
+Secret values (defn.secret=True) are encrypted at rest using Fernet symmetric
+encryption, keyed by PBKDF2(SECRET_KEY). Encrypted values are prefixed with
+'enc:' in the DB column to distinguish from plaintext.
 """
 import json
 import logging
@@ -28,15 +32,61 @@ _CACHE_TTL = 30  # seconds
 _cache: dict[tuple[Optional[int], str], tuple[Any, float]] = {}
 
 
+# ── Secret encryption ─────────────────────────────────────────────────────
+
+_fernet = None
+
+def _get_fernet():
+    """Lazily initialise a Fernet instance derived from SECRET_KEY."""
+    global _fernet
+    if _fernet is None:
+        from cryptography.fernet import Fernet
+        import base64
+        import hashlib
+        key = hashlib.pbkdf2_hmac(
+            "sha256",
+            env_settings.SECRET_KEY.encode(),
+            b"rag-webui-settings-v1",
+            480000,
+        )
+        _fernet = Fernet(base64.urlsafe_b64encode(key))
+    return _fernet
+
+
+def _encrypt(value: str) -> str:
+    """Encrypt a plaintext string, returning 'enc:<ciphertext>'."""
+    return "enc:" + _get_fernet().encrypt(value.encode()).decode()
+
+
+def _decrypt(raw: str) -> str:
+    """Decrypt an 'enc:<ciphertext>' string back to plaintext."""
+    if raw.startswith("enc:"):
+        return _get_fernet().decrypt(raw[4:].encode()).decode()
+    return raw  # plaintext fallback (for pre-encryption rows)
+
+
+def _mask_secret(value: Any) -> str:
+    """Mask a secret value for API display: show last 4 chars only."""
+    s = str(value) if value else ""
+    if len(s) <= 4:
+        return "••••"
+    return "••••" + s[-4:]
+
+
 # ── Encoding / decoding ───────────────────────────────────────────────────
 
 def _encode(value: Any, defn: SettingDef) -> str:
-    """Encode a Python value as JSON for DB storage."""
-    return json.dumps(value)
+    """Encode a Python value as JSON for DB storage. Encrypts if secret."""
+    encoded = json.dumps(value)
+    if defn.secret and value is not None:
+        encoded = _encrypt(encoded)
+    return encoded
 
 
 def _decode(raw: str, defn: SettingDef) -> Any:
-    """Decode a JSON string back to the registry type."""
+    """Decode a stored string back to the registry type. Decrypts if secret."""
+    if defn.secret:
+        raw = _decrypt(raw)
     parsed = json.loads(raw)
     if defn.value_type == "int":
         return int(parsed)
@@ -202,22 +252,6 @@ class OrgSettings:
         return int(self.CHUNK_SIZE * self.OVERLAP_PERCENTAGE)
 
     @property
-    def effective_query_model(self) -> str:
-        return self.QUERY_MODEL or self.OPENAI_MODEL
-
-    @property
-    def effective_reasoning_model(self) -> str:
-        return self.REASONING_MODEL or self.OPENAI_MODEL
-
-    @property
-    def effective_vision_api_base(self) -> str:
-        return self.OPENAI_VISION_API_BASE or self.OPENAI_API_BASE
-
-    @property
-    def graphrag_model(self) -> str:
-        return self.GRAPHRAG_LLM or self.OPENAI_MODEL
-
-    @property
     def retrieval_config_presets(self) -> dict:
         raw = self.RETRIEVAL_CONFIG_PRESETS
         if isinstance(raw, str):
@@ -228,10 +262,16 @@ class OrgSettings:
 # ── CRUD ──────────────────────────────────────────────────────────────────
 
 def upsert_app_setting(db: Session, key: str, value: Any, user_id: Optional[int] = None) -> None:
-    """Upsert an app-level setting (scope='app'). Validates against registry."""
+    """Upsert an app-level setting (scope='app'). Validates against registry.
+
+    For secret settings, if the value looks masked (starts with '••••'), it is
+    treated as a no-op — the existing encrypted value is preserved.
+    """
     defn = get_def(key)
     if defn is None:
         raise ValueError(f"Unknown setting key: {key}")
+    if defn.secret and isinstance(value, str) and value.startswith("••••"):
+        return  # masked value = no change
     validated = validate_value(key, value)
     encoded = _encode(validated, defn)
 
@@ -249,12 +289,18 @@ def upsert_app_setting(db: Session, key: str, value: Any, user_id: Optional[int]
 
 
 def upsert_org_setting(db: Session, org_id: int, key: str, value: Any, user_id: Optional[int] = None) -> None:
-    """Upsert an org-level override. Validates against registry + scope."""
+    """Upsert an org-level override. Validates against registry + scope.
+
+    For secret settings, if the value looks masked (starts with '••••'), it is
+    treated as a no-op — the existing encrypted value is preserved.
+    """
     defn = get_def(key)
     if defn is None:
         raise ValueError(f"Unknown setting key: {key}")
     if not is_org_overridable(key):
         raise ValueError(f"Setting {key} cannot be overridden per organisation")
+    if defn.secret and isinstance(value, str) and value.startswith("••••"):
+        return  # masked value = no change
     validated = validate_value(key, value)
     encoded = _encode(validated, defn)
 
@@ -322,9 +368,12 @@ def get_app_setting_with_meta(db: Session, key: str) -> dict:
     source = "database" if (row and row.value is not None) else "install_default"
     effective = get_setting(db, key, None)
 
+    # Mask secrets in API responses
+    display_value = _mask_secret(effective) if (defn.secret and effective) else effective
+
     return {
         "key": key,
-        "value": effective,
+        "value": display_value,
         "value_type": defn.value_type,
         "category": defn.category,
         "label": defn.label,
@@ -336,6 +385,8 @@ def get_app_setting_with_meta(db: Session, key: str) -> dict:
         "min": defn.min_value,
         "max": defn.max_value,
         "choices": list(defn.choices) if defn.choices else None,
+        "secret": defn.secret,
+        "is_set": effective is not None,
     }
 
 
@@ -361,22 +412,28 @@ def get_org_setting_with_meta(db: Session, org_id: int, key: str) -> dict:
     effective = get_setting(db, key, org_id if defn.scope == "org" else None)
     app_default = get_setting(db, key, None)
 
+    # Mask secrets in API responses
+    display_effective = _mask_secret(effective) if (defn.secret and effective) else effective
+    display_app_default = _mask_secret(app_default) if (defn.secret and app_default) else app_default
+
     return {
         "key": key,
-        "value": effective,
+        "value": display_effective,
         "value_type": defn.value_type,
         "category": defn.category,
         "label": defn.label,
         "scope": defn.scope,
         "overridden": overridden,
-        "app_default": app_default,
-        "effective": effective,
+        "app_default": display_app_default,
+        "effective": display_effective,
         "reload": defn.reload,
         "requires_reindex": defn.requires_reindex,
         "description": defn.description,
         "min": defn.min_value,
         "max": defn.max_value,
         "choices": list(defn.choices) if defn.choices else None,
+        "secret": defn.secret,
+        "is_set": effective is not None,
     }
 
 

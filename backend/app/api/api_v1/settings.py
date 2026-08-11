@@ -81,6 +81,7 @@ def get_app_settings_schema(
             min=d.min_value,
             max=d.max_value,
             choices=list(d.choices) if d.choices else None,
+            secret=d.secret,
         ))
     return SettingsSchemaResponse(settings=items)
 
@@ -192,6 +193,7 @@ def get_org_settings_schema(
             min=d.min_value,
             max=d.max_value,
             choices=list(d.choices) if d.choices else None,
+            secret=d.secret,
         ))
     return SettingsSchemaResponse(settings=items)
 

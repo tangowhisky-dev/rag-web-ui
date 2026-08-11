@@ -40,30 +40,6 @@ class OrgResponse(OrgBase):
 
 
 # ---------------------------------------------------------------------------
-# OrgLLMConfig schemas
-# ---------------------------------------------------------------------------
-
-class OrgLLMConfigBase(BaseModel):
-    api_base: Optional[str] = None
-    model_name: Optional[str] = None
-    query_model: Optional[str] = None
-
-
-class OrgLLMConfigCreate(OrgLLMConfigBase):
-    pass
-
-
-class OrgLLMConfigUpdate(OrgLLMConfigBase):
-    pass
-
-
-class OrgLLMConfigResponse(OrgLLMConfigBase):
-    org_id: int
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-# ---------------------------------------------------------------------------
 # Org ingestion status schema
 # ---------------------------------------------------------------------------
 

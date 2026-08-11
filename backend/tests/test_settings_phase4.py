@@ -23,7 +23,6 @@ import app.models.knowledge  # noqa
 import app.models.chat  # noqa
 import app.models.datastore  # noqa
 import app.models.setting  # noqa
-import app.models.org_llm_config  # noqa
 
 from app.services.settings_service import (
     upsert_app_setting, upsert_org_setting, clear_cache, get_setting,

@@ -103,14 +103,6 @@ export default function AdminOrgsPage() {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
-  // LLM config dialog
-  const [llmConfigOpen, setLlmConfigOpen] = useState(false);
-  const [llmConfigOrg, setLlmConfigOrg] = useState<Org | null>(null);
-  const [llmApiBase, setLlmApiBase] = useState('');
-  const [llmModelName, setLlmModelName] = useState('');
-  const [llmQueryModel, setLlmQueryModel] = useState('');
-  const [llmSaving, setLlmSaving] = useState(false);
-
   useEffect(() => {
     // Auth check is handled by the layout.tsx middleware.
     fetchOrgs();
@@ -237,53 +229,6 @@ export default function AdminOrgsPage() {
     }
   }
 
-  async function openLlmConfig(org: Org) {
-    setLlmConfigOrg(org);
-    setLlmApiBase('');
-    setLlmModelName('');
-    setLlmQueryModel('');
-    try {
-      const data = await api.get(`/api/admin/orgs/${org.id}/llm-config`);
-      setLlmApiBase(data.api_base ?? '');
-      setLlmModelName(data.model_name ?? '');
-      setLlmQueryModel(data.query_model ?? '');
-    } catch (err) {
-      // 404 means no config yet — leave fields empty
-      const apiErr = err as ApiError;
-      if (apiErr.status !== 404) {
-        toast({
-          title: 'Error',
-          description: apiErr.message ?? 'Failed to load LLM config',
-          variant: 'destructive',
-        });
-        return;
-      }
-    }
-    setLlmConfigOpen(true);
-  }
-
-  async function handleLlmConfigSave(clearAll: boolean) {
-    if (!llmConfigOrg) return;
-    setLlmSaving(true);
-    try {
-      await api.put(`/api/admin/orgs/${llmConfigOrg.id}/llm-config`, {
-        api_base: clearAll ? null : (llmApiBase.trim() || null),
-        model_name: clearAll ? null : (llmModelName.trim() || null),
-        query_model: clearAll ? null : (llmQueryModel.trim() || null),
-      });
-      toast({ title: clearAll ? 'LLM config cleared' : 'LLM config saved' });
-      setLlmConfigOpen(false);
-    } catch (err) {
-      toast({
-        title: 'Error',
-        description: (err as ApiError).message ?? 'Failed to save LLM config',
-        variant: 'destructive',
-      });
-    } finally {
-      setLlmSaving(false);
-    }
-  }
-
   // Build full hierarchy path: "GrandParent -> Parent -> Current"
   const hierarchyPath = (org: Org): string => {
     if (!org.path) return org.name;
@@ -381,9 +326,6 @@ export default function AdminOrgsPage() {
                   <TableCell className="space-x-2">
                     <Button variant="outline" size="sm" onClick={() => openEdit(org)} title="Change name and parent organization">
                       Edit
-                    </Button>
-                    <Button variant="outline" size="sm" onClick={() => openLlmConfig(org)} title="Configure LLM settings for this organization">
-                      LLM Config
                     </Button>
                     <Link href={`/dashboard/admin/orgs/${org.id}/settings`}>
                       <Button variant="outline" size="sm" title="Full organisation settings (retrieval, agentic, memory, etc.)">
@@ -485,56 +427,6 @@ export default function AdminOrgsPage() {
               Cancel
             </Button>
             <Button onClick={handleEdit} disabled={editing || !editName.trim() || !editParentId}>
-              Save
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* LLM config dialog */}
-      <Dialog open={llmConfigOpen} onOpenChange={setLlmConfigOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>LLM Config — {llmConfigOrg?.name}</DialogTitle>
-          </DialogHeader>
-          <p className="text-xs text-muted-foreground pb-1">
-            Leave fields blank to inherit from .env defaults.
-          </p>
-          <div className="space-y-3 py-2">
-            <div className="space-y-1">
-              <label className="text-sm font-medium">API Base URL</label>
-              <Input
-                placeholder="https://api.openai.com/v1"
-                value={llmApiBase}
-                onChange={(e) => setLlmApiBase(e.target.value)}
-              />
-            </div>
-            <div className="space-y-1">
-              <label className="text-sm font-medium">Model Name</label>
-              <Input
-                placeholder="gpt-4o"
-                value={llmModelName}
-                onChange={(e) => setLlmModelName(e.target.value)}
-              />
-            </div>
-            <div className="space-y-1">
-              <label className="text-sm font-medium">Query Model</label>
-              <Input
-                placeholder="gpt-4o-mini"
-                value={llmQueryModel}
-                onChange={(e) => setLlmQueryModel(e.target.value)}
-              />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => handleLlmConfigSave(true)}
-              disabled={llmSaving}
-            >
-              Clear
-            </Button>
-            <Button onClick={() => handleLlmConfigSave(false)} disabled={llmSaving}>
               Save
             </Button>
           </DialogFooter>

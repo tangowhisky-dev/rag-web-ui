@@ -54,11 +54,24 @@ def get_qdrant_client() -> QdrantClient:
 
 
 def get_openai_client() -> SyncOpenAI:
+    """Singleton OpenAI client for dense embeddings (super_admin-only settings).
+
+    Uses EMBEDDING_API_KEY / EMBEDDING_API_BASE (app scope), falling back to
+    OPENAI_API_KEY / OPENAI_API_BASE from .env.
+    """
     global _openai_client
     if _openai_client is None:
+        from app.services.settings_service import get_setting
+        from app.db.session import SessionLocal
+        _db = SessionLocal()
+        try:
+            api_key = get_setting(_db, "EMBEDDING_API_KEY", None) or get_setting(_db, "OPENAI_API_KEY", None)
+            api_base = get_setting(_db, "EMBEDDING_API_BASE", None) or get_setting(_db, "OPENAI_API_BASE", None)
+        finally:
+            _db.close()
         _openai_client = SyncOpenAI(
-            api_key=settings.OPENAI_API_KEY,
-            base_url=settings.OPENAI_API_BASE,
+            api_key=api_key,
+            base_url=api_base,
         )
     return _openai_client
 

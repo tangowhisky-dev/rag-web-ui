@@ -31,6 +31,8 @@ interface SettingItem {
   min: number | null;
   max: number | null;
   choices: string[] | null;
+  secret: boolean;
+  is_set: boolean;
 }
 
 interface SettingsResponse {
@@ -242,6 +244,74 @@ function SettingField({
 }
 
 function SettingInput({ setting, onChange }: { setting: SettingItem; onChange: (v: any) => void }) {
+  const [showSecret, setShowSecret] = useState(false);
+  const [secretEditing, setSecretEditing] = useState(false);
+
+  // Secret fields: render password input with show/hide and edit/clear controls.
+  if (setting.secret) {
+    const isMasked = typeof setting.value === 'string' && setting.value.startsWith('••••');
+    if (!secretEditing && isMasked) {
+      return (
+        <div className="flex items-center gap-2">
+          <Input
+            type="password"
+            value={setting.value ?? ''}
+            readOnly
+            className="flex-1 font-mono"
+          />
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => { setSecretEditing(true); onChange(''); }}
+          >
+            Replace
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => setShowSecret(!showSecret)}
+            title={showSecret ? 'Hide' : 'Show'}
+          >
+            {showSecret ? 'Hide' : 'Show'}
+          </Button>
+        </div>
+      );
+    }
+    return (
+      <div className="flex items-center gap-2">
+        <Input
+          type={showSecret ? 'text' : 'password'}
+          value={String(setting.value ?? '')}
+          onChange={(e) => onChange(e.target.value || null)}
+          placeholder={setting.is_set ? 'Enter new value' : 'Not set — enter value'}
+          className="flex-1 font-mono"
+          autoFocus={secretEditing}
+        />
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={() => setShowSecret(!showSecret)}
+          title={showSecret ? 'Hide' : 'Show'}
+        >
+          {showSecret ? 'Hide' : 'Show'}
+        </Button>
+        {secretEditing && (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => { setSecretEditing(false); onChange(setting.value); }}
+          >
+            Cancel
+          </Button>
+        )}
+      </div>
+    );
+  }
+
   if (setting.value_type === 'bool') {
     return (
       <Switch

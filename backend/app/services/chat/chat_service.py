@@ -35,20 +35,20 @@ async def stream_flush():
 def get_effective_llm_config(org_id: Optional[int], db: Session) -> dict:
     """Return LLM config dict for the given org, falling back to .env settings.
 
-    Keys: api_base, model_name, query_model.
+    Keys: api_base, api_key, model_name, query_model.
     Reads from the unified settings service (3-tier precedence:
     org override → app value → .env/config.py default).
     """
-    from app.services.settings_service import get_setting
+    from app.services.agentic_rag.llm_factory import get_org_llm
 
-    api_base = get_setting(db, "OPENAI_API_BASE", org_id)
-    model_name = get_setting(db, "OPENAI_MODEL", org_id)
-    query_model = get_setting(db, "QUERY_MODEL", org_id) or model_name
+    chat_cfg = get_org_llm(org_id, db, role="chat")
+    query_cfg = get_org_llm(org_id, db, role="query")
 
     return {
-        "api_base": api_base,
-        "model_name": model_name,
-        "query_model": query_model,
+        "api_base": chat_cfg["api_base"],
+        "api_key": chat_cfg["api_key"],
+        "model_name": chat_cfg["model_name"],
+        "query_model": query_cfg["model_name"],
     }
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -93,17 +93,17 @@ def _strip_think(text: str) -> str:
     return strip_reasoning_tags(text)
 
 
-async def classify_query(query: str, api_base: Optional[str] = None, query_model: Optional[str] = None) -> "QueryClassification":
+async def classify_query(query: str, api_base: Optional[str] = None, query_model: Optional[str] = None, api_key: Optional[str] = None) -> "QueryClassification":
     """
     Classify a query into one of 4 types using LLM-based zero-shot classification.
-    
+
     Returns QueryClassification with type, confidence, latency_ms, and fallback flag.
     On any failure, returns FACTUAL with fallback=True (safe default).
     """
     from app.models.query_classifier import QueryType, QueryClassification
-    
+
     start = time.perf_counter()
-    
+
     try:
         if not settings.QUERY_CLASSIFIER_ENABLED:
             elapsed_ms = (time.perf_counter() - start) * 1000
@@ -112,16 +112,16 @@ async def classify_query(query: str, api_base: Optional[str] = None, query_model
                 type=QueryType.FACTUAL, confidence=0.0,
                 latency_ms=elapsed_ms, fallback=True
             )
-        
+
         client = AsyncOpenAI(
-            api_key=settings.OPENAI_API_KEY,
+            api_key=api_key or settings.OPENAI_API_KEY,
             base_url=api_base or settings.OPENAI_API_BASE,
         )
-        
+
         prompt = settings.QUERY_CLASSIFIER_PROMPT.format(query=query)
-        
+
         response = await client.chat.completions.create(
-            model=query_model or settings.effective_query_model,
+            model=query_model or settings.QUERY_MODEL or settings.OPENAI_MODEL,
             messages=[
                 {"role": "user", "content": prompt},
             ],

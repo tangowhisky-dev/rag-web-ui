@@ -198,14 +198,24 @@ def _get_llm_pipeline():
             # before writing via the parent's run() method.
             return await super().run(graph, lexical_graph_config)
 
+    # Graph extraction LLM credentials are super_admin-only (app scope).
+    from app.services.settings_service import get_setting
+    from app.db.session import SessionLocal
+    _db = SessionLocal()
+    try:
+        graph_model = get_setting(_db, "GRAPHRAG_LLM", None) or get_setting(_db, "OPENAI_MODEL", None)
+        api_key = get_setting(_db, "GRAPHRAG_API_KEY", None) or get_setting(_db, "OPENAI_API_KEY", None)
+        api_base = get_setting(_db, "GRAPHRAG_API_BASE", None) or get_setting(_db, "OPENAI_API_BASE", None)
+    finally:
+        _db.close()
+
     llm = OpenAILLM(
-        model_name=settings.GRAPHRAG_LLM,
+        model_name=graph_model,
         model_params={
             "temperature": 0,
-            # "max_tokens": 1024,  # entity/relation JSON is small; cap prevents full context reservation
         },
-        base_url=settings.OPENAI_API_BASE,
-        api_key=settings.OPENAI_API_KEY,
+        base_url=api_base,
+        api_key=api_key,
     )
 
     extractor = LLMEntityRelationExtractor(
@@ -228,7 +238,7 @@ def _get_llm_pipeline():
     pipe.connect("extractor", "writer", input_config={"graph": "extractor"})
 
     _llm_pipeline = pipe
-    logger.info("GraphService[llm]: pipeline built with model=%s", settings.GRAPHRAG_LLM)
+    logger.info("GraphService[llm]: pipeline built with model=%s", graph_model)
     return _llm_pipeline
 
 

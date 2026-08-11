@@ -22,7 +22,6 @@ import app.models.knowledge  # noqa
 import app.models.chat  # noqa
 import app.models.datastore  # noqa
 import app.models.setting  # noqa
-import app.models.org_llm_config  # noqa
 
 from app.services.settings_service import (
     upsert_app_setting, upsert_org_setting, clear_cache, get_setting,
@@ -62,27 +61,6 @@ def _create_org(db, name="TestOrg"):
     db.commit()
     db.refresh(org)
     return org
-
-
-# ---------------------------------------------------------------------------
-# 1-2. Legacy LLM config deprecation
-# ---------------------------------------------------------------------------
-
-def test_legacy_llm_config_get_is_deprecated():
-    """The legacy GET /orgs/{id}/llm-config endpoint is marked deprecated."""
-    from app.api.api_v1.admin import get_org_llm_config
-    # FastAPI marks deprecated endpoints with the deprecated parameter
-    # We check the route's deprecated flag
-    import inspect
-    sig = inspect.signature(get_org_llm_config)
-    # The function itself should have a docstring mentioning deprecated
-    assert "Deprecated" in (get_org_llm_config.__doc__ or "")
-
-
-def test_legacy_llm_config_put_is_deprecated():
-    """The legacy PUT /orgs/{id}/llm-config endpoint is marked deprecated."""
-    from app.api.api_v1.admin import upsert_org_llm_config
-    assert "Deprecated" in (upsert_org_llm_config.__doc__ or "")
 
 
 # ---------------------------------------------------------------------------
@@ -172,10 +150,18 @@ def test_retrieval_relax_level2_reranker_threshold_is_org_overridable():
     assert is_org_overridable("RETRIEVAL_RELAX_LEVEL2_RERANKER_THRESHOLD")
 
 
-def test_openai_api_key_is_not_org_overridable():
-    """Secrets must not be org-overridable."""
+def test_openai_api_key_is_org_overridable():
+    """OPENAI_API_KEY is org-overridable (encrypted in DB)."""
     from app.core.settings_registry import is_org_overridable
-    assert not is_org_overridable("OPENAI_API_KEY")
+    assert is_org_overridable("OPENAI_API_KEY")
+
+
+def test_openai_api_key_is_secret():
+    """OPENAI_API_KEY is marked as a secret for encryption."""
+    from app.core.settings_registry import get_def
+    defn = get_def("OPENAI_API_KEY")
+    assert defn is not None
+    assert defn.secret is True
 
 
 def test_openai_api_base_is_org_overridable():

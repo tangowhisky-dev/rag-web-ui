@@ -135,11 +135,20 @@ class RedisMemory:
 
         if self._store is None:
             logger.info("[MEMORY] Initialising Redis store | uri=%s", self._uri)
-            embedding_model = settings.MEMORY_EMBEDDING_MODEL or settings.DENSE_EMBEDDINGS_MODEL
+            # Embeddings API key/base are super_admin-only (app scope).
+            from app.services.settings_service import get_setting
+            from app.db.session import SessionLocal
+            _db = SessionLocal()
+            try:
+                embedding_model = get_setting(_db, "MEMORY_EMBEDDING_MODEL", None) or get_setting(_db, "DENSE_EMBEDDINGS_MODEL", None)
+                api_key = get_setting(_db, "EMBEDDING_API_KEY", None) or get_setting(_db, "OPENAI_API_KEY", None)
+                api_base = get_setting(_db, "EMBEDDING_API_BASE", None) or get_setting(_db, "OPENAI_API_BASE", None)
+            finally:
+                _db.close()
             self._embeddings = _StringEmbeddings(
                 model=embedding_model,
-                api_base=settings.OPENAI_API_BASE,
-                api_key=settings.OPENAI_API_KEY,
+                api_base=api_base,
+                api_key=api_key,
             )
             try:
                 st = AsyncRedisStore(
@@ -259,11 +268,19 @@ class RedisMemory:
 
 def _cleanup_embeddings() -> _StringEmbeddings:
     """Build the same embedding wrapper used during normal setup."""
-    embedding_model = settings.MEMORY_EMBEDDING_MODEL or settings.DENSE_EMBEDDINGS_MODEL
+    from app.services.settings_service import get_setting
+    from app.db.session import SessionLocal
+    _db = SessionLocal()
+    try:
+        embedding_model = get_setting(_db, "MEMORY_EMBEDDING_MODEL", None) or get_setting(_db, "DENSE_EMBEDDINGS_MODEL", None)
+        api_key = get_setting(_db, "EMBEDDING_API_KEY", None) or get_setting(_db, "OPENAI_API_KEY", None)
+        api_base = get_setting(_db, "EMBEDDING_API_BASE", None) or get_setting(_db, "OPENAI_API_BASE", None)
+    finally:
+        _db.close()
     return _StringEmbeddings(
         model=embedding_model,
-        api_base=settings.OPENAI_API_BASE,
-        api_key=settings.OPENAI_API_KEY,
+        api_base=api_base,
+        api_key=api_key,
     )
 
 

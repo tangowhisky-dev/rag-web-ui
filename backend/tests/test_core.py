@@ -226,20 +226,6 @@ def test_settings_get_database_url_builds_mysql():
     assert settings.get_database_url == "mysql+mysqlconnector://u:p@db:3306/rag"
 
 
-def test_settings_effective_query_model_fallback():
-    from app.core.config import Settings
-
-    settings = Settings(OPENAI_MODEL="gpt", QUERY_MODEL=None)
-    assert settings.effective_query_model == "gpt"
-
-
-def test_settings_effective_vision_api_base_fallback():
-    from app.core.config import Settings
-
-    settings = Settings(OPENAI_API_BASE="http://base", OPENAI_VISION_API_BASE=None)
-    assert settings.effective_vision_api_base == "http://base"
-
-
 def test_settings_chunk_overlap():
     from app.core.config import Settings
 

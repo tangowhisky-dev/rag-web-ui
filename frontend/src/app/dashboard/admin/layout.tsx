@@ -6,7 +6,7 @@ import AdminSidebar from '@/components/admin/admin-sidebar';
 import { NavActions } from '@/components/layout/nav-actions';
 import { api } from '@/lib/api';
 
-// LLM config is managed per-organisation on the Orgs page (LLM Config button).
+// LLM config is managed via the Settings UI (Super Admin + per-org Settings).
 // The standalone /dashboard/admin/llm-config page does not exist.
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {

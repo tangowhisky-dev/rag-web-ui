@@ -29,7 +29,6 @@ import app.models.knowledge  # noqa
 import app.models.chat  # noqa
 import app.models.datastore  # noqa
 import app.models.setting  # noqa
-import app.models.org_llm_config  # noqa
 
 from app.services import settings_service
 from app.services.settings_service import (
@@ -271,20 +270,12 @@ def test_org_settings_computed_chunk_overlap(db_session):
     assert os.chunk_overlap == int(os.CHUNK_SIZE * os.OVERLAP_PERCENTAGE)
 
 
-def test_org_settings_effective_query_model(db_session):
-    """effective_query_model falls back to OPENAI_MODEL."""
+def test_org_settings_retrieval_config_presets(db_session):
+    """retrieval_config_presets returns a dict."""
     os = OrgSettings(db_session, None)
-    assert os.effective_query_model == (os.QUERY_MODEL or os.OPENAI_MODEL)
-
-
-def test_org_settings_effective_reasoning_model(db_session):
-    os = OrgSettings(db_session, None)
-    assert os.effective_reasoning_model == (os.REASONING_MODEL or os.OPENAI_MODEL)
-
-
-def test_org_settings_graphrag_model(db_session):
-    os = OrgSettings(db_session, None)
-    assert os.graphrag_model == (os.GRAPHRAG_LLM or os.OPENAI_MODEL)
+    presets = os.retrieval_config_presets
+    assert isinstance(presets, dict)
+    assert "FACTUAL" in presets
 
 
 def test_org_settings_unknown_attr_raises(db_session):

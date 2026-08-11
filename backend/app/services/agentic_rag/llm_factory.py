@@ -1,4 +1,13 @@
-"""Per-organisation LLM factory for the agent loop."""
+"""Per-organisation LLM factory for the agent loop.
+
+Role-aware resolution of API key, base URL, and model name. Each role has
+its own fallback chain:
+
+  Role-specific setting → OPENAI_* setting → .env default
+
+All reads go through the settings service (3-tier precedence:
+org override → app value → .env/config.py default).
+"""
 
 from __future__ import annotations
 
@@ -7,31 +16,51 @@ from typing import Optional
 from langchain_openai import ChatOpenAI
 from sqlalchemy.orm import Session
 
-from app.core.config import settings
 from app.services.settings_service import get_setting
+
+
+# Role → (role-specific key setting, role-specific base URL setting)
+_ROLE_KEY_MAP = {
+    "chat":      ("OPENAI_API_KEY",    "OPENAI_API_BASE"),
+    "query":     ("QUERY_API_KEY",     "QUERY_API_BASE"),
+    "reasoning": ("REASONING_API_KEY", "REASONING_API_BASE"),
+    "vision":    ("VISION_API_KEY",    "OPENAI_VISION_API_BASE"),
+    "graph":     ("GRAPHRAG_API_KEY",  "GRAPHRAG_API_BASE"),
+}
 
 
 def get_org_llm(org_id: Optional[int], db: Session, role: str = "chat") -> dict:
     """Resolve OpenAI-compatible LLM config for ``org_id`` and ``role``.
 
     Roles:
-    - "chat"     -> main response model
-    - "query"    -> rewrite / summarisation / extraction model
+    - "chat"      -> main response model
+    - "query"     -> rewrite / summarisation / extraction model
     - "reasoning" -> reasoning / thinking model
+    - "vision"    -> vision / OCR model
+    - "graph"     -> graph extraction model
 
-    Reads from the unified settings service (3-tier precedence:
-    org override → app value → .env/config.py default).
+    Key and base URL resolve with per-role fallback to the main OPENAI_* settings.
+    Model resolution: role-specific model → OPENAI_MODEL.
     """
-    api_base = get_setting(db, "OPENAI_API_BASE", org_id)
-    model_name = get_setting(db, "OPENAI_MODEL", org_id)
-    query_model = get_setting(db, "QUERY_MODEL", org_id) or model_name
-    reasoning_model = get_setting(db, "REASONING_MODEL", org_id) or model_name
-    api_key = settings.OPENAI_API_KEY  # always from .env (secret)
+    role_key, role_base = _ROLE_KEY_MAP.get(role, ("OPENAI_API_KEY", "OPENAI_API_BASE"))
 
+    # Key: role-specific → OPENAI_API_KEY (same tier) → .env fallback
+    api_key = get_setting(db, role_key, org_id) or get_setting(db, "OPENAI_API_KEY", org_id)
+
+    # Base URL: role-specific → OPENAI_API_BASE (same tier) → .env fallback
+    api_base = get_setting(db, role_base, org_id) or get_setting(db, "OPENAI_API_BASE", org_id)
+
+    # Model: role-specific model → OPENAI_MODEL
     if role == "query":
-        model_name = query_model
+        model_name = get_setting(db, "QUERY_MODEL", org_id) or get_setting(db, "OPENAI_MODEL", org_id)
     elif role == "reasoning":
-        model_name = reasoning_model
+        model_name = get_setting(db, "REASONING_MODEL", org_id) or get_setting(db, "OPENAI_MODEL", org_id)
+    elif role == "vision":
+        model_name = get_setting(db, "VISION_MODEL", org_id) or get_setting(db, "OPENAI_MODEL", org_id)
+    elif role == "graph":
+        model_name = get_setting(db, "GRAPHRAG_LLM", org_id) or get_setting(db, "OPENAI_MODEL", org_id)
+    else:
+        model_name = get_setting(db, "OPENAI_MODEL", org_id)
 
     return {
         "api_base": api_base,

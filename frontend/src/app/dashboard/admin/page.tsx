@@ -13,7 +13,7 @@ interface AdminCounts {
 
 type AdminCountsKey = keyof AdminCounts;
 
-// LLM config is managed per-organisation on the Orgs page (LLM Config button).
+// LLM config is managed via the Settings UI (Super Admin + per-org Settings).
 // The standalone /dashboard/admin/llm-config page does not exist.
 
 const ROUTE_MAP: Record<AdminCountsKey, string> = {

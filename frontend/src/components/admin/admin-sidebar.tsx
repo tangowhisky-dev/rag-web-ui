@@ -24,7 +24,7 @@ const SUPER_ADMIN_ITEMS = [
   { label: 'Settings', href: '/dashboard/admin/settings', icon: Settings },
 ];
 
-// LLM config is managed per-organisation on the Orgs page (LLM Config button).
+// LLM config is managed via the Settings UI (Super Admin + per-org Settings).
 // The standalone /dashboard/admin/llm-config page does not exist.
 
 

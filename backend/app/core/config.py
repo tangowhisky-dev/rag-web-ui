@@ -57,6 +57,8 @@ class Settings(BaseSettings):
     WATCHER_USE_INOTIFY: bool = os.getenv("WATCHER_USE_INOTIFY", "true").lower() == "true"
 
     # LLM + Embeddings (OpenAI-compatible)
+    # OPENAI_API_KEY and OPENAI_API_BASE are the ultimate fallback for all
+    # LLM roles. Per-role keys/base URLs can be set via the admin UI.
     OPENAI_API_BASE: str = os.getenv("OPENAI_API_BASE", "http://localhost:1234/v1")
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "lmstudio")
 
@@ -87,25 +89,28 @@ class Settings(BaseSettings):
     # to OPENAI_API_BASE (same server as chat/embeddings).
     OPENAI_VISION_API_BASE: Optional[str] = os.getenv("OPENAI_VISION_API_BASE") or None
 
+    # Per-role API keys (fall back to OPENAI_API_KEY when unset).
+    # These are the .env fallbacks; runtime values are stored encrypted in the
+    # settings table and managed via the admin UI.
+    QUERY_API_KEY: Optional[str] = os.getenv("QUERY_API_KEY") or None
+    REASONING_API_KEY: Optional[str] = os.getenv("REASONING_API_KEY") or None
+    VISION_API_KEY: Optional[str] = os.getenv("VISION_API_KEY") or None
+    GRAPHRAG_API_KEY: Optional[str] = os.getenv("GRAPHRAG_API_KEY") or None
+
+    # Per-role base URLs (fall back to OPENAI_API_BASE when unset).
+    QUERY_API_BASE: Optional[str] = os.getenv("QUERY_API_BASE") or None
+    REASONING_API_BASE: Optional[str] = os.getenv("REASONING_API_BASE") or None
+    GRAPHRAG_API_BASE: Optional[str] = os.getenv("GRAPHRAG_API_BASE") or None
+
+    # Embeddings API key and base URL (super_admin only, app scope).
+    # Fall back to OPENAI_API_KEY / OPENAI_API_BASE when unset.
+    EMBEDDING_API_KEY: Optional[str] = os.getenv("EMBEDDING_API_KEY") or None
+    EMBEDDING_API_BASE: Optional[str] = os.getenv("EMBEDDING_API_BASE") or None
+
     DENSE_EMBEDDINGS_MODEL: str = os.getenv("DENSE_EMBEDDINGS_MODEL", "local-embedding-model")
     # Dimension of the dense embedding model output. Must match DENSE_EMBEDDINGS_MODEL.
     # qwen3-embedding-0.6b = 1024, text-embedding-3-small = 1536, text-embedding-ada-002 = 1536
     DENSE_EMBEDDING_DIM: int = int(os.getenv("DENSE_EMBEDDING_DIM", "1024"))
-
-    @property
-    def effective_query_model(self) -> str:
-        """Model to use for query rewriting and summarisation. Falls back to OPENAI_MODEL."""
-        return self.QUERY_MODEL or self.OPENAI_MODEL
-
-    @property
-    def effective_reasoning_model(self) -> str:
-        """Model to use for reasoning/thinking steps. Falls back to OPENAI_MODEL."""
-        return self.REASONING_MODEL or self.OPENAI_MODEL
-
-    @property
-    def effective_vision_api_base(self) -> str:
-        """Base URL for vision/OCR calls. Falls back to OPENAI_API_BASE."""
-        return self.OPENAI_VISION_API_BASE or self.OPENAI_API_BASE
 
     # ── Query Classification ──────────────────────────────────────────────────
     # Enable/disable LLM-based query classification for adaptive retrieval routing.
@@ -173,11 +178,6 @@ class Settings(BaseSettings):
     # ── Retrieval ──────────────────────────────────────────────────────────────
     RETRIEVAL_TOP_K: int = int(os.getenv("RETRIEVAL_TOP_K", "20"))
     # Minimum RRF score to include a chunk in the context passed to the LLM.
-    # RRF scores range roughly 0.003–0.02 for a 3-leg setup with K=60.
-    # Chunks below this threshold are dropped before the LLM sees them.
-    # Set to 0.0 to disable filtering.
-    RETRIEVAL_MIN_RRF_SCORE: float = float(os.getenv("RETRIEVAL_MIN_RRF_SCORE", "0.005"))
-
     # Minimum score per retrieval leg. Docs below their leg's threshold are
     # dropped before merge — prevents clearly irrelevant results from consuming
     # cross-encoder compute and polluting the LLM context. Set to 0.0 to disable.
@@ -321,8 +321,6 @@ class Settings(BaseSettings):
     # registered tool schemas in the tools= parameter and the backend executes
     # tool_calls returned by the LLM, feeding results back in a loop.
     TOOL_CALLING_ENABLED: bool = os.getenv("TOOL_CALLING_ENABLED", "true").lower() == "true"
-    # Maximum tool call iterations per chat turn to prevent infinite loops.
-    MAX_TOOL_ITERATIONS: int = int(os.getenv("MAX_TOOL_ITERATIONS", "5"))
 
     # ── Multi-Document Synthesis ───────────────────────────────────────────────
     # Enable synthesis mode for MULTI_PART queries with synthesis keywords.
@@ -353,11 +351,6 @@ class Settings(BaseSettings):
     # Maximum characters for the compaction summary. Longer summaries
     # preserve more detail but consume more context tokens.
     COMPACTION_SUMMARY_MAX_CHARS: int = int(os.getenv("COMPACTION_SUMMARY_MAX_CHARS", "2000"))
-
-    @property
-    def graphrag_model(self) -> str:
-        """Model to use for entity/relationship extraction. Falls back to OPENAI_MODEL."""
-        return self.GRAPHRAG_LLM or self.OPENAI_MODEL
 
     # ── Enterprise Agent Loop ───────────────────────────────────────────────────
     TOOL_CALL_MODE: str = os.getenv("TOOL_CALL_MODE", "auto")  # native, json_text, auto

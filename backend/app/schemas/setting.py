@@ -20,6 +20,8 @@ class SettingItem(BaseModel):
     min: Optional[float] = None
     max: Optional[float] = None
     choices: Optional[List[str]] = None
+    secret: bool = False
+    is_set: bool = False
 
 
 class SettingsListResponse(BaseModel):
@@ -48,6 +50,7 @@ class SettingSchemaItem(BaseModel):
     min: Optional[float] = None
     max: Optional[float] = None
     choices: Optional[List[str]] = None
+    secret: bool = False
 
 
 class SettingsSchemaResponse(BaseModel):

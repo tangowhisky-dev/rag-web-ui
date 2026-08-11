@@ -138,6 +138,9 @@ async def evaluate_answer(
     answer: str,
     context_preview: str,
     confidence_level: str = "medium",
+    api_base: Optional[str] = None,
+    api_key: Optional[str] = None,
+    query_model: Optional[str] = None,
 ) -> AnswerEvaluation:
     """Evaluate answer quality using an LLM call.
 
@@ -146,6 +149,9 @@ async def evaluate_answer(
         answer: The generated answer text.
         context_preview: Retrieved context (for faithfulness check), full text, not truncated.
         confidence_level: Retrieval confidence level (very_high/high/medium/low/none).
+        api_base: Optional OpenAI-compatible base URL override.
+        api_key: Optional API key override.
+        query_model: Optional model name override.
 
     Returns:
         AnswerEvaluation with quality metrics.
@@ -164,12 +170,12 @@ Evaluate the quality of this answer based on the retrieved context.
     try:
         from openai import AsyncOpenAI as _OAI
         client = _OAI(
-            api_key=settings.OPENAI_API_KEY,
-            base_url=settings.OPENAI_API_BASE,
+            api_key=api_key or settings.OPENAI_API_KEY,
+            base_url=api_base or settings.OPENAI_API_BASE,
         )
 
         resp = await client.chat.completions.create(
-            model=settings.effective_query_model or settings.OPENAI_MODEL,
+            model=query_model or settings.QUERY_MODEL or settings.OPENAI_MODEL,
             messages=[
                 {"role": "system", "content": EVALUATION_SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},

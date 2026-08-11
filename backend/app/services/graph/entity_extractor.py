@@ -22,7 +22,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from langchain_core.documents import Document as LangchainDocument
 from openai import OpenAI as SyncOpenAI
@@ -93,8 +93,18 @@ _ENTITY_EXTRACT_SYSTEM = (
 )
 
 
-def _get_llm_client() -> SyncOpenAI:
+def _get_llm_client(db: Any = None, org_id: Any = None) -> SyncOpenAI:
+    """Get or create the LLM client for entity extraction.
+
+    When db and org_id are provided, resolves per-org graph-role config.
+    Falls back to the global singleton (app-level / .env) when not.
+    """
     global _llm_client
+    if db is not None:
+        from app.services.agentic_rag.llm_factory import get_org_llm
+        cfg = get_org_llm(org_id, db, role="graph")
+        return SyncOpenAI(base_url=cfg["api_base"], api_key=cfg["api_key"])
+    # Fallback: global singleton
     if _llm_client is None:
         _llm_client = SyncOpenAI(
             base_url=settings.OPENAI_API_BASE,
@@ -103,14 +113,18 @@ def _get_llm_client() -> SyncOpenAI:
     return _llm_client
 
 
-def _extraction_model() -> str:
+def _extraction_model(db: Any = None, org_id: Any = None) -> str:
     """Model to use for entity extraction. Prefers GRAPHRAG_LLM, falls back to OPENAI_MODEL."""
+    if db is not None:
+        from app.services.agentic_rag.llm_factory import get_org_llm
+        cfg = get_org_llm(org_id, db, role="graph")
+        return cfg["model_name"]
     return settings.GRAPHRAG_LLM or settings.OPENAI_MODEL
 
 
 # ── T01: LLM Query Entity Extraction ─────────────────────────────────────────
 
-def extract_entities_from_query(query: str) -> List[Entity]:
+def extract_entities_from_query(query: str, db: Any = None, org_id: Any = None) -> List[Entity]:
     """
     Extract named entities from a query using the GRAPHRAG_LLM model.
 
@@ -120,6 +134,8 @@ def extract_entities_from_query(query: str) -> List[Entity]:
 
     Args:
         query: User query text.
+        db: Optional database session for per-org resolution.
+        org_id: Optional organisation ID for per-org resolution.
 
     Returns:
         Deduplicated list of Entity objects ordered by appearance.
@@ -127,8 +143,8 @@ def extract_entities_from_query(query: str) -> List[Entity]:
     if not query.strip():
         return []
 
-    model = _extraction_model()
-    client = _get_llm_client()
+    model = _extraction_model(db, org_id)
+    client = _get_llm_client(db, org_id)
 
     try:
         resp = client.chat.completions.create(
@@ -321,6 +337,8 @@ def extract_expand_boost(
     query: str,
     docs: List[LangchainDocument],
     kb_ids: List[int],
+    db: Any = None,
+    org_id: Any = None,
 ) -> List[LangchainDocument]:
     """
     Full entity-aware retrieval pipeline: extract → expand → boost.
@@ -333,11 +351,13 @@ def extract_expand_boost(
         query:  User query text.
         docs:   Retrieved documents from RRF fusion.
         kb_ids: Knowledge base IDs.
+        db:     Optional database session for per-org LLM resolution.
+        org_id: Optional organisation ID for per-org LLM resolution.
 
     Returns:
         Documents with entity boost applied (or originals if extraction fails).
     """
-    entities = extract_entities_from_query(query)
+    entities = extract_entities_from_query(query, db=db, org_id=org_id)
     if not entities:
         return docs
 

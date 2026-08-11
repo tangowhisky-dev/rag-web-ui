@@ -9,10 +9,9 @@ logger = logging.getLogger(__name__)
 from app.core.security import get_admin_org_ids, require_admin
 from app.db.session import get_db
 from app.models.organisation import Organisation
-from app.models.org_llm_config import OrgLLMConfig
 from app.models.organisation import OrgAbbreviation
 from app.models.datastore import DataStore, OrganizationDataStore
-from app.schemas.organisation import OrgCreate, OrgUpdate, OrgResponse, OrgLLMConfigUpdate, OrgLLMConfigResponse, OrgIngestionStatusResponse
+from app.schemas.organisation import OrgCreate, OrgUpdate, OrgResponse, OrgIngestionStatusResponse
 from app.models.knowledge import KnowledgeBase, ProcessingTask
 from app.schemas.user import UserAdminCreate, UserAdminUpdate, UserResponse, UserDeleteResponse, PasswordChange, AdminPasswordChange
 from app.models.user import User, UserRole
@@ -163,59 +162,6 @@ def delete_org(
     db.delete(org)
     db.commit()
     logger.info("[ADMIN] org_deleted id=%s name=%s", org_id, org.name)
-
-
-@org_router.get("/orgs/{org_id}/llm-config", response_model=OrgLLMConfigResponse, deprecated=True)
-def get_org_llm_config(
-    org_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
-):
-    """Deprecated: use /api/admin/orgs/{org_id}/settings instead."""
-    logger.warning("[DEPRECATED] /orgs/%s/llm-config — use /api/admin/orgs/%s/settings", org_id, org_id)
-    org = db.query(Organisation).filter(Organisation.id == org_id).first()
-    if org is None:
-        raise HTTPException(status_code=404, detail="Org not found")
-
-    admin_org_ids = get_admin_org_ids(db, current_user)
-    if admin_org_ids is not None and org_id not in admin_org_ids:
-        raise HTTPException(status_code=403, detail="Org is outside your organisation scope")
-
-    config = db.query(OrgLLMConfig).filter(OrgLLMConfig.org_id == org_id).first()
-    if config is None:
-        raise HTTPException(status_code=404, detail="LLM config not found for this org")
-    return config
-
-
-@org_router.put("/orgs/{org_id}/llm-config", response_model=OrgLLMConfigResponse, deprecated=True)
-def upsert_org_llm_config(
-    org_id: int,
-    payload: OrgLLMConfigUpdate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
-):
-    """Deprecated: use /api/admin/orgs/{org_id}/settings instead."""
-    logger.warning("[DEPRECATED] PUT /orgs/%s/llm-config — use /api/admin/orgs/%s/settings", org_id, org_id)
-    org = db.query(Organisation).filter(Organisation.id == org_id).first()
-    if org is None:
-        raise HTTPException(status_code=404, detail="Org not found")
-
-    admin_org_ids = get_admin_org_ids(db, current_user)
-    if admin_org_ids is not None and org_id not in admin_org_ids:
-        raise HTTPException(status_code=403, detail="Org is outside your organisation scope")
-
-    config = db.query(OrgLLMConfig).filter(OrgLLMConfig.org_id == org_id).first()
-    if config is None:
-        config = OrgLLMConfig(org_id=org_id)
-        db.add(config)
-
-    for field, value in payload.model_dump(exclude_unset=True).items():
-        setattr(config, field, value)
-
-    db.commit()
-    db.refresh(config)
-    logger.info("[ADMIN] org_llm_config_updated id=%s", org_id)
-    return config
 
 
 # ---------------------------------------------------------------------------

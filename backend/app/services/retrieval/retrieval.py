@@ -208,10 +208,13 @@ def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], candi
     ``min_score`` overrides settings.DENSE_MIN_SCORE for this call (used by the
     graduated relaxation ladder in rag_retrieve).
     """
-    logger.info("[DENSE] embedding request | model=%s | query=%r", settings.DENSE_EMBEDDINGS_MODEL, query[:120])
+    # DENSE_EMBEDDINGS_MODEL is super_admin-only (app scope).
+    from app.services.settings_service import get_setting
+    embed_model = get_setting(db, "DENSE_EMBEDDINGS_MODEL", None)
+    logger.info("[DENSE] embedding request | model=%s | query=%r", embed_model, query[:120])
     response = get_openai_client().embeddings.create(
         input=query,
-        model=settings.DENSE_EMBEDDINGS_MODEL,
+        model=embed_model,
     )
     query_vector = response.data[0].embedding
     logger.info("[DENSE] embedding response | dim=%d | first5=%s",
@@ -693,7 +696,7 @@ async def hybrid_search_with_legs(
     if get_setting(db, "ENTITY_AWARE_ENABLED", org_id) and query_type == QueryType.ENTITY_CENTRIC and docs:
         try:
             from app.services.graph.entity_extractor import extract_expand_boost
-            docs = extract_expand_boost(query, docs, kb_ids)
+            docs = extract_expand_boost(query, docs, kb_ids, db=db, org_id=org_id)
         except Exception as exc:
             logger.warning("hybrid_search_with_legs: entity boost failed (non-fatal): %s", exc)
 

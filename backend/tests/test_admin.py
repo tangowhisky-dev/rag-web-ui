@@ -585,80 +585,11 @@ def test_deactivated_user_in_list_shows_is_active_false(client, db):
 
 
 # ---------------------------------------------------------------------------
-# LLM config admin tests
+# LLM config is now managed via the unified settings API.
+# The legacy /orgs/{id}/llm-config endpoints have been removed.
+# OrgLLMConfig table has been dropped; data migrated to settings table.
+# See test_settings_phase*.py for settings API tests.
 # ---------------------------------------------------------------------------
-
-def test_admin_get_llm_config_empty(client, db):
-    """GET /orgs/{id}/llm-config returns 404 when no config row exists."""
-    token = get_admin_token(client, db)
-    org = create_org(db, "LLMOrg1")
-
-    resp = client.get(
-        f"/api/admin/orgs/{org.id}/llm-config",
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    assert resp.status_code == 404, resp.text
-
-
-def test_admin_put_llm_config_creates(client, db):
-    """PUT creates a config row and GET returns saved values."""
-    token = get_admin_token(client, db)
-    org = create_org(db, "LLMOrg2")
-
-    resp = client.put(
-        f"/api/admin/orgs/{org.id}/llm-config",
-        json={"api_base": "https://llm.example.com", "model_name": "gpt-4o", "query_model": "gpt-4o-mini"},
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    assert resp.status_code == 200, resp.text
-    data = resp.json()
-    assert data["api_base"] == "https://llm.example.com"
-    assert data["model_name"] == "gpt-4o"
-    assert data["query_model"] == "gpt-4o-mini"
-    assert data["org_id"] == org.id
-
-    get_resp = client.get(
-        f"/api/admin/orgs/{org.id}/llm-config",
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    assert get_resp.status_code == 200, get_resp.text
-    assert get_resp.json()["api_base"] == "https://llm.example.com"
-
-
-def test_admin_put_llm_config_updates(client, db):
-    """Second PUT with different values overwrites the existing config."""
-    token = get_admin_token(client, db)
-    org = create_org(db, "LLMOrg3")
-
-    client.put(
-        f"/api/admin/orgs/{org.id}/llm-config",
-        json={"api_base": "https://old.example.com", "model_name": "old-model"},
-        headers={"Authorization": f"Bearer {token}"},
-    )
-
-    resp = client.put(
-        f"/api/admin/orgs/{org.id}/llm-config",
-        json={"api_base": "https://new.example.com", "model_name": "new-model"},
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    assert resp.status_code == 200, resp.text
-    data = resp.json()
-    assert data["api_base"] == "https://new.example.com"
-    assert data["model_name"] == "new-model"
-
-
-def test_admin_llm_config_rejects_regular_user(client, db):
-    """PUT /orgs/{id}/llm-config returns 403 for non-admin users."""
-    create_user(db, "plainuser2", "pass123", UserRole.user)
-    token = get_token(client, "plainuser2", "pass123")
-    org = create_org(db, "LLMOrg4")
-
-    resp = client.put(
-        f"/api/admin/orgs/{org.id}/llm-config",
-        json={"api_base": "https://llm.example.com"},
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    assert resp.status_code == 403, resp.text
 
 
 # ── Unit tests: get_effective_llm_config ──────────────────────────────────────
@@ -671,7 +602,7 @@ def test_effective_llm_config_fallback(db):
     cfg = get_effective_llm_config(None, db)
     assert cfg["api_base"] == settings.OPENAI_API_BASE
     assert cfg["model_name"] == settings.OPENAI_MODEL
-    assert cfg["query_model"] == settings.effective_query_model
+    assert cfg["query_model"] == settings.QUERY_MODEL or settings.OPENAI_MODEL
 
 
 def test_effective_llm_config_org_override(db):

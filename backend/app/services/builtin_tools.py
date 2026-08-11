@@ -115,12 +115,12 @@ def search_documents(
         "additionalProperties": False,
     },
 )
-def extract_entities(text: str) -> List[Dict[str, str]]:
+def extract_entities(text: str, org_id: Optional[int] = None, db: Any = None) -> List[Dict[str, str]]:
     """Extract named entities from text using the GRAPHRAG_LLM model."""
     from app.services.graph.entity_extractor import extract_entities_from_query
 
     try:
-        entities = extract_entities_from_query(text)
+        entities = extract_entities_from_query(text, db=db, org_id=org_id)
         return [{"name": e.name, "type": e.type} for e in entities]
     except Exception as exc:
         logger.warning("[TOOL] extract_entities failed: %s", exc)
@@ -153,10 +153,9 @@ def extract_entities(text: str) -> List[Dict[str, str]]:
         "additionalProperties": False,
     },
 )
-def summarize_chunks(chunks: List[str], instruction: str) -> Dict[str, str]:
+def summarize_chunks(chunks: List[str], instruction: str, org_id: Optional[int] = None, db: Any = None) -> Dict[str, str]:
     """Summarize chunks via the chat LLM."""
     from openai import OpenAI as SyncOpenAI
-    from app.core.config import settings
 
     if not chunks:
         return {"summary": "", "chunk_count": 0}
@@ -168,12 +167,14 @@ def summarize_chunks(chunks: List[str], instruction: str) -> Dict[str, str]:
     )
 
     try:
+        from app.services.agentic_rag.llm_factory import get_org_llm
+        cfg = get_org_llm(org_id, db, role="chat")
         client = SyncOpenAI(
-            base_url=settings.OPENAI_API_BASE,
-            api_key=settings.OPENAI_API_KEY,
+            base_url=cfg["api_base"],
+            api_key=cfg["api_key"],
         )
         resp = client.chat.completions.create(
-            model=settings.OPENAI_MODEL,
+            model=cfg["model_name"],
             messages=[
                 {"role": "system", "content": "You are a precise document summarizer."},
                 {"role": "user", "content": prompt},

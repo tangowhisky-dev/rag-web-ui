@@ -77,40 +77,53 @@ def _get_markitdown() -> MarkItDown:
     When VISION_MODEL is unset, MarkItDown is initialised without a
     client — markitdown-ocr still loads (if installed) but silently skips
     OCR, which is identical to the previous behaviour.
+
+    Vision model and API credentials are resolved from app-level settings
+    (super_admin only) since ingestion is a shared process.
     """
     global _markitdown
     if _markitdown is None:
-        vision_model = settings.VISION_MODEL
-        if vision_model:
-            vision_client = SyncOpenAI(
-                api_key=settings.OPENAI_API_KEY,
-                base_url=settings.effective_vision_api_base,
-            )
-            _markitdown = MarkItDown(
-                enable_plugins=True,
-                llm_client=vision_client,
-                llm_model=vision_model,
-                llm_prompt=(
-                    "Extract all text from this image into clean, naturally flowing paragraphs, "
-                    "while preserving document structure and any table or sub-element layout.\n\n"
-                    "Rules:\n"
-                    "- Remove unnatural line breaks within sentences\n"
-                    "- Join split words and sentences caused by column layout or line wrapping\n"
-                    "- Keep proper paragraph breaks where the topic clearly changes\n"
-                    "- Preserve tables using Markdown table syntax\n"
-                    "- Preserve all original meaning and technical terms exactly\n"
-                    "- Output only the extracted text, no explanations or commentary"
-                ),
-            )
-            logger.info(
-                "[markitdown] OCR enabled — vision_model=%s base=%s",
-                vision_model, settings.effective_vision_api_base,
-            )
-        else:
-            _markitdown = MarkItDown()
-            logger.info(
-                "[markitdown] OCR disabled — VISION_MODEL not set"
-            )
+        from app.services.settings_service import get_setting
+        from app.db.session import SessionLocal
+        _db = SessionLocal()
+        try:
+            vision_model = get_setting(_db, "VISION_MODEL", None)
+            if vision_model:
+                # Vision API key: VISION_API_KEY → OPENAI_API_KEY → .env
+                api_key = get_setting(_db, "VISION_API_KEY", None) or get_setting(_db, "OPENAI_API_KEY", None)
+                # Vision base URL: OPENAI_VISION_API_BASE → OPENAI_API_BASE → .env
+                api_base = get_setting(_db, "OPENAI_VISION_API_BASE", None) or get_setting(_db, "OPENAI_API_BASE", None)
+                vision_client = SyncOpenAI(
+                    api_key=api_key,
+                    base_url=api_base,
+                )
+                _markitdown = MarkItDown(
+                    enable_plugins=True,
+                    llm_client=vision_client,
+                    llm_model=vision_model,
+                    llm_prompt=(
+                        "Extract all text from this image into clean, naturally flowing paragraphs, "
+                        "while preserving document structure and any table or sub-element layout.\n\n"
+                        "Rules:\n"
+                        "- Remove unnatural line breaks within sentences\n"
+                        "- Join split words and sentences caused by column layout or line wrapping\n"
+                        "- Keep proper paragraph breaks where the topic clearly changes\n"
+                        "- Preserve tables using Markdown table syntax\n"
+                        "- Preserve all original meaning and technical terms exactly\n"
+                        "- Output only the extracted text, no explanations or commentary"
+                    ),
+                )
+                logger.info(
+                    "[markitdown] OCR enabled — vision_model=%s base=%s",
+                    vision_model, api_base,
+                )
+            else:
+                _markitdown = MarkItDown()
+                logger.info(
+                    "[markitdown] OCR disabled — VISION_MODEL not set"
+                )
+        finally:
+            _db.close()
     return _markitdown
 
 
@@ -134,7 +147,14 @@ def _convert_to_markdown(abs_path: str, file_name: str, enable_ocr: Optional[boo
         elif enable_ocr is True:
             # Explicit on: use the configured singleton (which has OCR if set up).
             md_instance = _get_markitdown()
-            if settings.VISION_MODEL is None:
+            from app.services.settings_service import get_setting
+            from app.db.session import SessionLocal
+            _db = SessionLocal()
+            try:
+                vision_model = get_setting(_db, "VISION_MODEL", None)
+            finally:
+                _db.close()
+            if not vision_model:
                 logger.warning("[markitdown] OCR requested but VISION_MODEL not set — falling back to text-only")
         else:
             # Default: respect global setting.
@@ -154,7 +174,7 @@ def _convert_to_markdown(abs_path: str, file_name: str, enable_ocr: Optional[boo
 
         logger.info(
             "[markitdown] converted %s → %d chars of markdown (ocr=%s)",
-            file_name, len(cleaned), bool(settings.VISION_MODEL),
+            file_name, len(cleaned), bool(md_instance),
         )
         return cleaned
     except Exception as e:
