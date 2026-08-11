@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import Breadcrumb from '@/components/ui/breadcrumb';
 import AdminSidebar from '@/components/admin/admin-sidebar';
 import { NavActions } from '@/components/layout/nav-actions';
+import { api } from '@/lib/api';
 
 // LLM config is managed per-organisation on the Orgs page (LLM Config button).
 // The standalone /dashboard/admin/llm-config page does not exist.
@@ -11,9 +12,13 @@ import { NavActions } from '@/components/layout/nav-actions';
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [hydrated, setHydrated] = useState(false);
+  const [userRole, setUserRole] = useState<string | undefined>(undefined);
 
   useEffect(() => {
     setHydrated(true);
+    api.get('/api/auth/test-token').then((data: { role?: string }) => {
+      setUserRole(data?.role);
+    }).catch(() => {});
   }, []);
 
   // Wait for hydration before rendering
@@ -53,6 +58,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
           <AdminSidebar
             isOpen={isSidebarOpen}
             onClose={() => setIsSidebarOpen(false)}
+            userRole={userRole}
           />
         </div>
         <main className="flex-1 min-w-0 overflow-hidden">

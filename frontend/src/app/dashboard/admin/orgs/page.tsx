@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -384,6 +385,11 @@ export default function AdminOrgsPage() {
                     <Button variant="outline" size="sm" onClick={() => openLlmConfig(org)} title="Configure LLM settings for this organization">
                       LLM Config
                     </Button>
+                    <Link href={`/dashboard/admin/orgs/${org.id}/settings`}>
+                      <Button variant="outline" size="sm" title="Full organisation settings (retrieval, agentic, memory, etc.)">
+                        Settings
+                      </Button>
+                    </Link>
                     {org.parent_id !== null && (
                       <Button variant="destructive" size="sm" onClick={() => openDelete(org)} title="Permanently delete this organization">
                         Delete

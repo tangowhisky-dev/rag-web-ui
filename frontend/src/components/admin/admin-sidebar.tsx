@@ -5,12 +5,13 @@ import Link from 'next/link';
 import { useSidebarCollapse } from "@/lib/hooks";
 import {
   PanelLeftClose, PanelLeftOpen,
-  Building2, Users, Database,
+  Building2, Users, Database, Settings,
 } from 'lucide-react';
 
 interface AdminSidebarProps {
   isOpen: boolean;
   onClose: () => void;
+  userRole?: string;
 }
 
 const NAV_ITEMS = [
@@ -19,11 +20,15 @@ const NAV_ITEMS = [
   { label: 'Data Stores', href: '/dashboard/admin/data-sources', icon: Database },
 ];
 
+const SUPER_ADMIN_ITEMS = [
+  { label: 'Settings', href: '/dashboard/admin/settings', icon: Settings },
+];
+
 // LLM config is managed per-organisation on the Orgs page (LLM Config button).
 // The standalone /dashboard/admin/llm-config page does not exist.
 
 
-export default function AdminSidebar({ isOpen, onClose }: AdminSidebarProps) {
+export default function AdminSidebar({ isOpen, onClose, userRole }: AdminSidebarProps) {
   const pathname = usePathname();
   const { collapsed, toggleCollapse } = useSidebarCollapse("admin-sidebar-collapsed");
 
@@ -58,6 +63,26 @@ export default function AdminSidebar({ isOpen, onClose }: AdminSidebarProps) {
             </button>
             <div className="w-5 h-px bg-border" />
             {NAV_ITEMS.map(({ href, icon: Icon }) => {
+              const isActive = pathname === href || pathname.startsWith(href + '/');
+              return (
+                <Link
+                  key={href}
+                  href={href}
+                  onClick={onClose}
+                  className={[
+                    'p-2 rounded-lg transition-colors',
+                    isActive
+                      ? 'bg-accent text-accent-foreground'
+                      : 'text-muted-foreground hover:text-foreground hover:bg-muted',
+                  ].join(' ')}
+                  aria-label={href}
+                  title={href}
+                >
+                  <Icon className="h-4 w-4" />
+                </Link>
+              );
+            })}
+            {userRole === 'super_admin' && SUPER_ADMIN_ITEMS.map(({ href, icon: Icon }) => {
               const isActive = pathname === href || pathname.startsWith(href + '/');
               return (
                 <Link
@@ -123,6 +148,29 @@ export default function AdminSidebar({ isOpen, onClose }: AdminSidebarProps) {
                   </Link>
                 );
               })}
+              {userRole === 'super_admin' && (
+                <div className="pt-2 mt-2 border-t">
+                  {SUPER_ADMIN_ITEMS.map(({ label, href, icon: Icon }) => {
+                    const isActive = pathname === href || pathname.startsWith(href + '/');
+                    return (
+                      <Link
+                        key={href}
+                        href={href}
+                        onClick={onClose}
+                        className={[
+                          'flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm transition-colors',
+                          isActive
+                            ? 'bg-accent text-accent-foreground'
+                            : 'hover:bg-accent/60 text-foreground',
+                        ].join(' ')}
+                      >
+                        <Icon className="h-3.5 w-3.5 shrink-0 opacity-50" />
+                        <span className="truncate">{label}</span>
+                      </Link>
+                    );
+                  })}
+                </div>
+              )}
             </nav>
           </>
         )}
