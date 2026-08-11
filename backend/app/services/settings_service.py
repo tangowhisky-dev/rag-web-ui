@@ -1,0 +1,447 @@
+"""
+settings_service.py — 3-tier settings resolution + CRUD + cache.
+
+Resolution precedence (per org, per key):
+  1. Org override (scope='org', org_id=<id>) — if key is org-overridable
+  2. App value (scope='app', org_id=NULL)
+  3. .env / config.py default (from the registry / global settings singleton)
+
+When RUNTIME_SETTINGS_ENABLED is false, all reads fall back to config.py (Tier 0 only).
+"""
+import json
+import logging
+import time
+from typing import Any, Optional
+
+from sqlalchemy.orm import Session
+
+from app.core.config import settings as env_settings
+from app.core.settings_registry import (
+    REGISTRY, REGISTRY_BY_KEY, SettingDef,
+    ORG_OVERRIDABLE_KEYS, get_def, is_org_overridable,
+)
+from app.models.setting import Setting
+
+logger = logging.getLogger(__name__)
+
+_CACHE_TTL = 30  # seconds
+_cache: dict[tuple[Optional[int], str], tuple[Any, float]] = {}
+
+
+# ── Encoding / decoding ───────────────────────────────────────────────────
+
+def _encode(value: Any, defn: SettingDef) -> str:
+    """Encode a Python value as JSON for DB storage."""
+    return json.dumps(value)
+
+
+def _decode(raw: str, defn: SettingDef) -> Any:
+    """Decode a JSON string back to the registry type."""
+    parsed = json.loads(raw)
+    if defn.value_type == "int":
+        return int(parsed)
+    if defn.value_type == "float":
+        return float(parsed)
+    if defn.value_type == "bool":
+        if isinstance(parsed, str):
+            return parsed.lower() == "true"
+        return bool(parsed)
+    return parsed  # str, json, text
+
+
+# ── Validation ────────────────────────────────────────────────────────────
+
+def validate_value(key: str, value: Any) -> Any:
+    """Validate a value against the registry. Returns the coerced value or raises ValueError."""
+    defn = get_def(key)
+    if defn is None:
+        raise ValueError(f"Unknown setting key: {key}")
+
+    # null is allowed for optional str fields (means "inherit/fallback")
+    if value is None and defn.value_type in ("str", "text"):
+        return None
+
+    if defn.value_type == "int":
+        try:
+            v = int(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{key} must be an integer, got {value!r}")
+        if defn.min_value is not None and v < defn.min_value:
+            raise ValueError(f"{key} must be >= {defn.min_value}, got {v}")
+        if defn.max_value is not None and v > defn.max_value:
+            raise ValueError(f"{key} must be <= {defn.max_value}, got {v}")
+        return v
+
+    if defn.value_type == "float":
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{key} must be a float, got {value!r}")
+        if defn.min_value is not None and v < defn.min_value:
+            raise ValueError(f"{key} must be >= {defn.min_value}, got {v}")
+        if defn.max_value is not None and v > defn.max_value:
+            raise ValueError(f"{key} must be <= {defn.max_value}, got {v}")
+        return v
+
+    if defn.value_type == "bool":
+        if isinstance(value, str):
+            return value.lower() == "true"
+        if isinstance(value, bool):
+            return value
+        raise ValueError(f"{key} must be a boolean, got {value!r}")
+
+    if defn.value_type == "json":
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                raise ValueError(f"{key} must be valid JSON, got {value!r}")
+        return value  # already a dict/list
+
+    if defn.choices is not None and value not in defn.choices:
+        raise ValueError(f"{key} must be one of {defn.choices}, got {value!r}")
+
+    return value  # str, text
+
+
+# ── Resolution ────────────────────────────────────────────────────────────
+
+def _get_env_default(key: str) -> Any:
+    """Get the .env/config.py default for a key."""
+    return getattr(env_settings, key, None)
+
+
+def get_setting(db: Session, key: str, org_id: Optional[int] = None) -> Any:
+    """Resolve a single setting with 3-tier precedence.
+
+    If RUNTIME_SETTINGS_ENABLED is false, returns the .env/config.py default directly.
+    """
+    if not env_settings.RUNTIME_SETTINGS_ENABLED:
+        return _get_env_default(key)
+
+    defn = get_def(key)
+    if defn is None:
+        return _get_env_default(key)
+
+    # Check cache
+    cache_key = (org_id if defn.scope == "org" else None, key)
+    cached = _cache.get(cache_key)
+    if cached is not None:
+        val, ts = cached
+        if time.time() - ts < _CACHE_TTL:
+            return val
+
+    # Tier 3: org override (only if scope allows and org_id is set)
+    if defn.scope == "org" and org_id is not None:
+        row = db.query(Setting).filter(
+            Setting.scope == "org", Setting.org_id == org_id, Setting.key == key
+        ).first()
+        if row is not None and row.value is not None:
+            val = _decode(row.value, defn)
+            _cache[cache_key] = (val, time.time())
+            return val
+
+    # Tier 2: app value
+    row = db.query(Setting).filter(
+        Setting.scope == "app", Setting.org_id.is_(None), Setting.key == key
+    ).first()
+    if row is not None and row.value is not None:
+        val = _decode(row.value, defn)
+        _cache[cache_key] = (val, time.time())
+        return val
+
+    # Tier 1: .env / config.py default
+    val = _get_env_default(key)
+    if val is not None:
+        _cache[cache_key] = (val, time.time())
+    return val
+
+
+def get_org_settings(db: Session, org_id: Optional[int]) -> dict[str, Any]:
+    """Resolve ALL registry keys for an org into a typed dict.
+
+    For app-only keys, returns the app value regardless of org_id.
+    For org keys, applies 3-tier precedence.
+    """
+    out = {}
+    for defn in REGISTRY:
+        out[defn.key] = get_setting(db, defn.key, org_id if defn.scope == "org" else None)
+    return out
+
+
+# ── OrgSettings accessor ──────────────────────────────────────────────────
+
+class OrgSettings:
+    """Attribute-access wrapper over get_org_settings.
+
+    Services receive an OrgSettings instance instead of reading the settings singleton.
+    Construct once per request: OrgSettings(db, current_user.org_id)
+    When org_id is None, all keys resolve to app-level values.
+    """
+    def __init__(self, db: Session, org_id: Optional[int] = None):
+        self._db = db
+        self._org_id = org_id
+        self._resolved = get_org_settings(db, org_id)
+
+    def __getattr__(self, key: str) -> Any:
+        if key.startswith("_"):
+            raise AttributeError(key)
+        resolved = self.__dict__.get("_resolved", {})
+        if key in resolved:
+            return resolved[key]
+        raise AttributeError(f"Unknown setting: {key}")
+
+    # Computed properties mirroring config.py
+    @property
+    def chunk_overlap(self) -> int:
+        return int(self.CHUNK_SIZE * self.OVERLAP_PERCENTAGE)
+
+    @property
+    def effective_query_model(self) -> str:
+        return self.QUERY_MODEL or self.OPENAI_MODEL
+
+    @property
+    def effective_reasoning_model(self) -> str:
+        return self.REASONING_MODEL or self.OPENAI_MODEL
+
+    @property
+    def effective_vision_api_base(self) -> str:
+        return self.OPENAI_VISION_API_BASE or self.OPENAI_API_BASE
+
+    @property
+    def graphrag_model(self) -> str:
+        return self.GRAPHRAG_LLM or self.OPENAI_MODEL
+
+    @property
+    def retrieval_config_presets(self) -> dict:
+        raw = self.RETRIEVAL_CONFIG_PRESETS
+        if isinstance(raw, str):
+            return json.loads(raw)
+        return raw or {}
+
+
+# ── CRUD ──────────────────────────────────────────────────────────────────
+
+def upsert_app_setting(db: Session, key: str, value: Any, user_id: Optional[int] = None) -> None:
+    """Upsert an app-level setting (scope='app'). Validates against registry."""
+    defn = get_def(key)
+    if defn is None:
+        raise ValueError(f"Unknown setting key: {key}")
+    validated = validate_value(key, value)
+    encoded = _encode(validated, defn)
+
+    row = db.query(Setting).filter(
+        Setting.scope == "app", Setting.org_id.is_(None), Setting.key == key
+    ).first()
+    if row:
+        row.value = encoded
+        row.updated_by = user_id
+    else:
+        row = Setting(scope="app", org_id=None, key=key, value=encoded, updated_by=user_id)
+        db.add(row)
+    db.commit()
+    _invalidate_cache(key, None)
+
+
+def upsert_org_setting(db: Session, org_id: int, key: str, value: Any, user_id: Optional[int] = None) -> None:
+    """Upsert an org-level override. Validates against registry + scope."""
+    defn = get_def(key)
+    if defn is None:
+        raise ValueError(f"Unknown setting key: {key}")
+    if not is_org_overridable(key):
+        raise ValueError(f"Setting {key} cannot be overridden per organisation")
+    validated = validate_value(key, value)
+    encoded = _encode(validated, defn)
+
+    row = db.query(Setting).filter(
+        Setting.scope == "org", Setting.org_id == org_id, Setting.key == key
+    ).first()
+    if row:
+        row.value = encoded
+        row.updated_by = user_id
+    else:
+        row = Setting(scope="org", org_id=org_id, key=key, value=encoded, updated_by=user_id)
+        db.add(row)
+    db.commit()
+    _invalidate_cache(key, org_id)
+
+
+def reset_app_setting(db: Session, key: str) -> None:
+    """Delete the app-level row for a key, reverting to .env/config.py default."""
+    defn = get_def(key)
+    if defn is None:
+        raise ValueError(f"Unknown setting key: {key}")
+    row = db.query(Setting).filter(
+        Setting.scope == "app", Setting.org_id.is_(None), Setting.key == key
+    ).first()
+    if row:
+        db.delete(row)
+        db.commit()
+    _invalidate_cache(key, None)
+
+
+def reset_org_setting(db: Session, org_id: int, key: str) -> None:
+    """Delete the org-level override, reverting to app-level default."""
+    defn = get_def(key)
+    if defn is None:
+        raise ValueError(f"Unknown setting key: {key}")
+    row = db.query(Setting).filter(
+        Setting.scope == "org", Setting.org_id == org_id, Setting.key == key
+    ).first()
+    if row:
+        db.delete(row)
+        db.commit()
+    _invalidate_cache(key, org_id)
+
+
+def reset_all_org_settings(db: Session, org_id: int) -> None:
+    """Delete all org-level overrides for an org."""
+    db.query(Setting).filter(
+        Setting.scope == "org", Setting.org_id == org_id
+    ).delete()
+    db.commit()
+    _invalidate_all_org(org_id)
+
+
+# ── Introspection (for API responses) ─────────────────────────────────────
+
+def get_app_setting_with_meta(db: Session, key: str) -> dict:
+    """Return a setting's effective value + metadata for the API."""
+    defn = get_def(key)
+    if defn is None:
+        raise ValueError(f"Unknown setting key: {key}")
+
+    row = db.query(Setting).filter(
+        Setting.scope == "app", Setting.org_id.is_(None), Setting.key == key
+    ).first()
+    source = "database" if (row and row.value is not None) else "install_default"
+    effective = get_setting(db, key, None)
+
+    return {
+        "key": key,
+        "value": effective,
+        "value_type": defn.value_type,
+        "category": defn.category,
+        "label": defn.label,
+        "scope": defn.scope,
+        "source": source,
+        "reload": defn.reload,
+        "requires_reindex": defn.requires_reindex,
+        "description": defn.description,
+        "min": defn.min_value,
+        "max": defn.max_value,
+        "choices": list(defn.choices) if defn.choices else None,
+    }
+
+
+def get_all_app_settings_with_meta(db: Session) -> list[dict]:
+    """Return all app settings with metadata."""
+    return [get_app_setting_with_meta(db, d.key) for d in REGISTRY]
+
+
+def get_org_setting_with_meta(db: Session, org_id: int, key: str) -> dict:
+    """Return a setting's effective value + override status for an org."""
+    defn = get_def(key)
+    if defn is None:
+        raise ValueError(f"Unknown setting key: {key}")
+
+    org_row = db.query(Setting).filter(
+        Setting.scope == "org", Setting.org_id == org_id, Setting.key == key
+    ).first()
+    app_row = db.query(Setting).filter(
+        Setting.scope == "app", Setting.org_id.is_(None), Setting.key == key
+    ).first()
+
+    overridden = org_row is not None and org_row.value is not None
+    effective = get_setting(db, key, org_id if defn.scope == "org" else None)
+    app_default = get_setting(db, key, None)
+
+    return {
+        "key": key,
+        "value": effective,
+        "value_type": defn.value_type,
+        "category": defn.category,
+        "label": defn.label,
+        "scope": defn.scope,
+        "overridden": overridden,
+        "app_default": app_default,
+        "effective": effective,
+        "reload": defn.reload,
+        "requires_reindex": defn.requires_reindex,
+        "description": defn.description,
+        "min": defn.min_value,
+        "max": defn.max_value,
+        "choices": list(defn.choices) if defn.choices else None,
+    }
+
+
+def get_all_org_settings_with_meta(db: Session, org_id: int) -> list[dict]:
+    """Return all org settings with metadata. Only org-overridable keys are included."""
+    return [
+        get_org_setting_with_meta(db, org_id, d.key)
+        for d in REGISTRY
+        if d.scope == "org"
+    ]
+
+
+# ── Cache management ──────────────────────────────────────────────────────
+
+def _invalidate_cache(key: str, org_id: Optional[int]) -> None:
+    """Invalidate cache entries for a key."""
+    defn = get_def(key)
+    if defn is None:
+        return
+    # Invalidate the org-specific entry
+    if defn.scope == "org":
+        _cache.pop((org_id, key), None)
+    # Invalidate the app-level entry (affects all orgs that don't override)
+    _cache.pop((None, key), None)
+
+
+def _invalidate_all_org(org_id: int) -> None:
+    """Invalidate all cache entries for an org."""
+    keys_to_remove = [k for k in _cache if k[0] == org_id]
+    for k in keys_to_remove:
+        _cache.pop(k, None)
+
+
+def clear_cache() -> None:
+    """Clear the entire cache. Useful for tests."""
+    _cache.clear()
+
+
+# ── Startup seed ──────────────────────────────────────────────────────────
+
+def seed_app_settings(db: Session) -> None:
+    """Ensure app-level rows exist for every registry key.
+
+    Only inserts rows when the .env value differs from the config.py hardcoded default.
+    This preserves current deployments' .env customizations into the DB once.
+    Idempotent: safe to run on every startup.
+    """
+    if not env_settings.RUNTIME_SETTINGS_ENABLED:
+        return
+
+    for defn in REGISTRY:
+        env_val = getattr(env_settings, defn.key, None)
+        if env_val is None:
+            continue
+
+        # Check if an app row already exists
+        existing = db.query(Setting).filter(
+            Setting.scope == "app", Setting.org_id.is_(None), Setting.key == defn.key
+        ).first()
+        if existing:
+            continue
+
+        # Only seed if env value differs from the hardcoded default
+        if env_val != defn.default:
+            try:
+                encoded = _encode(env_val, defn)
+                row = Setting(scope="app", org_id=None, key=defn.key, value=encoded)
+                db.add(row)
+                logger.info("[SEED] Seated app setting %s from .env (differs from default)", defn.key)
+            except Exception as e:
+                logger.warning("[SEED] Failed to seed %s: %s", defn.key, e)
+
+    db.commit()

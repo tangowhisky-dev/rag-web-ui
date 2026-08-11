@@ -4,6 +4,7 @@ from .user import User, UserRole
 from .knowledge import KnowledgeBase, Document, DocumentChunk
 from .chat import Chat, Message
 from .datastore import DataStore, OrganizationDataStore, DataStoreFileManifest
+from .setting import Setting
 
 __all__ = [
     "Organisation",
@@ -19,4 +20,5 @@ __all__ = [
     "DataStore",
     "OrganizationDataStore",
     "DataStoreFileManifest",
+    "Setting",
 ]

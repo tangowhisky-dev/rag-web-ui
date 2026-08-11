@@ -13,6 +13,7 @@ from app.services.datastore_watcher import DataStoreWatcher
 from app.services.discovery import StartupRecoveryService
 from app.services.retrieval.reranker import preload_cross_encoder
 from app.services.infrastructure.utils import preload_sparse_embedder
+from app.services.settings_service import seed_app_settings
 from fastapi import FastAPI
 
 logging.basicConfig(
@@ -128,6 +129,16 @@ async def lifespan(app: FastAPI):
     """Startup and shutdown lifecycle for the application."""
     # Seed root organisation and superadmin (runs before other startup tasks)
     _seed_root_org_and_superadmin()
+
+    # Seed app settings from .env (only values that differ from config.py defaults)
+    try:
+        db = SessionLocal()
+        try:
+            seed_app_settings(db)
+        finally:
+            db.close()
+    except Exception as e:
+        logging.getLogger(__name__).warning("Failed to seed app settings: %s", e)
 
     # Initialize local file storage
     init_storage()
