@@ -108,16 +108,24 @@ async def query(
         elif event.get("event") == "done":
             answer = event.get("full_response") or answer
 
+    # Resolve retrieval leg flags before closing the DB session.
+    from app.services.settings_service import get_setting
+    org_id = current_user.org_id
+    dense_enabled = get_setting(db, "RETRIEVAL_DENSE_ENABLED", org_id)
+    sparse_enabled = get_setting(db, "RETRIEVAL_SPARSE_ENABLED", org_id)
+    exact_enabled = get_setting(db, "RETRIEVAL_EXACT_ENABLED", org_id)
+    graph_enabled = get_setting(db, "RETRIEVAL_GRAPH_ENABLED", org_id)
+
     # Release the DB connection now that the agentic pipeline is done.
     db.close()
 
     # Build a basic retrieval_info map: all globally enabled sources are active.
     retrieval_info = {
         "legs": {
-            "dense": {"status": "ok" if settings.RETRIEVAL_DENSE_ENABLED else "disabled", "count": 0},
-            "sparse": {"status": "ok" if settings.RETRIEVAL_SPARSE_ENABLED else "disabled", "count": 0},
-            "exact": {"status": "ok" if settings.RETRIEVAL_EXACT_ENABLED else "disabled", "count": 0},
-            "graph": {"status": "ok" if settings.RETRIEVAL_GRAPH_ENABLED else "disabled", "count": 0},
+            "dense": {"status": "ok" if dense_enabled else "disabled", "count": 0},
+            "sparse": {"status": "ok" if sparse_enabled else "disabled", "count": 0},
+            "exact": {"status": "ok" if exact_enabled else "disabled", "count": 0},
+            "graph": {"status": "ok" if graph_enabled else "disabled", "count": 0},
         }
     }
 

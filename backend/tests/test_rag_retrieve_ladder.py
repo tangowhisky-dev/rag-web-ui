@@ -85,8 +85,25 @@ def _run_rag_retrieve(level_outcomes, graph_expand=True, adaptive_enabled=True):
     ctx = _StubToolContext()
     input_obj = mod.RagRetrieveInput(query="what is the refund policy?", graph_expand=graph_expand)
 
+    def _fake_get_setting(db, key, org_id=None):
+        if key == "ADAPTIVE_RETRIEVAL_ENABLED":
+            return adaptive_enabled
+        if key == "ADAPTIVE_RETRIEVAL_THRESHOLD":
+            return settings.ADAPTIVE_RETRIEVAL_THRESHOLD
+        if key == "ADAPTIVE_RETRIEVAL_RERANKER_THRESHOLD":
+            return settings.ADAPTIVE_RETRIEVAL_RERANKER_THRESHOLD
+        if key == "RETRIEVAL_RELAX_LEVEL2_RERANKER_THRESHOLD":
+            return settings.RETRIEVAL_RELAX_LEVEL2_RERANKER_THRESHOLD
+        if key == "DENSE_MIN_SCORE":
+            return settings.DENSE_MIN_SCORE
+        if key == "SPARSE_MIN_SCORE":
+            return settings.SPARSE_MIN_SCORE
+        if key == "EXACT_MIN_SCORE":
+            return settings.EXACT_MIN_SCORE
+        return getattr(settings, key, None)
+
     with patch.object(mod, "enforce_rbac", return_value={"kb_ids": [1]}), \
-         patch.object(settings, "ADAPTIVE_RETRIEVAL_ENABLED", adaptive_enabled), \
+         patch("app.services.settings_service.get_setting", side_effect=_fake_get_setting), \
          patch.multiple(mod, **patched):
         return asyncio.run(mod._rag_retrieve(ctx, input_obj))
 

@@ -864,7 +864,7 @@ async def think_node(state: AgentState, ctx: ToolContext) -> dict:
         # Build conversation context from the same shared projection every
         # other node uses (select_recent_history), so rewrite/think/finalize
         # can't disagree about what "recent history" means.
-        recent = select_recent_history(state.get("messages", []))
+        recent = select_recent_history(state.get("messages", []), max_pairs=get_setting(ctx.db, "AGENT_HISTORY_PAIRS", ctx.org_id))
         history_text = history_to_text(recent)
         summary_text = state.get("compaction_summary") or ""
 
@@ -922,7 +922,7 @@ async def think_node(state: AgentState, ctx: ToolContext) -> dict:
         if compaction_local:
             state = {**state, **compaction_local}
             observations = state.get("observations", [])
-            recent = select_recent_history(state.get("messages", []))
+            recent = select_recent_history(state.get("messages", []), max_pairs=get_setting(ctx.db, "AGENT_HISTORY_PAIRS", ctx.org_id))
             history_text = history_to_text(recent)
             summary_text = state.get("compaction_summary") or ""
             tried_queries = _tried_rag_retrieve_queries(observations)
@@ -1360,7 +1360,7 @@ async def finalize_node(state: AgentState, ctx: ToolContext) -> dict:
                 parts.append("Provide a concise, accurate answer.")
                 return "".join(parts)
 
-            recent = select_recent_history(state.get("messages", []))
+            recent = select_recent_history(state.get("messages", []), max_pairs=get_setting(ctx.db, "AGENT_HISTORY_PAIRS", ctx.org_id))
             history_text = history_to_text(recent)
             summary_text = state.get("compaction_summary") or ""
             user = _build_finalize_user_prompt()
@@ -1377,7 +1377,7 @@ async def finalize_node(state: AgentState, ctx: ToolContext) -> dict:
                 docs = state.get("retrieved_docs", docs)
                 context_text = format_context_string(docs, state.get("file_markdown"))
                 non_rag_text = _non_retrieval_observations_text(observations)
-                recent = select_recent_history(state.get("messages", []))
+                recent = select_recent_history(state.get("messages", []), max_pairs=get_setting(ctx.db, "AGENT_HISTORY_PAIRS", ctx.org_id))
                 history_text = history_to_text(recent)
                 summary_text = state.get("compaction_summary") or ""
                 user = _build_finalize_user_prompt()

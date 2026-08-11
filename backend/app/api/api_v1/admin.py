@@ -165,12 +165,14 @@ def delete_org(
     logger.info("[ADMIN] org_deleted id=%s name=%s", org_id, org.name)
 
 
-@org_router.get("/orgs/{org_id}/llm-config", response_model=OrgLLMConfigResponse)
+@org_router.get("/orgs/{org_id}/llm-config", response_model=OrgLLMConfigResponse, deprecated=True)
 def get_org_llm_config(
     org_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
+    """Deprecated: use /api/admin/orgs/{org_id}/settings instead."""
+    logger.warning("[DEPRECATED] /orgs/%s/llm-config — use /api/admin/orgs/%s/settings", org_id, org_id)
     org = db.query(Organisation).filter(Organisation.id == org_id).first()
     if org is None:
         raise HTTPException(status_code=404, detail="Org not found")
@@ -185,13 +187,15 @@ def get_org_llm_config(
     return config
 
 
-@org_router.put("/orgs/{org_id}/llm-config", response_model=OrgLLMConfigResponse)
+@org_router.put("/orgs/{org_id}/llm-config", response_model=OrgLLMConfigResponse, deprecated=True)
 def upsert_org_llm_config(
     org_id: int,
     payload: OrgLLMConfigUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
+    """Deprecated: use /api/admin/orgs/{org_id}/settings instead."""
+    logger.warning("[DEPRECATED] PUT /orgs/%s/llm-config — use /api/admin/orgs/%s/settings", org_id, org_id)
     org = db.query(Organisation).filter(Organisation.id == org_id).first()
     if org is None:
         raise HTTPException(status_code=404, detail="Org not found")

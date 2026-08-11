@@ -78,26 +78,32 @@ def _is_sufficient(docs: list, confidence: float, min_confidence: float) -> bool
 # Graduated relaxation ladder. Level 0 is the normal, tightest pass. Each
 # subsequent level loosens leg minimums and the reranker filter threshold.
 # `min_score=None` means "use the leg's default from settings".
-_RELAXATION_LEVELS: list[dict[str, Any]] = [
-    {
-        "dense_min_score": None,
-        "sparse_min_score": None,
-        "exact_min_score": None,
-        "rerank_threshold": None,  # settings.RERANKER_SCORE_THRESHOLD
-    },
-    {
-        "dense_min_score": max(0.0, settings.DENSE_MIN_SCORE - 0.15),
-        "sparse_min_score": settings.SPARSE_MIN_SCORE * 0.5,
-        "exact_min_score": settings.EXACT_MIN_SCORE * 0.5,
-        "rerank_threshold": settings.ADAPTIVE_RETRIEVAL_RERANKER_THRESHOLD,
-    },
-    {
-        "dense_min_score": 0.0,
-        "sparse_min_score": 0.0,
-        "exact_min_score": 0.0,
-        "rerank_threshold": settings.RETRIEVAL_RELAX_LEVEL2_RERANKER_THRESHOLD,
-    },
-]
+# Resolved per-request via the settings service (org-overridable).
+def _relaxation_levels(db, org_id) -> list[dict[str, Any]]:
+    from app.services.settings_service import get_setting
+    dense_min = get_setting(db, "DENSE_MIN_SCORE", org_id)
+    sparse_min = get_setting(db, "SPARSE_MIN_SCORE", org_id)
+    exact_min = get_setting(db, "EXACT_MIN_SCORE", org_id)
+    return [
+        {
+            "dense_min_score": None,
+            "sparse_min_score": None,
+            "exact_min_score": None,
+            "rerank_threshold": None,
+        },
+        {
+            "dense_min_score": max(0.0, dense_min - 0.15),
+            "sparse_min_score": sparse_min * 0.5,
+            "exact_min_score": exact_min * 0.5,
+            "rerank_threshold": get_setting(db, "ADAPTIVE_RETRIEVAL_RERANKER_THRESHOLD", org_id),
+        },
+        {
+            "dense_min_score": 0.0,
+            "sparse_min_score": 0.0,
+            "exact_min_score": 0.0,
+            "rerank_threshold": get_setting(db, "RETRIEVAL_RELAX_LEVEL2_RERANKER_THRESHOLD", org_id),
+        },
+    ]
 
 
 async def _run_retrieval_pass(
@@ -156,13 +162,16 @@ async def _rag_retrieve(ctx: ToolContext, input_obj: RagRetrieveInput) -> dict:
         file_markdown = ctx.state.get("file_markdown", None)
 
     legs = input_obj.legs or ["dense", "sparse", "exact"]
+    from app.services.settings_service import get_setting
     min_confidence = (
         input_obj.min_confidence
         if input_obj.min_confidence is not None
-        else settings.ADAPTIVE_RETRIEVAL_THRESHOLD / 100.0
+        else get_setting(ctx.db, "ADAPTIVE_RETRIEVAL_THRESHOLD", ctx.org_id) / 100.0
     )
 
-    levels = _RELAXATION_LEVELS if settings.ADAPTIVE_RETRIEVAL_ENABLED else _RELAXATION_LEVELS[:1]
+    all_levels = _relaxation_levels(ctx.db, ctx.org_id)
+    adaptive_enabled = get_setting(ctx.db, "ADAPTIVE_RETRIEVAL_ENABLED", ctx.org_id)
+    levels = all_levels if adaptive_enabled else all_levels[:1]
 
     state: dict[str, Any] = {}
     docs: list = []
