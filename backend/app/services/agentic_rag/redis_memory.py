@@ -156,6 +156,8 @@ class RedisMemory:
                 api_base = get_setting(_db, "EMBEDDING_API_BASE", None) or get_setting(_db, "OPENAI_API_BASE", None)
             finally:
                 _db.close()
+            if not api_key:
+                api_key = "not-required"
             self._embeddings = _StringEmbeddings(
                 model=embedding_model,
                 api_base=api_base,
@@ -288,6 +290,8 @@ def _cleanup_embeddings() -> _StringEmbeddings:
         api_base = get_setting(_db, "EMBEDDING_API_BASE", None) or get_setting(_db, "OPENAI_API_BASE", None)
     finally:
         _db.close()
+    if not api_key:
+        api_key = "not-required"
     return _StringEmbeddings(
         model=embedding_model,
         api_base=api_base,

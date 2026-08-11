@@ -51,16 +51,17 @@ class PreflightResult:
 # ── Setting groups ──────────────────────────────────────────────────────────
 
 # Settings required for chat (org-overridable, resolved per user's org).
+# API keys are NOT required — local servers (LM Studio, Ollama) typically
+# don't need them. The OpenAI client gets a placeholder when unset.
 _CHAT_SETTINGS = [
-    "OPENAI_API_KEY",
     "OPENAI_API_BASE",
     "OPENAI_MODEL",
 ]
 
 # Settings required for retrieval/embeddings (app-only, shared infrastructure).
-# EMBEDDING_API_KEY falls back to OPENAI_API_KEY at the app level.
+# API keys excluded for the same reason. EMBEDDING_API_BASE falls back to
+# OPENAI_API_BASE, and DENSE_EMBEDDINGS_MODEL has a registry default.
 _EMBEDDING_SETTINGS = [
-    "EMBEDDING_API_KEY",
     "EMBEDDING_API_BASE",
     "DENSE_EMBEDDINGS_MODEL",
 ]

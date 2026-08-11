@@ -220,8 +220,8 @@ def test_get_org_llm_role_specific_key_falls_back(db_session):
     from app.services.settings_service import get_setting, clear_cache
     clear_cache()
     cfg = get_org_llm(None, db_session, role="vision")
-    # VISION_API_KEY falls back to OPENAI_API_KEY (registry default)
-    expected = get_setting(db_session, "OPENAI_API_KEY", None)
+    # VISION_API_KEY falls back to OPENAI_API_KEY, then to "not-required" placeholder
+    expected = get_setting(db_session, "OPENAI_API_KEY", None) or "not-required"
     assert cfg["api_key"] == expected
 
 

@@ -89,10 +89,12 @@ def _get_markitdown() -> MarkItDown:
         try:
             vision_model = get_setting(_db, "VISION_MODEL", None)
             if vision_model:
-                # Vision API key: VISION_API_KEY → OPENAI_API_KEY → .env
+                # Vision API key: VISION_API_KEY → OPENAI_API_KEY → placeholder
                 api_key = get_setting(_db, "VISION_API_KEY", None) or get_setting(_db, "OPENAI_API_KEY", None)
                 # Vision base URL: OPENAI_VISION_API_BASE → OPENAI_API_BASE → .env
                 api_base = get_setting(_db, "OPENAI_VISION_API_BASE", None) or get_setting(_db, "OPENAI_API_BASE", None)
+                if not api_key:
+                    api_key = "not-required"
                 vision_client = SyncOpenAI(
                     api_key=api_key,
                     base_url=api_base,

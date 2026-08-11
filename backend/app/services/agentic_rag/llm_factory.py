@@ -44,8 +44,12 @@ def get_org_llm(org_id: Optional[int], db: Session, role: str = "chat") -> dict:
     """
     role_key, role_base = _ROLE_KEY_MAP.get(role, ("OPENAI_API_KEY", "OPENAI_API_BASE"))
 
-    # Key: role-specific → OPENAI_API_KEY (same tier) → .env fallback
+    # Key: role-specific → OPENAI_API_KEY (same tier) → placeholder.
+    # Local servers (LM Studio, Ollama) don't require a key, but the OpenAI
+    # client library rejects None/empty — supply a placeholder when unset.
     api_key = get_setting(db, role_key, org_id) or get_setting(db, "OPENAI_API_KEY", org_id)
+    if not api_key:
+        api_key = "not-required"
 
     # Base URL: role-specific → OPENAI_API_BASE (same tier) → .env fallback
     api_base = get_setting(db, role_base, org_id) or get_setting(db, "OPENAI_API_BASE", org_id)

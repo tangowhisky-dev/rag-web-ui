@@ -69,6 +69,8 @@ def get_openai_client() -> SyncOpenAI:
             api_base = get_setting(_db, "EMBEDDING_API_BASE", None) or get_setting(_db, "OPENAI_API_BASE", None)
         finally:
             _db.close()
+        if not api_key:
+            api_key = "not-required"
         _openai_client = SyncOpenAI(
             api_key=api_key,
             base_url=api_base,

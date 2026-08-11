@@ -128,6 +128,9 @@ async def classify_query(query: str, api_base: Optional[str] = None, query_model
             finally:
                 _db.close()
 
+        # Local servers don't require a key; supply a placeholder when unset.
+        if not api_key:
+            api_key = "not-required"
         client = AsyncOpenAI(
             api_key=api_key,
             base_url=api_base,

@@ -147,6 +147,10 @@ def _get_llm(
                 api_key = get_setting(_db, "OPENAI_API_KEY", None)
         finally:
             _db.close()
+    # Local servers (LM Studio, Ollama) don't require a key, but the OpenAI
+    # client rejects None/empty — supply a placeholder when unset.
+    if not api_key:
+        api_key = "not-required"
     return ChatOpenAI(
         model=model_name,
         temperature=temperature,

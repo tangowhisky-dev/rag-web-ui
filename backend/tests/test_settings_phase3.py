@@ -75,7 +75,7 @@ def test_get_org_llm_falls_back_to_env(db_session):
     cfg = get_org_llm(None, db_session, role="chat")
     assert cfg["api_base"] == get_setting(db_session, "OPENAI_API_BASE", None)
     assert cfg["model_name"] == get_setting(db_session, "OPENAI_MODEL", None)
-    assert cfg["api_key"] == get_setting(db_session, "OPENAI_API_KEY", None)
+    assert cfg["api_key"] == (get_setting(db_session, "OPENAI_API_KEY", None) or "not-required")
 
 
 def test_get_org_llm_uses_app_settings(db_session):
@@ -144,7 +144,7 @@ def test_get_org_llm_api_key_always_from_env(db_session):
     clear_cache()
 
     cfg = get_org_llm(org.id, db_session, role="chat")
-    assert cfg["api_key"] == get_setting(db_session, "OPENAI_API_KEY", None)
+    assert cfg["api_key"] == (get_setting(db_session, "OPENAI_API_KEY", None) or "not-required")
 
 
 # ---------------------------------------------------------------------------

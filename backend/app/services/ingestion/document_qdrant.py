@@ -118,6 +118,9 @@ async def _embed_texts_batch(
         embed_model = get_setting(_db, "DENSE_EMBEDDINGS_MODEL", None)
     finally:
         _db.close()
+    # Local servers don't require a key; supply a placeholder when unset.
+    if not api_key:
+        api_key = "not-required"
     client = AsyncOpenAI(
         api_key=api_key,
         base_url=api_base,

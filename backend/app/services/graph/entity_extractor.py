@@ -114,6 +114,8 @@ def _get_llm_client(db: Any = None, org_id: Any = None) -> SyncOpenAI:
             api_base = get_setting(_db, "GRAPHRAG_API_BASE", None) or get_setting(_db, "OPENAI_API_BASE", None)
         finally:
             _db.close()
+        if not api_key:
+            api_key = "not-required"
         _llm_client = SyncOpenAI(base_url=api_base, api_key=api_key)
     return _llm_client
 
