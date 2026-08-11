@@ -8,35 +8,30 @@ from langchain_openai import ChatOpenAI
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.models.org_llm_config import OrgLLMConfig
+from app.services.settings_service import get_setting
 
 
 def get_org_llm(org_id: Optional[int], db: Session, role: str = "chat") -> dict:
     """Resolve OpenAI-compatible LLM config for ``org_id`` and ``role``.
 
     Roles:
-    - "chat"    -> main response model
-    - "query"   -> rewrite / summarisation / extraction model
+    - "chat"     -> main response model
+    - "query"    -> rewrite / summarisation / extraction model
+    - "reasoning" -> reasoning / thinking model
 
-    Falls back to ``settings`` when no per-org config exists.
+    Reads from the unified settings service (3-tier precedence:
+    org override → app value → .env/config.py default).
     """
-    api_base = settings.OPENAI_API_BASE
-    model_name = settings.OPENAI_MODEL
-    query_model = settings.effective_query_model
-    api_key = settings.OPENAI_API_KEY
-
-    if org_id is not None and db is not None:
-        row = db.query(OrgLLMConfig).filter(OrgLLMConfig.org_id == org_id).first()
-        if row:
-            if row.api_base:
-                api_base = row.api_base
-            if row.model_name:
-                model_name = row.model_name
-            if row.query_model:
-                query_model = row.query_model
+    api_base = get_setting(db, "OPENAI_API_BASE", org_id)
+    model_name = get_setting(db, "OPENAI_MODEL", org_id)
+    query_model = get_setting(db, "QUERY_MODEL", org_id) or model_name
+    reasoning_model = get_setting(db, "REASONING_MODEL", org_id) or model_name
+    api_key = settings.OPENAI_API_KEY  # always from .env (secret)
 
     if role == "query":
-        model_name = query_model or model_name
+        model_name = query_model
+    elif role == "reasoning":
+        model_name = reasoning_model
 
     return {
         "api_base": api_base,

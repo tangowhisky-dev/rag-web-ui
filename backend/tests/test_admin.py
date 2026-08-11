@@ -675,20 +675,15 @@ def test_effective_llm_config_fallback(db):
 
 
 def test_effective_llm_config_org_override(db):
-    """When an OrgLLMConfig row exists for the org, those values are returned."""
+    """When an org override exists in the settings table, those values are returned."""
     from app.services.chat import get_effective_llm_config
-    from app.models.org_llm_config import OrgLLMConfig
-    import app.models.org_llm_config  # noqa: ensure table is registered
+    from app.services.settings_service import upsert_org_setting, clear_cache
 
+    clear_cache()
     org = create_org(db, "LLMConfigOrg5")
-    row = OrgLLMConfig(
-        org_id=org.id,
-        api_base="https://custom.example.com",
-        model_name="custom-model",
-        query_model="custom-query-model",
-    )
-    db.add(row)
-    db.commit()
+    upsert_org_setting(db, org.id, "OPENAI_API_BASE", "https://custom.example.com")
+    upsert_org_setting(db, org.id, "OPENAI_MODEL", "custom-model")
+    upsert_org_setting(db, org.id, "QUERY_MODEL", "custom-query-model")
 
     cfg = get_effective_llm_config(org.id, db)
     assert cfg["api_base"] == "https://custom.example.com"

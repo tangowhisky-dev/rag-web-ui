@@ -36,25 +36,19 @@ def get_effective_llm_config(org_id: Optional[int], db: Session) -> dict:
     """Return LLM config dict for the given org, falling back to .env settings.
 
     Keys: api_base, model_name, query_model.
-    When org_id is None or no OrgLLMConfig row exists, all values are None
-    (callers should fall back to settings).
+    Reads from the unified settings service (3-tier precedence:
+    org override → app value → .env/config.py default).
     """
-    api_base = None
-    model_name = None
-    query_model = None
+    from app.services.settings_service import get_setting
 
-    if org_id is not None:
-        from app.models.org_llm_config import OrgLLMConfig
-        row = db.query(OrgLLMConfig).filter(OrgLLMConfig.org_id == org_id).first()
-        if row:
-            api_base = row.api_base or None
-            model_name = row.model_name or None
-            query_model = row.query_model or None
+    api_base = get_setting(db, "OPENAI_API_BASE", org_id)
+    model_name = get_setting(db, "OPENAI_MODEL", org_id)
+    query_model = get_setting(db, "QUERY_MODEL", org_id) or model_name
 
     return {
-        "api_base": api_base or settings.OPENAI_API_BASE,
-        "model_name": model_name or settings.OPENAI_MODEL,
-        "query_model": query_model or settings.effective_query_model,
+        "api_base": api_base,
+        "model_name": model_name,
+        "query_model": query_model,
     }
 
 # ── Constants ─────────────────────────────────────────────────────────────────
