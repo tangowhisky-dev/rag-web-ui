@@ -261,10 +261,6 @@ class TestExtractExpandBoost:
             mock_llm.return_value.chat.completions.create.return_value = mock_resp
             mock_settings.GRAPHRAG_ENABLED = False  # skip Neo4j expansion
             mock_settings.ENTITY_BOOST_FACTOR = 0.1
-            mock_settings.GRAPHRAG_LLM = "test-model"
-            mock_settings.OPENAI_MODEL = "test-model"
-            mock_settings.OPENAI_API_BASE = "http://localhost"
-            mock_settings.OPENAI_API_KEY = "test"
 
             result = extract_expand_boost("What did Apple acquire?", docs, [1])
 
@@ -281,10 +277,6 @@ class TestExtractExpandBoost:
              patch("app.services.graph.entity_extractor.settings") as mock_settings:
 
             mock_llm.return_value.chat.completions.create.return_value = mock_resp
-            mock_settings.GRAPHRAG_LLM = "test-model"
-            mock_settings.OPENAI_MODEL = "test-model"
-            mock_settings.OPENAI_API_BASE = "http://localhost"
-            mock_settings.OPENAI_API_KEY = "test"
 
             result = extract_expand_boost("general query", docs, [1])
 

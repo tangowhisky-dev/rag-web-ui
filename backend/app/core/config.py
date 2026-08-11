@@ -56,61 +56,18 @@ class Settings(BaseSettings):
     # Falls back to PollingObserver on macOS, Windows, or when inotify is unavailable.
     WATCHER_USE_INOTIFY: bool = os.getenv("WATCHER_USE_INOTIFY", "true").lower() == "true"
 
-    # LLM + Embeddings (OpenAI-compatible)
-    # OPENAI_API_KEY and OPENAI_API_BASE are the ultimate fallback for all
-    # LLM roles. Per-role keys/base URLs can be set via the admin UI.
-    OPENAI_API_BASE: str = os.getenv("OPENAI_API_BASE", "http://localhost:1234/v1")
-    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "lmstudio")
+    # LLM + Embeddings — all LLM model/endpoint/key settings are managed via
+    # the settings table (Super Admin UI for app defaults, Admin UI for org
+    # overrides). Nothing in .env for these. The registry provides defaults.
+    #
+    # SPLADE / reranker models are embedded in the app (not user-changeable
+    # at runtime) and stay in .env:
 
-    # Chat / response-generation model
-    OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "local-model")
-
-    # Total context window size of OPENAI_MODEL in tokens.
-    # 25% is reserved for injected chat-file content.
-    OPENAI_MODEL_CONTEXT_SIZE: int = int(os.getenv("OPENAI_MODEL_CONTEXT_SIZE", "131072"))
-
-    # Query-rewriting model (used for standalone-question condensation and
-    # rolling-summary generation). Falls back to OPENAI_MODEL when unset.
-    # A smaller/faster model works well here — the task is mechanical rewording,
-    # not complex reasoning.
-    QUERY_MODEL: Optional[str] = os.getenv("QUERY_MODEL") or None
-
-    # Reasoning model for thinking-mode / chain-of-thought steps. Falls back to
-    # OPENAI_MODEL when unset.
-    REASONING_MODEL: Optional[str] = os.getenv("REASONING_MODEL") or None
-
-    # Vision model for OCR of embedded images (scanned PDFs, images in DOCX/
-    # PPTX/XLSX). Must be a multimodal (vision-capable) model.
-    # When unset, markitdown-ocr is loaded without an llm_client and OCR is
-    # silently skipped — behaviour identical to before.
-    VISION_MODEL: Optional[str] = os.getenv("VISION_MODEL") or None
-
-    # Optional separate base URL for the vision model. When unset, falls back
-    # to OPENAI_API_BASE (same server as chat/embeddings).
-    OPENAI_VISION_API_BASE: Optional[str] = os.getenv("OPENAI_VISION_API_BASE") or None
-
-    # Per-role API keys (fall back to OPENAI_API_KEY when unset).
-    # These are the .env fallbacks; runtime values are stored encrypted in the
-    # settings table and managed via the admin UI.
-    QUERY_API_KEY: Optional[str] = os.getenv("QUERY_API_KEY") or None
-    REASONING_API_KEY: Optional[str] = os.getenv("REASONING_API_KEY") or None
-    VISION_API_KEY: Optional[str] = os.getenv("VISION_API_KEY") or None
-    GRAPHRAG_API_KEY: Optional[str] = os.getenv("GRAPHRAG_API_KEY") or None
-
-    # Per-role base URLs (fall back to OPENAI_API_BASE when unset).
-    QUERY_API_BASE: Optional[str] = os.getenv("QUERY_API_BASE") or None
-    REASONING_API_BASE: Optional[str] = os.getenv("REASONING_API_BASE") or None
-    GRAPHRAG_API_BASE: Optional[str] = os.getenv("GRAPHRAG_API_BASE") or None
-
-    # Embeddings API key and base URL (super_admin only, app scope).
-    # Fall back to OPENAI_API_KEY / OPENAI_API_BASE when unset.
-    EMBEDDING_API_KEY: Optional[str] = os.getenv("EMBEDDING_API_KEY") or None
-    EMBEDDING_API_BASE: Optional[str] = os.getenv("EMBEDDING_API_BASE") or None
-
-    DENSE_EMBEDDINGS_MODEL: str = os.getenv("DENSE_EMBEDDINGS_MODEL", "local-embedding-model")
-    # Dimension of the dense embedding model output. Must match DENSE_EMBEDDINGS_MODEL.
-    # qwen3-embedding-0.6b = 1024, text-embedding-3-small = 1536, text-embedding-ada-002 = 1536
-    DENSE_EMBEDDING_DIM: int = int(os.getenv("DENSE_EMBEDDING_DIM", "1024"))
+    # SPLADE sparse embedding model (FastEmbed / ONNX — CPU-optimised)
+    SPLADE_MODEL: str = os.getenv("SPLADE_MODEL", "prithivida/Splade_PP_en_v1")
+    # Directory where FastEmbed caches downloaded ONNX models.
+    # Mount as a volume so the model survives container restarts.
+    FASTEMBED_CACHE_DIR: str = os.getenv("FASTEMBED_CACHE_DIR", "/app/assets/fastembed")
 
     # ── Query Classification ──────────────────────────────────────────────────
     # Enable/disable LLM-based query classification for adaptive retrieval routing.
@@ -166,8 +123,6 @@ class Settings(BaseSettings):
     REDIS_PORT: int = int(os.getenv("REDIS_PORT", "6379"))
     REDIS_INSIGHT_PORT: int = int(os.getenv("REDIS_INSIGHT_PORT", "8001"))
     MEMORY_ENABLED: bool = os.getenv("MEMORY_ENABLED", "true").lower() == "true"
-    # Embedding model used for the Redis long-term memory store. Defaults to DENSE_EMBEDDINGS_MODEL.
-    MEMORY_EMBEDDING_MODEL: Optional[str] = os.getenv("MEMORY_EMBEDDING_MODEL") or None
 
     # SPLADE sparse embedding model (FastEmbed / ONNX — CPU-optimised)
     SPLADE_MODEL: str = os.getenv("SPLADE_MODEL", "prithivida/Splade_PP_en_v1")

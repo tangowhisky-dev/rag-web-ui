@@ -25,8 +25,18 @@ from qdrant_client.models import (
     VectorParams,
 )
 
-from app.core.config import settings
 from app.services.infrastructure import content_hash, get_qdrant_client, get_sparse_embedder
+
+
+def _get_embedding_dim() -> int:
+    """Resolve DENSE_EMBEDDING_DIM from app-level settings."""
+    from app.services.settings_service import get_setting
+    from app.db.session import SessionLocal
+    _db = SessionLocal()
+    try:
+        return get_setting(_db, "DENSE_EMBEDDING_DIM", None) or 1024
+    finally:
+        _db.close()
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +72,7 @@ def _ensure_qdrant_collection(client: QdrantClient, collection_name: str) -> Non
                 collection_name=collection_name,
                 vectors_config={
                     "dense": VectorParams(
-                        size=settings.DENSE_EMBEDDING_DIM,
+                        size=_get_embedding_dim(),
                         distance=Distance.COSINE,
                     )
                 },

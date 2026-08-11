@@ -11,7 +11,6 @@ import re
 from dataclasses import dataclass
 from typing import Any, List, Optional
 
-from app.core.config import settings
 from app.services.agentic_rag.prompts import EVALUATION_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -169,13 +168,27 @@ Evaluate the quality of this answer based on the retrieved context.
 
     try:
         from openai import AsyncOpenAI as _OAI
+        # Fall back to app-level settings when no explicit overrides provided
+        if api_key is None or api_base is None or query_model is None:
+            from app.services.settings_service import get_setting
+            from app.db.session import SessionLocal
+            _db = SessionLocal()
+            try:
+                if api_key is None:
+                    api_key = get_setting(_db, "QUERY_API_KEY", None) or get_setting(_db, "OPENAI_API_KEY", None)
+                if api_base is None:
+                    api_base = get_setting(_db, "QUERY_API_BASE", None) or get_setting(_db, "OPENAI_API_BASE", None)
+                if query_model is None:
+                    query_model = get_setting(_db, "QUERY_MODEL", None) or get_setting(_db, "OPENAI_MODEL", None)
+            finally:
+                _db.close()
         client = _OAI(
-            api_key=api_key or settings.OPENAI_API_KEY,
-            base_url=api_base or settings.OPENAI_API_BASE,
+            api_key=api_key,
+            base_url=api_base,
         )
 
         resp = await client.chat.completions.create(
-            model=query_model or settings.QUERY_MODEL or settings.OPENAI_MODEL,
+            model=query_model,
             messages=[
                 {"role": "system", "content": EVALUATION_SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},

@@ -553,7 +553,7 @@ def _build_compaction_llm(ctx: Optional["ToolContext"]):
             logger.warning("[compaction] org LLM unavailable (%s) — falling back to global config", exc)
     from app.services.agentic_rag.nodes import _get_llm
 
-    return _get_llm(model_name=settings.QUERY_MODEL or settings.OPENAI_MODEL, temperature=0.0, streaming=False)
+    return _get_llm(temperature=0.0, streaming=False)
 
 
 def _trim_docs_to_budget(docs: list[dict], overflow_tokens: int) -> list[dict]:

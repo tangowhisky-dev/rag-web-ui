@@ -206,29 +206,34 @@ def test_get_org_llm_chat_role(db_session):
 def test_get_org_llm_query_role_falls_back(db_session):
     """get_org_llm with query role falls back to OPENAI_MODEL when QUERY_MODEL unset."""
     from app.services.agentic_rag.llm_factory import get_org_llm
-    from app.core.config import settings
+    from app.services.settings_service import get_setting, clear_cache
+    clear_cache()
     cfg = get_org_llm(None, db_session, role="query")
-    # query_model falls back to OPENAI_MODEL
-    assert cfg["model_name"] == settings.OPENAI_MODEL
+    # query_model falls back to OPENAI_MODEL (registry default)
+    expected = get_setting(db_session, "OPENAI_MODEL", None)
+    assert cfg["model_name"] == expected
 
 
 def test_get_org_llm_role_specific_key_falls_back(db_session):
     """Role-specific key falls back to OPENAI_API_KEY."""
     from app.services.agentic_rag.llm_factory import get_org_llm
-    from app.services.settings_service import clear_cache
+    from app.services.settings_service import get_setting, clear_cache
     clear_cache()
     cfg = get_org_llm(None, db_session, role="vision")
-    # VISION_API_KEY falls back to OPENAI_API_KEY
-    from app.core.config import settings
-    assert cfg["api_key"] == settings.OPENAI_API_KEY
+    # VISION_API_KEY falls back to OPENAI_API_KEY (registry default)
+    expected = get_setting(db_session, "OPENAI_API_KEY", None)
+    assert cfg["api_key"] == expected
 
 
 def test_get_org_llm_graph_role_uses_graphrag_model(db_session):
     """get_org_llm with graph role uses GRAPHRAG_LLM."""
     from app.services.agentic_rag.llm_factory import get_org_llm
-    from app.core.config import settings
+    from app.services.settings_service import get_setting, clear_cache
+    clear_cache()
     cfg = get_org_llm(None, db_session, role="graph")
-    assert cfg["model_name"] == settings.GRAPHRAG_LLM
+    # GRAPHRAG_LLM is app-only; falls back to OPENAI_MODEL when unset
+    expected = get_setting(db_session, "GRAPHRAG_LLM", None) or get_setting(db_session, "OPENAI_MODEL", None)
+    assert cfg["model_name"] == expected
 
 
 # ── 8. OrgLLMConfig removed ──────────────────────────────────────────────────

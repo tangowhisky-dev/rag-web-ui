@@ -14,6 +14,7 @@ encryption, keyed by PBKDF2(SECRET_KEY). Encrypted values are prefixed with
 """
 import json
 import logging
+import os
 import time
 from typing import Any, Optional
 
@@ -157,8 +158,33 @@ def validate_value(key: str, value: Any) -> Any:
 # ── Resolution ────────────────────────────────────────────────────────────
 
 def _get_env_default(key: str) -> Any:
-    """Get the .env/config.py default for a key."""
-    return getattr(env_settings, key, None)
+    """Get the fallback default for a key.
+
+    Resolution order:
+      1. config.py attribute (for settings that still have .env fields)
+      2. os.getenv (for settings removed from config.py but still in .env)
+      3. registry default
+    """
+    val = getattr(env_settings, key, None)
+    if val is not None:
+        return val
+    # Check os.getenv for settings that were removed from config.py
+    # but may still have env vars set in the deployment
+    env_val = os.getenv(key)
+    if env_val is not None:
+        defn = get_def(key)
+        if defn:
+            if defn.value_type == "int":
+                return int(env_val)
+            elif defn.value_type == "float":
+                return float(env_val)
+            elif defn.value_type == "bool":
+                return env_val.lower() == "true"
+        return env_val
+    defn = get_def(key)
+    if defn is not None:
+        return defn.default
+    return None
 
 
 def get_setting(db: Session, key: str, org_id: Optional[int] = None) -> Any:

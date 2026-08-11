@@ -113,15 +113,30 @@ async def classify_query(query: str, api_base: Optional[str] = None, query_model
                 latency_ms=elapsed_ms, fallback=True
             )
 
+        # Fall back to app-level settings when no explicit overrides provided
+        if api_key is None or api_base is None or query_model is None:
+            from app.services.settings_service import get_setting
+            from app.db.session import SessionLocal
+            _db = SessionLocal()
+            try:
+                if api_key is None:
+                    api_key = get_setting(_db, "QUERY_API_KEY", None) or get_setting(_db, "OPENAI_API_KEY", None)
+                if api_base is None:
+                    api_base = get_setting(_db, "QUERY_API_BASE", None) or get_setting(_db, "OPENAI_API_BASE", None)
+                if query_model is None:
+                    query_model = get_setting(_db, "QUERY_MODEL", None) or get_setting(_db, "OPENAI_MODEL", None)
+            finally:
+                _db.close()
+
         client = AsyncOpenAI(
-            api_key=api_key or settings.OPENAI_API_KEY,
-            base_url=api_base or settings.OPENAI_API_BASE,
+            api_key=api_key,
+            base_url=api_base,
         )
 
         prompt = settings.QUERY_CLASSIFIER_PROMPT.format(query=query)
 
         response = await client.chat.completions.create(
-            model=query_model or settings.QUERY_MODEL or settings.OPENAI_MODEL,
+            model=query_model,
             messages=[
                 {"role": "user", "content": prompt},
             ],

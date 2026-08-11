@@ -28,6 +28,17 @@ from openai import AsyncOpenAI
 
 from app.core.config import settings
 
+
+def _get_embedding_dim() -> int:
+    """Resolve DENSE_EMBEDDING_DIM from app-level settings."""
+    from app.services.settings_service import get_setting
+    from app.db.session import SessionLocal
+    _db = SessionLocal()
+    try:
+        return get_setting(_db, "DENSE_EMBEDDING_DIM", None) or 1024
+    finally:
+        _db.close()
+
 logger = logging.getLogger(__name__)
 
 
@@ -155,13 +166,13 @@ class RedisMemory:
                     redis_url=self._uri,
                     index={
                         "embed": self._embeddings,
-                        "dims": settings.DENSE_EMBEDDING_DIM,
+                        "dims": _get_embedding_dim(),
                     },
                 )
                 self._store = await st.__aenter__()
                 await self._store.setup()
                 self._using_redis = True
-                logger.info("[MEMORY] Redis semantic store ready | dims=%d", settings.DENSE_EMBEDDING_DIM)
+                logger.info("[MEMORY] Redis semantic store ready | dims=%d", _get_embedding_dim())
             except Exception as exc:
                 logger.warning(
                     "[MEMORY] Redis semantic store init failed (%s); using in-memory fallback.",
@@ -290,7 +301,7 @@ async def _cleanup_store(redis_url: str) -> Any:
         redis_url=redis_url,
         index={
             "embed": _cleanup_embeddings(),
-            "dims": settings.DENSE_EMBEDDING_DIM,
+            "dims": _get_embedding_dim(),
         },
     )
     st = await st.__aenter__()

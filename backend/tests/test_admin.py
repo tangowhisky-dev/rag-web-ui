@@ -595,14 +595,15 @@ def test_deactivated_user_in_list_shows_is_active_false(client, db):
 # ── Unit tests: get_effective_llm_config ──────────────────────────────────────
 
 def test_effective_llm_config_fallback(db):
-    """When org_id is None, all values fall back to settings defaults."""
+    """When org_id is None, all values fall back to settings table defaults."""
     from app.services.chat import get_effective_llm_config
-    from app.core.config import settings
+    from app.services.settings_service import get_setting, clear_cache
 
+    clear_cache()
     cfg = get_effective_llm_config(None, db)
-    assert cfg["api_base"] == settings.OPENAI_API_BASE
-    assert cfg["model_name"] == settings.OPENAI_MODEL
-    assert cfg["query_model"] == settings.QUERY_MODEL or settings.OPENAI_MODEL
+    assert cfg["api_base"] == get_setting(db, "OPENAI_API_BASE", None)
+    assert cfg["model_name"] == get_setting(db, "OPENAI_MODEL", None)
+    assert cfg["query_model"] == get_setting(db, "QUERY_MODEL", None) or get_setting(db, "OPENAI_MODEL", None)
 
 
 def test_effective_llm_config_org_override(db):

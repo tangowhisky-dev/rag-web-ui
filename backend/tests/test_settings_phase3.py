@@ -24,7 +24,7 @@ import app.models.datastore  # noqa
 import app.models.setting  # noqa
 
 from app.services.settings_service import (
-    upsert_app_setting, upsert_org_setting, clear_cache,
+    upsert_app_setting, upsert_org_setting, clear_cache, get_setting,
 )
 from app.services.agentic_rag.llm_factory import get_org_llm, build_chat_llm
 from app.services.chat.chat_service import get_effective_llm_config
@@ -70,11 +70,12 @@ def _create_org(db, name="TestOrg"):
 # ---------------------------------------------------------------------------
 
 def test_get_org_llm_falls_back_to_env(db_session):
-    """With no DB rows, get_org_llm returns .env/config.py defaults."""
+    """With no DB rows, get_org_llm returns registry defaults."""
+    clear_cache()
     cfg = get_org_llm(None, db_session, role="chat")
-    assert cfg["api_base"] == env_settings.OPENAI_API_BASE
-    assert cfg["model_name"] == env_settings.OPENAI_MODEL
-    assert cfg["api_key"] == env_settings.OPENAI_API_KEY
+    assert cfg["api_base"] == get_setting(db_session, "OPENAI_API_BASE", None)
+    assert cfg["model_name"] == get_setting(db_session, "OPENAI_MODEL", None)
+    assert cfg["api_key"] == get_setting(db_session, "OPENAI_API_KEY", None)
 
 
 def test_get_org_llm_uses_app_settings(db_session):
@@ -143,7 +144,7 @@ def test_get_org_llm_api_key_always_from_env(db_session):
     clear_cache()
 
     cfg = get_org_llm(org.id, db_session, role="chat")
-    assert cfg["api_key"] == env_settings.OPENAI_API_KEY
+    assert cfg["api_key"] == get_setting(db_session, "OPENAI_API_KEY", None)
 
 
 # ---------------------------------------------------------------------------
@@ -151,12 +152,13 @@ def test_get_org_llm_api_key_always_from_env(db_session):
 # ---------------------------------------------------------------------------
 
 def test_get_effective_llm_config_fallback(db_session):
-    """When org_id is None, all values fall back to settings defaults."""
+    """When org_id is None, all values fall back to settings table defaults."""
+    clear_cache()
     cfg = get_effective_llm_config(None, db_session)
-    assert cfg["api_base"] == env_settings.OPENAI_API_BASE
-    assert cfg["model_name"] == env_settings.OPENAI_MODEL
+    assert cfg["api_base"] == get_setting(db_session, "OPENAI_API_BASE", None)
+    assert cfg["model_name"] == get_setting(db_session, "OPENAI_MODEL", None)
     # query_model falls back to model_name when unset
-    assert cfg["query_model"] == (env_settings.QUERY_MODEL or env_settings.OPENAI_MODEL)
+    assert cfg["query_model"] == (get_setting(db_session, "QUERY_MODEL", None) or get_setting(db_session, "OPENAI_MODEL", None))
 
 
 def test_get_effective_llm_config_org_override(db_session):

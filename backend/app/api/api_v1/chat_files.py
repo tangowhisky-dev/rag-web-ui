@@ -16,7 +16,6 @@ from sqlalchemy.orm import Session
 
 from app.api.api_v1.auth import get_current_user
 from app.api.api_v1.rbac import chat_owner_filter as _chat_owner_filter
-from app.core.config import settings
 from app.core.storage import save_ephemeral_file
 from app.db.session import get_db
 from app.models.chat import Chat, ChatFile
@@ -34,7 +33,14 @@ def _estimate_tokens(text: str) -> int:
 
 def _file_token_budget() -> int:
     """25% of total context window reserved for file content."""
-    return settings.OPENAI_MODEL_CONTEXT_SIZE // 4
+    from app.services.settings_service import get_setting
+    from app.db.session import SessionLocal
+    _db = SessionLocal()
+    try:
+        ctx_size = get_setting(_db, "OPENAI_MODEL_CONTEXT_SIZE", None) or 131072
+    finally:
+        _db.close()
+    return ctx_size // 4
 
 
 async def _process_file(db_session_factory, file_id: int, tmp_path: str, filename: str) -> None:

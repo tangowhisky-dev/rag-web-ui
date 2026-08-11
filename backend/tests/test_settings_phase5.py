@@ -92,12 +92,14 @@ def test_tool_call_budget_uses_org_override(db_session):
 # ---------------------------------------------------------------------------
 
 def test_context_budget_falls_back_to_env(db_session):
-    """With no DB rows, ContextBudget uses .env defaults."""
+    """With no DB rows, ContextBudget uses registry defaults."""
+    from app.services.settings_service import get_setting, clear_cache
+    clear_cache()
     budget = ContextBudget(db=db_session, org_id=None)
-    assert budget.context_size == env_settings.OPENAI_MODEL_CONTEXT_SIZE
-    assert budget.reserved_generation == env_settings.CONTEXT_RESERVED_GENERATION
-    assert budget.tool_budget == env_settings.CONTEXT_TOOL_BUDGET
-    assert budget.trigger_ratio == env_settings.CONTEXT_COMPACTION_TRIGGER_RATIO
+    assert budget.context_size == get_setting(db_session, "OPENAI_MODEL_CONTEXT_SIZE", None)
+    assert budget.reserved_generation == get_setting(db_session, "CONTEXT_RESERVED_GENERATION", None)
+    assert budget.tool_budget == get_setting(db_session, "CONTEXT_TOOL_BUDGET", None)
+    assert budget.trigger_ratio == get_setting(db_session, "CONTEXT_COMPACTION_TRIGGER_RATIO", None)
 
 
 def test_context_budget_uses_org_override(db_session):
@@ -113,10 +115,20 @@ def test_context_budget_uses_org_override(db_session):
 
 
 def test_context_budget_without_db_uses_env():
-    """ContextBudget without db falls back to .env defaults."""
+    """ContextBudget without db falls back to registry defaults via a temporary session."""
+    from app.services.settings_service import get_setting, clear_cache
+    clear_cache()
     budget = ContextBudget()
-    assert budget.context_size == env_settings.OPENAI_MODEL_CONTEXT_SIZE
-    assert budget.reserved_generation == env_settings.CONTEXT_RESERVED_GENERATION
+    # Resolve expected values the same way ContextBudget does without db
+    from app.db.session import SessionLocal
+    _db = SessionLocal()
+    try:
+        expected_ctx = get_setting(_db, "OPENAI_MODEL_CONTEXT_SIZE", None)
+        expected_reserved = get_setting(_db, "CONTEXT_RESERVED_GENERATION", None)
+    finally:
+        _db.close()
+    assert budget.context_size == expected_ctx
+    assert budget.reserved_generation == expected_reserved
 
 
 # ---------------------------------------------------------------------------

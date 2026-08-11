@@ -127,17 +127,31 @@ def _get_llm(
     api_key: Optional[str] = None,
     streaming: bool = False,
 ) -> ChatOpenAI:
-    """Build a ChatOpenAI from explicit overrides or .env defaults.
+    """Build a ChatOpenAI from explicit overrides or app-level settings.
 
     Prefer build_chat_llm() / get_org_llm() for per-org resolution.
     This fallback path is used when org context is unavailable (e.g. compaction
     fallback in agent_graph.py).
     """
+    # Resolve from app-level settings when not explicitly provided
+    if model_name is None or api_base is None or api_key is None:
+        from app.services.settings_service import get_setting
+        from app.db.session import SessionLocal
+        _db = SessionLocal()
+        try:
+            if model_name is None:
+                model_name = get_setting(_db, "QUERY_MODEL", None) or get_setting(_db, "OPENAI_MODEL", None)
+            if api_base is None:
+                api_base = get_setting(_db, "OPENAI_API_BASE", None)
+            if api_key is None:
+                api_key = get_setting(_db, "OPENAI_API_KEY", None)
+        finally:
+            _db.close()
     return ChatOpenAI(
-        model=model_name or settings.OPENAI_MODEL,
+        model=model_name,
         temperature=temperature,
-        openai_api_base=api_base or settings.OPENAI_API_BASE,
-        openai_api_key=api_key or settings.OPENAI_API_KEY,
+        openai_api_base=api_base,
+        openai_api_key=api_key,
         streaming=streaming,
     )
 
@@ -197,9 +211,9 @@ async def rewrite_query_node(
             recent_history=recent_history,
             provenance_sources=provenance_sources,
             api_base=api_base,
-            query_model=query_model or settings.QUERY_MODEL or settings.OPENAI_MODEL,
-            openai_api_key=api_key or settings.OPENAI_API_KEY,
-            openai_api_base=api_base or settings.OPENAI_API_BASE,
+            query_model=query_model,
+            openai_api_key=api_key,
+            openai_api_base=api_base,
         )
 
         if provenance.get("reason") == "provenance_rejected":

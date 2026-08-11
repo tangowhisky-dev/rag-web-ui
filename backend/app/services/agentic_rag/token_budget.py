@@ -79,7 +79,15 @@ def get_tokenizer(model_name: Optional[str] = None):
     if _tokenizer_loaded:
         return _tokenizer
 
-    resolved = model_name or settings.TOKENIZER_MODEL or settings.OPENAI_MODEL
+    resolved = model_name or settings.TOKENIZER_MODEL
+    if not resolved:
+        from app.services.settings_service import get_setting
+        from app.db.session import SessionLocal
+        _db = SessionLocal()
+        try:
+            resolved = get_setting(_db, "OPENAI_MODEL", None)
+        finally:
+            _db.close()
     if not resolved:
         _tokenizer_loaded = True
         return None
@@ -160,10 +168,17 @@ class ContextBudget:
             self.tool_budget = tool_budget or get_setting(db, "CONTEXT_TOOL_BUDGET", org_id)
             self.trigger_ratio = get_setting(db, "CONTEXT_COMPACTION_TRIGGER_RATIO", org_id)
         else:
-            self.context_size = context_size or settings.OPENAI_MODEL_CONTEXT_SIZE
-            self.reserved_generation = reserved_generation or settings.CONTEXT_RESERVED_GENERATION
-            self.tool_budget = tool_budget or settings.CONTEXT_TOOL_BUDGET
-            self.trigger_ratio = settings.CONTEXT_COMPACTION_TRIGGER_RATIO
+            # No db session — resolve from app-level settings via a temporary session
+            from app.services.settings_service import get_setting
+            from app.db.session import SessionLocal
+            _db = SessionLocal()
+            try:
+                self.context_size = context_size or get_setting(_db, "OPENAI_MODEL_CONTEXT_SIZE", None)
+                self.reserved_generation = reserved_generation or get_setting(_db, "CONTEXT_RESERVED_GENERATION", None)
+                self.tool_budget = tool_budget or get_setting(_db, "CONTEXT_TOOL_BUDGET", None)
+                self.trigger_ratio = get_setting(_db, "CONTEXT_COMPACTION_TRIGGER_RATIO", None)
+            finally:
+                _db.close()
         self.available = max(self.context_size - self.reserved_generation - self.tool_budget, 0)
         self.used = 0
         self.compaction_threshold = int(self.available * self.trigger_ratio)

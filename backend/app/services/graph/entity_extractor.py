@@ -97,19 +97,24 @@ def _get_llm_client(db: Any = None, org_id: Any = None) -> SyncOpenAI:
     """Get or create the LLM client for entity extraction.
 
     When db and org_id are provided, resolves per-org graph-role config.
-    Falls back to the global singleton (app-level / .env) when not.
+    Falls back to the global singleton (app-level settings) when not.
     """
     global _llm_client
     if db is not None:
         from app.services.agentic_rag.llm_factory import get_org_llm
         cfg = get_org_llm(org_id, db, role="graph")
         return SyncOpenAI(base_url=cfg["api_base"], api_key=cfg["api_key"])
-    # Fallback: global singleton
+    # Fallback: global singleton using app-level settings
     if _llm_client is None:
-        _llm_client = SyncOpenAI(
-            base_url=settings.OPENAI_API_BASE,
-            api_key=settings.OPENAI_API_KEY,
-        )
+        from app.services.settings_service import get_setting
+        from app.db.session import SessionLocal
+        _db = SessionLocal()
+        try:
+            api_key = get_setting(_db, "GRAPHRAG_API_KEY", None) or get_setting(_db, "OPENAI_API_KEY", None)
+            api_base = get_setting(_db, "GRAPHRAG_API_BASE", None) or get_setting(_db, "OPENAI_API_BASE", None)
+        finally:
+            _db.close()
+        _llm_client = SyncOpenAI(base_url=api_base, api_key=api_key)
     return _llm_client
 
 
@@ -119,7 +124,13 @@ def _extraction_model(db: Any = None, org_id: Any = None) -> str:
         from app.services.agentic_rag.llm_factory import get_org_llm
         cfg = get_org_llm(org_id, db, role="graph")
         return cfg["model_name"]
-    return settings.GRAPHRAG_LLM or settings.OPENAI_MODEL
+    from app.services.settings_service import get_setting
+    from app.db.session import SessionLocal
+    _db = SessionLocal()
+    try:
+        return get_setting(_db, "GRAPHRAG_LLM", None) or get_setting(_db, "OPENAI_MODEL", None)
+    finally:
+        _db.close()
 
 
 # ── T01: LLM Query Entity Extraction ─────────────────────────────────────────
