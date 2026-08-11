@@ -105,13 +105,19 @@ async def classify_query(query: str, api_base: Optional[str] = None, query_model
     start = time.perf_counter()
 
     try:
-        if not settings.QUERY_CLASSIFIER_ENABLED:
-            elapsed_ms = (time.perf_counter() - start) * 1000
-            logger.info("[CLASSIFY] disabled | latency=%.1fms query=%s", elapsed_ms, query[:80])
-            return QueryClassification(
-                type=QueryType.FACTUAL, confidence=0.0,
-                latency_ms=elapsed_ms, fallback=True
-            )
+        from app.services.settings_service import get_setting
+        from app.db.session import SessionLocal
+        _db = SessionLocal()
+        try:
+            if not get_setting(_db, "QUERY_CLASSIFIER_ENABLED", None):
+                elapsed_ms = (time.perf_counter() - start) * 1000
+                logger.info("[CLASSIFY] disabled | latency=%.1fms query=%s", elapsed_ms, query[:80])
+                return QueryClassification(
+                    type=QueryType.FACTUAL, confidence=0.0,
+                    latency_ms=elapsed_ms, fallback=True
+                )
+        finally:
+            _db.close()
 
         # Fall back to app-level settings when no explicit overrides provided
         if api_key is None or api_base is None or query_model is None:
@@ -136,7 +142,12 @@ async def classify_query(query: str, api_base: Optional[str] = None, query_model
             base_url=api_base,
         )
 
-        prompt = settings.QUERY_CLASSIFIER_PROMPT.format(query=query)
+        from app.db.session import SessionLocal as _SL2
+        _db2 = _SL2()
+        try:
+            prompt = get_setting(_db2, "QUERY_CLASSIFIER_PROMPT", None).format(query=query)
+        finally:
+            _db2.close()
 
         response = await client.chat.completions.create(
             model=query_model,

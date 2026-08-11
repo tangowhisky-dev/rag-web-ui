@@ -15,7 +15,6 @@ import pytest
 from unittest.mock import patch, MagicMock
 from sqlalchemy.orm import sessionmaker
 
-from app.core.config import settings as env_settings
 from app.models.base import Base
 from app.models.organisation import Organisation
 import app.models.user  # noqa
@@ -193,11 +192,9 @@ def test_get_retrieval_config_without_db_uses_env_defaults():
     Note: preset values still take precedence over env defaults for keys the preset defines.
     """
     config = get_retrieval_config(QueryType.FACTUAL)
-    # FACTUAL preset has dense_weight=0.5, top_k=10 — these override env defaults
+    # FACTUAL preset has dense_weight=0.5, top_k=10 — these override registry defaults
     assert config["dense_weight"] == 0.5  # from FACTUAL preset
     assert config["top_k"] == 10  # from FACTUAL preset
-    # But env defaults are used as the fallback base
-    assert env_settings.HYBRID_DENSE_WEIGHT == config["dense_weight"] or True  # env may differ
 
 
 # ---------------------------------------------------------------------------

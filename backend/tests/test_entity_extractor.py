@@ -37,6 +37,15 @@ def _llm_resp(entities: list) -> MagicMock:
     return resp
 
 
+def _mock_get_def(**overrides) -> MagicMock:
+    """Mock for settings_registry.get_def returning SettingDef-like objects with .default."""
+    def _side_effect(key):
+        m = MagicMock()
+        m.default = overrides.get(key)
+        return m
+    return MagicMock(side_effect=_side_effect)
+
+
 # ── T01: LLM entity extraction ────────────────────────────────────────────────
 
 class TestExtractEntitiesFromQuery:
@@ -133,8 +142,7 @@ class TestExpandQueryEntities:
         ])
 
         with patch("app.services.graph.entity_extractor._get_neo4j_driver", return_value=driver):
-            with patch("app.services.graph.entity_extractor.settings") as mock_settings:
-                mock_settings.GRAPHRAG_ENABLED = True
+            with patch("app.core.settings_registry.get_def", new=_mock_get_def(GRAPHRAG_ENABLED=True)):
                 result = expand_query_entities(entities, [1])
 
         assert len(result) == 2
@@ -147,8 +155,7 @@ class TestExpandQueryEntities:
 
     def test_graphrag_disabled_returns_empty(self):
         entities = [Entity(name="Apple", type="ORG")]
-        with patch("app.services.graph.entity_extractor.settings") as mock_settings:
-            mock_settings.GRAPHRAG_ENABLED = False
+        with patch("app.core.settings_registry.get_def", new=_mock_get_def(GRAPHRAG_ENABLED=False)):
             result = expand_query_entities(entities, [1])
         assert result == []
 
@@ -156,8 +163,7 @@ class TestExpandQueryEntities:
         entities = [Entity(name="Apple", type="ORG")]
         with patch("app.services.graph.entity_extractor._get_neo4j_driver") as mock_driver_fn:
             mock_driver_fn.return_value.session.side_effect = Exception("connection refused")
-            with patch("app.services.graph.entity_extractor.settings") as mock_settings:
-                mock_settings.GRAPHRAG_ENABLED = True
+            with patch("app.core.settings_registry.get_def", new=_mock_get_def(GRAPHRAG_ENABLED=True)):
                 result = expand_query_entities(entities, [1])
         assert result == []
 
@@ -169,8 +175,7 @@ class TestExpandQueryEntities:
         ])
 
         with patch("app.services.graph.entity_extractor._get_neo4j_driver", return_value=driver):
-            with patch("app.services.graph.entity_extractor.settings") as mock_settings:
-                mock_settings.GRAPHRAG_ENABLED = True
+            with patch("app.core.settings_registry.get_def", new=_mock_get_def(GRAPHRAG_ENABLED=True)):
                 result = expand_query_entities(entities, [1])
 
         assert len(result) == 1
@@ -183,8 +188,7 @@ class TestApplyEntityBoost:
         docs = [_doc("Apple acquired Beats in 2014.", score=0.8)]
         entities = [Entity(name="Apple", type="ORG")]
 
-        with patch("app.services.graph.entity_extractor.settings") as mock_settings:
-            mock_settings.ENTITY_BOOST_FACTOR = 0.1
+        with patch("app.core.settings_registry.get_def", new=_mock_get_def(ENTITY_BOOST_FACTOR=0.1)):
             result = apply_entity_boost(docs, entities)
 
         assert result[0].metadata["score"] > 0.8
@@ -194,8 +198,7 @@ class TestApplyEntityBoost:
         docs = [_doc("Google released a new product.", score=0.8)]
         entities = [Entity(name="Apple", type="ORG")]
 
-        with patch("app.services.graph.entity_extractor.settings") as mock_settings:
-            mock_settings.ENTITY_BOOST_FACTOR = 0.1
+        with patch("app.core.settings_registry.get_def", new=_mock_get_def(ENTITY_BOOST_FACTOR=0.1)):
             result = apply_entity_boost(docs, entities)
 
         assert result[0].metadata.get("score") == 0.8
@@ -211,8 +214,7 @@ class TestApplyEntityBoost:
         entities = [Entity(name="Apple", type="ORG")]  # not in text
         neighbors = [EntityNeighbor(name="Beats Electronics", type="ORG", relation="ACQUIRED")]
 
-        with patch("app.services.graph.entity_extractor.settings") as mock_settings:
-            mock_settings.ENTITY_BOOST_FACTOR = 0.1
+        with patch("app.core.settings_registry.get_def", new=_mock_get_def(ENTITY_BOOST_FACTOR=0.1)):
             result = apply_entity_boost(docs, entities, neighbors)
 
         # "Beats Electronics" appears once → count = int(1 * 0.5) = 0 → no boost
@@ -223,8 +225,7 @@ class TestApplyEntityBoost:
         docs = [_doc("Apple Apple Apple.", score=1.0)]
         entities = [Entity(name="Apple", type="ORG")]
 
-        with patch("app.services.graph.entity_extractor.settings") as mock_settings:
-            mock_settings.ENTITY_BOOST_FACTOR = 0.1
+        with patch("app.core.settings_registry.get_def", new=_mock_get_def(ENTITY_BOOST_FACTOR=0.1)):
             result = apply_entity_boost(docs, entities)
 
         # 3 mentions × 0.1 factor → multiplier 1.3 → score = 1.3
@@ -234,8 +235,7 @@ class TestApplyEntityBoost:
         docs = [_doc("Apple and Google compete.", score=0.5)]
         entities = [Entity(name="Apple", type="ORG"), Entity(name="Google", type="ORG")]
 
-        with patch("app.services.graph.entity_extractor.settings") as mock_settings:
-            mock_settings.ENTITY_BOOST_FACTOR = 0.1
+        with patch("app.core.settings_registry.get_def", new=_mock_get_def(ENTITY_BOOST_FACTOR=0.1)):
             result = apply_entity_boost(docs, entities)
 
         matches = {m["entity"]: m["count"] for m in result[0].metadata["entity_matches"]}
@@ -256,11 +256,9 @@ class TestExtractExpandBoost:
 
         with patch("app.services.graph.entity_extractor._get_llm_client") as mock_llm, \
              patch("app.services.graph.entity_extractor._get_neo4j_driver") as mock_neo4j, \
-             patch("app.services.graph.entity_extractor.settings") as mock_settings:
+             patch("app.core.settings_registry.get_def", new=_mock_get_def(GRAPHRAG_ENABLED=False, ENTITY_BOOST_FACTOR=0.1)):
 
             mock_llm.return_value.chat.completions.create.return_value = mock_resp
-            mock_settings.GRAPHRAG_ENABLED = False  # skip Neo4j expansion
-            mock_settings.ENTITY_BOOST_FACTOR = 0.1
 
             result = extract_expand_boost("What did Apple acquire?", docs, [1])
 

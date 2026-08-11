@@ -1,12 +1,13 @@
 """
-settings_service.py — 3-tier settings resolution + CRUD + cache + secret encryption.
+settings_service.py — 2-tier settings resolution + CRUD + cache + secret encryption.
 
 Resolution precedence (per org, per key):
   1. Org override (scope='org', org_id=<id>) — if key is org-overridable
   2. App value (scope='app', org_id=NULL)
-  3. .env / config.py default (from the registry / global settings singleton)
+  3. Registry default
 
-When RUNTIME_SETTINGS_ENABLED is false, all reads fall back to config.py (Tier 0 only).
+The settings table is the single source of truth for runtime-configurable values.
+config.py / .env only controls deployment infrastructure (DB, Redis, Qdrant, etc.).
 
 Secret values (defn.secret=True) are encrypted at rest using Fernet symmetric
 encryption, keyed by PBKDF2(SECRET_KEY). Encrypted values are prefixed with
@@ -14,7 +15,6 @@ encryption, keyed by PBKDF2(SECRET_KEY). Encrypted values are prefixed with
 """
 import json
 import logging
-import os
 import time
 from typing import Any, Optional
 
@@ -157,48 +157,28 @@ def validate_value(key: str, value: Any) -> Any:
 
 # ── Resolution ────────────────────────────────────────────────────────────
 
-def _get_env_default(key: str) -> Any:
-    """Get the fallback default for a key.
-
-    Resolution order:
-      1. config.py attribute (for settings that still have .env fields)
-      2. os.getenv (for settings removed from config.py but still in .env)
-      3. registry default
-    """
-    val = getattr(env_settings, key, None)
-    if val is not None:
-        return val
-    # Check os.getenv for settings that were removed from config.py
-    # but may still have env vars set in the deployment
-    env_val = os.getenv(key)
-    if env_val is not None:
-        defn = get_def(key)
-        if defn:
-            if defn.value_type == "int":
-                return int(env_val)
-            elif defn.value_type == "float":
-                return float(env_val)
-            elif defn.value_type == "bool":
-                return env_val.lower() == "true"
-        return env_val
+def _registry_default(key: str) -> Any:
+    """Return the registry default for a key, or None if not in the registry."""
     defn = get_def(key)
     if defn is not None:
         return defn.default
-    return None
+    # For non-registry keys, fall back to config.py (infrastructure settings)
+    return getattr(env_settings, key, None)
 
 
 def get_setting(db: Session, key: str, org_id: Optional[int] = None) -> Any:
-    """Resolve a single setting with 3-tier precedence.
+    """Resolve a single setting with 2-tier precedence.
 
-    If RUNTIME_SETTINGS_ENABLED is false, returns the .env/config.py default directly.
-    Falls back to .env/config.py default on any DB error (e.g. mock sessions in tests).
+    1. Org override (if scope='org' and org_id is set)
+    2. App value (scope='app', org_id=NULL)
+    3. Registry default
+
+    Falls back to registry default on any DB error (e.g. mock sessions in tests).
     """
-    if not env_settings.RUNTIME_SETTINGS_ENABLED:
-        return _get_env_default(key)
-
     defn = get_def(key)
     if defn is None:
-        return _get_env_default(key)
+        # Not a registry key — read from config.py (infrastructure setting)
+        return getattr(env_settings, key, None)
 
     # Check cache
     cache_key = (org_id if defn.scope == "org" else None, key)
@@ -209,7 +189,7 @@ def get_setting(db: Session, key: str, org_id: Optional[int] = None) -> Any:
             return val
 
     try:
-        # Tier 3: org override (only if scope allows and org_id is set)
+        # Tier 1: org override (only if scope allows and org_id is set)
         if defn.scope == "org" and org_id is not None:
             row = db.query(Setting).filter(
                 Setting.scope == "org", Setting.org_id == org_id, Setting.key == key
@@ -228,13 +208,12 @@ def get_setting(db: Session, key: str, org_id: Optional[int] = None) -> Any:
             _cache[cache_key] = (val, time.time())
             return val
     except Exception:
-        # DB error (mock session, connection issue, etc.) — fall back to env default
+        # DB error (mock session, connection issue, etc.) — fall back to registry default
         pass
 
-    # Tier 1: .env / config.py default
-    val = _get_env_default(key)
-    if val is not None:
-        _cache[cache_key] = (val, time.time())
+    # Tier 3: registry default
+    val = defn.default
+    _cache[cache_key] = (val, time.time())
     return val
 
 
@@ -272,7 +251,7 @@ class OrgSettings:
             return resolved[key]
         raise AttributeError(f"Unknown setting: {key}")
 
-    # Computed properties mirroring config.py
+    # Computed properties
     @property
     def chunk_overlap(self) -> int:
         return int(self.CHUNK_SIZE * self.OVERLAP_PERCENTAGE)
@@ -496,40 +475,3 @@ def _invalidate_all_org(org_id: int) -> None:
 def clear_cache() -> None:
     """Clear the entire cache. Useful for tests."""
     _cache.clear()
-
-
-# ── Startup seed ──────────────────────────────────────────────────────────
-
-def seed_app_settings(db: Session) -> None:
-    """Ensure app-level rows exist for every registry key.
-
-    Only inserts rows when the .env value differs from the config.py hardcoded default.
-    This preserves current deployments' .env customizations into the DB once.
-    Idempotent: safe to run on every startup.
-    """
-    if not env_settings.RUNTIME_SETTINGS_ENABLED:
-        return
-
-    for defn in REGISTRY:
-        env_val = getattr(env_settings, defn.key, None)
-        if env_val is None:
-            continue
-
-        # Check if an app row already exists
-        existing = db.query(Setting).filter(
-            Setting.scope == "app", Setting.org_id.is_(None), Setting.key == defn.key
-        ).first()
-        if existing:
-            continue
-
-        # Only seed if env value differs from the hardcoded default
-        if env_val != defn.default:
-            try:
-                encoded = _encode(env_val, defn)
-                row = Setting(scope="app", org_id=None, key=defn.key, value=encoded)
-                db.add(row)
-                logger.info("[SEED] Seated app setting %s from .env (differs from default)", defn.key)
-            except Exception as e:
-                logger.warning("[SEED] Failed to seed %s: %s", defn.key, e)
-
-    db.commit()

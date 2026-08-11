@@ -58,7 +58,6 @@ These describe the deployment environment. They are read at import time, never a
 | `REDIS_URL`, `REDIS_HOST`, `REDIS_PORT`, `REDIS_INSIGHT_PORT` | Redis endpoint — same. |
 | `SECRET_KEY` | JWT signing secret. Changing invalidates every session. Security-sensitive; never browseable in UI. |
 | `OPENAI_API_KEY` | Secret. Never stored in cleartext DB or shown in UI. |
-| `RELIK_URL` | ReLiK service URL — shared infra service, not per-org. |
 | `UPLOAD_DIR` | Filesystem mount point. Changing requires a remount/restart. |
 | `FASTEMBED_CACHE_DIR` | Filesystem mount point for ONNX model cache. |
 | `RERANKER_CACHE_DIR` | Filesystem mount point for reranker model cache. |
@@ -420,7 +419,7 @@ Register in `models/__init__.py`.
 
 Core responsibilities:
 
-1. **Resolve** a setting for a given org: org override → app value → `.env`/config.py default.
+1. **Resolve** a setting for a given org: org override → app value → registry default.
 2. **Read all** settings for an org as a typed dict (for service call sites).
 3. **CRUD** with validation against the registry.
 4. **Cache** with a short TTL.
@@ -438,7 +437,7 @@ _REGISTRY_BY_KEY = {d.key: d for d in REGISTRY}
 _CACHE_TTL = 30  # seconds
 
 def get_setting(db: Session, key: str, org_id: Optional[int] = None) -> Any:
-    """Resolve a single setting with 3-tier precedence."""
+    """Resolve a single setting with 2-tier precedence."""
     defn = _REGISTRY_BY_KEY[key]
     # Tier 3: org override (only if scope allows)
     if defn.scope == "org" and org_id is not None:
@@ -453,13 +452,13 @@ def get_setting(db: Session, key: str, org_id: Optional[int] = None) -> Any:
     ).first()
     if row is not None and row.value is not None:
         return _decode(row.value, defn)
-    # Tier 1: .env / config.py default
-    return getattr(env_settings, key, defn.default)
+    # Tier 2: registry default
+    return defn.default
 
 def get_org_settings(db: Session, org_id: Optional[int]) -> dict:
     """Resolve ALL registry keys for an org into a typed dict.
     For app-only keys, returns the app value regardless of org_id.
-    For org keys, applies 3-tier precedence."""
+    For org keys, applies 2-tier precedence."""
     out = {}
     for defn in REGISTRY:
         out[defn.key] = get_setting(db, defn.key, org_id if defn.scope == "org" else None)
@@ -530,9 +529,7 @@ DELETE /api/admin/orgs/{org_id}/settings           → clear all org overrides
 
 **Schema endpoints:** `/settings/schema` returns the registry metadata (types, labels, categories, validation rules, scope) so the frontend can build forms dynamically without hardcoding field definitions. This prevents UI/backend drift.
 
-**Provenance:** each setting item includes a `source` field: `"database"` (a DB row exists) or `"install_default"` (falling back to `.env`/`config.py`). The UI shows a badge per field so operators know where the effective value comes from.
-
-**Feature flag (rollback):** `RUNTIME_SETTINGS_ENABLED=false` in `.env` forces Tier 0 only (all reads go to `config.py` singleton, DB ignored). This provides a safe rollback path if the settings service has issues. Default: `true`.
+**Provenance:** each setting item includes a `source` field: `"database"` (a DB row exists) or `"install_default"` (falling back to the registry default). The UI shows a badge per field so operators know where the effective value comes from.
 
 **Scope enforcement:**
 - App endpoints use `Depends(require_super_admin)`.
@@ -722,14 +719,14 @@ export interface SettingUpdate { key: string; value: any }
 
 ### 9.2 Backfill / seed on startup
 
-`backend/app/main.py` startup: ensure the `settings` table has an app row for every registry key (insert missing ones from `.env`/config.py defaults). Idempotent. This handles fresh installs and registry additions in future releases without a new migration per key.
+`backend/app/main.py` startup: the settings table is not seeded at startup. Registry defaults are used when no DB row exists. This handles fresh installs and registry additions in future releases without a new migration per key.
 
 ### 9.3 Phased rollout
 
 | Phase | Scope | Risk |
 |---|---|---|
 | **0 — Align inventory** | Add `REASONING_MODEL` to `config.py`. Document canonical key names (use code names: `HYBRID_SPARSE_WEIGHT` not `HYBRID_QDRANT_SPARSE_WEIGHT`). Freeze registry list from §4. | Low — config.py addition only. |
-| **1 — Schema + service** | Add `settings` table, `Setting` model, `settings_registry.py`, `settings_service.py`, `OrgSettings`. No service changes yet. Add startup seed. Add `RUNTIME_SETTINGS_ENABLED` feature flag. | Low — additive only. |
+| **1 — Schema + service** | Add `settings` table, `Setting` model, `settings_registry.py`, `settings_service.py`, `OrgSettings`. No service changes yet. Registry provides canonical defaults. | Low — additive only. |
 | **2 — API** | Add `settings.py` router + schemas (including `/schema` endpoints). Super Admin and Admin endpoints live but read-only against the new table. Existing `OrgLLMConfig` endpoints still work (dual-write starts). | Low — no behavior change. |
 | **3 — Wire LLM resolvers** | Rewrite `llm_factory.get_org_llm` and `chat_service.get_effective_llm_config` to read from `OrgSettings`. Migrate `OrgLLMConfig` data into KV. Dual-write begins. | Medium — LLM path is hot. Verify per-org model/base still resolves. |
 | **4 — Wire retrieval + graph query + ingestion** | Thread `OrgSettings` into `retrieval.py` (query), `graph_service.py` (query path), `reranker.py`, `entity_extractor.py`, `historical_memory.py`. Ingestion paths (`document_processor`, `graph_service` extract) use **app-level** `OrgSettings` only. | High — largest diff. Do behind the `org_settings=None` default so unconverted paths keep working. |
@@ -746,7 +743,6 @@ Each phase is independently shippable. Phases 0–2 change nothing about runtime
 | `MYSQL_*`, `QDRANT_*`, `NEO4J_*`, `REDIS_*` | yes | — | — | (infra) |
 | `SECRET_KEY` | yes | — | — | (secret) |
 | `OPENAI_API_KEY` | yes | — | — | (secret) |
-| `RELIK_URL` | yes | — | — | (infra) |
 | `UPLOAD_DIR`, `FASTEMBED_CACHE_DIR`, `RERANKER_CACHE_DIR` | yes | — | — | (mount) |
 | `TZ`, `LOG_LEVEL`, `TRUSTED_PROXIES`, `TIMEOUT_SECONDS` | yes | — | — | (host) |
 | `ROOT_ORG`, `SUPERADMIN_*`, `COMPOSE_PROFILES` | yes | — | — | (init/docker) |
@@ -803,7 +799,7 @@ Each phase is independently shippable. Phases 0–2 change nothing about runtime
 | **Concurrent edits (two admins same org)** | Lost update | Last-write-wins with `updated_at`. Optimistic locking (version column) is a later enhancement if needed. |
 | **Config drift between .env and DB** | Confusion about the active value | `GET /api/admin/settings/effective` returns the fully resolved snapshot. UI shows provenance badge ("Database" vs "Install default") per field. |
 | **Org override of ingestion setting** | Inconsistent indexes for shared DataStores | Ingestion settings are `scope="app"` — org endpoints reject them with 403. Ingestion code uses app-level `OrgSettings` only. |
-| **Settings service failure** | App unusable | `RUNTIME_SETTINGS_ENABLED=false` feature flag forces Tier 0 only (all reads go to `config.py`). |
+| **Settings service failure** | App unusable | `get_setting()` catches DB exceptions and falls back to the registry default. No feature flag needed. |
 
 ### 11.1 Testing plan
 
@@ -819,7 +815,6 @@ Each phase is independently shippable. Phases 0–2 change nothing about runtime
 | Ingestion isolation | org override of `CHUNK_SIZE` (rejected: app-only key) does NOT change chunk_size used in processor |
 | Validation | bad types/ranges → 422; org endpoint with app-only key → 403 |
 | Import seed | non-default `.env` values imported once; idempotent |
-| Feature flag | `RUNTIME_SETTINGS_ENABLED=false` → all reads fall back to `config.py` |
 
 ### Frontend
 
@@ -893,9 +888,8 @@ Each phase is independently shippable. Phases 0–2 change nothing about runtime
 4. Org Admin cannot change embedding dim, chunk size, watcher, or secrets via API (403/422).
 5. Ingestion of a shared DataStore always uses app ingestion settings, regardless of org overrides.
 6. Existing LLM Config UI/API continues to work through the façade until removed.
-7. `.env.example` documents only Tier 0 + optional install defaults; operational tuning docs point at Admin UIs.
-8. `RUNTIME_SETTINGS_ENABLED=false` restores pre-migration behavior.
-9. Pytest coverage for resolution, ACL, ingestion isolation, and at least one wired retrieval path.
+7. `.env.example` documents only deployment/infrastructure settings; operational tuning docs point at Admin UIs.
+8. Pytest coverage for resolution, ACL, ingestion isolation, and at least one wired retrieval path.
 
 ## 14. Operator runbook (what needs restart/reindex/reingest)
 

@@ -84,7 +84,8 @@ def rerank(
         return docs
 
     if score_threshold is None:
-        score_threshold = settings.RERANKER_SCORE_THRESHOLD
+        from app.core.settings_registry import get_def
+        score_threshold = get_def("RERANKER_SCORE_THRESHOLD").default
 
     encoder = _get_cross_encoder()
 

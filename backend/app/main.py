@@ -13,7 +13,7 @@ from app.services.datastore_watcher import DataStoreWatcher
 from app.services.discovery import StartupRecoveryService
 from app.services.retrieval.reranker import preload_cross_encoder
 from app.services.infrastructure.utils import preload_sparse_embedder
-from app.services.settings_service import seed_app_settings
+from app.services.settings_service import clear_cache
 from fastapi import FastAPI
 
 logging.basicConfig(
@@ -130,16 +130,6 @@ async def lifespan(app: FastAPI):
     # Seed root organisation and superadmin (runs before other startup tasks)
     _seed_root_org_and_superadmin()
 
-    # Seed app settings from .env (only values that differ from config.py defaults)
-    try:
-        db = SessionLocal()
-        try:
-            seed_app_settings(db)
-        finally:
-            db.close()
-    except Exception as e:
-        logging.getLogger(__name__).warning("Failed to seed app settings: %s", e)
-
     # Initialize local file storage
     init_storage()
 
@@ -164,7 +154,13 @@ async def lifespan(app: FastAPI):
 
     # Start the DataStore watcher service after recovery
     global watcher_service
-    if settings.WATCHER_ENABLED:
+    from app.services.settings_service import get_setting
+    _db = SessionLocal()
+    try:
+        _watcher_enabled = get_setting(_db, "WATCHER_ENABLED", None)
+    finally:
+        _db.close()
+    if _watcher_enabled:
         try:
             _services["watcher"] = DataStoreWatcher()
             _services["watcher"].start()

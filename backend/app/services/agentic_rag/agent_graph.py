@@ -51,7 +51,6 @@ def _writer():
 # Per-turn call caps for tools that can be invoked in a tight loop.
 # Resolved per-request via the settings service (org-overridable).
 def _tool_call_budget(db, org_id) -> dict:
-    from app.services.settings_service import get_setting
     return {
         "rag_retrieve": get_setting(db, "AGENT_MAX_RETRIEVALS", org_id),
         "code_execute": get_setting(db, "AGENT_MAX_CODE_EXEC", org_id),
@@ -164,6 +163,7 @@ def _extract_json_block(text: str) -> str | None:
 
 from app.services.agentic_rag.llm_factory import build_chat_llm
 from app.services.settings_service import get_setting
+from app.core.settings_registry import get_def
 from app.services.agentic_rag.nodes import (
     _agent_step,
     answer_evaluation_node,
@@ -247,7 +247,9 @@ def _prune_contiguous_overlaps(docs: list[dict]) -> list[dict]:
     if not docs:
         return docs
 
-    max_overlap = max(200, settings.chunk_overlap * 2)
+    chunk_size = get_def("CHUNK_SIZE").default
+    overlap_pct = get_def("OVERLAP_PERCENTAGE").default
+    max_overlap = max(200, int(chunk_size * overlap_pct) * 2)
 
     # Group by document_id, sort by chunk_index within each group.
     by_doc: dict[Any, list[dict]] = {}
@@ -514,7 +516,7 @@ async def _compact_messages_llm(
     from app.services.agentic_rag.nodes import _messages_to_conversation_text
     from app.services.agentic_rag.prompts import COMPACTION_SYSTEM_PROMPT, COMPACTION_USER_PROMPT
 
-    keep_recent = get_setting(ctx.db, "COMPACTION_KEEP_RECENT", ctx.org_id) if ctx else settings.COMPACTION_KEEP_RECENT
+    keep_recent = get_setting(ctx.db, "COMPACTION_KEEP_RECENT", ctx.org_id) if ctx else get_def("COMPACTION_KEEP_RECENT").default
     recent = messages[-keep_recent:] if keep_recent else []
     old = messages[:len(messages) - len(recent)]
     # Drop a previous summary from *old* so it is re-summarised rather than
@@ -531,7 +533,7 @@ async def _compact_messages_llm(
             {"role": "user", "content": COMPACTION_USER_PROMPT.format(conversation=conversation_text)},
         ])
         summary = str(response.content).strip()
-        max_chars = get_setting(ctx.db, "COMPACTION_SUMMARY_MAX_CHARS", ctx.org_id) if ctx else settings.COMPACTION_SUMMARY_MAX_CHARS
+        max_chars = get_setting(ctx.db, "COMPACTION_SUMMARY_MAX_CHARS", ctx.org_id) if ctx else get_def("COMPACTION_SUMMARY_MAX_CHARS").default
         if len(summary) > max_chars:
             summary = summary[:max_chars] + "\n\n[...summary truncated]"
         summary_msg = HumanMessage(
@@ -607,7 +609,7 @@ async def _compact_if_needed(
     the caller can rebuild its prompt without having to interpret reducer
     markers. Both are empty when no compaction was needed.
     """
-    if not (get_setting(ctx.db, "COMPACTION_ENABLED", ctx.org_id) if ctx else settings.COMPACTION_ENABLED):
+    if not (get_setting(ctx.db, "COMPACTION_ENABLED", ctx.org_id) if ctx else get_def("COMPACTION_ENABLED").default):
         return {}, {}
 
     from app.services.agentic_rag.token_budget import ContextBudget
@@ -662,7 +664,7 @@ async def _compact_if_needed(
 
     # Stage 3: summarise old messages (LLM call).
     messages = list(state.get("messages", []))
-    if len(messages) > (get_setting(ctx.db, "COMPACTION_KEEP_RECENT", ctx.org_id) if ctx else settings.COMPACTION_KEEP_RECENT):
+    if len(messages) > (get_setting(ctx.db, "COMPACTION_KEEP_RECENT", ctx.org_id) if ctx else get_def("COMPACTION_KEEP_RECENT").default):
         message_updates, resolved, summary = await _compact_messages_llm(messages, ctx=ctx)
         if summary is not None:
             updates["messages"] = message_updates
@@ -974,7 +976,6 @@ def _wall_clock_exceeded(state: AgentState) -> bool:
     started_at = state.get("started_at")
     if started_at is None:
         return False
-    from app.services.settings_service import get_setting
     from app.db.session import SessionLocal
     org_id = state.get("org_id")
     _db = SessionLocal()
@@ -987,7 +988,6 @@ def _wall_clock_exceeded(state: AgentState) -> bool:
 
 def route_think(state: AgentState) -> str:
     iteration = state.get("iteration", 0)
-    from app.services.settings_service import get_setting
     from app.db.session import SessionLocal
     org_id = state.get("org_id")
     _db = SessionLocal()
@@ -1014,7 +1014,6 @@ def route_reflect_final(state: AgentState) -> str:
     reflection = state.get("reflection_final", {})
     ready = reflection.get("ready", True) if isinstance(reflection, dict) else True
     iteration = state.get("iteration", 0)
-    from app.services.settings_service import get_setting
     from app.db.session import SessionLocal
     org_id = state.get("org_id")
     _db = SessionLocal()
@@ -1666,7 +1665,6 @@ def _build_execution_summary(state: AgentState) -> dict:
             failures.append({"tool": o.tool, "error": o.error})
 
     # Remaining retrieval budget.
-    from app.services.settings_service import get_setting
     from app.db.session import SessionLocal
     org_id = state.get("org_id")
     _db = SessionLocal()

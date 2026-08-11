@@ -71,6 +71,7 @@ from langchain_core.documents import Document as LangchainDocument
 
 from app.core.config import settings
 from app.services.agentic_rag.retry import with_retry_sync
+from app.services.settings_service import get_setting
 
 logger = logging.getLogger(__name__)
 
@@ -460,6 +461,8 @@ async def build_graph_for_document(
     chunk_ids: list[str],
     data_store_id: Optional[int] = None,
     pt=None,            # optional ProgressTimeout for periodic pings
+    db: Optional[Session] = None,
+    org_id: Optional[int] = None,
 ) -> None:
     """
     Extract entity/relationship graph from document chunks and store in Neo4j.
@@ -478,11 +481,10 @@ async def build_graph_for_document(
       data_store_id      — datastore (optional)
       file_name          — human-readable source
     """
-    if not settings.GRAPHRAG_ENABLED:
+    if not get_setting(db, "GRAPHRAG_ENABLED", None):
         return
 
     # Resolve app-level ingestion settings from the settings service
-    from app.services.settings_service import get_setting
     from app.db.session import SessionLocal
     _db = SessionLocal()
     try:
@@ -590,21 +592,15 @@ def expand_docs_via_graph(
     Non-fatal — returns [] on any failure so the caller's pipeline continues
     with only the original vector search results.
     """
-    if not settings.GRAPHRAG_ENABLED or not docs:
+    if not get_setting(db, "GRAPHRAG_ENABLED", None) or not docs:
         return []
 
     from qdrant_client import QdrantClient
 
     # Resolve org-overridable settings
-    if db is not None:
-        from app.services.settings_service import get_setting
-        hops_val = get_setting(db, "GRAPHRAG_RETRIEVAL_HOPS", org_id)
-        fanout_val = get_setting(db, "GRAPHRAG_ENTITY_FANOUT_CAP", org_id)
-        limit_val = get_setting(db, "GRAPHRAG_RETRIEVAL_LIMIT", org_id)
-    else:
-        hops_val = settings.GRAPHRAG_RETRIEVAL_HOPS
-        fanout_val = settings.GRAPHRAG_ENTITY_FANOUT_CAP
-        limit_val = settings.GRAPHRAG_RETRIEVAL_LIMIT
+    hops_val = get_setting(db, "GRAPHRAG_RETRIEVAL_HOPS", org_id)
+    fanout_val = get_setting(db, "GRAPHRAG_ENTITY_FANOUT_CAP", org_id)
+    limit_val = get_setting(db, "GRAPHRAG_RETRIEVAL_LIMIT", org_id)
 
     # Extract the Qdrant point UUIDs from the retrieved docs
     seen_point_ids = set()
@@ -725,7 +721,11 @@ def expand_docs_via_graph(
 # ── Retrieval: entity context enrichment ──────────────────────────────────────
 
 @with_retry_sync(max_attempts=3)
-def enrich_docs_with_graph(docs: list[LangchainDocument]) -> list[LangchainDocument]:
+def enrich_docs_with_graph(
+    docs: list[LangchainDocument],
+    db: Optional[Session] = None,
+    org_id: Optional[int] = None,
+) -> list[LangchainDocument]:
     """
     Append [Graph context] entity relationship triples to each doc's text.
 
@@ -741,7 +741,7 @@ def enrich_docs_with_graph(docs: list[LangchainDocument]) -> list[LangchainDocum
 
     Non-fatal per doc — failures return the doc unchanged.
     """
-    if not settings.GRAPHRAG_ENABLED or not docs:
+    if not get_setting(db, "GRAPHRAG_ENABLED", None) or not docs:
         return docs
 
     driver = _get_driver()

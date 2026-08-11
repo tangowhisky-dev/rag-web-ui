@@ -24,7 +24,15 @@ api_router.include_router(datastore_recovery.router, prefix="/admin", tags=["dat
 @api_router.get("/config", tags=["config"])
 def get_client_config():
     """Expose non-sensitive runtime configuration to the frontend."""
-    return {
-        "chunk_size": settings.CHUNK_SIZE,
-        "chunk_overlap": settings.chunk_overlap,
-    }
+    from app.db.session import SessionLocal
+    from app.services.settings_service import get_setting
+    db = SessionLocal()
+    try:
+        chunk_size = get_setting(db, "CHUNK_SIZE", None)
+        overlap_pct = get_setting(db, "OVERLAP_PERCENTAGE", None)
+        return {
+            "chunk_size": chunk_size,
+            "chunk_overlap": int(chunk_size * overlap_pct),
+        }
+    finally:
+        db.close()

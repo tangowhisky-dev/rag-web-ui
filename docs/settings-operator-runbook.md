@@ -1,18 +1,8 @@
 # Operator Runbook: Settings Migration
 
 This runbook covers operational concerns for the runtime settings system
-introduced in the settings migration. Settings are now resolved via a 3-tier
-precedence: **org override → app-level DB value → .env/config.py default**.
-
-## Feature flag: `RUNTIME_SETTINGS_ENABLED`
-
-- **`true`** (default): Settings are resolved from the database with 3-tier
-  precedence. Super Admin and Admin UIs are functional.
-- **`false`**: All settings reads fall back to `.env`/`config.py` defaults.
-  This is the rollback path if the settings table or service has issues.
-
-To roll back: set `RUNTIME_SETTINGS_ENABLED=false` in `.env` and restart the
-backend. No data loss occurs — DB rows remain but are simply not read.
+introduced in the settings migration. Settings are now resolved via a 2-tier
+precedence: **org override → app-level DB value → registry default**.
 
 ## Restart-required changes
 
@@ -87,22 +77,18 @@ After deploying the settings migration:
    DESCRIBE settings;
    ```
 
-2. Verify seed ran (app-level rows for non-default .env values):
+2. Verify app-level rows:
    ```sql
    SELECT key, scope, LEFT(value, 50) FROM settings WHERE scope = 'app';
    ```
 
-3. Test the feature flag:
-   - Set `RUNTIME_SETTINGS_ENABLED=false`, restart, verify settings come from .env
-   - Set `RUNTIME_SETTINGS_ENABLED=true`, restart, verify DB settings take effect
-
-4. Test the API:
+3. Test the API:
    ```bash
    # As super admin
    curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/admin/settings
    curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/admin/settings/schema
    ```
 
-5. Test the UI:
+4. Test the UI:
    - Navigate to Admin → Settings (super admin only)
    - Navigate to Admin → Orgs → Settings button (per-org)

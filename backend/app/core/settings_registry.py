@@ -2,10 +2,9 @@
 settings_registry.py — Single source of metadata for all runtime-settable keys.
 
 The registry drives:
-  - DB seeding (which keys exist, what their defaults are)
   - API response shape (types, labels, categories, validation)
   - UI rendering (tabs, fields, types)
-  - Settings resolution (3-tier precedence: org → app → .env/config.py default)
+  - Settings resolution (2-tier precedence: org override → app DB value → registry default)
 
 Adding a setting = one line here + one read in the consuming service.
 No new table, no new migration for the schema itself (only seed data).
@@ -16,6 +15,39 @@ from typing import Any, Literal, Optional, Tuple
 
 Scope = Literal["app", "org"]          # "app" = app-only; "org" = app-default + org-override
 Reload = Literal["next_request", "restart", "ingest"]
+
+
+_DEFAULT_CLASSIFIER_PROMPT = (
+    "Classify this query into exactly one category. Respond with only the category name.\n\n"
+    "Categories:\n"
+    "FACTUAL — Questions asking for specific facts, definitions, or concrete information (e.g., 'What is RRF?', 'Define BM25 scoring')\n"
+    "ENTITY_CENTRIC — Questions about specific entities, organizations, people, or products (e.g., 'What did Apple acquire?', 'Who founded Microsoft?')\n"
+    "MULTI_PART — Questions comparing/contrasting things, asking for pros/cons, or requesting multiple aspects (e.g., 'Compare RRF and BM25', 'Pros and cons of vector databases')\n"
+    "AMBIGUOUS — Vague, context-dependent, or incomplete queries (e.g., 'Tell me about that', 'What do you think?')\n\n"
+    "Query: {query}\n\n"
+    "Category: "
+)
+
+import json as _json
+
+_DEFAULT_RETRIEVAL_PRESETS = _json.dumps({
+    "FACTUAL": {
+        "dense_weight": 0.5, "sparse_weight": 0.3, "exact_weight": 0.2,
+        "top_k": 10
+    },
+    "ENTITY_CENTRIC": {
+        "dense_weight": 0.6, "sparse_weight": 0.2, "exact_weight": 0.2,
+        "top_k": 10
+    },
+    "MULTI_PART": {
+        "dense_weight": 0.5, "sparse_weight": 0.5, "exact_weight": 0.0,
+        "top_k": 10
+    },
+    "AMBIGUOUS": {
+        "dense_weight": 0.4, "sparse_weight": 0.4, "exact_weight": 0.2,
+        "top_k": 15
+    }
+})
 
 
 @dataclass(frozen=True)
@@ -71,12 +103,6 @@ _APP_ONLY = [
     SettingDef("GRAPHRAG_API_BASE", "GraphRAG", "Graph extraction API base URL",
                "str", None, scope="app", reload="ingest",
                description="Base URL for graph extraction. Falls back to OPENAI_API_BASE."),
-    SettingDef("SPLADE_MODEL", "LLM & Models", "SPLADE sparse model",
-               "str", "prithivida/Splade_PP_en_v1", scope="app", reload="restart",
-               description="Loaded once by FastEmbed into a process-global ONNX session."),
-    SettingDef("RERANKER_MODEL", "Reranker", "Reranker model",
-               "str", "Xenova/ms-marco-MiniLM-L-12-v2", scope="app", reload="restart",
-               description="Loaded once into a process-global cross-encoder."),
     SettingDef("MEMORY_EMBEDDING_MODEL", "System", "Memory embedding model",
                "str", None, scope="app", reload="restart",
                description="Embedding model for Redis store; tied to global embeddings."),
@@ -120,7 +146,7 @@ _APP_ONLY = [
                choices=("native", "json_text", "auto"),
                description="Agent protocol choice: native, json_text, or auto."),
     SettingDef("QUERY_CLASSIFIER_PROMPT", "Query Classification", "Classifier prompt template",
-               "text", "", scope="app", reload="next_request",
+               "text", _DEFAULT_CLASSIFIER_PROMPT, scope="app", reload="next_request",
                description="Large template; should be consistent across orgs. Enable toggle is org-overridable."),
 ]
 
@@ -189,7 +215,7 @@ _ORG_OVERRIDABLE = [
                "bool", True, scope="org", reload="next_request",
                description="Graph retrieval leg toggle at query time. Ingestion unaffected."),
     SettingDef("RETRIEVAL_CONFIG_PRESETS", "Retrieval", "Per-query-type presets",
-               "json", None, scope="org", reload="next_request",
+               "json", _DEFAULT_RETRIEVAL_PRESETS, scope="org", reload="next_request",
                description="JSON object: FACTUAL, ENTITY_CENTRIC, MULTI_PART, AMBIGUOUS presets."),
     SettingDef("ENTITY_AWARE_ENABLED", "Retrieval", "Enable entity-aware retrieval",
                "bool", True, scope="org", reload="next_request"),

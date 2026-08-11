@@ -125,6 +125,8 @@ class DataStoreWatcher:
 
         try:
             from watchdog.observers import Observer
+            from app.core.settings_registry import get_def
+            poll_interval = get_def("WATCH_POLL_INTERVAL").default
 
             # Force PollingObserver when inotify is disabled (e.g., Docker Desktop
             # on macOS where inotify doesn't properly propagate events from
@@ -132,17 +134,17 @@ class DataStoreWatcher:
             if not settings.WATCHER_USE_INOTIFY:
                 from watchdog.observers.polling import PollingObserver
 
-                self._observer = PollingObserver(timeout=settings.WATCH_POLL_INTERVAL)
+                self._observer = PollingObserver(timeout=poll_interval)
                 self._observer.start()
                 logger.info(
                     "[WATCHER] observer started (PollingObserver with "
                     "recursive=True, WATCH_POLL_INTERVAL=%ds, "
                     "WATCHER_USE_INOTIFY=%s)",
-                    settings.WATCH_POLL_INTERVAL,
+                    poll_interval,
                     settings.WATCHER_USE_INOTIFY,
                 )
             else:
-                self._observer = Observer(timeout=settings.WATCH_POLL_INTERVAL)
+                self._observer = Observer(timeout=poll_interval)
                 self._observer.start()
                 logger.info(
                     "[WATCHER] observer started (Observer with recursive=True, "
@@ -152,13 +154,15 @@ class DataStoreWatcher:
         except (ImportError, OSError) as e:
             # Fallback to PollingObserver if native observer is unavailable
             from watchdog.observers.polling import PollingObserver
+            from app.core.settings_registry import get_def
+            poll_interval = get_def("WATCH_POLL_INTERVAL").default
 
-            self._observer = PollingObserver(timeout=settings.WATCH_POLL_INTERVAL)
+            self._observer = PollingObserver(timeout=poll_interval)
             self._observer.start()
             logger.warning(
                 "[WATCHER] native observer unavailable, "
                 "falling back to PollingObserver (WATCH_POLL_INTERVAL=%ds): %s",
-                settings.WATCH_POLL_INTERVAL,
+                poll_interval,
                 e,
             )
 

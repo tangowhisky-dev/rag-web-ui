@@ -3,14 +3,12 @@ test_settings_phase1.py — Phase 1: registry, model, service, resolution, CRUD.
 
 Tests:
   1. Registry completeness: all keys present, no duplicates.
-  2. 3-tier precedence: org override → app value → .env default.
-  3. Reset semantics: delete org → app value; delete app → .env default.
+  2. 2-tier precedence: org override → app value → registry default.
+  3. Reset semantics: delete org → app value; delete app → registry default.
   4. Validation: type coercion, min/max, unknown keys.
   5. Scope enforcement: org CRUD rejects app-only keys.
   6. OrgSettings accessor: attribute access + computed properties.
   7. Cache invalidation on upsert/reset.
-  8. Feature flag: RUNTIME_SETTINGS_ENABLED=false → Tier 0 only.
-  9. Seed: only non-default .env values are seeded.
 """
 import json
 import pytest
@@ -20,7 +18,6 @@ from app.core.settings_registry import (
     REGISTRY, REGISTRY_BY_KEY, ORG_OVERRIDABLE_KEYS, APP_ONLY_KEYS,
     get_def, is_org_overridable, all_keys,
 )
-from app.core.config import settings as env_settings
 from app.models.setting import Setting
 from app.models.base import Base
 from app.models.organisation import Organisation
@@ -35,7 +32,7 @@ from app.services.settings_service import (
     get_setting, get_org_settings, OrgSettings,
     upsert_app_setting, upsert_org_setting,
     reset_app_setting, reset_org_setting, reset_all_org_settings,
-    validate_value, seed_app_settings, clear_cache,
+    validate_value, clear_cache,
     get_all_app_settings_with_meta, get_all_org_settings_with_meta,
 )
 
@@ -117,10 +114,10 @@ def test_all_keys_covers_registry():
 # 2. 3-tier precedence
 # ---------------------------------------------------------------------------
 
-def test_precedence_falls_back_to_env_default(db_session):
-    """With no DB rows, get_setting returns the .env/config.py default."""
+def test_precedence_falls_back_to_registry_default(db_session):
+    """With no DB rows, get_setting returns the registry default."""
     val = get_setting(db_session, "RETRIEVAL_TOP_K", org_id=None)
-    assert val == env_settings.RETRIEVAL_TOP_K
+    assert val == get_def("RETRIEVAL_TOP_K").default
 
 
 def test_precedence_app_value_overrides_env(db_session):
@@ -171,12 +168,12 @@ def test_reset_org_reverts_to_app(db_session):
 
 
 def test_reset_app_reverts_to_env(db_session):
-    """Deleting app value reverts to .env/config.py default."""
+    """Deleting app value reverts to registry default."""
     upsert_app_setting(db_session, "RETRIEVAL_TOP_K", 50)
     assert get_setting(db_session, "RETRIEVAL_TOP_K", org_id=None) == 50
 
     reset_app_setting(db_session, "RETRIEVAL_TOP_K")
-    assert get_setting(db_session, "RETRIEVAL_TOP_K", org_id=None) == env_settings.RETRIEVAL_TOP_K
+    assert get_setting(db_session, "RETRIEVAL_TOP_K", org_id=None) == get_def("RETRIEVAL_TOP_K").default
 
 
 def test_reset_all_org_settings(db_session):
@@ -312,58 +309,7 @@ def test_cache_invalidation_on_org_upsert(db_session):
 
 
 # ---------------------------------------------------------------------------
-# 8. Feature flag
-# ---------------------------------------------------------------------------
-
-def test_feature_flag_disabled_returns_env_default(db_session, monkeypatch):
-    """When RUNTIME_SETTINGS_ENABLED is false, all reads go to config.py."""
-    monkeypatch.setattr(env_settings, "RUNTIME_SETTINGS_ENABLED", False)
-    upsert_app_setting(db_session, "RETRIEVAL_TOP_K", 99)
-    val = get_setting(db_session, "RETRIEVAL_TOP_K", None)
-    assert val == env_settings.RETRIEVAL_TOP_K
-    assert val != 99
-
-
-# ---------------------------------------------------------------------------
-# 9. Seed
-# ---------------------------------------------------------------------------
-
-def test_seed_only_non_defaults(db_session, monkeypatch):
-    """Seed only inserts rows when .env value differs from config.py default."""
-    # Ensure RUNTIME_SETTINGS_ENABLED is True
-    monkeypatch.setattr(env_settings, "RUNTIME_SETTINGS_ENABLED", True)
-    clear_cache()
-
-    seed_app_settings(db_session)
-
-    # Check that some rows were seeded (most .env values differ from defaults in test env)
-    rows = db_session.query(Setting).filter(Setting.scope == "app").all()
-    # In test env, SQLALCHEMY_DATABASE_URI is set to sqlite, so at least that differs
-    # But that's not in the registry. Check that seed ran without error.
-    # The key point: no row for keys where env == default
-    for row in rows:
-        defn = get_def(row.key)
-        if defn and defn.default == getattr(env_settings, row.key, None):
-            # This shouldn't happen — seed skips when env == default
-            pytest.fail(f"Seeded {row.key} but env value equals default")
-
-
-def test_seed_idempotent(db_session, monkeypatch):
-    """Running seed twice doesn't create duplicate rows."""
-    monkeypatch.setattr(env_settings, "RUNTIME_SETTINGS_ENABLED", True)
-    clear_cache()
-
-    seed_app_settings(db_session)
-    count1 = db_session.query(Setting).filter(Setting.scope == "app").count()
-
-    seed_app_settings(db_session)
-    count2 = db_session.query(Setting).filter(Setting.scope == "app").count()
-
-    assert count1 == count2
-
-
-# ---------------------------------------------------------------------------
-# 10. Metadata API helpers
+# 8. Metadata API helpers
 # ---------------------------------------------------------------------------
 
 def test_get_all_app_settings_with_meta(db_session):

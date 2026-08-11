@@ -46,6 +46,7 @@ from sqlalchemy import text, bindparam
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.services.settings_service import get_setting
 from app.models.query_classifier import QueryType
 from app.services.infrastructure import content_hash, get_qdrant_client, get_openai_client, get_sparse_embedder
 from app.services.agentic_rag.retry import with_retry_sync
@@ -142,11 +143,13 @@ def get_retrieval_config(query_type: QueryType, db: Optional[Session] = None, or
         e_weight = get_setting(db, "HYBRID_EXACT_WEIGHT", org_id)
         top_k = get_setting(db, "RETRIEVAL_TOP_K", org_id)
     else:
-        presets = settings.retrieval_config_presets
-        d_weight = settings.HYBRID_DENSE_WEIGHT
-        s_weight = settings.HYBRID_SPARSE_WEIGHT
-        e_weight = settings.HYBRID_EXACT_WEIGHT
-        top_k = settings.RETRIEVAL_TOP_K
+        from app.core.settings_registry import get_def
+        presets_raw = get_def("RETRIEVAL_CONFIG_PRESETS").default
+        presets = json.loads(presets_raw) if isinstance(presets_raw, str) else (presets_raw or {})
+        d_weight = get_def("HYBRID_DENSE_WEIGHT").default
+        s_weight = get_def("HYBRID_SPARSE_WEIGHT").default
+        e_weight = get_def("HYBRID_EXACT_WEIGHT").default
+        top_k = get_def("RETRIEVAL_TOP_K").default
 
     preset = presets.get(query_type.value, {})
 
@@ -201,7 +204,7 @@ def _qdrant_payload_to_doc(payload: dict) -> LangchainDocument:
 # ── Search legs ───────────────────────────────────────────────────────────────
 
 @with_retry_sync(max_attempts=3)
-def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], candidates: int, min_score: Optional[float] = None) -> Dict[str, _Candidate]:
+def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: Session, candidates: int, org_id: Optional[int] = None, min_score: Optional[float] = None) -> Dict[str, _Candidate]:
     """Qdrant cosine-similarity search using the dense (OpenAI) embedding.
     
     Searches both KB collections (kb_{kb_id}) and DataStore collections (ds_{datastore_id}).
@@ -222,7 +225,7 @@ def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], candi
 
     result: Dict[str, _Candidate] = {}
     rank = 0
-    min_score = settings.DENSE_MIN_SCORE if min_score is None else min_score
+    min_score = get_setting(db, "DENSE_MIN_SCORE", org_id) if min_score is None else min_score
     if min_score > 0.0:
         logger.info("[DENSE] applying min_cosine=%.2f", min_score)
 
@@ -297,7 +300,7 @@ def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], candi
 
 
 @with_retry_sync(max_attempts=3)
-def _sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], candidates: int, min_score: Optional[float] = None) -> Dict[str, _Candidate]:
+def _sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: Session, candidates: int, org_id: Optional[int] = None, min_score: Optional[float] = None) -> Dict[str, _Candidate]:
     """Qdrant learned-sparse search (SPLADE via FastEmbed).
     
     Searches both KB collections (kb_{kb_id}) and DataStore collections (ds_{datastore_id}).
@@ -317,7 +320,7 @@ def _sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], cand
 
     result: Dict[str, _Candidate] = {}
     rank = 0
-    min_score = settings.SPARSE_MIN_SCORE if min_score is None else min_score
+    min_score = get_setting(db, "SPARSE_MIN_SCORE", org_id) if min_score is None else min_score
     if min_score > -float("inf"):
         logger.info("[SPARSE] applying min_score=%.2f", min_score)
     # Search KB collections
@@ -391,7 +394,7 @@ def _sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], cand
 
 
 @with_retry_sync(max_attempts=3)
-def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: Session, candidates: int, min_score: Optional[float] = None) -> Dict[str, _Candidate]:
+def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: Session, candidates: int, org_id: Optional[int] = None, min_score: Optional[float] = None) -> Dict[str, _Candidate]:
     """MySQL InnoDB FULLTEXT search — exact keyword / BM25 scoring, server-side.
     
     Searches both KB documents and DataStore documents.
@@ -480,7 +483,7 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
         for i, row in enumerate(all_rows[:5]):
             logger.debug("  exact[%d] fts_score=%.4f text=%r", i, row.fts_score, (row.chunk_text or "")[:80])
 
-    min_score = settings.EXACT_MIN_SCORE if min_score is None else min_score
+    min_score = get_setting(db, "EXACT_MIN_SCORE", org_id) if min_score is None else min_score
     result: Dict[str, _Candidate] = {}
     filtered = 0
     for rank, row in enumerate(all_rows):
@@ -643,7 +646,7 @@ async def hybrid_search_with_legs(
     legs: dict[str, dict] = {}
 
     if enabled["dense"]:
-        results, err = _run_leg("dense", _dense_search, query, kb_ids, datastore_ids or [], pool)
+        results, err = _run_leg("dense", _dense_search, query, kb_ids, datastore_ids or [], db, pool, org_id)
         legs["dense"] = {"status": "failed" if err else "ok", "count": len(results), "error": err}
         dense = results
     else:
@@ -651,7 +654,7 @@ async def hybrid_search_with_legs(
         legs["dense"] = {"status": "disabled", "count": 0, "error": None}
 
     if enabled["sparse"]:
-        results, err = _run_leg("sparse", _sparse_search, query, kb_ids, datastore_ids or [], pool)
+        results, err = _run_leg("sparse", _sparse_search, query, kb_ids, datastore_ids or [], db, pool, org_id)
         legs["sparse"] = {"status": "failed" if err else "ok", "count": len(results), "error": err}
         sparse = results
     else:
@@ -659,7 +662,7 @@ async def hybrid_search_with_legs(
         legs["sparse"] = {"status": "disabled", "count": 0, "error": None}
 
     if enabled["exact"]:
-        results, err = _run_leg("exact", _exact_search, query, kb_ids, datastore_ids or [], db, pool)
+        results, err = _run_leg("exact", _exact_search, query, kb_ids, datastore_ids or [], db, pool, org_id)
         legs["exact"] = {"status": "failed" if err else "ok", "count": len(results), "error": err}
         exact = results
     else:
@@ -759,7 +762,7 @@ async def hybrid_search_with_legs(
                     len(docs),
                 )
             else:
-                docs = rerank(query=query, docs=docs)
+                docs = rerank(query=query, docs=docs, score_threshold=get_setting(db, "RERANKER_SCORE_THRESHOLD", org_id))
                 logger.info("hybrid_search_with_legs: reranker reduced to %d docs", len(docs))
         except Exception as exc:
             logger.warning("hybrid_search_with_legs: reranker failed (using RRF order): %s", exc)
@@ -806,9 +809,9 @@ async def hybrid_search(
         [k for k, v in enabled.items() if v],
     )
 
-    dense        = _dense_search(query, kb_ids, datastore_ids, pool)           if enabled["dense"]          else {}
-    sparse = _sparse_search(query, kb_ids, datastore_ids, pool)  if enabled["sparse"]  else {}
-    exact        = _exact_search(query, kb_ids, datastore_ids, db, pool)       if enabled["exact"]          else {}
+    dense        = _dense_search(query, kb_ids, datastore_ids, db, pool, org_id)           if enabled["dense"]          else {}
+    sparse = _sparse_search(query, kb_ids, datastore_ids, db, pool, org_id)  if enabled["sparse"]  else {}
+    exact        = _exact_search(query, kb_ids, datastore_ids, db, pool, org_id)       if enabled["exact"]          else {}
 
     docs = [c.doc for c in _rrf_merge_candidates(dense, sparse, exact, top_k)]
 
@@ -849,14 +852,16 @@ def dense_search_docs(
     query: str,
     kb_ids: List[int],
     datastore_ids: List[int],
+    db: Session,
+    org_id: Optional[int] = None,
     top_k: Optional[int] = None,
     min_score: Optional[float] = None,
 ) -> List[LangchainDocument]:
     """Run only the dense leg and return its ranked candidate docs."""
-    candidates = top_k or settings.RETRIEVAL_TOP_K
+    candidates = top_k or get_setting(db, "RETRIEVAL_TOP_K", org_id)
     pool = candidates * _LEG_POOL_MULTIPLIER
     return _candidates_to_docs(
-        _dense_search(query, kb_ids, datastore_ids, pool, min_score=min_score), "dense"
+        _dense_search(query, kb_ids, datastore_ids, db, pool, org_id, min_score=min_score), "dense"
     )
 
 
@@ -864,14 +869,16 @@ def sparse_search_docs(
     query: str,
     kb_ids: List[int],
     datastore_ids: List[int],
+    db: Session,
+    org_id: Optional[int] = None,
     top_k: Optional[int] = None,
     min_score: Optional[float] = None,
 ) -> List[LangchainDocument]:
     """Run only the sparse leg and return its ranked candidate docs."""
-    candidates = top_k or settings.RETRIEVAL_TOP_K
+    candidates = top_k or get_setting(db, "RETRIEVAL_TOP_K", org_id)
     pool = candidates * _LEG_POOL_MULTIPLIER
     return _candidates_to_docs(
-        _sparse_search(query, kb_ids, datastore_ids, pool, min_score=min_score), "sparse"
+        _sparse_search(query, kb_ids, datastore_ids, db, pool, org_id, min_score=min_score), "sparse"
     )
 
 
@@ -880,12 +887,13 @@ def exact_search_docs(
     kb_ids: List[int],
     datastore_ids: List[int],
     db: Session,
+    org_id: Optional[int] = None,
     top_k: Optional[int] = None,
     min_score: Optional[float] = None,
 ) -> List[LangchainDocument]:
     """Run only the exact (MySQL FTS) leg and return its ranked candidate docs."""
-    candidates = top_k or settings.RETRIEVAL_TOP_K
+    candidates = top_k or get_setting(db, "RETRIEVAL_TOP_K", org_id)
     pool = candidates * _LEG_POOL_MULTIPLIER
     return _candidates_to_docs(
-        _exact_search(query, kb_ids, datastore_ids, db, pool, min_score=min_score), "exact"
+        _exact_search(query, kb_ids, datastore_ids, db, pool, org_id, min_score=min_score), "exact"
     )

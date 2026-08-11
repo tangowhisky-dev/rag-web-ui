@@ -4,17 +4,15 @@ test_settings_phase7.py — Phase 7: Hardening + deprecation.
 Tests:
   1. Legacy LLM config GET endpoint is marked deprecated.
   2. Legacy LLM config PUT endpoint is marked deprecated.
-  3. RUNTIME_SETTINGS_ENABLED=false falls back to env defaults.
-  4. Settings cache invalidation on upsert.
-  5. AGENT_HISTORY_PAIRS is org-overridable.
-  6. ADAPTIVE_RETRIEVAL_ENABLED is org-overridable.
-  7. Retrieval leg flags resolve per-org in query endpoint path.
+  3. Settings cache invalidation on upsert.
+  4. AGENT_HISTORY_PAIRS is org-overridable.
+  5. ADAPTIVE_RETRIEVAL_ENABLED is org-overridable.
+  6. Retrieval leg flags resolve per-org in query endpoint path.
 """
 import pytest
-from unittest.mock import patch, MagicMock
 from sqlalchemy.orm import sessionmaker
 
-from app.core.config import settings as env_settings
+from app.core.settings_registry import get_def
 from app.models.base import Base
 from app.models.organisation import Organisation
 import app.models.user  # noqa
@@ -64,33 +62,14 @@ def _create_org(db, name="TestOrg"):
 
 
 # ---------------------------------------------------------------------------
-# 3. Feature flag fallback
-# ---------------------------------------------------------------------------
-
-def test_feature_flag_false_falls_back_to_env(db_session):
-    """When RUNTIME_SETTINGS_ENABLED=false, get_setting returns env default."""
-    with patch("app.services.settings_service.env_settings.RUNTIME_SETTINGS_ENABLED", False):
-        val = get_setting(db_session, "RETRIEVAL_TOP_K", None)
-        assert val == env_settings.RETRIEVAL_TOP_K
-
-
-def test_feature_flag_true_uses_db(db_session):
-    """When RUNTIME_SETTINGS_ENABLED=true, get_setting uses DB values."""
-    upsert_app_setting(db_session, "RETRIEVAL_TOP_K", 99)
-    clear_cache()
-    val = get_setting(db_session, "RETRIEVAL_TOP_K", None)
-    assert val == 99
-
-
-# ---------------------------------------------------------------------------
-# 4. Cache invalidation
+# 3. Cache invalidation
 # ---------------------------------------------------------------------------
 
 def test_cache_invalidation_on_upsert(db_session):
     """Cache is invalidated when a setting is upserted."""
-    # First read populates cache with env default
+    # First read populates cache with registry default
     val1 = get_setting(db_session, "RETRIEVAL_TOP_K", None)
-    assert val1 == env_settings.RETRIEVAL_TOP_K
+    assert val1 == get_def("RETRIEVAL_TOP_K").default
 
     # Upsert a new value (which invalidates cache)
     upsert_app_setting(db_session, "RETRIEVAL_TOP_K", 50)

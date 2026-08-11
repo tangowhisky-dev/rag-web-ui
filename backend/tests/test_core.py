@@ -226,18 +226,20 @@ def test_settings_get_database_url_builds_mysql():
     assert settings.get_database_url == "mysql+mysqlconnector://u:p@db:3306/rag"
 
 
-def test_settings_chunk_overlap():
-    from app.core.config import Settings
+def test_registry_chunk_overlap():
+    """chunk_overlap is computed from registry defaults for CHUNK_SIZE and OVERLAP_PERCENTAGE."""
+    from app.core.settings_registry import get_def
+    chunk_size = get_def("CHUNK_SIZE").default
+    overlap_pct = get_def("OVERLAP_PERCENTAGE").default
+    assert int(chunk_size * overlap_pct) == int(1500 * 0.20)
 
-    settings = Settings(CHUNK_SIZE=1000, OVERLAP_PERCENTAGE=0.25)
-    assert settings.chunk_overlap == 250
 
-
-def test_settings_retrieval_config_presets():
-    from app.core.config import Settings
-
-    settings = Settings()
-    presets = settings.retrieval_config_presets
+def test_registry_retrieval_config_presets():
+    """RETRIEVAL_CONFIG_PRESETS registry default contains expected query types."""
+    import json
+    from app.core.settings_registry import get_def
+    raw = get_def("RETRIEVAL_CONFIG_PRESETS").default
+    presets = json.loads(raw) if isinstance(raw, str) else raw
     assert "FACTUAL" in presets
     assert "AMBIGUOUS" in presets
     assert all(

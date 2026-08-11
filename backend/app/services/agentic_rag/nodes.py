@@ -15,6 +15,7 @@ from langgraph.config import get_stream_writer
 from langgraph.types import Command, interrupt
 
 from app.core.config import settings
+from app.core.settings_registry import get_def
 
 from app.services.infrastructure import content_hash
 from app.services.infrastructure.utils import _serialise_doc
@@ -47,7 +48,8 @@ def select_recent_history(messages: list, max_pairs: int | None = None) -> list:
     from langchain_core.messages import HumanMessage, AIMessage
 
     if max_pairs is None:
-        max_pairs = settings.AGENT_HISTORY_PAIRS
+        from app.core.settings_registry import get_def
+        max_pairs = get_def("AGENT_HISTORY_PAIRS").default
 
     history: list = []
     # Skip the final message (current query).
@@ -344,7 +346,7 @@ def filter_node(state: AgentState, threshold: Optional[float] = None) -> dict:
         if not docs:
             return {"retrieved_docs": []}
 
-        threshold = settings.RERANKER_SCORE_THRESHOLD if threshold is None else threshold
+        threshold = get_def("RERANKER_SCORE_THRESHOLD").default if threshold is None else threshold
 
         filtered = [
             d for d in docs
@@ -377,7 +379,7 @@ def adaptive_reranking_node(state: Any = None, db: Any = None) -> dict:
         if not all_docs:
             return {"adaptive_rerunning": False, "adaptive_reran": True}
 
-        threshold = settings.ADAPTIVE_RETRIEVAL_RERANKER_THRESHOLD
+        threshold = get_def("ADAPTIVE_RETRIEVAL_RERANKER_THRESHOLD").default
 
         filtered = [
             d for d in all_docs
@@ -453,7 +455,7 @@ async def dense_retrieval_node(
             writer({"event": "progress", "phase": "dense_retrieval", "message": "Running dense vector retrieval..."})
 
         try:
-            docs = dense_search_docs(query=query, kb_ids=kb_ids, datastore_ids=datastore_ids, min_score=min_score)
+            docs = dense_search_docs(query=query, kb_ids=kb_ids, datastore_ids=datastore_ids, db=db, org_id=org_id, min_score=min_score)
             failed = False
         except Exception as exc:
             logger.warning("[DENSE_RETRIEVAL] failed: %s", exc)
@@ -496,7 +498,7 @@ async def sparse_retrieval_node(
             writer({"event": "progress", "phase": "sparse_retrieval", "message": "Running sparse keyword retrieval..."})
 
         try:
-            docs = sparse_search_docs(query=query, kb_ids=kb_ids, datastore_ids=datastore_ids, min_score=min_score)
+            docs = sparse_search_docs(query=query, kb_ids=kb_ids, datastore_ids=datastore_ids, db=db, org_id=org_id, min_score=min_score)
             failed = False
         except Exception as exc:
             logger.warning("[SPARSE_RETRIEVAL] failed: %s", exc)
@@ -539,7 +541,7 @@ async def exact_retrieval_node(
             writer({"event": "progress", "phase": "exact_retrieval", "message": "Running exact full-text retrieval..."})
 
         try:
-            docs = exact_search_docs(query=query, kb_ids=kb_ids, datastore_ids=datastore_ids, db=db, min_score=min_score)
+            docs = exact_search_docs(query=query, kb_ids=kb_ids, datastore_ids=datastore_ids, db=db, org_id=org_id, min_score=min_score)
             failed = False
         except Exception as exc:
             logger.warning("[EXACT_RETRIEVAL] failed: %s", exc)

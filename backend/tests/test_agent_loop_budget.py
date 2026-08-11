@@ -2,25 +2,25 @@
 
 from unittest.mock import patch
 
-from app.core.config import settings
 from app.services.agentic_rag.agent_graph import route_think
 from app.services.agentic_rag.token_budget import count_tokens
 
 
 def test_route_think_routes_to_tool_when_calls_present():
     state = {"iteration": 1, "tool_calls": [{"tool": "rag_retrieve"}]}
-    assert route_think(state) == "tool"
+    with patch("app.services.agentic_rag.agent_graph.get_setting", return_value=8):
+        assert route_think(state) == "tool"
 
 
 def test_route_think_routes_to_reflect_final_at_max_iterations():
-    with patch.object(settings, "AGENT_MAX_ITERATIONS", 3):
-        state = {"iteration": 3, "tool_calls": []}
+    state = {"iteration": 3, "tool_calls": []}
+    with patch("app.services.agentic_rag.agent_graph.get_setting", return_value=3):
         assert route_think(state) == "reflect_final"
 
 
 def test_route_think_routes_to_reflect_final_when_no_calls():
-    with patch.object(settings, "AGENT_MAX_ITERATIONS", 5):
-        state = {"iteration": 2, "tool_calls": []}
+    state = {"iteration": 2, "tool_calls": []}
+    with patch("app.services.agentic_rag.agent_graph.get_setting", return_value=5):
         assert route_think(state) == "reflect_final"
 
 

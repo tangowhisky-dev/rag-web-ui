@@ -106,8 +106,7 @@ def test_preflight_does_not_require_api_keys(db_session):
     clear_cache()
 
     # No API keys set anywhere — should still be ok
-    with patch("app.services.settings_service.os.getenv", return_value=None):
-        result = check_required_settings(db_session, "user", org_id=None)
+    result = check_required_settings(db_session, "user", org_id=None)
 
     key_issues = [i for i in result.issues if "API_KEY" in i.key]
     assert len(key_issues) == 0
@@ -198,8 +197,7 @@ def test_preflight_optional_settings_for_super_admin(db_session):
     upsert_app_setting(db_session, "DENSE_EMBEDDINGS_MODEL", "local-embedding-model")
     clear_cache()
 
-    with patch("app.services.settings_service.os.getenv", return_value=None):
-        result = check_required_settings(db_session, "super_admin", org_id=None)
+    result = check_required_settings(db_session, "super_admin", org_id=None)
 
     warnings = [i for i in result.issues if i.severity == "warning"]
     keys = {i.key for i in warnings}
@@ -217,8 +215,7 @@ def test_preflight_no_optional_settings_for_normal_user(db_session):
     upsert_app_setting(db_session, "DENSE_EMBEDDINGS_MODEL", "local-embedding-model")
     clear_cache()
 
-    with patch("app.services.settings_service.os.getenv", return_value=None):
-        result = check_required_settings(db_session, "user", org_id=None)
+    result = check_required_settings(db_session, "user", org_id=None)
 
     warnings = [i for i in result.issues if i.severity == "warning"]
     assert len(warnings) == 0
@@ -235,8 +232,7 @@ def test_preflight_org_override_satisfies_check(db_session):
     upsert_app_setting(db_session, "DENSE_EMBEDDINGS_MODEL", "local-embedding-model")
     clear_cache()
 
-    with patch("app.services.settings_service.os.getenv", return_value=None):
-        result = check_required_settings(db_session, "user", org_id=org.id)
+    result = check_required_settings(db_session, "user", org_id=org.id)
 
     base_issues = [i for i in result.issues if i.key == "OPENAI_API_BASE"]
     assert len(base_issues) == 0

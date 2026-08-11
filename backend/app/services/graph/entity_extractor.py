@@ -227,7 +227,8 @@ def expand_query_entities(
     Returns:
         Deduplicated list of EntityNeighbor objects.
     """
-    if not settings.GRAPHRAG_ENABLED or not entities:
+    from app.core.settings_registry import get_def
+    if not get_def("GRAPHRAG_ENABLED").default or not entities:
         return []
 
     driver = _get_neo4j_driver()
@@ -305,7 +306,8 @@ def apply_entity_boost(
     if not entities:
         return docs
 
-    boost_factor = settings.ENTITY_BOOST_FACTOR
+    from app.core.settings_registry import get_def
+    boost_factor = get_def("ENTITY_BOOST_FACTOR").default
 
     # Build (pattern, entity_name) pairs — query entities get full weight,
     # expanded neighbors get half weight (they're one hop away).

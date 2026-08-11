@@ -225,11 +225,12 @@ class TestGenerateSynthesisReport:
 # ── Config ────────────────────────────────────────────────────────────────────
 
 class TestSynthesisConfig:
-    def test_synthesis_mode_enabled_setting(self):
-        from app.core.config import settings
-        assert hasattr(settings, "SYNTHESIS_MODE_ENABLED")
-        assert isinstance(settings.SYNTHESIS_MODE_ENABLED, bool)
+    def test_synthesis_mode_enabled_in_registry(self):
+        from app.core.settings_registry import get_def
+        defn = get_def("SYNTHESIS_MODE_ENABLED")
+        assert defn is not None
+        assert isinstance(defn.default, bool)
 
     def test_default_is_true(self):
-        from app.core.config import settings
-        assert settings.SYNTHESIS_MODE_ENABLED is True
+        from app.core.settings_registry import get_def
+        assert get_def("SYNTHESIS_MODE_ENABLED").default is True

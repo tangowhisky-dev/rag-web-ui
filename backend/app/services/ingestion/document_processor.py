@@ -213,14 +213,17 @@ async def process_document_background(
         task.progress_message = "Starting…"
         db.commit()
 
+        from app.services.settings_service import get_setting
+        silence_s = get_setting(db, "PROCESSING_TIMEOUT_SILENCE_S", None)
+
         def _on_timeout() -> None:
             logger.warning(
                 "[PROGRESS_TIMEOUT] task_id=%s silence_s=%s — "
                 "task may still be processing (graph build is non-fatal)",
-                task_id, settings.PROCESSING_TIMEOUT_SILENCE_S,
+                task_id, silence_s,
             )
 
-        async with ProgressTimeout(settings.PROCESSING_TIMEOUT_SILENCE_S, _on_timeout) as pt:
+        async with ProgressTimeout(silence_s, _on_timeout) as pt:
 
             local_temp_path = get_abs_path(temp_path)
             logger.info(f"Task {task_id}: Using file at {local_temp_path}")
@@ -447,7 +450,7 @@ async def process_document_background(
             # Await the graph build directly so the event loop stays alive until
             # it completes.  This prevents "Task was destroyed but it is pending"
             # when the loop would otherwise close while the graph task is running.
-            if settings.GRAPHRAG_ENABLED:
+            if get_setting(db, "GRAPHRAG_ENABLED", None):
                 _doc_id = document.id   # capture plain int before session closes
                 _chunks = [p[1] for p in qdrant_payloads]
                 _chunk_ids = [p[0] for p in qdrant_payloads]

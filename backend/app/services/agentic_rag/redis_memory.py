@@ -27,6 +27,7 @@ from langgraph.store.redis.aio import AsyncRedisStore
 from openai import AsyncOpenAI
 
 from app.core.config import settings
+from app.services.settings_service import get_setting
 
 
 def _get_embedding_dim() -> int:
@@ -123,11 +124,16 @@ class RedisMemory:
         transparently falls back to in-memory implementations so the pipeline
         keeps working (without cross-process persistence).
         """
-        if not settings.MEMORY_ENABLED:
-            logger.info("[MEMORY] Memory persistence disabled; using in-memory fallback.")
-            self._checkpointer = MemorySaver()
-            self._store = InMemoryStore()
-            return
+        from app.db.session import SessionLocal
+        _db = SessionLocal()
+        try:
+            if not get_setting(_db, "MEMORY_ENABLED", None):
+                logger.info("[MEMORY] Memory persistence disabled; using in-memory fallback.")
+                self._checkpointer = MemorySaver()
+                self._store = InMemoryStore()
+                return
+        finally:
+            _db.close()
 
         if self._checkpointer is None:
             logger.info("[MEMORY] Initialising Redis checkpointer | uri=%s", self._uri)
@@ -147,7 +153,6 @@ class RedisMemory:
         if self._store is None:
             logger.info("[MEMORY] Initialising Redis store | uri=%s", self._uri)
             # Embeddings API key/base are super_admin-only (app scope).
-            from app.services.settings_service import get_setting
             from app.db.session import SessionLocal
             _db = SessionLocal()
             try:
@@ -203,8 +208,13 @@ class RedisMemory:
         extra: Optional[dict[str, Any]] = None,
     ) -> None:
         """Persist a user/assistant turn to the long-term memory store."""
-        if not settings.MEMORY_ENABLED:
-            return
+        from app.db.session import SessionLocal
+        _db = SessionLocal()
+        try:
+            if not get_setting(_db, "MEMORY_ENABLED", None):
+                return
+        finally:
+            _db.close()
         if not user_id and not chat_id:
             return
 
@@ -237,8 +247,13 @@ class RedisMemory:
         limit: int = 5,
     ) -> List[dict[str, Any]]:
         """Search long-term memory for relevant past turns."""
-        if not settings.MEMORY_ENABLED:
-            return []
+        from app.db.session import SessionLocal
+        _db = SessionLocal()
+        try:
+            if not get_setting(_db, "MEMORY_ENABLED", None):
+                return []
+        finally:
+            _db.close()
         if not user_id and not chat_id:
             return []
 
@@ -355,8 +370,13 @@ async def _cleanup_chat_redis(chat_id: int, user_id: Optional[int] = None) -> No
     FastAPI endpoint (which runs in a threadpool) without relying on the
     global singleton's event loop.
     """
-    if not settings.MEMORY_ENABLED:
-        return
+    from app.db.session import SessionLocal
+    _db = SessionLocal()
+    try:
+        if not get_setting(_db, "MEMORY_ENABLED", None):
+            return
+    finally:
+        _db.close()
 
     uri = settings.REDIS_URL
     thread_id = f"chat-{chat_id}"
@@ -387,8 +407,13 @@ async def _cleanup_chat_redis(chat_id: int, user_id: Optional[int] = None) -> No
 
 async def _cleanup_user_redis(user_id: int, chat_ids: List[int]) -> None:
     """Delete a user's memory namespace plus every chat memory/checkpoint."""
-    if not settings.MEMORY_ENABLED:
-        return
+    from app.db.session import SessionLocal
+    _db = SessionLocal()
+    try:
+        if not get_setting(_db, "MEMORY_ENABLED", None):
+            return
+    finally:
+        _db.close()
 
     uri = settings.REDIS_URL
 
@@ -416,8 +441,13 @@ async def _cleanup_user_redis(user_id: int, chat_ids: List[int]) -> None:
 
 def delete_chat_redis_sync(chat_id: int, user_id: Optional[int] = None) -> None:
     """Sync entrypoint for chat Redis cleanup from sync FastAPI endpoints."""
-    if not settings.MEMORY_ENABLED:
-        return
+    from app.db.session import SessionLocal
+    _db = SessionLocal()
+    try:
+        if not get_setting(_db, "MEMORY_ENABLED", None):
+            return
+    finally:
+        _db.close()
     try:
         asyncio.run(_cleanup_chat_redis(chat_id, user_id=user_id))
     except Exception as exc:
@@ -426,8 +456,13 @@ def delete_chat_redis_sync(chat_id: int, user_id: Optional[int] = None) -> None:
 
 def delete_user_redis_sync(user_id: int, chat_ids: List[int]) -> None:
     """Sync entrypoint for user Redis cleanup from sync FastAPI endpoints."""
-    if not settings.MEMORY_ENABLED:
-        return
+    from app.db.session import SessionLocal
+    _db = SessionLocal()
+    try:
+        if not get_setting(_db, "MEMORY_ENABLED", None):
+            return
+    finally:
+        _db.close()
     try:
         asyncio.run(_cleanup_user_redis(user_id, chat_ids))
     except Exception as exc:
@@ -440,6 +475,7 @@ async def get_redis_memory() -> RedisMemory:
     if _redis_memory is None:
         async with _init_lock:
             if _redis_memory is None:
-                _redis_memory = RedisMemory()
-                await _redis_memory.setup()
+                mem = RedisMemory()
+                await mem.setup()
+                _redis_memory = mem
     return _redis_memory

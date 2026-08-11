@@ -13,7 +13,6 @@ import pytest
 from unittest.mock import MagicMock, patch
 from sqlalchemy.orm import sessionmaker
 
-from app.core.config import settings as env_settings
 from app.models.base import Base
 from app.models.organisation import Organisation
 import app.models.user  # noqa
@@ -68,11 +67,12 @@ def _create_org(db, name="TestOrg"):
 # 1. _tool_call_budget
 # ---------------------------------------------------------------------------
 
-def test_tool_call_budget_falls_back_to_env(db_session):
-    """With no DB rows, _tool_call_budget returns .env defaults."""
+def test_tool_call_budget_falls_back_to_registry(db_session):
+    """With no DB rows, _tool_call_budget returns registry defaults."""
+    from app.core.settings_registry import get_def
     budget = _tool_call_budget(db_session, None)
-    assert budget["rag_retrieve"] == env_settings.AGENT_MAX_RETRIEVALS
-    assert budget["code_execute"] == env_settings.AGENT_MAX_CODE_EXEC
+    assert budget["rag_retrieve"] == get_def("AGENT_MAX_RETRIEVALS").default
+    assert budget["code_execute"] == get_def("AGENT_MAX_CODE_EXEC").default
 
 
 def test_tool_call_budget_uses_org_override(db_session):
@@ -244,7 +244,8 @@ def test_get_setting_falls_back_on_db_error():
     mock_db.query.side_effect = Exception("DB connection failed")
 
     val = get_setting(mock_db, "RETRIEVAL_TOP_K", None)
-    assert val == env_settings.RETRIEVAL_TOP_K
+    from app.core.settings_registry import get_def
+    assert val == get_def("RETRIEVAL_TOP_K").default
 
 
 def test_get_setting_falls_back_on_mock_session():
@@ -253,5 +254,6 @@ def test_get_setting_falls_back_on_mock_session():
     # MagicMock returns MagicMock for .query().filter().first()
     # which will fail during _decode
     val = get_setting(mock_db, "RERANKER_ENABLED", None)
-    # Should fall back to env default
-    assert val == env_settings.RERANKER_ENABLED
+    # Should fall back to registry default
+    from app.core.settings_registry import get_def
+    assert val == get_def("RERANKER_ENABLED").default

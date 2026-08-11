@@ -86,21 +86,23 @@ def _run_rag_retrieve(level_outcomes, graph_expand=True, adaptive_enabled=True):
     input_obj = mod.RagRetrieveInput(query="what is the refund policy?", graph_expand=graph_expand)
 
     def _fake_get_setting(db, key, org_id=None):
+        from app.core.settings_registry import get_def
         if key == "ADAPTIVE_RETRIEVAL_ENABLED":
             return adaptive_enabled
         if key == "ADAPTIVE_RETRIEVAL_THRESHOLD":
-            return settings.ADAPTIVE_RETRIEVAL_THRESHOLD
+            return get_def("ADAPTIVE_RETRIEVAL_THRESHOLD").default
         if key == "ADAPTIVE_RETRIEVAL_RERANKER_THRESHOLD":
-            return settings.ADAPTIVE_RETRIEVAL_RERANKER_THRESHOLD
+            return get_def("ADAPTIVE_RETRIEVAL_RERANKER_THRESHOLD").default
         if key == "RETRIEVAL_RELAX_LEVEL2_RERANKER_THRESHOLD":
-            return settings.RETRIEVAL_RELAX_LEVEL2_RERANKER_THRESHOLD
+            return get_def("RETRIEVAL_RELAX_LEVEL2_RERANKER_THRESHOLD").default
         if key == "DENSE_MIN_SCORE":
-            return settings.DENSE_MIN_SCORE
+            return get_def("DENSE_MIN_SCORE").default
         if key == "SPARSE_MIN_SCORE":
-            return settings.SPARSE_MIN_SCORE
+            return get_def("SPARSE_MIN_SCORE").default
         if key == "EXACT_MIN_SCORE":
-            return settings.EXACT_MIN_SCORE
-        return getattr(settings, key, None)
+            return get_def("EXACT_MIN_SCORE").default
+        defn = get_def(key)
+        return defn.default if defn else None
 
     with patch.object(mod, "enforce_rbac", return_value={"kb_ids": [1]}), \
          patch("app.services.settings_service.get_setting", side_effect=_fake_get_setting), \
@@ -161,23 +163,33 @@ def test_min_confidence_defaults_from_adaptive_threshold_setting():
 
 # ── Wall-clock budget routing (Issue #6) ───────────────────────────────────────
 
+def _mock_settings(overrides: dict):
+    """Create a side_effect that returns override values for specific keys."""
+    from app.services.settings_service import get_setting as _real
+    def _side(db, key, org_id=None):
+        if key in overrides:
+            return overrides[key]
+        return _real(db, key, org_id)
+    return _side
+
+
 def test_route_think_respects_wall_clock_budget():
-    with patch.object(settings, "AGENT_MAX_ITERATIONS", 100), \
-         patch.object(settings, "AGENT_MAX_WALL_SECONDS", 1.0):
+    with patch("app.services.agentic_rag.agent_graph.get_setting",
+               side_effect=_mock_settings({"AGENT_MAX_ITERATIONS": 100, "AGENT_MAX_WALL_SECONDS": 1.0})):
         state = {"iteration": 1, "tool_calls": [{"tool": "rag_retrieve"}], "started_at": time.monotonic() - 10}
         assert route_think(state) == "reflect_final"
 
 
 def test_route_think_ignores_wall_clock_when_not_started():
-    with patch.object(settings, "AGENT_MAX_ITERATIONS", 100), \
-         patch.object(settings, "AGENT_MAX_WALL_SECONDS", 1.0):
+    with patch("app.services.agentic_rag.agent_graph.get_setting",
+               side_effect=_mock_settings({"AGENT_MAX_ITERATIONS": 100, "AGENT_MAX_WALL_SECONDS": 1.0})):
         state = {"iteration": 1, "tool_calls": [{"tool": "rag_retrieve"}]}
         assert route_think(state) == "tool"
 
 
 def test_route_reflect_final_respects_wall_clock_budget():
-    with patch.object(settings, "AGENT_MAX_ITERATIONS", 100), \
-         patch.object(settings, "AGENT_MAX_WALL_SECONDS", 1.0):
+    with patch("app.services.agentic_rag.agent_graph.get_setting",
+               side_effect=_mock_settings({"AGENT_MAX_ITERATIONS": 100, "AGENT_MAX_WALL_SECONDS": 1.0})):
         state = {
             "iteration": 1,
             "reflection_final": {"ready": False},

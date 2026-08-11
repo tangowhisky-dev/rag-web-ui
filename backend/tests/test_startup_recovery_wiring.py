@@ -156,8 +156,10 @@ class TestLifespanWiring:
                 "app.main.DataStoreWatcher"
             ) as mock_watcher_cls, patch(
                 "app.main.StartupRecoveryService"
-            ) as mock_recovery_cls:
-                mock_settings.WATCHER_ENABLED = True
+            ) as mock_recovery_cls, patch(
+                "app.services.settings_service.get_setting"
+            ) as mock_get_setting:
+                mock_get_setting.return_value = True
                 mock_watcher_instance = MagicMock()
                 mock_watcher_cls.return_value = mock_watcher_instance
                 mock_recovery_instance = MagicMock()
@@ -197,8 +199,10 @@ class TestLifespanWiring:
                 "app.main.DataStoreWatcher"
             ) as mock_watcher_cls, patch(
                 "app.main.StartupRecoveryService"
-            ) as mock_recovery_cls:
-                mock_settings.WATCHER_ENABLED = False
+            ) as mock_recovery_cls, patch(
+                "app.services.settings_service.get_setting"
+            ) as mock_get_setting:
+                mock_get_setting.return_value = False
                 mock_watcher_cls.return_value = MagicMock()
 
                 mock_query = MagicMock()
@@ -237,8 +241,10 @@ class TestLifespanWiring:
                 "app.main.DataStoreWatcher"
             ) as mock_watcher_cls, patch(
                 "app.main.StartupRecoveryService"
-            ) as mock_recovery_cls:
-                mock_settings.WATCHER_ENABLED = True
+            ) as mock_recovery_cls, patch(
+                "app.services.settings_service.get_setting"
+            ) as mock_get_setting:
+                mock_get_setting.return_value = True
                 mock_watcher_cls.return_value = MagicMock()
                 mock_recovery_instance = MagicMock()
                 mock_recovery_cls.return_value = mock_recovery_instance
@@ -275,8 +281,10 @@ class TestLifespanWiring:
                 "app.main.DataStoreWatcher"
             ) as mock_watcher_cls, patch(
                 "app.main.StartupRecoveryService"
-            ) as mock_recovery_cls:
-                mock_settings.WATCHER_ENABLED = True
+            ) as mock_recovery_cls, patch(
+                "app.services.settings_service.get_setting"
+            ) as mock_get_setting:
+                mock_get_setting.return_value = True
                 mock_watcher_cls.return_value = MagicMock()
                 mock_recovery_instance = MagicMock()
                 mock_recovery_cls.return_value = mock_recovery_instance
@@ -311,8 +319,10 @@ class TestLifespanWiring:
                 "app.main.SessionLocal"
             ) as mock_session_cls, patch(
                 "app.main.DataStoreWatcher"
-            ) as mock_watcher_cls:
-                mock_settings.WATCHER_ENABLED = False
+            ) as mock_watcher_cls, patch(
+                "app.services.settings_service.get_setting"
+            ) as mock_get_setting:
+                mock_get_setting.return_value = False
                 mock_watcher_cls.return_value = MagicMock()
 
                 mock_query = MagicMock()

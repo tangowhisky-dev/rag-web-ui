@@ -144,10 +144,15 @@ class TestDeclaredStateKeys:
         assert self._roundtrip({"precomputed_tool_calls": calls})["precomputed_tool_calls"] == calls
 
     def test_wall_clock_budget_actually_terminates(self, monkeypatch):
-        from app.core.config import settings
+        from app.services.settings_service import get_setting as _real_get_setting
         from app.services.agentic_rag.agent_graph import _wall_clock_exceeded, route_think
 
-        monkeypatch.setattr(settings, "AGENT_MAX_WALL_SECONDS", 0.0)
+        def _mock_get_setting(db, key, org_id=None):
+            if key == "AGENT_MAX_WALL_SECONDS":
+                return 0.0
+            return _real_get_setting(db, key, org_id)
+
+        monkeypatch.setattr("app.services.agentic_rag.agent_graph.get_setting", _mock_get_setting)
         state = {"started_at": 0.0, "iteration": 1, "tool_calls": [{"tool": "rag_retrieve"}]}
         assert _wall_clock_exceeded(state) is True
         assert route_think(state) == "reflect_final"
@@ -329,10 +334,15 @@ class TestClarificationFlow:
         ]
 
     def test_clarification_budget_is_capped(self, monkeypatch):
-        from app.core.config import settings
+        from app.services.settings_service import get_setting as _real_get_setting
         from app.services.agentic_rag import agent_graph
 
-        monkeypatch.setattr(settings, "AGENT_MAX_CLARIFICATIONS", 1)
+        def _mock_get_setting(db, key, org_id=None):
+            if key == "AGENT_MAX_CLARIFICATIONS":
+                return 1
+            return _real_get_setting(db, key, org_id)
+
+        monkeypatch.setattr(agent_graph, "get_setting", _mock_get_setting)
 
         plan = Plan(intent="rag", needs_clarification=True, clarification_question="Which one?")
 
@@ -362,10 +372,15 @@ class TestCompactionReplacesHistory:
     """`add_messages` appends: `[summary] + recent` grew the checkpoint."""
 
     def test_compaction_removes_old_messages_and_keeps_one_summary(self, monkeypatch):
-        from app.core.config import settings
+        from app.core.settings_registry import get_def as _real_get_def
         from app.services.agentic_rag import agent_graph
 
-        monkeypatch.setattr(settings, "COMPACTION_KEEP_RECENT", 2)
+        def _mock_get_def(key):
+            if key == "COMPACTION_KEEP_RECENT":
+                return SimpleNamespace(default=2)
+            return _real_get_def(key)
+
+        monkeypatch.setattr(agent_graph, "get_def", _mock_get_def)
 
         class _FakeLLM:
             async def ainvoke(self, *_a, **_kw):
@@ -407,10 +422,15 @@ class TestCompactionReplacesHistory:
         assert "q1" not in contents and "a1" not in contents
 
     def test_second_compaction_replaces_the_first_summary(self, monkeypatch):
-        from app.core.config import settings
+        from app.core.settings_registry import get_def as _real_get_def
         from app.services.agentic_rag import agent_graph
 
-        monkeypatch.setattr(settings, "COMPACTION_KEEP_RECENT", 2)
+        def _mock_get_def(key):
+            if key == "COMPACTION_KEEP_RECENT":
+                return SimpleNamespace(default=2)
+            return _real_get_def(key)
+
+        monkeypatch.setattr(agent_graph, "get_def", _mock_get_def)
 
         class _FakeLLM:
             async def ainvoke(self, *_a, **_kw):
