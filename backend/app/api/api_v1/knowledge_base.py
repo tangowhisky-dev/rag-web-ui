@@ -866,6 +866,7 @@ async def test_retrieval(
             query=request.query,
             kb_ids=[request.kb_id],
             db=db,
+            org_id=current_user.org_id,
         )
         response = [
             {"content": doc.page_content, "metadata": doc.metadata, "score": 0.0}

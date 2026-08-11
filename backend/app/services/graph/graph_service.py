@@ -63,6 +63,7 @@ import asyncio
 import logging
 import uuid
 from typing import Optional
+from sqlalchemy.orm import Session
 
 
 import neo4j
@@ -324,7 +325,7 @@ async def _extract_with_llm(
     driver = _get_driver()
 
     # Cap chunks to avoid OOM on low-RAM local models. Qdrant still has all chunks.
-    cap = settings.GRAPHRAG_MAX_CHUNKS
+    cap = max_chunks
     effective_chunks = chunks if cap <= 0 else chunks[:cap]
     effective_ids = qdrant_point_ids if cap <= 0 else qdrant_point_ids[:cap]
     if cap > 0 and len(chunks) > cap:
@@ -334,11 +335,11 @@ async def _extract_with_llm(
         )
 
     batches = _build_extraction_batches(
-        effective_chunks, effective_ids, settings.NEO4J_LLM_CONTEXT
+        effective_chunks, effective_ids, neo4j_llm_context
     )
     logger.info(
         "GraphService[llm]: doc %d — %d chunks → %d extraction batches (NEO4J_LLM_CONTEXT=%d)",
-        document_id, len(effective_chunks), len(batches), settings.NEO4J_LLM_CONTEXT,
+        document_id, len(effective_chunks), len(batches), neo4j_llm_context,
     )
 
     _batch_sem = asyncio.Semaphore(4)
@@ -470,6 +471,20 @@ async def build_graph_for_document(
     if not settings.GRAPHRAG_ENABLED:
         return
 
+    # Resolve app-level ingestion settings from the settings service
+    from app.services.settings_service import get_setting
+    from app.db.session import SessionLocal
+    _db = SessionLocal()
+    try:
+        graphrag_enabled = get_setting(_db, "GRAPHRAG_ENABLED", None)
+        max_chunks = get_setting(_db, "GRAPHRAG_MAX_CHUNKS", None)
+        neo4j_llm_context = get_setting(_db, "NEO4J_LLM_CONTEXT", None)
+    finally:
+        _db.close()
+
+    if not graphrag_enabled:
+        return
+
     driver = _get_driver()
     loop = asyncio.get_event_loop()
 
@@ -539,6 +554,8 @@ async def build_graph_for_document(
 def expand_docs_via_graph(
     docs: list[LangchainDocument],
     kb_ids: list[int],
+    db: Optional[Session] = None,
+    org_id: Optional[int] = None,
 ) -> list[LangchainDocument]:
     """
     Graph-expanded retrieval: find additional chunks via Neo4j graph traversal
@@ -557,6 +574,9 @@ def expand_docs_via_graph(
     This surfaces chunks that are SEMANTICALLY linked via entity relationships
     but would not have been returned by vector similarity alone.
 
+    When db and org_id are provided, org-overridable settings (hops, limit,
+    fanout) are resolved via the settings service.
+
     Non-fatal — returns [] on any failure so the caller's pipeline continues
     with only the original vector search results.
     """
@@ -564,6 +584,17 @@ def expand_docs_via_graph(
         return []
 
     from qdrant_client import QdrantClient
+
+    # Resolve org-overridable settings
+    if db is not None:
+        from app.services.settings_service import get_setting
+        hops_val = get_setting(db, "GRAPHRAG_RETRIEVAL_HOPS", org_id)
+        fanout_val = get_setting(db, "GRAPHRAG_ENTITY_FANOUT_CAP", org_id)
+        limit_val = get_setting(db, "GRAPHRAG_RETRIEVAL_LIMIT", org_id)
+    else:
+        hops_val = settings.GRAPHRAG_RETRIEVAL_HOPS
+        fanout_val = settings.GRAPHRAG_ENTITY_FANOUT_CAP
+        limit_val = settings.GRAPHRAG_RETRIEVAL_LIMIT
 
     # Extract the Qdrant point UUIDs from the retrieved docs
     seen_point_ids = set()
@@ -587,7 +618,7 @@ def expand_docs_via_graph(
         # 1 hop: (e)-[:FROM_CHUNK]->(c2)
         # 2 hops: (e)-[r1]-(e2)-[:FROM_CHUNK]->(c2)
         # N hops: chain of N entity nodes with N-1 relationships
-        hops = max(1, settings.GRAPHRAG_RETRIEVAL_HOPS)
+        hops = max(1, hops_val)
         if hops == 1:
             rest_pattern = "(e)-[:FROM_CHUNK]->(c2)"
         else:
@@ -621,8 +652,8 @@ def expand_docs_via_graph(
                 """,
                 seen_ids=list(seen_point_ids),
                 collections=collections,
-                entity_cap=max(1, settings.GRAPHRAG_ENTITY_FANOUT_CAP),
-                limit=max(1, settings.GRAPHRAG_RETRIEVAL_LIMIT),
+                entity_cap=max(1, fanout_val),
+                limit=max(1, limit_val),
             )
             expansion_targets = [
                 (rec["point_id"], rec["collection"]) for rec in result

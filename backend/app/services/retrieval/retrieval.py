@@ -125,23 +125,38 @@ def get_effective_datastore_ids(
     return datastore_ids
 
 
-def get_retrieval_config(query_type: QueryType) -> dict:
+def get_retrieval_config(query_type: QueryType, db: Optional[Session] = None, org_id: Optional[int] = None) -> dict:
     """
     Return retrieval config preset for a query type.
-    
+
     Presets override default leg flags and weights based on query classification.
     Falls back to default settings when preset is not found.
+    When db and org_id are provided, resolves org-overridable settings via the settings service.
     """
-    presets = settings.retrieval_config_presets
+    if db is not None:
+        from app.services.settings_service import get_setting
+        presets_raw = get_setting(db, "RETRIEVAL_CONFIG_PRESETS", org_id)
+        presets = json.loads(presets_raw) if isinstance(presets_raw, str) else (presets_raw or {})
+        d_weight = get_setting(db, "HYBRID_DENSE_WEIGHT", org_id)
+        s_weight = get_setting(db, "HYBRID_SPARSE_WEIGHT", org_id)
+        e_weight = get_setting(db, "HYBRID_EXACT_WEIGHT", org_id)
+        top_k = get_setting(db, "RETRIEVAL_TOP_K", org_id)
+    else:
+        presets = settings.retrieval_config_presets
+        d_weight = settings.HYBRID_DENSE_WEIGHT
+        s_weight = settings.HYBRID_SPARSE_WEIGHT
+        e_weight = settings.HYBRID_EXACT_WEIGHT
+        top_k = settings.RETRIEVAL_TOP_K
+
     preset = presets.get(query_type.value, {})
-    
+
     config = {
-        "dense_weight": preset.get("dense_weight", settings.HYBRID_DENSE_WEIGHT),
-        "sparse_weight": preset.get("sparse_weight", settings.HYBRID_SPARSE_WEIGHT),
-        "exact_weight": preset.get("exact_weight", settings.HYBRID_EXACT_WEIGHT),
-        "top_k": preset.get("top_k", settings.RETRIEVAL_TOP_K),
+        "dense_weight": preset.get("dense_weight", d_weight),
+        "sparse_weight": preset.get("sparse_weight", s_weight),
+        "exact_weight": preset.get("exact_weight", e_weight),
+        "top_k": preset.get("top_k", top_k),
     }
-    
+
     return config
 
 # RRF smoothing constant — standard value from the original paper (k=60).
@@ -567,6 +582,7 @@ async def hybrid_search_with_legs(
     query_type: Optional[QueryType] = None,
     datastore_ids: Optional[List[int]] = None,
     return_full_pool: bool = False,
+    org_id: Optional[int] = None,
 ) -> dict:
     """
     Like hybrid_search but returns a richer dict:
@@ -587,17 +603,22 @@ async def hybrid_search_with_legs(
 
     Per-call flags AND with global .env settings: a leg is only enabled when
     both the chat-level flag and the global env flag are True.
-    
+
     When query_type is provided, apply retrieval config preset to override
     default leg flags and weights.
+
+    When org_id is provided, org-overridable settings are resolved via the
+    settings service (3-tier precedence: org → app → .env).
     """
-    # Apply query-type preset if provided
-    dense_weight = settings.HYBRID_DENSE_WEIGHT
-    sparse_weight = settings.HYBRID_SPARSE_WEIGHT
-    exact_weight = settings.HYBRID_EXACT_WEIGHT
+    from app.services.settings_service import get_setting
+
+    # Resolve org-overridable settings
+    dense_weight = get_setting(db, "HYBRID_DENSE_WEIGHT", org_id)
+    sparse_weight = get_setting(db, "HYBRID_SPARSE_WEIGHT", org_id)
+    exact_weight = get_setting(db, "HYBRID_EXACT_WEIGHT", org_id)
 
     if query_type is not None:
-        preset = get_retrieval_config(query_type)
+        preset = get_retrieval_config(query_type, db, org_id)
         top_k = preset["top_k"]
         # Apply per-preset weights (overrides global defaults when present)
         dense_weight = preset.get("dense_weight", dense_weight)
@@ -605,15 +626,15 @@ async def hybrid_search_with_legs(
         exact_weight = preset.get("exact_weight", exact_weight)
         logger.info("[RETRIEVAL] query_type=%s | config=%s", query_type.value, preset)
     else:
-        top_k = settings.RETRIEVAL_TOP_K
-    
+        top_k = get_setting(db, "RETRIEVAL_TOP_K", org_id)
+
     pool  = top_k * 4
 
     enabled = {
-        "dense": settings.RETRIEVAL_DENSE_ENABLED,
-        "sparse": settings.RETRIEVAL_SPARSE_ENABLED,
-        "exact": settings.RETRIEVAL_EXACT_ENABLED,
-        "graph": settings.RETRIEVAL_GRAPH_ENABLED,
+        "dense": get_setting(db, "RETRIEVAL_DENSE_ENABLED", org_id),
+        "sparse": get_setting(db, "RETRIEVAL_SPARSE_ENABLED", org_id),
+        "exact": get_setting(db, "RETRIEVAL_EXACT_ENABLED", org_id),
+        "graph": get_setting(db, "RETRIEVAL_GRAPH_ENABLED", org_id),
     }
 
     legs: dict[str, dict] = {}
@@ -669,7 +690,7 @@ async def hybrid_search_with_legs(
     # ── Entity-aware boost (post-RRF, pre-graph) ───────────────────────────
     # For ENTITY_CENTRIC queries: extract entities from query, expand via Neo4j,
     # and boost chunks mentioning those entities.
-    if settings.ENTITY_AWARE_ENABLED and query_type == QueryType.ENTITY_CENTRIC and docs:
+    if get_setting(db, "ENTITY_AWARE_ENABLED", org_id) and query_type == QueryType.ENTITY_CENTRIC and docs:
         try:
             from app.services.graph.entity_extractor import extract_expand_boost
             docs = extract_expand_boost(query, docs, kb_ids)
@@ -685,7 +706,7 @@ async def hybrid_search_with_legs(
         try:
             from app.services.graph import expand_docs_via_graph
             loop = asyncio.get_running_loop()
-            expanded = await loop.run_in_executor(None, lambda: expand_docs_via_graph(docs, kb_ids))
+            expanded = await loop.run_in_executor(None, lambda: expand_docs_via_graph(docs, kb_ids, db, org_id))
             if expanded:
                 existing_hashes = {content_hash(d.page_content) for d in docs}
                 new_docs = [d for d in expanded if content_hash(d.page_content) not in existing_hashes]
@@ -723,7 +744,7 @@ async def hybrid_search_with_legs(
         legs["graph"] = {"status": "disabled", "count": 0, "expanded": 0, "error": None}
 
     # ── Cross-encoder reranking (optional) ────────────────────────────────────
-    if settings.RERANKER_ENABLED and docs:
+    if get_setting(db, "RERANKER_ENABLED", org_id) and docs:
         try:
             from app.services.retrieval import rerank
             if return_full_pool:
@@ -754,21 +775,27 @@ async def hybrid_search(
     kb_ids: List[int],
     db: Session,
     datastore_ids: Optional[List[int]] = None,
+    org_id: Optional[int] = None,
 ) -> List[LangchainDocument]:
     """Run enabled retrieval legs in parallel (sync calls) and merge via RRF.
 
     Searches both KB collections and DataStore collections.
     All globally enabled retrieval sources are used; chat-level toggles were removed.
+
+    When org_id is provided, org-overridable settings are resolved via the
+    settings service (3-tier precedence: org → app → .env).
     """
-    top_k = settings.RETRIEVAL_TOP_K
+    from app.services.settings_service import get_setting
+
+    top_k = get_setting(db, "RETRIEVAL_TOP_K", org_id)
     pool = top_k * 4
     datastore_ids = datastore_ids or []
 
     enabled = {
-        "dense": settings.RETRIEVAL_DENSE_ENABLED,
-        "sparse": settings.RETRIEVAL_SPARSE_ENABLED,
-        "exact": settings.RETRIEVAL_EXACT_ENABLED,
-        "graph": settings.RETRIEVAL_GRAPH_ENABLED,
+        "dense": get_setting(db, "RETRIEVAL_DENSE_ENABLED", org_id),
+        "sparse": get_setting(db, "RETRIEVAL_SPARSE_ENABLED", org_id),
+        "exact": get_setting(db, "RETRIEVAL_EXACT_ENABLED", org_id),
+        "graph": get_setting(db, "RETRIEVAL_GRAPH_ENABLED", org_id),
     }
     logger.info(
         "hybrid_search | kb_ids=%s | ds_ids=%s | top_k=%d | legs=%s",

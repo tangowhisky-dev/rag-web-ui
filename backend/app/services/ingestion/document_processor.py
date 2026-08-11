@@ -79,9 +79,21 @@ async def upload_document(file: UploadFile, kb_id: int, user_id: int) -> UploadR
 async def preview_document(file_path: str, chunk_size: int = None, chunk_overlap: int = None) -> PreviewResult:
     """Step 2: Generate preview chunks"""
     if chunk_size is None:
-        chunk_size = settings.CHUNK_SIZE
+        from app.services.settings_service import get_setting
+        from app.db.session import SessionLocal
+        _db = SessionLocal()
+        try:
+            chunk_size = get_setting(_db, "CHUNK_SIZE", None)
+        finally:
+            _db.close()
     if chunk_overlap is None:
-        chunk_overlap = settings.chunk_overlap
+        from app.services.settings_service import get_setting
+        from app.db.session import SessionLocal
+        _db = SessionLocal()
+        try:
+            chunk_overlap = int(get_setting(_db, "CHUNK_SIZE", None) * get_setting(_db, "OVERLAP_PERCENTAGE", None))
+        finally:
+            _db.close()
     _, ext = os.path.splitext(file_path)
     ext = ext.lower()
 
@@ -158,16 +170,18 @@ async def process_document_background(
     file_path: Original file path (for in-place processing, not copying).
     """
     logger = logging.getLogger(__name__)
-    if chunk_size is None:
-        chunk_size = settings.CHUNK_SIZE
-    if chunk_overlap is None:
-        chunk_overlap = settings.chunk_overlap
-
     if db is None:
         db = SessionLocal()
         should_close_db = True
     else:
         should_close_db = False
+
+    if chunk_size is None:
+        from app.services.settings_service import get_setting
+        chunk_size = get_setting(db, "CHUNK_SIZE", None)
+    if chunk_overlap is None:
+        from app.services.settings_service import get_setting
+        chunk_overlap = int(get_setting(db, "CHUNK_SIZE", None) * get_setting(db, "OVERLAP_PERCENTAGE", None))
 
     task = db.query(ProcessingTask).get(task_id)
     if not task:

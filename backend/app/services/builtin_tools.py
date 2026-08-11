@@ -51,6 +51,7 @@ def search_documents(
     query: str,
     kb_ids: List[int],
     top_k: int = 5,
+    org_id: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Search knowledge bases and return top-k chunks.
 
@@ -69,7 +70,7 @@ def search_documents(
             datastore_ids = get_effective_datastore_ids(kb_ids, None, _db)
 
             return asyncio.run(
-                hybrid_search_with_legs(query=query, kb_ids=kb_ids, db=_db, datastore_ids=datastore_ids)
+                hybrid_search_with_legs(query=query, kb_ids=kb_ids, db=_db, datastore_ids=datastore_ids, org_id=org_id)
             )
         finally:
             _db.close()
@@ -234,6 +235,7 @@ def synthesize_documents(
     sub_queries: List[str],
     kb_ids: List[int],
     top_k_per_query: int = 8,
+    org_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Fan out multiple search queries in parallel, deduplicate results, return unique chunks.
@@ -257,7 +259,7 @@ def synthesize_documents(
 
             async def _gather():
                 tasks = [
-                    hybrid_search_with_legs(query=q, kb_ids=kb_ids, db=_db, datastore_ids=datastore_ids)
+                    hybrid_search_with_legs(query=q, kb_ids=kb_ids, db=_db, datastore_ids=datastore_ids, org_id=org_id)
                     for q in sub_queries
                 ]
                 return await asyncio.gather(*tasks, return_exceptions=True)
