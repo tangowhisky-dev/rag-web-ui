@@ -188,6 +188,34 @@ def _setup_graph(monkeypatch, scripted_llm: _ScriptedLLM, ctx: ToolContext,
     # Mock build_chat_llm to return our scripted LLM everywhere.
     monkeypatch.setattr(agent_graph, "build_chat_llm", lambda *a, **kw: scripted_llm)
 
+    # Mock resolve_retrieval_query — the rewriter uses AsyncOpenAI directly
+    # (not LangChain), so build_chat_llm mock doesn't cover it. The test
+    # exercises agent loop logic, not LLM rewriting ability.
+    from app.services.agentic_rag import nodes as _nodes
+
+    async def _mock_resolve(query, original_query, recent_history, provenance_sources, **kw):
+        # "its" → resolve to the entity from the previous turn.
+        # Simple heuristic: find the first capitalized word in the AI message.
+        if "its" in query.lower() or "it" in query.lower().split():
+            for m in reversed(recent_history):
+                from langchain_core.messages import AIMessage
+                if isinstance(m, AIMessage):
+                    import re
+                    # Match capitalized words including camelCase (e.g. "StreamVC").
+                    words = re.findall(r'\b([A-Z][A-Za-z]+)\b', m.content)
+                    if words:
+                        return f"What are the limitations of {words[0]}?", {
+                            "resolved": True,
+                            "reason": "reference_resolved",
+                            "original_query": original_query,
+                        }
+        return query, {"resolved": False, "reason": "self_contained"}
+
+    monkeypatch.setattr(
+        "app.services.agentic_rag.utils.resolve_retrieval_query",
+        _mock_resolve,
+    )
+
     # Mock the rag_retrieve tool to return scripted docs.
     async def _mock_rag_retrieve(ctx, input_obj):
         query = input_obj.query
