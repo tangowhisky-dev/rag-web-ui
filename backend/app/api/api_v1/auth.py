@@ -249,6 +249,22 @@ def test_token(current_user: User = Depends(get_current_user)) -> Any:
     return current_user
 
 
+@router.get("/preflight")
+def preflight(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Any:
+    """Post-login settings validation.
+
+    Returns a list of settings that are unset and would break functionality
+    for the authenticated user's role and org. The frontend uses this to
+    show a popup after login if any required settings are missing.
+    """
+    from app.services.settings_preflight import check_required_settings
+    result = check_required_settings(db, current_user.role.value, current_user.org_id)
+    return result.to_dict()
+
+
 @router.post("/logout", status_code=200)
 def logout(response: Response) -> Any:
     """Clear the HttpOnly auth cookie."""

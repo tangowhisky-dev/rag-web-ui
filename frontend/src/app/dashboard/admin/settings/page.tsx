@@ -39,6 +39,14 @@ interface SettingsResponse {
   settings: SettingItem[];
 }
 
+interface PreflightIssue {
+  key: string;
+  label: string;
+  severity: string;
+  message: string;
+  who_can_fix: string;
+}
+
 export default function SuperAdminSettingsPage() {
   const { toast } = useToast();
   const [loading, setLoading] = useState(true);
@@ -46,8 +54,14 @@ export default function SuperAdminSettingsPage() {
   const [settings, setSettings] = useState<SettingItem[]>([]);
   const [dirtyKeys, setDirtyKeys] = useState<Set<string>>(new Set());
   const [confirmKey, setConfirmKey] = useState<string | null>(null);
+  const [preflightIssues, setPreflightIssues] = useState<PreflightIssue[]>([]);
 
-  useEffect(() => { fetchSettings(); }, []);
+  useEffect(() => {
+    fetchSettings();
+    api.get('/api/auth/preflight').then((data: any) => {
+      setPreflightIssues(data.issues || []);
+    }).catch(() => {});
+  }, []);
 
   async function fetchSettings() {
     try {
@@ -167,6 +181,7 @@ export default function SuperAdminSettingsPage() {
                   key={s.key}
                   setting={s}
                   dirty={dirtyKeys.has(s.key)}
+                  preflightIssue={preflightIssues.find(i => i.key === s.key)}
                   onChange={(v) => updateValue(s.key, v)}
                   onReset={() => setConfirmKey(s.key)}
                 />
@@ -191,18 +206,21 @@ export default function SuperAdminSettingsPage() {
 function SettingField({
   setting,
   dirty,
+  preflightIssue,
   onChange,
   onReset,
 }: {
   setting: SettingItem;
   dirty: boolean;
+  preflightIssue?: PreflightIssue;
   onChange: (v: any) => void;
   onReset: () => void;
 }) {
   const showWarning = setting.requires_reindex || setting.reload === 'restart' || setting.reload === 'ingest';
+  const hasError = preflightIssue?.severity === 'error';
 
   return (
-    <div className="flex flex-col gap-1">
+    <div className={`flex flex-col gap-1 rounded-md p-2 -mx-2 ${hasError ? 'border border-red-300 dark:border-red-800 bg-red-50/50 dark:bg-red-950/20' : ''}`}>
       <div className="flex items-center justify-between gap-3">
         <div className="flex-1 min-w-0">
           <Label className="text-sm font-medium flex items-center gap-1.5">
@@ -213,9 +231,20 @@ function SettingField({
                 org-overridable
               </span>
             )}
+            {hasError && (
+              <span className="text-[10px] font-medium text-red-600 dark:text-red-400 border border-red-300 dark:border-red-800 rounded px-1 py-0.5">
+                required
+              </span>
+            )}
           </Label>
           {setting.description && (
             <p className="text-xs text-muted-foreground mt-0.5">{setting.description}</p>
+          )}
+          {hasError && preflightIssue && (
+            <p className="text-xs text-red-600 dark:text-red-400 mt-0.5 flex items-center gap-1">
+              <AlertTriangle className="h-3 w-3" />
+              {preflightIssue.message}
+            </p>
           )}
           {showWarning && (
             <p className="text-xs text-amber-600 dark:text-amber-500 mt-0.5 flex items-center gap-1">

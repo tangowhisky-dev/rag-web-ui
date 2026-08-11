@@ -17,7 +17,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
-import { ArrowLeft, Save, RotateCcw, Layers } from 'lucide-react';
+import { ArrowLeft, Save, RotateCcw, Layers, AlertTriangle } from 'lucide-react';
 
 interface OrgSettingItem {
   key: string;
@@ -43,6 +43,14 @@ interface OrgSettingsResponse {
   settings: OrgSettingItem[];
 }
 
+interface PreflightIssue {
+  key: string;
+  label: string;
+  severity: string;
+  message: string;
+  who_can_fix: string;
+}
+
 export default function OrgSettingsPage() {
   const params = useParams();
   const orgId = Number(params.orgId);
@@ -53,8 +61,14 @@ export default function OrgSettingsPage() {
   const [dirtyKeys, setDirtyKeys] = useState<Set<string>>(new Set());
   const [confirmKey, setConfirmKey] = useState<string | null>(null);
   const [confirmClearAll, setConfirmClearAll] = useState(false);
+  const [preflightIssues, setPreflightIssues] = useState<PreflightIssue[]>([]);
 
-  useEffect(() => { fetchSettings(); }, [orgId]);
+  useEffect(() => {
+    fetchSettings();
+    api.get('/api/auth/preflight').then((data: any) => {
+      setPreflightIssues(data.issues || []);
+    }).catch(() => {});
+  }, [orgId]);
 
   async function fetchSettings() {
     try {
@@ -210,6 +224,7 @@ export default function OrgSettingsPage() {
                   key={s.key}
                   setting={s}
                   dirty={dirtyKeys.has(s.key)}
+                  preflightIssue={preflightIssues.find(i => i.key === s.key)}
                   onChange={(v) => updateValue(s.key, v)}
                   onReset={() => setConfirmKey(s.key)}
                 />
@@ -244,16 +259,20 @@ export default function OrgSettingsPage() {
 function OrgSettingField({
   setting,
   dirty,
+  preflightIssue,
   onChange,
   onReset,
 }: {
   setting: OrgSettingItem;
   dirty: boolean;
+  preflightIssue?: PreflightIssue;
   onChange: (v: any) => void;
   onReset: () => void;
 }) {
+  const hasError = preflightIssue?.severity === 'error';
+
   return (
-    <div className="flex flex-col gap-1">
+    <div className={`flex flex-col gap-1 rounded-md p-2 -mx-2 ${hasError ? 'border border-red-300 dark:border-red-800 bg-red-50/50 dark:bg-red-950/20' : ''}`}>
       <div className="flex items-center justify-between gap-3">
         <div className="flex-1 min-w-0">
           <Label className="text-sm font-medium flex items-center gap-1.5">
@@ -264,9 +283,20 @@ function OrgSettingField({
                 overridden
               </span>
             )}
+            {hasError && (
+              <span className="text-[10px] font-medium text-red-600 dark:text-red-400 border border-red-300 dark:border-red-800 rounded px-1 py-0.5">
+                required
+              </span>
+            )}
           </Label>
           {setting.description && (
             <p className="text-xs text-muted-foreground mt-0.5">{setting.description}</p>
+          )}
+          {hasError && preflightIssue && (
+            <p className="text-xs text-red-600 dark:text-red-400 mt-0.5 flex items-center gap-1">
+              <AlertTriangle className="h-3 w-3" />
+              {preflightIssue.message}
+            </p>
           )}
           {!setting.overridden && (
             <p className="text-xs text-muted-foreground mt-0.5">
