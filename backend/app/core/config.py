@@ -13,6 +13,10 @@ class Settings(BaseSettings):
     # Root logger level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
+    # Feature flag: when false, all settings reads fall back to config.py defaults
+    # (Tier 0 only). Provides a safe rollback path if the settings service has issues.
+    RUNTIME_SETTINGS_ENABLED: bool = os.getenv("RUNTIME_SETTINGS_ENABLED", "true").lower() == "true"
+
     # MySQL
     MYSQL_SERVER: str = os.getenv("MYSQL_SERVER", "localhost")
     MYSQL_PORT: int = int(os.getenv("MYSQL_PORT", "3306"))
@@ -69,6 +73,10 @@ class Settings(BaseSettings):
     # not complex reasoning.
     QUERY_MODEL: Optional[str] = os.getenv("QUERY_MODEL") or None
 
+    # Reasoning model for thinking-mode / chain-of-thought steps. Falls back to
+    # OPENAI_MODEL when unset.
+    REASONING_MODEL: Optional[str] = os.getenv("REASONING_MODEL") or None
+
     # Vision model for OCR of embedded images (scanned PDFs, images in DOCX/
     # PPTX/XLSX). Must be a multimodal (vision-capable) model.
     # When unset, markitdown-ocr is loaded without an llm_client and OCR is
@@ -88,6 +96,11 @@ class Settings(BaseSettings):
     def effective_query_model(self) -> str:
         """Model to use for query rewriting and summarisation. Falls back to OPENAI_MODEL."""
         return self.QUERY_MODEL or self.OPENAI_MODEL
+
+    @property
+    def effective_reasoning_model(self) -> str:
+        """Model to use for reasoning/thinking steps. Falls back to OPENAI_MODEL."""
+        return self.REASONING_MODEL or self.OPENAI_MODEL
 
     @property
     def effective_vision_api_base(self) -> str:
