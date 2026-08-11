@@ -32,11 +32,13 @@ export default function AdminPage() {
   const router = useRouter();
   const [counts, setCounts] = useState<AdminCounts | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     api.get('/api/admin/counts')
       .then((data) => setCounts(data))
-      .catch((e) => setError(e.message ?? 'Failed to load counts'));
+      .catch((e) => setError(e.message ?? 'Failed to load counts'))
+      .finally(() => setLoading(false));
   }, []);
 
   return (
@@ -55,27 +57,35 @@ export default function AdminPage() {
           </div>
         )}
 
-        <div className="grid gap-6 md:grid-cols-3">
-          {STAT_CARDS.map(({ label, key, icon: Icon }) => (
-            <button
-              key={label}
-              onClick={() => router.push(ROUTE_MAP[key])}
-              className="rounded-2xl border bg-card text-card-foreground p-8 text-left hover:shadow-md transition-shadow cursor-pointer focus:outline-none focus:ring-2 focus:ring-primary"
-            >
-              <div className="flex items-center gap-4">
-                <div className="rounded-full bg-muted p-3">
-                  <Icon className="h-6 w-6 text-foreground" />
+        {loading && (
+          <div className="flex justify-center py-12">
+            <div className="w-8 h-8 border-4 border-primary/30 border-t-primary rounded-full animate-spin" />
+          </div>
+        )}
+
+        {!loading && (
+          <div className="grid gap-6 md:grid-cols-3">
+            {STAT_CARDS.map(({ label, key, icon: Icon }) => (
+              <button
+                key={label}
+                onClick={() => router.push(ROUTE_MAP[key])}
+                className="rounded-2xl border bg-card text-card-foreground p-8 text-left hover:shadow-md transition-shadow cursor-pointer focus:outline-none focus:ring-2 focus:ring-primary"
+              >
+                <div className="flex items-center gap-4">
+                  <div className="rounded-full bg-muted p-3">
+                    <Icon className="h-6 w-6 text-foreground" />
+                  </div>
+                  <div>
+                    <h3 className="text-3xl font-bold">
+                      {counts?.[key] ?? '—'}
+                    </h3>
+                    <p className="text-muted-foreground mt-1 text-sm">{label}</p>
+                  </div>
                 </div>
-                <div>
-                  <h3 className="text-3xl font-bold">
-                    {counts?.[key] ?? '—'}
-                  </h3>
-                  <p className="text-muted-foreground mt-1 text-sm">{label}</p>
-                </div>
-              </div>
-            </button>
-          ))}
-        </div>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

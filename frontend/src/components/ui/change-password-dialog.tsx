@@ -22,7 +22,7 @@ interface ChangePasswordDialogProps {
   username?: string;
 }
 
-export function ChangePasswordDialog({ open, onOpenChange, username }: ChangePasswordDialogProps) {
+export function ChangePasswordDialog({ open, onOpenChange }: ChangePasswordDialogProps) {
   const router = useRouter();
   const { toast } = useToast();
   const [changing, setChanging] = useState(false);

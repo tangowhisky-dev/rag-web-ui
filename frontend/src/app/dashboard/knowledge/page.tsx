@@ -9,12 +9,6 @@ import { useKnowledgeContext } from "@/contexts/knowledge-context";
 import { ApiError } from "@/lib/api";
 import { useToast } from "@/components/ui/use-toast";
 
-interface KbDocument {
-  id: number;
-  file_name: string;
-  created_at: string;
-}
-
 function KnowledgeBaseList() {
   const [deleteTarget, setDeleteTarget] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);

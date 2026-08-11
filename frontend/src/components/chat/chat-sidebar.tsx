@@ -12,6 +12,19 @@ import { DndContext, DragEndEvent, useDraggable } from "@dnd-kit/core";
 import { CSS } from "@dnd-kit/utilities";
 import { useChatContext } from "@/contexts/chat-context";
 import FolderItem from "@/components/chat/folder-item";
+import { useSidebarCollapse, exportChatToMarkdown } from "@/lib/hooks";
+import { api, ApiError } from "@/lib/api";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { useToast } from "@/components/ui/use-toast";
 
 interface ChatSidebarProps {
   isOpen: boolean;
@@ -65,10 +78,9 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
     chatListLoaded,
   } = useChatContext();
 
-  const [collapsed, setCollapsed] = useState(false);
-  useEffect(() => {
-    setCollapsed(localStorage.getItem("chat-sidebar-collapsed") === "true");
-  }, []);
+  const { toast } = useToast();
+
+  const { collapsed, toggleCollapse } = useSidebarCollapse("chat-sidebar-collapsed");
 
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editingValue, setEditingValue] = useState("");
@@ -91,11 +103,7 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
     setSearchError(false);
     console.debug("[SEARCH] query=%s", q);
     try {
-      const res = await fetch(`/api/chat/search?q=${encodeURIComponent(q)}`, {
-        credentials: "include",
-      });
-      if (!res.ok) throw new Error("search failed");
-      const data: SearchResult[] = await res.json();
+      const data: SearchResult[] = await api.get(`/api/chat/search?q=${encodeURIComponent(q)}`);
       console.debug("[SEARCH] result_count=%d", data.length);
       setSearchResults(data);
     } catch {
@@ -142,13 +150,6 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
     }
   }, [editingId]);
 
-  const toggleCollapse = () => {
-    setCollapsed((prev) => {
-      localStorage.setItem("chat-sidebar-collapsed", String(!prev));
-      return !prev;
-    });
-  };
-
   const startEdit = (id: number, title: string) => {
     setEditingId(id);
     setEditingValue(title);
@@ -157,7 +158,9 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
   const commitEdit = async (id: number) => {
     const trimmed = editingValue.trim();
     if (trimmed && trimmed !== chatList.find((c) => c.id === id)?.title) {
-      await renameChat(id, trimmed).catch(() => {});
+      await renameChat(id, trimmed).catch((e) => {
+        toast({ title: "Rename failed", description: e instanceof ApiError ? e.message : "Please try again", variant: "destructive" });
+      });
     }
     setEditingId(null);
   };
@@ -167,42 +170,41 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
     if (e.key === "Escape") setEditingId(null);
   };
 
+  const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
+  const [newFolderOpen, setNewFolderOpen] = useState(false);
+  const [newFolderName, setNewFolderName] = useState("");
+
   const handleDelete = async (id: number) => {
-    if (!window.confirm("Delete this chat?")) return;
-    await deleteChat(id).catch(() => {});
+    await deleteChat(id).catch((e) => {
+      toast({ title: "Delete failed", description: e instanceof ApiError ? e.message : "Please try again", variant: "destructive" });
+    });
     if (pathname === `/dashboard/chat/${id}`) {
       router.push("/dashboard/chat");
     }
   };
 
   const handleTogglePin = async (id: number, pinned: boolean) => {
-    await patchChat(id, { pinned: !pinned }).catch(() => {});
+    await patchChat(id, { pinned: !pinned }).catch((e) => {
+      toast({ title: "Pin failed", description: e instanceof ApiError ? e.message : "Please try again", variant: "destructive" });
+    });
   };
 
   const handleExport = async (id: number) => {
     try {
-      const res = await fetch(`/api/chat/${id}/export`, {
-        credentials: "include",
-      });
-      if (!res.ok) throw new Error("Export failed");
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `chat-${id}.md`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
+      await exportChatToMarkdown(id);
     } catch (e) {
       console.error("Export failed", e);
     }
   };
 
   const handleNewFolder = async () => {
-    const name = window.prompt("Folder name:");
-    if (!name?.trim()) return;
-    await createFolder(name.trim()).catch(() => {});
+    const name = newFolderName.trim();
+    if (!name) return;
+    await createFolder(name).catch((e) => {
+      toast({ title: "Folder creation failed", description: e instanceof ApiError ? e.message : "Please try again", variant: "destructive" });
+    });
+    setNewFolderName("");
+    setNewFolderOpen(false);
   };
 
   // DnD: drag a chat (id=String(chatId)) onto a folder (droppable id=`folder-{folderId}`)
@@ -215,7 +217,9 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
     const folderId = Number(overStr.replace("folder-", ""));
     if (!chatId || !folderId) return;
     console.debug("[DnD] chat_id=%d → folder_id=%d", chatId, folderId);
-    await assignChatToFolder(chatId, folderId).catch(() => {});
+    await assignChatToFolder(chatId, folderId).catch((e) => {
+      toast({ title: "Move failed", description: e instanceof ApiError ? e.message : "Could not move chat to folder", variant: "destructive" });
+    });
   };
 
   // Filtered lists
@@ -295,7 +299,7 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
                 <Pencil className="h-3 w-3" />
               </button>
               <button
-                onClick={() => handleDelete(chat.id)}
+                onClick={() => setConfirmDeleteId(chat.id)}
                 className="p-1 rounded hover:bg-destructive/20 hover:text-destructive transition-colors"
                 aria-label="Delete"
               >
@@ -364,7 +368,7 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
                 New Chat
               </Link>
               <button
-                onClick={handleNewFolder}
+                onClick={() => setNewFolderOpen(true)}
                 className="p-1.5 rounded-lg hover:bg-muted transition-colors text-muted-foreground hover:text-foreground shrink-0"
                 aria-label="New Folder"
                 title="New Folder"
@@ -399,6 +403,15 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
                   onChange={(e) => setSearchQuery(e.target.value)}
                   className="flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
                 />
+                {searchQuery && (
+                  <button
+                    onClick={() => setSearchQuery("")}
+                    className="text-muted-foreground hover:text-foreground transition-colors shrink-0"
+                    aria-label="Clear search"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                )}
               </div>
             </div>
 
@@ -505,6 +518,45 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
           </DndContext>
         )}
       </aside>
+
+      <ConfirmDialog
+        open={confirmDeleteId !== null}
+        title="Delete chat"
+        description="Delete this chat?"
+        confirmText="Delete"
+        destructive
+        onConfirm={() => {
+          if (confirmDeleteId !== null) handleDelete(confirmDeleteId);
+          setConfirmDeleteId(null);
+        }}
+        onCancel={() => setConfirmDeleteId(null)}
+      />
+
+      <Dialog open={newFolderOpen} onOpenChange={(o) => { setNewFolderOpen(o); if (!o) setNewFolderName(""); }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>New folder</DialogTitle>
+          </DialogHeader>
+          <Input
+            autoFocus
+            placeholder="Folder name"
+            value={newFolderName}
+            onChange={(e) => setNewFolderName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") handleNewFolder();
+              if (e.key === "Escape") { setNewFolderOpen(false); setNewFolderName(""); }
+            }}
+          />
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setNewFolderOpen(false); setNewFolderName(""); }}>
+              Cancel
+            </Button>
+            <Button onClick={handleNewFolder} disabled={!newFolderName.trim()}>
+              Create
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }

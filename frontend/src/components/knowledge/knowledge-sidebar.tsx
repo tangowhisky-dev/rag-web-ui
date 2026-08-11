@@ -8,6 +8,10 @@ import {
   Search, PanelLeftClose, PanelLeftOpen,
 } from "lucide-react";
 import { useKnowledgeContext } from "@/contexts/knowledge-context";
+import { useSidebarCollapse } from "@/lib/hooks";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { useToast } from "@/components/ui/use-toast";
+import { ApiError } from "@/lib/api";
 
 interface KnowledgeSidebarProps {
   isOpen: boolean;
@@ -18,15 +22,14 @@ export default function KnowledgeSidebar({ isOpen, onClose }: KnowledgeSidebarPr
   const router = useRouter();
   const pathname = usePathname();
   const { kbList, activeKbId, renameKb, deleteKb } = useKnowledgeContext();
+  const { toast } = useToast();
 
-  const [collapsed, setCollapsed] = useState(false);
-  useEffect(() => {
-    setCollapsed(localStorage.getItem("kb-sidebar-collapsed") === "true");
-  }, []);
+  const { collapsed, toggleCollapse } = useSidebarCollapse("kb-sidebar-collapsed");
 
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editingValue, setEditingValue] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
+  const [confirmId, setConfirmId] = useState<number | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -36,11 +39,13 @@ export default function KnowledgeSidebar({ isOpen, onClose }: KnowledgeSidebarPr
     }
   }, [editingId]);
 
-  const toggleCollapse = () => {
-    setCollapsed((prev) => {
-      localStorage.setItem("kb-sidebar-collapsed", String(!prev));
-      return !prev;
+  const handleDelete = async (id: number) => {
+    await deleteKb(id).catch((e) => {
+      toast({ title: "Delete failed", description: e instanceof ApiError ? e.message : "Please try again", variant: "destructive" });
     });
+    if (pathname === `/dashboard/knowledge/${id}`) {
+      router.push("/dashboard/knowledge");
+    }
   };
 
   const startEdit = (id: number, name: string) => {
@@ -51,7 +56,9 @@ export default function KnowledgeSidebar({ isOpen, onClose }: KnowledgeSidebarPr
   const commitEdit = async (id: number) => {
     const trimmed = editingValue.trim();
     if (trimmed && trimmed !== kbList.find((k) => k.id === id)?.name) {
-      await renameKb(id, trimmed).catch(() => {});
+      await renameKb(id, trimmed).catch((e) => {
+        toast({ title: "Rename failed", description: e instanceof ApiError ? e.message : "Please try again", variant: "destructive" });
+      });
     }
     setEditingId(null);
   };
@@ -59,14 +66,6 @@ export default function KnowledgeSidebar({ isOpen, onClose }: KnowledgeSidebarPr
   const handleEditKeyDown = (e: React.KeyboardEvent, id: number) => {
     if (e.key === "Enter") commitEdit(id);
     if (e.key === "Escape") setEditingId(null);
-  };
-
-  const handleDelete = async (id: number) => {
-    if (!window.confirm("Delete this knowledge base and all its documents?")) return;
-    await deleteKb(id).catch(() => {});
-    if (pathname === `/dashboard/knowledge/${id}`) {
-      router.push("/dashboard/knowledge");
-    }
   };
 
   const filtered = kbList.filter((kb) =>
@@ -209,7 +208,7 @@ export default function KnowledgeSidebar({ isOpen, onClose }: KnowledgeSidebarPr
                           <Pencil className="h-3 w-3" />
                         </button>
                         <button
-                          onClick={() => handleDelete(kb.id)}
+                          onClick={() => setConfirmId(kb.id)}
                           className="p-1 rounded hover:bg-destructive/20 hover:text-destructive transition-colors"
                           aria-label="Delete"
                         >
@@ -224,6 +223,18 @@ export default function KnowledgeSidebar({ isOpen, onClose }: KnowledgeSidebarPr
           </>
         )}
       </aside>
+      <ConfirmDialog
+        open={confirmId !== null}
+        title="Delete knowledge base"
+        description="Delete this knowledge base and all its documents?"
+        confirmText="Delete"
+        destructive
+        onConfirm={() => {
+          if (confirmId !== null) handleDelete(confirmId);
+          setConfirmId(null);
+        }}
+        onCancel={() => setConfirmId(null)}
+      />
     </>
   );
 }

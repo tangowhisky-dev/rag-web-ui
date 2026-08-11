@@ -259,10 +259,6 @@ export default function UploadPage({ params }: { params: { id: string } }) {
     setFiles((prev) => prev.filter((f) => f.file !== file));
   };
 
-  const allCompleted =
-    files.length > 0 &&
-    files.every((f) => f.status === "completed" || f.status === "error");
-
   const hasUploadedFiles = files.some((f) => f.status === "uploaded");
   return (
     <DashboardLayout>

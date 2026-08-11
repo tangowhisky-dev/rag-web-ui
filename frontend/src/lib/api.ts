@@ -1,5 +1,5 @@
 interface FetchOptions extends Omit<RequestInit, 'body' | 'headers'> {
-  data?: any;
+  data?: unknown;
   headers?: Record<string, string>;
 }
 
@@ -14,7 +14,7 @@ export class ApiError extends Error {
   }
 }
 
-export async function fetchApi(fullUrl: string, options: FetchOptions = {}) {
+function buildConfig(options: FetchOptions): RequestInit {
   const { data, headers: customHeaders = {}, ...restOptions } = options;
 
   const headers: Record<string, string> = {
@@ -39,12 +39,18 @@ export async function fetchApi(fullUrl: string, options: FetchOptions = {}) {
     } else if (headers['Content-Type'] === 'application/json') {
       config.body = JSON.stringify(data);
     } else if (headers['Content-Type'] === 'application/x-www-form-urlencoded') {
-      config.body = typeof data === 'string' ? data : new URLSearchParams(data).toString();
+      config.body = typeof data === 'string' ? data : new URLSearchParams(data as Record<string, string>).toString();
     } else {
-      config.body = data;
+      config.body = data as BodyInit;
     }
   }
 
+  return config;
+}
+
+/** Fetch with auth + error handling, returning the raw Response (for blob/stream cases). */
+export async function fetchRaw(fullUrl: string, options: FetchOptions = {}): Promise<Response> {
+  const config = buildConfig(options);
   try {
     const response = await fetch(fullUrl, config);
 
@@ -70,12 +76,7 @@ export async function fetchApi(fullUrl: string, options: FetchOptions = {}) {
       );
     }
 
-    // Handle 204 No Content - return null instead of trying to parse JSON
-    if (response.status === 204) {
-      return null;
-    }
-
-    return await response.json();
+    return response;
   } catch (error) {
     if (error instanceof ApiError) {
       throw error;
@@ -84,20 +85,38 @@ export async function fetchApi(fullUrl: string, options: FetchOptions = {}) {
   }
 }
 
+/** Fetch with auth + error handling, parsing the response as JSON. */
+export async function fetchApi(fullUrl: string, options: FetchOptions = {}): Promise<any> {
+  const response = await fetchRaw(fullUrl, options);
+
+  // Handle 204 No Content - return null instead of trying to parse JSON
+  if (response.status === 204) {
+    return null;
+  }
+
+  return await response.json();
+}
+
 // Helper methods for common HTTP methods
 export const api = {
   get: (url: string, options?: Omit<FetchOptions, 'method'>) =>
     fetchApi(url, { ...options, method: 'GET' }),
 
-  post: (url: string, data?: any, options?: Omit<FetchOptions, 'method'>) =>
+  getRaw: (url: string, options?: Omit<FetchOptions, 'method'>) =>
+    fetchRaw(url, { ...options, method: 'GET' }),
+
+  post: (url: string, data?: unknown, options?: Omit<FetchOptions, 'method'>) =>
     fetchApi(url, { ...options, method: 'POST', data }),
 
-  put: (url: string, data?: any, options?: Omit<FetchOptions, 'method'>) =>
+  postRaw: (url: string, data?: unknown, options?: Omit<FetchOptions, 'method'>) =>
+    fetchRaw(url, { ...options, method: 'POST', data }),
+
+  put: (url: string, data?: unknown, options?: Omit<FetchOptions, 'method'>) =>
     fetchApi(url, { ...options, method: 'PUT', data }),
 
   delete: (url: string, options?: Omit<FetchOptions, 'method'>) =>
     fetchApi(url, { ...options, method: 'DELETE' }),
 
-  patch: (url: string, data?: any, options?: Omit<FetchOptions, 'method'>) =>
+  patch: (url: string, data?: unknown, options?: Omit<FetchOptions, 'method'>) =>
     fetchApi(url, { ...options, method: 'PATCH', data }),
 };

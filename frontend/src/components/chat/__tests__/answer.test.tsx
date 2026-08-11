@@ -29,7 +29,7 @@ jest.mock('rehype-highlight', () => ({}));
 jest.mock('remark-math', () => ({}));
 jest.mock('rehype-katex', () => ({}));
 jest.mock('katex/dist/katex.min.css', () => ({}));
-jest.mock('next/dynamic', () => (fn: any) => () => null);
+jest.mock('next/dynamic', () => () => () => null);
 jest.mock('react-file-icon', () => ({
   FileIcon: () => <div>FileIcon</div>,
 }));

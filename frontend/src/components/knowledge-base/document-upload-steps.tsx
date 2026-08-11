@@ -5,7 +5,7 @@ import { FileIcon, defaultStyles } from "react-file-icon";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tabs, TabsContent } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -117,7 +117,7 @@ export function DocumentUploadSteps({
 
   // Fetch server-side chunk defaults from .env so the UI stays in sync.
   useEffect(() => {
-    api.get("/api/config").then((data: any) => {
+    api.get("/api/config").then((data: { chunk_size: number; chunk_overlap: number }) => {
       setChunkSize(data.chunk_size);
       setChunkOverlap(data.chunk_overlap);
     }).catch(() => {

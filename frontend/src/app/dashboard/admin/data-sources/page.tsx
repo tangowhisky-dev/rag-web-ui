@@ -1,7 +1,6 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { useRouter } from 'next/navigation';
 import { api, ApiError } from '@/lib/api';
 
 import { Button } from '@/components/ui/button';
@@ -66,14 +65,6 @@ interface DataStore {
   processing: boolean;
 }
 
-interface ScanResult {
-  scanned: number;
-  new: number;
-  modified: number;
-  skipped: number;
-  errors: number;
-}
-
 interface ScanProgress {
   total_files: number;
   processed_files: number;
@@ -127,7 +118,6 @@ function StatusBadge({ status, isRunning }: { status: string; isRunning?: boolea
 }
 
 export default function DataSourcesPage() {
-  const router = useRouter();
   const { toast } = useToast();
 
   const [datastores, setDatastores] = useState<DataStore[]>([]);
@@ -176,8 +166,6 @@ export default function DataSourcesPage() {
     const hasRunningScan = datastores.some(
       (ds) => ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running'
     );
-    const hasManualTrigger = triggering.size > 0;
-
     if (hasProcessing || hasRunningScan) {
       // Poll every 2-5 seconds for event-driven processing and background scans
       pollingRef.current = setInterval(() => {

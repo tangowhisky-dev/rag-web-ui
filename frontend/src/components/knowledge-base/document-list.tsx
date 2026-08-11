@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/table";
 import { FileText, Trash2 } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 
 interface ProcessingTask {
   id: number;
@@ -49,6 +50,7 @@ export function DocumentList({ knowledgeBaseId, refreshKey }: DocumentListProps)
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [deletingId, setDeletingId] = useState<number | null>(null);
+  const [confirmDoc, setConfirmDoc] = useState<Document | null>(null);
   // live progress keyed by task id — overlays the static data from KB GET
   const [taskProgress, setTaskProgress] = useState<Record<number, ProcessingTask>>({});
   const { toast } = useToast();
@@ -164,7 +166,6 @@ export function DocumentList({ knowledgeBaseId, refreshKey }: DocumentListProps)
   }, [knowledgeBaseId, refreshKey]);
 
   const handleDelete = async (doc: Document) => {
-    if (!confirm(`Delete "${doc.file_name}"? This will remove the file and all its indexed chunks.`)) return;
     setDeletingId(doc.id);
     try {
       await api.delete(`/api/knowledge-base/${knowledgeBaseId}/documents/${doc.id}`);
@@ -225,6 +226,7 @@ export function DocumentList({ knowledgeBaseId, refreshKey }: DocumentListProps)
   }
 
   return (
+    <>
     <Table>
       <TableHeader>
         <TableRow>
@@ -295,7 +297,7 @@ export function DocumentList({ knowledgeBaseId, refreshKey }: DocumentListProps)
                   variant="ghost"
                   size="icon"
                   disabled={deletingId === doc.id || !!isInProgress}
-                  onClick={() => handleDelete(doc)}
+                  onClick={() => setConfirmDoc(doc)}
                   className="h-8 w-8 text-muted-foreground hover:text-destructive hover:bg-destructive/10"
                   title={isInProgress ? "Cannot delete while processing" : "Delete document"}
                 >
@@ -311,5 +313,18 @@ export function DocumentList({ knowledgeBaseId, refreshKey }: DocumentListProps)
         })}
       </TableBody>
     </Table>
+      <ConfirmDialog
+        open={confirmDoc !== null}
+        title="Delete document"
+        description={`Delete "${confirmDoc?.file_name}"? This will remove the file and all its indexed chunks.`}
+        confirmText="Delete"
+        destructive
+        onConfirm={() => {
+          if (confirmDoc) handleDelete(confirmDoc);
+          setConfirmDoc(null);
+        }}
+        onCancel={() => setConfirmDoc(null)}
+      />
+    </>
   );
 }

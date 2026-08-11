@@ -1,5 +1,5 @@
 import React from "react";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, act } from "@testing-library/react";
 import "@testing-library/jest-dom";
 import { InputBar } from "../chat-input";
 
@@ -33,19 +33,24 @@ describe("InputBar", () => {
       expect(screen.getByTestId("chat-input-textarea")).toBeInTheDocument();
     });
 
-    it("textarea starts with rows=1 and uses auto-resize for height", () => {
+    it("textarea starts with rows=1 and uses auto-resize for height", async () => {
       render(<InputBar {...defaultProps} />);
       const textarea = screen.getByTestId("chat-input-textarea") as HTMLTextAreaElement;
       expect(textarea.rows).toBe(1);
-      // useAutoResize sets height to MIN_HEIGHT_PX (48px) on mount
+      // useAutoResize sets height to MIN_HEIGHT_PX (48px) via requestAnimationFrame
+      await act(async () => {
+        await new Promise((r) => requestAnimationFrame(() => r(null)));
+      });
       expect(parseInt(textarea.style.height)).toBeGreaterThanOrEqual(48);
     });
 
     it("textarea min-height is 48px (2 lines) via useAutoResize", async () => {
       render(<InputBar {...defaultProps} />);
       const textarea = screen.getByTestId("chat-input-textarea") as HTMLTextAreaElement;
-      await new Promise((r) => setTimeout(r, 10));
-      // useAutoResize sets MIN_HEIGHT_PX = 2 * LINE_HEIGHT_PX = 48px
+      // useAutoResize sets MIN_HEIGHT_PX = 2 * LINE_HEIGHT_PX = 48px via rAF
+      await act(async () => {
+        await new Promise((r) => requestAnimationFrame(() => r(null)));
+      });
       expect(parseInt(textarea.style.height)).toBeGreaterThanOrEqual(48);
     });
 

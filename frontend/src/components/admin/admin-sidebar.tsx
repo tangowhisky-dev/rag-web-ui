@@ -1,8 +1,8 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { useRouter, usePathname } from 'next/navigation';
+import { usePathname } from 'next/navigation';
 import Link from 'next/link';
+import { useSidebarCollapse } from "@/lib/hooks";
 import {
   PanelLeftClose, PanelLeftOpen,
   Building2, Users, Database,
@@ -24,20 +24,8 @@ const NAV_ITEMS = [
 
 
 export default function AdminSidebar({ isOpen, onClose }: AdminSidebarProps) {
-  const router = useRouter();
   const pathname = usePathname();
-  const [collapsed, setCollapsed] = useState(false);
-
-  useEffect(() => {
-    setCollapsed(localStorage.getItem('admin-sidebar-collapsed') === 'true');
-  }, []);
-
-  const toggleCollapse = () => {
-    setCollapsed((prev) => {
-      localStorage.setItem('admin-sidebar-collapsed', String(!prev));
-      return !prev;
-    });
-  };
+  const { collapsed, toggleCollapse } = useSidebarCollapse("admin-sidebar-collapsed");
 
   return (
     <>

@@ -16,7 +16,6 @@ import {
   ChevronRight,
   Loader2,
   AlertTriangle,
-  Link2,
 } from "lucide-react";
 
 export default function Home() {
@@ -110,12 +109,12 @@ export default function Home() {
           </nav>
           <div className="ml-auto flex items-center gap-2">
             <ThemeToggle />
-            {/* <Link
+            <Link
               href="/register"
               className="text-sm px-4 py-1.5 rounded-full border hover:bg-muted transition-colors"
             >
               Create account
-            </Link> */}
+            </Link>
           </div>
         </div>
       </header>
@@ -139,7 +138,7 @@ export default function Home() {
                 {APP_NAME} transforms your enterprise documents into an intelligent knowledge base.
                 Ask questions in plain language and get precise, cited answers in seconds.
               </p>
-              {/* <div className="flex flex-col sm:flex-row gap-3">
+              <div className="flex flex-col sm:flex-row gap-3">
                 <Link
                   href="/register"
                   className="inline-flex items-center justify-center gap-2 rounded-full bg-primary text-primary-foreground px-6 py-3 text-sm font-semibold hover:bg-primary/90 transition-colors"
@@ -147,7 +146,7 @@ export default function Home() {
                   Create Account
                   <ChevronRight className="h-4 w-4" />
                 </Link>
-              </div> */}
+              </div>
               {/* Trust signals */}
               <div className="flex flex-wrap items-center gap-6 pt-2">
                 {[

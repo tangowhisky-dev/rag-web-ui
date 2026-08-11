@@ -35,6 +35,7 @@ const EChartsDiagramDynamic = dynamic(
   { ssr: false, loading: () => <div className="h-72 w-full animate-pulse bg-muted rounded" /> }
 );
 import { api } from "@/lib/api";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { cleanChunkText } from "@/lib/utils";
 import { FileIcon } from "react-file-icon";
 
@@ -55,10 +56,17 @@ const useDebouncedValue = <T,>(value: T, delay: number): T => {
   return debouncedValue;
 };
 
+interface CitationMetadata {
+  kb_id?: number;
+  document_id?: number;
+  source?: string;
+  [key: string]: unknown;
+}
+
 interface Citation {
   id: number;
   text: string;
-  metadata: Record<string, any>;
+  metadata: CitationMetadata;
   kb_id?: number;
   data_store_id?: number;
   document_id?: number;
@@ -169,7 +177,7 @@ export const Answer: FC<{
   lastAnswerObject?: Record<string, unknown>;
   chartOption?: Record<string, unknown>;
   chartOptions?: Array<Record<string, unknown>>;
-}> = React.memo(({ messageId, chatId, markdown, citations = [], rewrittenQuery, confidence, confidenceScore, confidenceBreakdown, suggestion, failedLegs, queryClassification, toolTrace, agentSteps, taskList, progressMessages, synthesisMode, isStreaming = false, onDelete, finalConfidence, finalConfidenceLevel, faithfulness, completeness, retrievalScore, plan, toolCalls, toolObservations, lastAnswerObject, chartOption, chartOptions }) => {
+}> = React.memo(({ messageId, chatId, markdown, citations = [], rewrittenQuery, confidence, confidenceScore, suggestion, failedLegs, agentSteps, taskList, isStreaming = false, onDelete, finalConfidence, finalConfidenceLevel, faithfulness, completeness, retrievalScore, toolCalls, toolObservations, chartOption, chartOptions }) => {
   const [citationInfoMap, setCitationInfoMap] = useState<
     Record<string, CitationInfo>
   >({});
@@ -197,9 +205,6 @@ export const Answer: FC<{
   // now delivers citations well before streaming ends, and remounting again
   // at stream-end caused a redundant visible "refresh" with no content change.
   const [renderKey, setRenderKey] = useState(0);
-  // Bumped by the "Refresh citations" button to re-trigger the fetch effect
-  // without remounting the entire Markdown tree.
-  const [citationRefreshTick, setCitationRefreshTick] = useState(0);
   const hadCitationsRef = useRef(citations.length > 0);
   useEffect(() => {
     if (citations.length > 0 && !hadCitationsRef.current) {
@@ -288,6 +293,7 @@ export const Answer: FC<{
     }, [markdown]);
 
   useEffect(() => {
+    const controller = new AbortController();
     let cancelled = false;
 
     const fetchCitationInfo = async () => {
@@ -300,10 +306,9 @@ export const Answer: FC<{
       const genericDocIds: Array<{ key: string; docId: number }> = [];
 
       for (const citation of debouncedCitations) {
-        const top = citation as Record<string, any>;
-        const meta = (citation.metadata as Record<string, any>) || {};
-        const effectiveKbId = top.kb_id ?? meta.kb_id;
-        const effectiveDocId = top.document_id ?? meta.document_id;
+        const meta = citation.metadata || {};
+        const effectiveKbId = citation.kb_id ?? meta.kb_id;
+        const effectiveDocId = citation.document_id ?? meta.document_id;
         if (!effectiveDocId) continue;
 
         if (effectiveKbId) {
@@ -382,8 +387,8 @@ export const Answer: FC<{
       fetchCitationInfo();
     }
 
-    return () => { cancelled = true; };
-  }, [debouncedCitations, citationRefreshTick]);
+    return () => { cancelled = true; controller.abort(); };
+  }, [debouncedCitations]);
 
   // Stable component reference — never recreated, reads current data from refs.
   const CitationLink = useCallback(
@@ -590,6 +595,7 @@ export const Answer: FC<{
 
   // ── Action handlers ────────────────────────────────────────────────────────
   const [copied, setCopied] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const handleCopy = useCallback(() => {
     const plain = parsedContent.answerText.replace(/\[citation:\d+\]/g, "").trim();
@@ -601,8 +607,6 @@ export const Answer: FC<{
 
   const handleDelete = useCallback(async () => {
     if (!messageId || !chatId) return;
-    const confirmed = window.confirm("Delete this message? This cannot be undone.");
-    if (!confirmed) return;
     try {
       await api.delete(`/api/chat/${chatId}/messages/${messageId}`);
       onDelete?.(messageId);
@@ -746,7 +750,7 @@ export const Answer: FC<{
               <span>Image</span>
             </button>
             <button
-              onClick={handleDelete}
+              onClick={() => setConfirmDelete(true)}
               title="Delete message"
               className="flex items-center gap-1 px-2 py-1 rounded text-xs text-zinc-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
             >
@@ -785,6 +789,19 @@ export const Answer: FC<{
         // panel's own render for older messages that never got one.
         chartOption={markdown.includes("```echarts") ? undefined : chartOption}
         chartOptions={markdown.includes("```echarts") ? undefined : chartOptions}
+      />
+
+      <ConfirmDialog
+        open={confirmDelete}
+        title="Delete message"
+        description="Delete this message? This cannot be undone."
+        confirmText="Delete"
+        destructive
+        onConfirm={() => {
+          setConfirmDelete(false);
+          handleDelete();
+        }}
+        onCancel={() => setConfirmDelete(false)}
       />
     </div>
   );
@@ -850,11 +867,16 @@ const ThinkBlock: FC<{ content: string; isComplete: boolean }> = ({
   const [elapsedMs, setElapsedMs] = useState(0);
   const startTimeRef = useRef<number>(Date.now());
   const finalMsRef = useRef<number | null>(null);
+  // If isComplete is true on mount, the thinking was finished before this
+  // component mounted (loaded from API on page refresh) — we have no timing data.
+  const loadedCompleteRef = useRef(isComplete);
   const contentRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (isComplete) {
-      if (finalMsRef.current === null) {
+      // Only record timing if we actually tracked the thinking (streaming case).
+      // On page refresh, isComplete is already true on mount, so skip.
+      if (finalMsRef.current === null && !loadedCompleteRef.current) {
         finalMsRef.current = Date.now() - startTimeRef.current;
       }
       const timer = setTimeout(() => setIsExpanded(false), 1500);
@@ -875,9 +897,11 @@ const ThinkBlock: FC<{ content: string; isComplete: boolean }> = ({
   const displayMs = finalMsRef.current ?? elapsedMs;
   const seconds = displayMs / 1000;
   const label = isComplete
-    ? seconds < 1
-      ? "Thought for less than a second"
-      : `Thought for ${seconds.toFixed(1)} seconds`
+    ? loadedCompleteRef.current
+      ? "Thoughts"
+      : seconds < 1
+        ? "Thought for less than a second"
+        : `Thought for ${seconds.toFixed(1)} seconds`
     : `Thinking... (${seconds.toFixed(1)}s)`;
 
   return (
@@ -918,21 +942,6 @@ const ThinkBlock: FC<{ content: string; isComplete: boolean }> = ({
 
 type ConfidenceLevel = "very_high" | "high" | "medium" | "low" | "none";
 
-const CONFIDENCE_CONFIG: Record<ConfidenceLevel, {
-  steps: number;
-  label: string;
-  stepColor: string;
-  textColor: string;
-  bgColor: string;
-  borderColor: string;
-}> = {
-  very_high: { steps: 4, label: "Very High",  stepColor: "bg-[hsl(var(--confidence-very-high))]", textColor: "text-[hsl(var(--confidence-very-high))]", bgColor: "bg-[hsl(var(--confidence-very-high)/10%)]",  borderColor: "border-[hsl(var(--confidence-very-high)/30%)]" },
-  high:      { steps: 3, label: "High",       stepColor: "bg-[hsl(var(--confidence-high))]",      textColor: "text-[hsl(var(--confidence-high))]",      bgColor: "bg-[hsl(var(--confidence-high)/10%)]",      borderColor: "border-[hsl(var(--confidence-high)/30%)]"     },
-  medium:    { steps: 2, label: "Medium",     stepColor: "bg-[hsl(var(--confidence-medium))]",    textColor: "text-[hsl(var(--confidence-medium))]",    bgColor: "bg-[hsl(var(--confidence-medium)/10%)]",    borderColor: "border-[hsl(var(--confidence-medium)/30%)]"   },
-  low:       { steps: 1, label: "Low",        stepColor: "bg-[hsl(var(--confidence-low))]",       textColor: "text-[hsl(var(--confidence-low))]",       bgColor: "bg-[hsl(var(--confidence-low)/10%)]",       borderColor: "border-[hsl(var(--confidence-low)/30%)]"      },
-  none:      { steps: 0, label: "None",       stepColor: "bg-[hsl(var(--confidence-none))]",      textColor: "text-[hsl(var(--confidence-none))]",      bgColor: "bg-[hsl(var(--confidence-none)/10%)]",      borderColor: "border-[hsl(var(--confidence-none)/30%)]"      },
-};
-
 const CONFIDENCE_COLORS: Record<ConfidenceLevel, { bar: string; text: string; bg: string; border: string }> = {
   very_high: { bar: "bg-[hsl(var(--confidence-very-high))]", text: "text-[hsl(var(--confidence-very-high))]", bg: "bg-[hsl(var(--confidence-very-high)/10%)]", border: "border-[hsl(var(--confidence-very-high)/30%)]" },
   high:      { bar: "bg-[hsl(var(--confidence-high))]",      text: "text-[hsl(var(--confidence-high))]",      bg: "bg-[hsl(var(--confidence-high)/10%)]",      border: "border-[hsl(var(--confidence-high)/30%)]"     },
@@ -965,11 +974,9 @@ const ConfidenceCollapsible: FC<{
   retrievalScore?: number;
   failedLegs?: string[];
 }> = ({
-  level,
   score,
   suggestion,
   finalConfidence,
-  finalConfidenceLevel,
   faithfulness,
   completeness,
   retrievalScore,

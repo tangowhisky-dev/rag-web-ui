@@ -22,9 +22,18 @@ interface KnowledgeBase {
   description: string;
 }
 
+interface RetrievalResult {
+  content: string;
+  score: number;
+  metadata: {
+    source: string;
+    [key: string]: unknown;
+  };
+}
+
 export default function TestPage({ params }: { params: { id: string } }) {
   const [query, setQuery] = useState("");
-  const [results, setResults] = useState<any[]>([]);
+  const [results, setResults] = useState<RetrievalResult[]>([]);
   const [knowledgeBase, setKnowledgeBase] = useState<KnowledgeBase | null>(
     null
   );
@@ -73,8 +82,8 @@ export default function TestPage({ params }: { params: { id: string } }) {
       setResults(data.results);
     } catch (error) {
       toast({
-        title: "测试失败",
-        description: error instanceof Error ? error.message : "未知错误",
+        title: "Retrieval failed",
+        description: error instanceof Error ? error.message : "Unknown error",
         variant: "destructive",
       });
     } finally {
@@ -92,7 +101,7 @@ export default function TestPage({ params }: { params: { id: string } }) {
         <div className="max-w-6xl mx-auto py-12 px-6">
           <div className="text-center mb-12">
             <h1 className="text-4xl font-bold tracking-tighter bg-clip-text text-transparent bg-gradient-to-r from-primary to-primary/60">
-              知识库检索测试
+              Knowledge Base Retrieval Test
             </h1>
             <p className="mt-4 text-lg text-muted-foreground">
               <span className="font-semibold text-foreground">
@@ -111,7 +120,7 @@ export default function TestPage({ params }: { params: { id: string } }) {
                     <Search className="h-5 w-5 text-muted-foreground" />
                   </div>
                   <Input
-                    placeholder="输入您想要查询的内容..."
+                    placeholder="Enter your query..."
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
                     className="pl-12 h-14 text-lg bg-background/50 border-primary/20 focus:border-primary"
@@ -127,11 +136,11 @@ export default function TestPage({ params }: { params: { id: string } }) {
                     {loading ? (
                       <span className="flex items-center">
                         <Sparkles className="animate-spin mr-2 h-4 w-4" />
-                        搜索中...
+                        Searching...
                       </span>
                     ) : (
                       <span className="flex items-center">
-                        搜索
+                        Search
                         <ArrowRight className="ml-2 h-4 w-4" />
                       </span>
                     )}
@@ -140,7 +149,7 @@ export default function TestPage({ params }: { params: { id: string } }) {
 
                 <Select value={topK} onValueChange={setTopK}>
                   <SelectTrigger className="w-[140px] h-14 bg-background/50 border-primary/20">
-                    <SelectValue placeholder="返回数量" />
+                    <SelectValue placeholder="Results" />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="1">Top 1</SelectItem>
@@ -157,23 +166,23 @@ export default function TestPage({ params }: { params: { id: string } }) {
             <div className="mt-12 space-y-8">
               <h2 className="text-2xl font-semibold flex items-center gap-2">
                 <Sparkles className="h-6 w-6 text-primary" />
-                搜索结果
+                Search Results
               </h2>
               <div className="grid gap-6">
                 {results.map((result, index) => (
                   <Card
-                    key={index}
+                    key={`${result.metadata.source}-${index}`}
                     className="overflow-hidden border-0 shadow-lg hover:shadow-xl transition-shadow duration-300 bg-card/50 backdrop-blur-sm"
                   >
                     <CardContent className="p-8">
                       <div className="flex items-center justify-between mb-6">
                         <div className="flex items-center gap-4">
                           <span className="px-4 py-2 rounded-full bg-primary/10 text-primary font-medium">
-                            相关度: {(result.score * 100).toFixed(2)}%
+                            Relevance: {(result.score * 100).toFixed(2)}%
                           </span>
                           <span className="text-sm text-muted-foreground flex items-center gap-2">
                             <Search className="h-4 w-4" />
-                            来源: {result.metadata.source}
+                            Source: {result.metadata.source}
                           </span>
                         </div>
                       </div>

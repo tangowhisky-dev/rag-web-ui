@@ -15,7 +15,7 @@ function generateId(): string {
 import { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback } from "react";
 
 import { useRouter } from "next/navigation";
-import { Copy, Trash2, Lightbulb, ChevronDown } from "lucide-react";
+import { Copy, Trash2, ChevronDown } from "lucide-react";
 import { useChatContext } from "@/contexts/chat-context";
 import ChatSettings from "@/components/chat/chat-settings";
 import type { ChatPatch } from "@/components/chat/chat-settings";
@@ -28,6 +28,7 @@ import { InputBar } from "@/components/chat/chat-input";
 import { MessageFileChip, type UploadedFile } from "@/components/chat/file-attachment";
 import { BranchPicker } from "@/components/chat/branch-picker";
 import ClarificationDialog from "@/components/chat/clarification-dialog";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 
 interface AgentStep {
   node: string;
@@ -103,21 +104,22 @@ interface ChatMessage {
   citations?: Citation[];
 }
 
-interface Chat {
+interface ChatMeta {
   id: number;
   title: string;
-  messages: ChatMessage[];
+  temperature?: number;
+  model_name?: string;
+  [key: string]: unknown;
 }
 
 interface Citation {
   id: number;
   text: string;
-  metadata: Record<string, any>;
+  metadata: Record<string, unknown>;
 }
 
 function ChatPageInner({ params }: { params: { id: string } }) {
   const router = useRouter();
-  const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const { toast } = useToast();
   const { setActiveChat, setGraphRagActive, bumpChatToTop } = useChatContext();
@@ -131,7 +133,10 @@ function ChatPageInner({ params }: { params: { id: string } }) {
   const [isLoading, setIsLoading] = useState(false);
   const [uploadedFile, setUploadedFile] = useState<UploadedFile | null>(null);
   const [fileError, setFileError] = useState<string>("");
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollRefs = useRef<Set<ReturnType<typeof setInterval>>>(new Set());
+
+  // ── Delete message confirmation ───────────────────────────────────────────
+  const [confirmDeleteMsgId, setConfirmDeleteMsgId] = useState<string | null>(null);
 
   // ── Clarification state ───────────────────────────────────────────────────
   const [clarificationState, setClarificationState] = useState<{
@@ -177,24 +182,20 @@ function ChatPageInner({ params }: { params: { id: string } }) {
 
   // Poll file status until ready or error
   const startPolling = (fileId: number) => {
-    if (pollRef.current) clearInterval(pollRef.current);
-    pollRef.current = setInterval(async () => {
+    const interval = setInterval(async () => {
       try {
-        const res = await fetch(`/api/chat/${params.id}/files/${fileId}`, {
-          credentials: "include",
-        });
-        if (!res.ok) return;
-        const data = await res.json();
+        const data = await api.get(`/api/chat/${params.id}/files/${fileId}`);
         setUploadedFile((prev) => prev ? { ...prev, ...data } : null);
         if (data.status === "ready" || data.status === "error") {
-          clearInterval(pollRef.current!);
-          pollRef.current = null;
+          clearInterval(interval);
+          pollRefs.current.delete(interval);
           if (data.status === "error") {
             setFileError(data.error_message || "File processing failed.");
           }
         }
       } catch { /* ignore */ }
     }, 1200);
+    pollRefs.current.add(interval);
   };
 
   // Upload file immediately on attach
@@ -203,37 +204,34 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     const formData = new FormData();
     formData.append("file", file);
     try {
-      const res = await fetch(`/api/chat/${params.id}/files`, {
-        method: "POST",
-        credentials: "include",
-        body: formData,
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        setFileError(err.detail || "Upload failed.");
-        return;
-      }
-      const data: UploadedFile = await res.json();
+      const data: UploadedFile = await api.post(`/api/chat/${params.id}/files`, formData);
       setUploadedFile(data);
       if (data.status === "processing") startPolling(data.id);
     } catch (err) {
-      setFileError("Upload failed. Please try again.");
+      if (err instanceof ApiError) {
+        setFileError(err.message || "Upload failed.");
+      } else {
+        setFileError("Upload failed. Please try again.");
+      }
     }
   };
 
   const handleFileRemove = async () => {
     if (uploadedFile) {
-      fetch(`/api/chat/${params.id}/files/${uploadedFile.id}`, {
-        method: "DELETE",
-        credentials: "include",
-      }).catch(() => {});
+      api.delete(`/api/chat/${params.id}/files/${uploadedFile.id}`).catch(() => {});
     }
     setUploadedFile(null);
     setFileError("");
-    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+    pollRefs.current.forEach((id) => clearInterval(id));
+    pollRefs.current.clear();
   };
 
-  useEffect(() => { return () => { if (pollRef.current) clearInterval(pollRef.current); }; }, []);
+  useEffect(() => {
+    return () => {
+      pollRefs.current.forEach((id) => clearInterval(id));
+      pollRefs.current.clear();
+    };
+  }, []);
 
   useEffect(() => {
     setActiveChat(Number(params.id));
@@ -289,8 +287,8 @@ function ChatPageInner({ params }: { params: { id: string } }) {
         api.get(`/api/chat/${params.id}/messages/paginated?limit=20`),
       ]);
       setChatTitle(meta.title);
-      setTemperature((meta as any).temperature ?? 0.7);
-      setModelName((meta as any).model_name ?? "gpt-4o");
+      setTemperature((meta as ChatMeta).temperature ?? 0.7);
+      setModelName((meta as ChatMeta).model_name ?? "gpt-4o");
       console.log("[FETCH] paginated messages:", page.messages.map((m: any) => ({ id: m.id, role: m.role, content: m.content?.slice(0, 30) })));
       setMessages(page.messages.map(formatMessage));
       setHasMoreMessages(page.has_more);
@@ -422,34 +420,13 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       .replace(/\[KB-(\d+)\]/g, "[citation]($1)")
       // Agentic pipeline also emits combined [KB-N, KB-M] labels.
       // Split into separate [citation](N) links.
-      .replace(/\[KB-([\d,\s]+)\]/g, (match, ids: string) =>
+      .replace(/\[KB-([\d,\s]+)\]/g, (_match, ids: string) =>
         ids.split(",").map((id: string) => `[citation](${id.trim()})`).join("")
       )
       // Fallback: plain [N] that the model emits instead of [citation:N].
       // Only match standalone bracketed numbers (not part of markdown list
       // syntax "1." or already-converted "[citation](N)").
       .replace(/(?<!\()\[(\d+)\](?!\()/g, "[citation]($1)");
-  };
-
-  const parseContextCitations = (base64Part: string): Citation[] => {
-    if (!base64Part) {
-      return [];
-    }
-
-    const contextData = JSON.parse(atob(base64Part.trim())) as {
-      context: Array<{
-        page_content: string;
-        metadata: Record<string, any>;
-      }>;
-    };
-
-    return (
-      contextData.context.map((citation, index) => ({
-        id: index + 1,
-        text: citation.page_content,
-        metadata: citation.metadata,
-      })) || []
-    );
   };
 
   const flushToBrowser = async () => {
@@ -887,14 +864,12 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       const lines = buffer.split("\n");
       buffer = lines.pop() || "";
 
-      let hasTokenLines = false;
       for (const line of lines) {
         const t = line.trim();
         if (t.startsWith("1:") || t.startsWith("2:")) {
           processStreamLine(line, assistantId);
         } else if (t) {
           processStreamLine(line, assistantId);
-          hasTokenLines = true;
         }
       }
       // Always flush so UI updates progressively between agent steps
@@ -1259,26 +1234,6 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     return last;
   }, [processedMessages]);
 
-  const handleExport = async () => {
-    try {
-      const res = await fetch(`/api/chat/${params.id}/export`, {
-        credentials: "include",
-      });
-      if (!res.ok) throw new Error("Export failed");
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `chat-${params.id}.md`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      console.error("Export failed", e);
-    }
-  };
-
   const handleSettingsUpdate = (patch: Partial<ChatPatch>) => {
     if (patch.temperature !== undefined) setTemperature(patch.temperature);
     if (patch.model_name !== undefined) setModelName(patch.model_name);
@@ -1413,15 +1368,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                           Copy
                         </button>
                         <button
-                          onClick={async () => {
-                            if (!window.confirm("Delete this message? This cannot be undone.")) return;
-                            try {
-                              await api.delete(`/api/chat/${params.id}/messages/${message.id}`);
-                              setMessages((prev) => prev.filter((m) => m.id !== message.id));
-                            } catch (e) {
-                              console.error("Failed to delete message:", e);
-                            }
-                          }}
+                          onClick={() => setConfirmDeleteMsgId(message.id)}
                           title="Delete"
                           className="flex items-center gap-1 px-2 py-0.5 rounded text-xs text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
                         >
@@ -1482,6 +1429,26 @@ function ChatPageInner({ params }: { params: { id: string } }) {
           </div>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={confirmDeleteMsgId !== null}
+        title="Delete message"
+        description="Delete this message? This cannot be undone."
+        confirmText="Delete"
+        destructive
+        onConfirm={async () => {
+          const id = confirmDeleteMsgId;
+          setConfirmDeleteMsgId(null);
+          if (!id) return;
+          try {
+            await api.delete(`/api/chat/${params.id}/messages/${id}`);
+            setMessages((prev) => prev.filter((m) => m.id !== id));
+          } catch (e) {
+            console.error("Failed to delete message:", e);
+          }
+        }}
+        onCancel={() => setConfirmDeleteMsgId(null)}
+      />
     </>
   );
 }

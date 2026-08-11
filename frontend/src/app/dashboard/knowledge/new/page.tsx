@@ -154,7 +154,7 @@ export default function NewKnowledgeBasePage() {
                         type="checkbox"
                         id={`source-${source.id}`}
                         checked={selectedSources.includes(source.id)}
-                        onChange={(e) => {
+                        onChange={() => {
                           handleSourceToggle(source.id);
                         }}
                         className="mt-0.5 h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary"

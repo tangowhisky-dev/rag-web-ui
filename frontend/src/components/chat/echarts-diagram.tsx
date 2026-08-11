@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 interface EChartsDiagramProps {
   code: string;
@@ -9,8 +9,6 @@ interface EChartsDiagramProps {
 export default function EChartsDiagram({ code }: EChartsDiagramProps) {
   const [option, setOption] = useState<Record<string, unknown> | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const id = useId();
-  const safeId = 'echarts-' + id.replace(/[^a-zA-Z0-9-_]/g, '');
   const containerRef = useRef<HTMLDivElement>(null);
   const echartsInstanceRef = useRef<unknown>(null);
 

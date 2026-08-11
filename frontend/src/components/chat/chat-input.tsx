@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { Paperclip, ArrowUp, Square, ArrowRight } from "lucide-react";
+import { Paperclip, ArrowUp, Square } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
   Select,
@@ -11,7 +11,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { api } from "@/lib/api";
-import { FileAttachButton, FileChip, useFileDropzone, type UploadedFile } from "./file-attachment";
+import { FileChip, useFileDropzone, type UploadedFile } from "./file-attachment";
 
 interface KnowledgeBase {
   id: number;
@@ -47,8 +47,11 @@ function useAutoResize(ref: React.RefObject<HTMLTextAreaElement>, value: string)
   useEffect(() => {
     const ta = ref.current;
     if (!ta) return;
-    ta.style.height = "auto";
-    ta.style.height = `${Math.min(Math.max(ta.scrollHeight, MIN_HEIGHT_PX), MAX_HEIGHT_PX)}px`;
+    const rafId = requestAnimationFrame(() => {
+      ta.style.height = "auto";
+      ta.style.height = `${Math.min(Math.max(ta.scrollHeight, MIN_HEIGHT_PX), MAX_HEIGHT_PX)}px`;
+    });
+    return () => cancelAnimationFrame(rafId);
   }, [value, ref]);
 }
 

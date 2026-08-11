@@ -30,6 +30,7 @@ describe("cancelStream", () => {
     expect(global.fetch).toHaveBeenCalledWith("/api/chat/42/cancel", {
       method: "POST",
       credentials: "include",
+      headers: {},
     });
   });
 

@@ -4,6 +4,7 @@ import { useCallback } from "react";
 import { useDropzone } from "react-dropzone";
 import { Paperclip, X, FileText, Loader2, AlertCircle, CheckCircle2 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { api } from "@/lib/api";
 
 export const MAX_FILE_SIZE = 10 * 1024 * 1024;
 
@@ -106,17 +107,18 @@ interface MessageFileChipProps {
 
 export function MessageFileChip({ fileName, fileId, chatId }: MessageFileChipProps) {
   const handleDownload = async () => {
-    const res = await fetch(`/api/chat/${chatId}/files/${fileId}/download`, {
-      credentials: "include",
-    });
-    if (!res.ok) return;
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = fileName;
-    a.click();
-    URL.revokeObjectURL(url);
+    try {
+      const res = await api.getRaw(`/api/chat/${chatId}/files/${fileId}/download`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = fileName;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      // best-effort download
+    }
   };
 
   return (
