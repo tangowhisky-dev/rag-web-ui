@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from typing import Any, Optional, Union
+from sqlalchemy.orm import Session
 
 from app.core.config import settings
 
@@ -149,13 +150,22 @@ class ContextBudget:
         context_size: Optional[int] = None,
         reserved_generation: Optional[int] = None,
         tool_budget: Optional[int] = None,
+        db: Optional[Session] = None,
+        org_id: Optional[int] = None,
     ):
-        self.context_size = context_size or settings.OPENAI_MODEL_CONTEXT_SIZE
-        self.reserved_generation = reserved_generation or settings.CONTEXT_RESERVED_GENERATION
-        self.tool_budget = tool_budget or settings.CONTEXT_TOOL_BUDGET
+        if db is not None:
+            from app.services.settings_service import get_setting
+            self.context_size = context_size or get_setting(db, "OPENAI_MODEL_CONTEXT_SIZE", org_id)
+            self.reserved_generation = reserved_generation or get_setting(db, "CONTEXT_RESERVED_GENERATION", org_id)
+            self.tool_budget = tool_budget or get_setting(db, "CONTEXT_TOOL_BUDGET", org_id)
+            self.trigger_ratio = get_setting(db, "CONTEXT_COMPACTION_TRIGGER_RATIO", org_id)
+        else:
+            self.context_size = context_size or settings.OPENAI_MODEL_CONTEXT_SIZE
+            self.reserved_generation = reserved_generation or settings.CONTEXT_RESERVED_GENERATION
+            self.tool_budget = tool_budget or settings.CONTEXT_TOOL_BUDGET
+            self.trigger_ratio = settings.CONTEXT_COMPACTION_TRIGGER_RATIO
         self.available = max(self.context_size - self.reserved_generation - self.tool_budget, 0)
         self.used = 0
-        self.trigger_ratio = settings.CONTEXT_COMPACTION_TRIGGER_RATIO
         self.compaction_threshold = int(self.available * self.trigger_ratio)
 
     def add(self, tokens: int) -> None:

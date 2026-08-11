@@ -49,10 +49,13 @@ def _writer():
 
 
 # Per-turn call caps for tools that can be invoked in a tight loop.
-_TOOL_CALL_BUDGET = {
-    "rag_retrieve": settings.AGENT_MAX_RETRIEVALS,
-    "code_execute": settings.AGENT_MAX_CODE_EXEC,
-}
+# Resolved per-request via the settings service (org-overridable).
+def _tool_call_budget(db, org_id) -> dict:
+    from app.services.settings_service import get_setting
+    return {
+        "rag_retrieve": get_setting(db, "AGENT_MAX_RETRIEVALS", org_id),
+        "code_execute": get_setting(db, "AGENT_MAX_CODE_EXEC", org_id),
+    }
 
 # Error patterns that indicate a transient infrastructure failure rather
 # than a bad-argument error.  Transient failures retry with the same
@@ -160,6 +163,7 @@ def _extract_json_block(text: str) -> str | None:
 
 
 from app.services.agentic_rag.llm_factory import build_chat_llm
+from app.services.settings_service import get_setting
 from app.services.agentic_rag.nodes import (
     _agent_step,
     answer_evaluation_node,
@@ -510,7 +514,7 @@ async def _compact_messages_llm(
     from app.services.agentic_rag.nodes import _messages_to_conversation_text
     from app.services.agentic_rag.prompts import COMPACTION_SYSTEM_PROMPT, COMPACTION_USER_PROMPT
 
-    keep_recent = settings.COMPACTION_KEEP_RECENT
+    keep_recent = get_setting(ctx.db, "COMPACTION_KEEP_RECENT", ctx.org_id) if ctx else settings.COMPACTION_KEEP_RECENT
     recent = messages[-keep_recent:] if keep_recent else []
     old = messages[:len(messages) - len(recent)]
     # Drop a previous summary from *old* so it is re-summarised rather than
@@ -527,8 +531,9 @@ async def _compact_messages_llm(
             {"role": "user", "content": COMPACTION_USER_PROMPT.format(conversation=conversation_text)},
         ])
         summary = str(response.content).strip()
-        if len(summary) > settings.COMPACTION_SUMMARY_MAX_CHARS:
-            summary = summary[:settings.COMPACTION_SUMMARY_MAX_CHARS] + "\n\n[...summary truncated]"
+        max_chars = get_setting(ctx.db, "COMPACTION_SUMMARY_MAX_CHARS", ctx.org_id) if ctx else settings.COMPACTION_SUMMARY_MAX_CHARS
+        if len(summary) > max_chars:
+            summary = summary[:max_chars] + "\n\n[...summary truncated]"
         summary_msg = HumanMessage(
             content=f"[Conversation summary]\n{summary}", id=_COMPACTION_SUMMARY_ID
         )
@@ -602,12 +607,12 @@ async def _compact_if_needed(
     the caller can rebuild its prompt without having to interpret reducer
     markers. Both are empty when no compaction was needed.
     """
-    if not settings.COMPACTION_ENABLED:
+    if not (get_setting(ctx.db, "COMPACTION_ENABLED", ctx.org_id) if ctx else settings.COMPACTION_ENABLED):
         return {}, {}
 
     from app.services.agentic_rag.token_budget import ContextBudget
 
-    budget = ContextBudget()
+    budget = ContextBudget(db=ctx.db if ctx else None, org_id=ctx.org_id if ctx else None)
     budget.add(count_tokens(prompt_text))
     budget.add(system_overhead)
 
@@ -657,7 +662,7 @@ async def _compact_if_needed(
 
     # Stage 3: summarise old messages (LLM call).
     messages = list(state.get("messages", []))
-    if len(messages) > settings.COMPACTION_KEEP_RECENT:
+    if len(messages) > (get_setting(ctx.db, "COMPACTION_KEEP_RECENT", ctx.org_id) if ctx else settings.COMPACTION_KEEP_RECENT):
         message_updates, resolved, summary = await _compact_messages_llm(messages, ctx=ctx)
         if summary is not None:
             updates["messages"] = message_updates
@@ -811,7 +816,7 @@ async def plan_node(state: AgentState, ctx: ToolContext) -> dict:
         # needs_clarification=true loops plan → clarify → plan until the
         # recursion limit. Past the cap, answer with the ambiguity stated.
         needs_clarification = bool(getattr(plan, "needs_clarification", False))
-        if needs_clarification and state.get("clarification_count", 0) >= settings.AGENT_MAX_CLARIFICATIONS:
+        if needs_clarification and state.get("clarification_count", 0) >= get_setting(ctx.db, "AGENT_MAX_CLARIFICATIONS", ctx.org_id):
             logger.info("[plan_node] clarification budget exhausted — proceeding without asking")
             needs_clarification = False
             if isinstance(plan, Plan):
@@ -829,7 +834,7 @@ async def think_node(state: AgentState, ctx: ToolContext) -> dict:
     with _agent_step("think"):
         ctx.state = state
         iteration = state.get("iteration", 0) + 1
-        max_iter = settings.AGENT_MAX_ITERATIONS
+        max_iter = get_setting(ctx.db, "AGENT_MAX_ITERATIONS", ctx.org_id)
     
         if state.get("force_finalize"):
             return {"iteration": iteration, "tool_calls": [], "precomputed_answer": ""}
@@ -927,7 +932,7 @@ async def think_node(state: AgentState, ctx: ToolContext) -> dict:
             )
             user = _build_think_user_prompt()
     
-        mode = settings.TOOL_CALL_MODE
+        mode = get_setting(ctx.db, "TOOL_CALL_MODE", None)
         try:
             # Tool selection is a classification decision — temperature 0.
             # Creative sampling belongs in finalize_node's prose, not here.
@@ -969,12 +974,28 @@ def _wall_clock_exceeded(state: AgentState) -> bool:
     started_at = state.get("started_at")
     if started_at is None:
         return False
-    return (time.monotonic() - started_at) >= settings.AGENT_MAX_WALL_SECONDS
+    from app.services.settings_service import get_setting
+    from app.db.session import SessionLocal
+    org_id = state.get("org_id")
+    _db = SessionLocal()
+    try:
+        max_seconds = get_setting(_db, "AGENT_MAX_WALL_SECONDS", org_id)
+    finally:
+        _db.close()
+    return (time.monotonic() - started_at) >= max_seconds
 
 
 def route_think(state: AgentState) -> str:
     iteration = state.get("iteration", 0)
-    if iteration >= settings.AGENT_MAX_ITERATIONS or _wall_clock_exceeded(state):
+    from app.services.settings_service import get_setting
+    from app.db.session import SessionLocal
+    org_id = state.get("org_id")
+    _db = SessionLocal()
+    try:
+        max_iter = get_setting(_db, "AGENT_MAX_ITERATIONS", org_id)
+    finally:
+        _db.close()
+    if iteration >= max_iter or _wall_clock_exceeded(state):
         return "reflect_final"
     if state.get("tool_calls"):
         return "tool"
@@ -993,7 +1014,15 @@ def route_reflect_final(state: AgentState) -> str:
     reflection = state.get("reflection_final", {})
     ready = reflection.get("ready", True) if isinstance(reflection, dict) else True
     iteration = state.get("iteration", 0)
-    if not ready and iteration < settings.AGENT_MAX_ITERATIONS and not _wall_clock_exceeded(state):
+    from app.services.settings_service import get_setting
+    from app.db.session import SessionLocal
+    org_id = state.get("org_id")
+    _db = SessionLocal()
+    try:
+        max_iter = get_setting(_db, "AGENT_MAX_ITERATIONS", org_id)
+    finally:
+        _db.close()
+    if not ready and iteration < max_iter and not _wall_clock_exceeded(state):
         return "think"
     return "finalize"
 
@@ -1087,7 +1116,7 @@ async def tool_node(state: AgentState, ctx: ToolContext) -> dict:
                 logger.info("[tool_node] duplicate call skipped, reusing prior observation: tool=%s args=%s", name, args)
                 coros.append(_reuse_prior(prior))
                 continue
-            cap = _TOOL_CALL_BUDGET.get(name)
+            cap = _tool_call_budget(ctx.db, ctx.org_id).get(name)
             current = counts.get(name, 0)
             if cap is not None and current >= cap:
                 coros.append(_budget_exceeded(name, args, cap))
@@ -1129,7 +1158,7 @@ async def tool_node(state: AgentState, ctx: ToolContext) -> dict:
         # call budget (_TOOL_CALL_BUDGET) — that budget limits how many times
         # the *think* LLM can choose to call a tool, not how many times a
         # single failed call can be retried.
-        max_retries = settings.AGENT_MAX_TOOL_RETRIES
+        max_retries = get_setting(ctx.db, "AGENT_MAX_TOOL_RETRIES", ctx.org_id)
         if max_retries > 0:
             for idx, obs in enumerate(new_observations):
                 if obs.error is None:
@@ -1140,7 +1169,7 @@ async def tool_node(state: AgentState, ctx: ToolContext) -> dict:
                     continue
                 for attempt in range(max_retries):
                     if _is_transient_error(obs.error):
-                        await asyncio.sleep(settings.AGENT_RETRY_BACKOFF_BASE * (2 ** attempt))
+                        await asyncio.sleep(get_setting(ctx.db, "AGENT_RETRY_BACKOFF_BASE", ctx.org_id) * (2 ** attempt))
                         retry_args = obs.arguments
                     else:
                         retry_args = await _correct_tool_args(
@@ -1502,7 +1531,7 @@ async def reflect_node(state: AgentState, ctx: ToolContext) -> dict:
     """Periodic reflection: concrete deterministic recovery rules only."""
     with _agent_step("reflect"):
         iteration = state.get("iteration", 0)
-        if iteration == 0 or iteration % settings.AGENT_REFLECT_EVERY != 0:
+        if iteration == 0 or iteration % get_setting(ctx.db, "AGENT_REFLECT_EVERY", ctx.org_id) != 0:
             return {}
     
         observations = state.get("observations", [])
@@ -1522,13 +1551,13 @@ async def reflect_node(state: AgentState, ctx: ToolContext) -> dict:
         for raw_obs in observations:
             obs = _coerce_observation(raw_obs)
             if obs.tool == "chart_generate" and obs.error:
-                if counts.get("extract_data", 0) < settings.AGENT_MAX_RETRIEVALS:
+                if counts.get("extract_data", 0) < get_setting(ctx.db, "AGENT_MAX_RETRIEVALS", ctx.org_id):
                     precomputed.append({
                         "tool": "extract_data",
                         "arguments": {"source": "retrieved_docs"},
                     })
             if obs.tool == "code_execute" and obs.error:
-                if counts.get("code_execute", 0) < settings.AGENT_MAX_CODE_EXEC:
+                if counts.get("code_execute", 0) < get_setting(ctx.db, "AGENT_MAX_CODE_EXEC", ctx.org_id):
                     precomputed.append({
                         "tool": "extract_data",
                         "arguments": {"source": "retrieved_docs"},
@@ -1637,7 +1666,17 @@ def _build_execution_summary(state: AgentState) -> dict:
             failures.append({"tool": o.tool, "error": o.error})
 
     # Remaining retrieval budget.
-    retrieval_budget_left = settings.AGENT_MAX_RETRIEVALS - retrieval_queries
+    from app.services.settings_service import get_setting
+    from app.db.session import SessionLocal
+    org_id = state.get("org_id")
+    _db = SessionLocal()
+    try:
+        max_retrievals = get_setting(_db, "AGENT_MAX_RETRIEVALS", org_id)
+        max_iterations = get_setting(_db, "AGENT_MAX_ITERATIONS", org_id)
+        max_wall_seconds = get_setting(_db, "AGENT_MAX_WALL_SECONDS", org_id)
+    finally:
+        _db.close()
+    retrieval_budget_left = max_retrievals - retrieval_queries
 
     started_at = state.get("started_at")
     elapsed_seconds = round(time.monotonic() - started_at, 1) if started_at else 0.0
@@ -1653,8 +1692,8 @@ def _build_execution_summary(state: AgentState) -> dict:
         "tool_failures": failures,
         "remaining_budget": {
             "retrieval": retrieval_budget_left,
-            "iterations": settings.AGENT_MAX_ITERATIONS - iteration,
-            "seconds": round(settings.AGENT_MAX_WALL_SECONDS - elapsed_seconds, 1),
+            "iterations": max_iterations - iteration,
+            "seconds": round(max_wall_seconds - elapsed_seconds, 1),
         },
     }
 
@@ -1706,7 +1745,7 @@ async def reflect_final_node(state: AgentState, ctx: ToolContext) -> dict:
     """Final pre-finalize verification: deterministic execution completeness check."""
     with _agent_step("reflect_final"):
         iteration = state.get("iteration", 0)
-        max_iter = settings.AGENT_MAX_ITERATIONS
+        max_iter = get_setting(ctx.db, "AGENT_MAX_ITERATIONS", ctx.org_id)
 
         summary = _build_execution_summary(state)
         ready, reasoning = _verify_execution(summary)

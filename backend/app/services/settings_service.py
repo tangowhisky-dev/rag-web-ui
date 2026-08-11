@@ -115,6 +115,7 @@ def get_setting(db: Session, key: str, org_id: Optional[int] = None) -> Any:
     """Resolve a single setting with 3-tier precedence.
 
     If RUNTIME_SETTINGS_ENABLED is false, returns the .env/config.py default directly.
+    Falls back to .env/config.py default on any DB error (e.g. mock sessions in tests).
     """
     if not env_settings.RUNTIME_SETTINGS_ENABLED:
         return _get_env_default(key)
@@ -131,24 +132,28 @@ def get_setting(db: Session, key: str, org_id: Optional[int] = None) -> Any:
         if time.time() - ts < _CACHE_TTL:
             return val
 
-    # Tier 3: org override (only if scope allows and org_id is set)
-    if defn.scope == "org" and org_id is not None:
+    try:
+        # Tier 3: org override (only if scope allows and org_id is set)
+        if defn.scope == "org" and org_id is not None:
+            row = db.query(Setting).filter(
+                Setting.scope == "org", Setting.org_id == org_id, Setting.key == key
+            ).first()
+            if row is not None and row.value is not None:
+                val = _decode(row.value, defn)
+                _cache[cache_key] = (val, time.time())
+                return val
+
+        # Tier 2: app value
         row = db.query(Setting).filter(
-            Setting.scope == "org", Setting.org_id == org_id, Setting.key == key
+            Setting.scope == "app", Setting.org_id.is_(None), Setting.key == key
         ).first()
         if row is not None and row.value is not None:
             val = _decode(row.value, defn)
             _cache[cache_key] = (val, time.time())
             return val
-
-    # Tier 2: app value
-    row = db.query(Setting).filter(
-        Setting.scope == "app", Setting.org_id.is_(None), Setting.key == key
-    ).first()
-    if row is not None and row.value is not None:
-        val = _decode(row.value, defn)
-        _cache[cache_key] = (val, time.time())
-        return val
+    except Exception:
+        # DB error (mock session, connection issue, etc.) — fall back to env default
+        pass
 
     # Tier 1: .env / config.py default
     val = _get_env_default(key)

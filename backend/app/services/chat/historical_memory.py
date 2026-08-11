@@ -59,6 +59,7 @@ _HISTORICAL_FETCH_LIMIT = 50
 
 
 from app.services.infrastructure import _serialise_doc
+from app.services.settings_service import get_setting
 
 
 def retrieve_historical_memory(
@@ -67,6 +68,7 @@ def retrieve_historical_memory(
     db: Session,
     top_k: int = 5,
     score_threshold: float = 2.0,
+    org_id: Optional[int] = None,
 ) -> List[dict]:
     """
     Query past assistant messages from MySQL, rerank against query,
@@ -157,7 +159,9 @@ def retrieve_historical_memory(
     )
 
     # ── 3. Rerank — disabled path: return last K raw ────────────────────
-    if not settings.HISTORICAL_MEMORY_ENABLED or not settings.RERANKER_ENABLED:
+    hist_enabled = get_setting(db, "HISTORICAL_MEMORY_ENABLED", org_id)
+    reranker_enabled = get_setting(db, "RERANKER_ENABLED", org_id)
+    if not hist_enabled or not reranker_enabled:
         # No reranker available: return the last `top_k` (most recent) docs raw.
         result = docs[-top_k:] if top_k > 0 else []
         for d in result:

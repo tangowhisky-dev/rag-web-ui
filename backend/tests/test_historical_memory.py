@@ -24,6 +24,19 @@ from unittest.mock import patch, MagicMock
 from langchain_core.documents import Document as LangchainDocument
 
 
+def _mock_settings(hist_enabled=True, reranker_enabled=True):
+    """Patch get_setting to return the given feature flags."""
+    def _fake_get_setting(db, key, org_id=None):
+        if key == "HISTORICAL_MEMORY_ENABLED":
+            return hist_enabled
+        if key == "RERANKER_ENABLED":
+            return reranker_enabled
+        # Fall back to env default for other keys
+        from app.core.config import settings
+        return getattr(settings, key, None)
+    return patch("app.services.chat.historical_memory.get_setting", side_effect=_fake_get_setting)
+
+
 def _make_rows(n):
     """Return a list of SimpleNamespace objects mimicking DB rows."""
     return [
@@ -76,9 +89,7 @@ def test_normal_case_returns_top_k_reranked():
     mock_db = MagicMock()
     mock_db.execute.return_value.fetchall.return_value = rows
 
-    with patch("app.services.chat.historical_memory.settings") as mock_settings:
-        mock_settings.HISTORICAL_MEMORY_ENABLED = True
-        mock_settings.RERANKER_ENABLED = True
+    with _mock_settings(hist_enabled=True, reranker_enabled=True):
         with patch("app.services.retrieval.rerank", return_value=mock_reranked):
             from app.services.chat import retrieve_historical_memory
 
@@ -104,9 +115,7 @@ def test_no_messages_returns_empty():
     mock_db = MagicMock()
     mock_db.execute.return_value.fetchall.return_value = []
 
-    with patch("app.services.chat.historical_memory.settings") as mock_settings:
-        mock_settings.HISTORICAL_MEMORY_ENABLED = True
-        mock_settings.RERANKER_ENABLED = True
+    with _mock_settings(hist_enabled=True, reranker_enabled=True):
         with patch("app.services.retrieval.rerank") as mock_rerank:
             from app.services.chat import retrieve_historical_memory
             result = retrieve_historical_memory(
@@ -133,9 +142,7 @@ def test_all_scores_below_threshold_returns_empty():
     mock_db = MagicMock()
     mock_db.execute.return_value.fetchall.return_value = rows
 
-    with patch("app.services.chat.historical_memory.settings") as mock_settings:
-        mock_settings.HISTORICAL_MEMORY_ENABLED = True
-        mock_settings.RERANKER_ENABLED = True
+    with _mock_settings(hist_enabled=True, reranker_enabled=True):
         # The real reranker returns [] when all docs fail the threshold.
         # We simulate that exact behavior.
         with patch("app.services.retrieval.rerank", return_value=[]):
@@ -161,9 +168,7 @@ def test_reranker_disabled_returns_last_k_raw():
     mock_db = MagicMock()
     mock_db.execute.return_value.fetchall.return_value = rows
 
-    with patch("app.services.chat.historical_memory.settings") as mock_settings:
-        mock_settings.HISTORICAL_MEMORY_ENABLED = True
-        mock_settings.RERANKER_ENABLED = False  # disabled
+    with _mock_settings(hist_enabled=True, reranker_enabled=False):  # disabled
         with patch("app.services.retrieval.rerank") as mock_rerank:
             from app.services.chat import retrieve_historical_memory
             result = retrieve_historical_memory(
@@ -190,9 +195,7 @@ def test_historical_memory_disabled_returns_empty():
     mock_db = MagicMock()
     mock_db.execute.return_value.fetchall.return_value = rows
 
-    with patch("app.services.chat.historical_memory.settings") as mock_settings:
-        mock_settings.HISTORICAL_MEMORY_ENABLED = False
-        mock_settings.RERANKER_ENABLED = True
+    with _mock_settings(hist_enabled=False, reranker_enabled=True):
         with patch("app.services.retrieval.rerank") as mock_rerank:
             from app.services.chat import retrieve_historical_memory
             result = retrieve_historical_memory(
@@ -213,9 +216,7 @@ def test_db_query_failure_returns_empty():
     mock_db = MagicMock()
     mock_db.execute.side_effect = Exception("Connection refused")
 
-    with patch("app.services.chat.historical_memory.settings") as mock_settings:
-        mock_settings.HISTORICAL_MEMORY_ENABLED = True
-        mock_settings.RERANKER_ENABLED = True
+    with _mock_settings(hist_enabled=True, reranker_enabled=True):
         with patch("app.services.retrieval.rerank") as mock_rerank:
             from app.services.chat import retrieve_historical_memory
             result = retrieve_historical_memory(
@@ -239,9 +240,7 @@ def test_reranker_failure_returns_empty():
     mock_db = MagicMock()
     mock_db.execute.return_value.fetchall.return_value = rows
 
-    with patch("app.services.chat.historical_memory.settings") as mock_settings:
-        mock_settings.HISTORICAL_MEMORY_ENABLED = True
-        mock_settings.RERANKER_ENABLED = True
+    with _mock_settings(hist_enabled=True, reranker_enabled=True):
         with patch(
             "app.services.retrieval.rerank",
             side_effect=Exception("Model not found"),
@@ -263,9 +262,7 @@ def test_top_k_zero_returns_empty():
     mock_db = MagicMock()
     mock_db.execute.return_value.fetchall.return_value = rows
 
-    with patch("app.services.chat.historical_memory.settings") as mock_settings:
-        mock_settings.HISTORICAL_MEMORY_ENABLED = True
-        mock_settings.RERANKER_ENABLED = False
+    with _mock_settings(hist_enabled=True, reranker_enabled=False):
         with patch("app.services.retrieval.rerank") as mock_rerank:
             from app.services.chat import retrieve_historical_memory
             result = retrieve_historical_memory(
@@ -285,9 +282,7 @@ def test_top_k_exceeds_available_returns_all():
     mock_db = MagicMock()
     mock_db.execute.return_value.fetchall.return_value = rows
 
-    with patch("app.services.chat.historical_memory.settings") as mock_settings:
-        mock_settings.HISTORICAL_MEMORY_ENABLED = True
-        mock_settings.RERANKER_ENABLED = False
+    with _mock_settings(hist_enabled=True, reranker_enabled=False):
         with patch("app.services.retrieval.rerank") as mock_rerank:
             from app.services.chat import retrieve_historical_memory
             result = retrieve_historical_memory(
