@@ -131,12 +131,11 @@ These have no per-org meaning, or changing them per-org would require reloading 
 
 | Key | Default | Type | Category/Tab | Reload | Why app-only |
 |---|---|---|---|---|---|
-| `OPENAI_MODEL_CONTEXT_SIZE` | 131072 | int | LLM & Models | next_request | Token budgeting. (Org can override via `context_size` on the LLM tab — see §4.2.) |
-| `DENSE_EMBEDDINGS_MODEL` | `local-embedding-model` | str | LLM & Models | restart | Qdrant collections are dimension-locked; per-org would need separate collections. Shared index geometry. |
-| `DENSE_EMBEDDING_DIM` | 1024 | int | LLM & Models | restart | Must match the embeddings model; tied to collection schema. |
-| `SPLADE_MODEL` | `prithivida/Splade_PP_en_v1` | str | LLM & Models | restart | Loaded once by FastEmbed into a process-global ONNX session. |
+| `OPENAI_MODEL_CONTEXT_SIZE` | 131072 | int | Response Model | next_request | Token budgeting. (Org can override via `context_size` on the LLM tab — see §4.2.) |
+| `DENSE_EMBEDDINGS_MODEL` | `local-embedding-model` | str | Embeddings | restart | Qdrant collections are dimension-locked; per-org would need separate collections. Shared index geometry. |
+| `DENSE_EMBEDDING_DIM` | 1024 | int | Embeddings | restart | Must match the embeddings model; tied to collection schema. |
+| `SPLADE_MODEL` | `prithivida/Splade_PP_en_v1` | str | Embeddings | restart | Loaded once by FastEmbed into a process-global ONNX session. |
 | `RERANKER_MODEL` | `Xenova/ms-marco-MiniLM-L-12-v2` | str | Reranker | restart | Loaded once into a process-global cross-encoder. (Enabled/threshold ARE org-overridable — see 4.2.) |
-| `MEMORY_EMBEDDING_MODEL` | None | str? | System / Memory | restart | Embedding model for Redis store; tied to global embeddings. |
 | `MEMORY_ENABLED` | true | bool | System / Memory | restart | Redis long-term memory toggle; affects LangGraph store wiring (process singleton). |
 | `CHUNK_SIZE` | 1500 | int | Ingestion / Chunking | ingest | **Ingestion setting.** DataStores are shared across orgs — per-org chunking would produce inconsistent indexes for the same folder. `requires_reindex=True`. |
 | `OVERLAP_PERCENTAGE` | 0.20 | float | Ingestion / Chunking | ingest | **Ingestion setting.** Same shared-DataStore constraint. `requires_reindex=True`. |
@@ -159,13 +158,13 @@ These have no per-org meaning, or changing them per-org would require reloading 
 
 | Key | Default | Type | Category/Tab | Reload | Notes |
 |---|---|---|---|---|---|
-| `OPENAI_API_BASE` | `http://localhost:1234/v1` | str | LLM & Models | next_request | Already partially per-org via `OrgLLMConfig.api_base`. Migrated into the unified table. |
-| `OPENAI_MODEL` | `local-model` | str | LLM & Models | next_request | Already partially per-org via `OrgLLMConfig.model_name`. |
-| `OPENAI_MODEL_CONTEXT_SIZE` | 131072 | int | LLM & Models | next_request | Org can have a different chat model with a different context window. Override follows `model_name`. |
-| `QUERY_MODEL` | None (→ OPENAI_MODEL) | str? | LLM & Models | next_request | Already partially per-org via `OrgLLMConfig.query_model`. |
-| `REASONING_MODEL` | None (→ OPENAI_MODEL) | str? | LLM & Models | next_request | **Not yet in `config.py`** — add in Phase 0. New org field. |
-| `VISION_MODEL` | None | str? | LLM & Models | next_request | OCR model. Org override applies to **query-time** vision; **ingestion OCR** uses app-level setting (shared DataStores). |
-| `OPENAI_VISION_API_BASE` | None (→ OPENAI_API_BASE) | str? | LLM & Models | next_request | New org field. Same ingestion caveat as `VISION_MODEL`. |
+| `OPENAI_API_BASE` | `http://localhost:1234/v1` | str | Response Model | next_request | Already partially per-org via `OrgLLMConfig.api_base`. Migrated into the unified table. |
+| `OPENAI_MODEL` | `local-model` | str | Response Model | next_request | Already partially per-org via `OrgLLMConfig.model_name`. |
+| `OPENAI_MODEL_CONTEXT_SIZE` | 131072 | int | Response Model | next_request | Org can have a different chat model with a different context window. Override follows `model_name`. |
+| `QUERY_MODEL` | None (→ OPENAI_MODEL) | str? | Query Rewrite Model | next_request | Already partially per-org via `OrgLLMConfig.query_model`. |
+| `REASONING_MODEL` | None (→ OPENAI_MODEL) | str? | Reasoning Model | next_request | **Not yet in `config.py`** — add in Phase 0. New org field. |
+| `VISION_MODEL` | None | str? | Vision / OCR | next_request | OCR model. Org override applies to **query-time** vision; **ingestion OCR** uses app-level setting (shared DataStores). |
+| `OPENAI_VISION_API_BASE` | None (→ OPENAI_API_BASE) | str? | Vision / OCR | next_request | New org field. Same ingestion caveat as `VISION_MODEL`. |
 | `GRAPHRAG_LLM` | None (→ OPENAI_MODEL) | str? | GraphRAG | next_request | Org override applies to **query-time** entity extraction. **Ingestion** graph extraction uses app-level setting (shared DataStores). |
 
 > LLM clients are built per-request in `services/agentic_rag/llm_factory.py` (`build_chat_llm`) and `services/chat/chat_service.py` (`get_effective_llm_config`), so per-org model/base overrides are already feasible and partially wired. This plan extends those resolvers to read from the unified settings table instead of `OrgLLMConfig` directly.
@@ -281,11 +280,11 @@ Example entries (abbreviated; the real file lists all ~60):
 ```python
 REGISTRY = [
     # ── App-only (scope="app") — Super Admin only, no org override ──────
-    SettingDef("DENSE_EMBEDDINGS_MODEL", "LLM & Models", "Dense embeddings model",
+    SettingDef("DENSE_EMBEDDINGS_MODEL", "Embeddings", "Dense embeddings model",
                "str", "local-embedding-model", scope="app", reload="restart"),
-    SettingDef("DENSE_EMBEDDING_DIM", "LLM & Models", "Embedding dimension",
+    SettingDef("DENSE_EMBEDDING_DIM", "Embeddings", "Embedding dimension",
                "int", 1024, scope="app", reload="restart", min=1),
-    SettingDef("SPLADE_MODEL", "LLM & Models", "SPLADE sparse model",
+    SettingDef("SPLADE_MODEL", "Embeddings", "SPLADE sparse model",
                "str", "prithivida/Splade_PP_en_v1", scope="app", reload="restart"),
     SettingDef("RERANKER_MODEL", "Reranker", "Reranker model",
                "str", "Xenova/ms-marco-MiniLM-L-12-v2", scope="app", reload="restart"),
@@ -313,13 +312,13 @@ REGISTRY = [
     SettingDef("MEMORY_ENABLED", "System", "Enable Redis long-term memory",
                "bool", True, scope="app", reload="restart"),
     # ── App-default + org-override (scope="org") ────────────────────────
-    SettingDef("OPENAI_API_BASE", "LLM & Models", "Base API URL",
+    SettingDef("OPENAI_API_BASE", "Response Model", "Base API URL",
                "str", "http://localhost:1234/v1", scope="org", reload="next_request"),
-    SettingDef("OPENAI_MODEL", "LLM & Models", "Response model",
+    SettingDef("OPENAI_MODEL", "Response Model", "Response model",
                "str", "local-model", scope="org", reload="next_request"),
-    SettingDef("OPENAI_MODEL_CONTEXT_SIZE", "LLM & Models", "Context window size",
+    SettingDef("OPENAI_MODEL_CONTEXT_SIZE", "Response Model", "Context window size",
                "int", 131072, scope="org", reload="next_request", min=1024),
-    SettingDef("REASONING_MODEL", "LLM & Models", "Reasoning model",
+    SettingDef("REASONING_MODEL", "Reasoning Model", "Reasoning model",
                "str", None, scope="org", reload="next_request"),
     SettingDef("RETRIEVAL_TOP_K", "Retrieval", "Top-K",
                "int", 20, scope="org", reload="next_request", min=1, max=200),
@@ -626,7 +625,7 @@ This is a prerequisite for the registry entry and the org-override path.
 | Reload class | Behavior | Applies to |
 |---|---|---|
 | `next_request` | Resolved per request from the cache (30s TTL). Changes take effect within 30s, or immediately if the upsert invalidates the cache. | All retrieval/chunking/graphrag/agentic/memory/query/watcher/LLM-endpoint settings. |
-| `restart` | Read once at startup into a process-global resource (ONNX session, Qdrant collection, tokenizer). Changing requires a restart. UI shows a "restart required" badge. | `DENSE_EMBEDDINGS_MODEL`, `DENSE_EMBEDDING_DIM`, `SPLADE_MODEL`, `RERANKER_MODEL`, `TOKENIZER_MODEL`, `MEMORY_ENABLED`, `MEMORY_EMBEDDING_MODEL`, `SANDBOX_BACKEND`. |
+| `restart` | Read once at startup into a process-global resource (ONNX session, Qdrant collection, tokenizer). Changing requires a restart. UI shows a "restart required" badge. | `DENSE_EMBEDDINGS_MODEL`, `DENSE_EMBEDDING_DIM`, `SPLADE_MODEL`, `RERANKER_MODEL`, `TOKENIZER_MODEL`, `MEMORY_ENABLED`, `SANDBOX_BACKEND`. |
 
 The cache invalidation hook lives in `settings_service.upsert_*` / `reset_*`: on any write, drop the affected `(org_id)` and the app-scope cache entries. For multi-worker setups, a Redis pub/sub invalidation channel is a later enhancement; for v1, the 30s TTL bounds staleness across workers.
 
@@ -646,7 +645,7 @@ The cache invalidation hook lives in `settings_service.upsert_*` / `reset_*`: on
 
 **New route:** `frontend/src/app/dashboard/admin/settings/page.tsx`
 
-- Tabbed interface. Tabs derived from the registry `category` values: System, LLM & Models, Retrieval, Adaptive Retrieval, Reranker, Chunking, GraphRAG, Query Classification, Agentic, Memory, File Watcher.
+- Tabbed interface. Tabs derived from the registry `category` values: System, Models, Retrieval, Adaptive Retrieval, Reranker, Chunking, GraphRAG, Query Classification, Agentic, Memory, File Watcher.
 - Each tab renders fields from `GET /api/admin/settings`, grouped by `category`.
 - Field rendering by `type`: text input (str), number input (int/float, with min/max), toggle (bool), textarea (the `QUERY_CLASSIFIER_PROMPT` and any `text` type), JSON editor with preview (json), masked input (secret — not used in v1 since secrets stay in .env).
 - "Restart required" badge next to `reload="restart"` fields.
@@ -667,7 +666,7 @@ NAV_ITEMS (super_admin sees all; admin sees Orgs/Users/DataStores only):
 **Extend:** `frontend/src/app/dashboard/admin/orgs/page.tsx`
 
 - The current "LLM Config" dialog becomes one tab inside a broader "Settings" dialog for the org.
-- The dialog has the same tabs as the Super Admin page but only for `scope="org"` categories (LLM & Models, Retrieval, Adaptive Retrieval, Reranker, Chunking, GraphRAG, Query Classification, Agentic, Memory, File Watcher).
+- The dialog has the same tabs as the Super Admin page but only for `scope="org"` categories (Models, Retrieval, Adaptive Retrieval, Reranker, Chunking, GraphRAG, Query Classification, Agentic, Memory, File Watcher).
 - Each field shows: current org value (if overridden), app default (greyed "inherited" placeholder), and an "override" toggle. When the toggle is off, the field is disabled and shows the app default. When on, the field is editable.
 - `overridden` flag from `GET /api/admin/orgs/{org_id}/settings` drives the toggle state.
 - Save: `PUT /api/admin/orgs/{org_id}/settings` with overridden fields only.
@@ -750,24 +749,24 @@ Each phase is independently shippable. Phases 0–2 change nothing about runtime
 | `TOKENIZER_MODEL`, `WATCHER_USE_INOTIFY`, `WATCH_DIR`, `SANDBOX_BACKEND` | yes | — | — | (host/mount/capability) |
 | `PROCESSING_TIMEOUT_SILENCE_S` | fallback | default | override | Quality |
 | `ANSWER_QUALITY_GRADING_ENABLED` | fallback | default | override | Quality |
-| `DENSE_EMBEDDINGS_MODEL`, `DENSE_EMBEDDING_DIM` | — | app-only (restart) | — | LLM & Models |
-| `SPLADE_MODEL` | — | app-only (restart) | — | LLM & Models |
+| `DENSE_EMBEDDINGS_MODEL`, `DENSE_EMBEDDING_DIM` | — | app-only (restart) | — | Embeddings |
+| `SPLADE_MODEL` | — | app-only (restart) | — | Embeddings |
 | `RERANKER_MODEL` | — | app-only (restart) | — | Reranker |
 | `SANDBOX_TIMEOUT_S` | — | app-only | — | System / Agent |
 | `TOOL_CALL_MODE` | — | app-only | — | System / Agent |
 | `QUERY_CLASSIFIER_PROMPT` | — | app-only | — | Query Classification |
 | `COMPACTION_*`, `CONTEXT_*`, `HIGHLIGHTS_TOKEN_CAP`, `CONTEXT_COMPACTION_TRIGGER_RATIO` | fallback | default | override | Context / Memory |
-| `MEMORY_ENABLED`, `MEMORY_EMBEDDING_MODEL` | — | app-only (restart) | — | System / Memory |
+| `MEMORY_ENABLED` | — | app-only (restart) | — | System / Memory |
 | `CHUNK_SIZE`, `OVERLAP_PERCENTAGE` | — | app-only (reindex) | — | Ingestion / Chunking |
 | `GRAPHRAG_ENABLED`, `GRAPHRAG_MAX_CHUNKS`, `NEO4J_LLM_CONTEXT` | — | app-only (reindex) | — | Ingestion / GraphRAG |
 | `WATCHER_ENABLED`, `WATCH_POLL_INTERVAL` | — | app-only (restart) | — | System / Watcher |
-| `OPENAI_API_BASE` | fallback | default | override | LLM & Models |
-| `OPENAI_MODEL` | fallback | default | override | LLM & Models |
-| `OPENAI_MODEL_CONTEXT_SIZE` | fallback | default | override | LLM & Models |
-| `QUERY_MODEL` | fallback | default | override | LLM & Models |
-| `REASONING_MODEL` | fallback | default | override | LLM & Models |
-| `VISION_MODEL` | fallback | default | override (query only) | LLM & Models |
-| `OPENAI_VISION_API_BASE` | fallback | default | override (query only) | LLM & Models |
+| `OPENAI_API_BASE` | fallback | default | override | Response Model |
+| `OPENAI_MODEL` | fallback | default | override | Response Model |
+| `OPENAI_MODEL_CONTEXT_SIZE` | fallback | default | override | Response Model |
+| `QUERY_MODEL` | fallback | default | override | Query Rewrite Model |
+| `REASONING_MODEL` | fallback | default | override | Reasoning Model |
+| `VISION_MODEL` | fallback | default | override (query only) | Vision / OCR |
+| `OPENAI_VISION_API_BASE` | fallback | default | override (query only) | Vision / OCR |
 | `GRAPHRAG_LLM` | fallback | default | override (query only) | GraphRAG |
 | `RETRIEVAL_TOP_K`, `RETRIEVAL_MIN_RRF_SCORE` | fallback | default | override | Retrieval |
 | `DENSE_MIN_SCORE`, `SPARSE_MIN_SCORE`, `EXACT_MIN_SCORE` | fallback | default | override | Retrieval |
@@ -899,7 +898,7 @@ Each phase is independently shippable. Phases 0–2 change nothing about runtime
 | `CHUNK_SIZE` / `OVERLAP_PERCENTAGE` | Re-ingest for consistency |
 | `GRAPHRAG_ENABLED` / `GRAPHRAG_MAX_CHUNKS` / `NEO4J_LLM_CONTEXT` | Re-run graph extraction for consistency |
 | `RERANKER_MODEL` | Restart backend workers to reload ONNX |
-| `MEMORY_ENABLED` / `MEMORY_EMBEDDING_MODEL` | Restart backend |
+| `MEMORY_ENABLED` /  | Restart backend |
 | `WATCHER_ENABLED` / `WATCH_POLL_INTERVAL` | Restart backend (watcher process) |
 | All other settings | Take effect within cache TTL (30s); no restart needed |
 

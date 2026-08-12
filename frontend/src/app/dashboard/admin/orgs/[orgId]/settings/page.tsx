@@ -168,7 +168,7 @@ export default function OrgSettingsPage() {
 
   // Tab groupings: each tab maps to a set of categories
   const TAB_GROUPS: { tab: string; cats: string[] }[] = [
-    { tab: 'Models', cats: ['LLM & Models'] },
+    { tab: 'Models', cats: ['Response Model', 'Query Rewrite Model', 'Reasoning Model'] },
     { tab: 'Retrieval', cats: ['Retrieval', 'Adaptive Retrieval', 'Reranker'] },
     { tab: 'GraphRAG', cats: ['GraphRAG'] },
     { tab: 'Agent', cats: ['Agentic'] },
