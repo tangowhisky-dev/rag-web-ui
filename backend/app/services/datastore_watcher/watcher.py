@@ -224,12 +224,14 @@ class DataStoreWatcher:
             )
             return
 
-        # Skip if already watching
+        # If already watching, still update the handler's folder_paths so
+        # org_id stays current after org reassignment.
         if datastore_id in self._datastore_paths:
             logger.info(
-                "[WATCHER] add_datastore_already_watching datastore_id=%s",
+                "[WATCHER] add_datastore_already_watching datastore_id=%s — updating org_id",
                 datastore_id,
             )
+            self._handler.add_folder(datastore_id, org_id, abs_path, interval_minutes * 60)
             return
 
         # Register the datastore in the handler's folder_paths map

@@ -993,3 +993,56 @@ def unlink_datastore_from_kb(
     ds = db.query(DataStore).filter(DataStore.id == data_store_id).first()
     logger.info("Data source '%s' unlinked from knowledge base '%s' (kb_id=%d)", ds.name if ds else data_store_id, kb.name, kb_id)
     return {"message": f"Data source unlinked from knowledge base '{kb.name}'"}
+
+
+@router.get("/available-datastores")
+def list_available_datastores(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Any:
+    """List datastores assigned to the current user's org hierarchy.
+
+    Returns datastores that the user can link to their knowledge bases.
+    Org-level assignment makes a datastore visible for linking; it does NOT
+    make it queryable — the user must explicitly link it to a KB first.
+    """
+    if not current_user.org_id:
+        return []
+
+    user_org_ids = _get_user_org_ids(db, current_user.org_id)
+
+    datastores = (
+        db.query(DataStore)
+        .join(OrganizationDataStore)
+        .filter(
+            OrganizationDataStore.org_id.in_(user_org_ids),
+            OrganizationDataStore.is_active == True,
+            DataStore.is_active == True,
+        )
+        .distinct()
+        .order_by(DataStore.id)
+        .all()
+    )
+
+    result = []
+    for ds in datastores:
+        links = (
+            db.query(OrganizationDataStore)
+            .join(Organisation)
+            .filter(
+                OrganizationDataStore.data_store_id == ds.id,
+                OrganizationDataStore.is_active == True,
+            )
+            .all()
+        )
+        result.append({
+            "id": ds.id,
+            "name": ds.name,
+            "description": ds.description,
+            "folder_path": ds.folder_path,
+            "assigned_orgs": [
+                {"id": link.organisation.id, "name": link.organisation.name}
+                for link in links
+            ],
+        })
+    return result

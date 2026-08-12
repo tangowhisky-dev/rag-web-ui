@@ -24,12 +24,9 @@ export default function NewKnowledgeBasePage() {
 
   useEffect(() => {
     // Fetch available data sources for the user's organization
-    api.get("/api/admin/datastores")
+    api.get("/api/knowledge-base/available-datastores")
       .then((data) => {
-        const sources = (data as DataSource[]).filter(ds => 
-          ds.assigned_orgs && ds.assigned_orgs.length > 0
-        );
-        setAvailableSources(sources);
+        setAvailableSources(data as DataSource[]);
       })
       .catch((err) => {
         console.error("Failed to fetch data sources:", err);

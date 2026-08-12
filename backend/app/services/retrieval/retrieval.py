@@ -59,13 +59,12 @@ def get_effective_datastore_ids(
     org_id: Optional[int],
     db: Session,
 ) -> List[int]:
-    """Resolve all effective datastore IDs for a set of knowledge bases.
+    """Resolve all datastore IDs explicitly linked to the given knowledge bases.
 
-    Queries two tables:
-      1. KnowledgeBaseDataStore  — KB-to-datastore links
-      2. OrganizationDataStore   — org-to-datastore links (for standalone DataStores)
-
-    Returns the deduplicated union of both.
+    Only datastores linked via KnowledgeBaseDataStore are returned — org-level
+    assignment (OrganizationDataStore) makes a datastore *visible* for linking
+    in the UI but does NOT make it queryable. A user must explicitly link a
+    datastore to their KB for it to be searched at query time.
 
     IMPORTANT: This function creates its own fresh SessionLocal() session instead
     of using the passed ``db`` session. The passed session may be shared across
@@ -91,20 +90,6 @@ def get_effective_datastore_ids(
                     .all()
                 )
                 datastore_ids = [row.data_store_id for row in datastore_links]
-
-            if org_id and fresh_db and datastore_ids is not None:
-                from app.models.datastore import OrganizationDataStore
-
-                ds_org_links = (
-                    fresh_db.query(OrganizationDataStore.data_store_id)
-                    .filter(OrganizationDataStore.org_id == org_id)
-                    .distinct()
-                    .all()
-                )
-                org_ds_ids = [row.data_store_id for row in ds_org_links]
-                for ds_id in org_ds_ids:
-                    if ds_id not in datastore_ids:
-                        datastore_ids.append(ds_id)
             break
         except Exception as exc:
             logger.warning("get_effective_datastore_ids failed (attempt %d): %s", attempt + 1, exc)

@@ -65,12 +65,8 @@ export default function KnowledgeBasePage() {
 
   const fetchAvailableSources = async () => {
     try {
-      const data = await api.get("/api/admin/datastores");
-      // Filter to only show data stores assigned to user's org
-      const filtered = (data as AvailableDataSource[]).filter(ds => 
-        ds.assigned_orgs && ds.assigned_orgs.length > 0
-      );
-      setAvailableSources(filtered);
+      const data = await api.get("/api/knowledge-base/available-datastores");
+      setAvailableSources(data as AvailableDataSource[]);
     } catch (err) {
       console.error("Failed to fetch data stores:", err);
     }
