@@ -392,6 +392,9 @@ def get_app_setting_with_meta(db: Session, key: str) -> dict:
         "choices": list(defn.choices) if defn.choices else None,
         "secret": defn.secret,
         "is_set": effective is not None,
+        "model_picker": defn.model_picker,
+        "api_base_ref": defn.api_base_ref,
+        "api_key_ref": defn.api_key_ref,
     }
 
 
@@ -439,6 +442,9 @@ def get_org_setting_with_meta(db: Session, org_id: int, key: str) -> dict:
         "choices": list(defn.choices) if defn.choices else None,
         "secret": defn.secret,
         "is_set": effective is not None,
+        "model_picker": defn.model_picker,
+        "api_base_ref": defn.api_base_ref,
+        "api_key_ref": defn.api_key_ref,
     }
 
 

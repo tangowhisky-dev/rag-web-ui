@@ -19,6 +19,7 @@ import {
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { ArrowLeft, Save, RotateCcw, Layers, AlertTriangle } from 'lucide-react';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
+import { ModelPicker } from '@/components/settings/model-picker';
 
 interface OrgSettingItem {
   key: string;
@@ -38,6 +39,9 @@ interface OrgSettingItem {
   choices: string[] | null;
   secret: boolean;
   is_set: boolean;
+  model_picker: boolean;
+  api_base_ref: string | null;
+  api_key_ref: string | null;
 }
 
 interface OrgSettingsResponse {
@@ -249,6 +253,8 @@ export default function OrgSettingsPage() {
                           preflightIssue={preflightIssues.find(i => i.key === s.key)}
                           onChange={(v) => updateValue(s.key, v)}
                           onReset={() => setConfirmKey(s.key)}
+                          getSettingValue={(key: string) => settings.find(x => x.key === key)?.value ?? null}
+                          orgId={orgId}
                         />
                       ))}
                     </div>
@@ -288,12 +294,16 @@ function OrgSettingField({
   preflightIssue,
   onChange,
   onReset,
+  getSettingValue,
+  orgId,
 }: {
   setting: OrgSettingItem;
   dirty: boolean;
   preflightIssue?: PreflightIssue;
   onChange: (v: any) => void;
   onReset: () => void;
+  getSettingValue: (key: string) => any;
+  orgId: number;
 }) {
   const hasError = preflightIssue?.severity === 'error';
 
@@ -341,14 +351,30 @@ function OrgSettingField({
           </button>
         )}
       </div>
-      <OrgSettingInput setting={setting} onChange={onChange} />
+      <OrgSettingInput setting={setting} onChange={onChange} getSettingValue={getSettingValue} orgId={orgId} />
     </div>
   );
 }
 
-function OrgSettingInput({ setting, onChange }: { setting: OrgSettingItem; onChange: (v: any) => void }) {
+function OrgSettingInput({ setting, onChange, getSettingValue, orgId }: { setting: OrgSettingItem; onChange: (v: any) => void; getSettingValue: (key: string) => any; orgId: number }) {
   const [showSecret, setShowSecret] = useState(false);
   const [secretEditing, setSecretEditing] = useState(false);
+
+  // Model picker: render combobox with fetch button for model fields.
+  if (setting.model_picker) {
+    const apiBase = setting.api_base_ref ? getSettingValue(setting.api_base_ref) : null;
+    const apiKey = setting.api_key_ref ? getSettingValue(setting.api_key_ref) : null;
+    return (
+      <ModelPicker
+        value={setting.value}
+        apiBase={apiBase}
+        apiKey={apiKey}
+        fetchUrl={`/api/admin/orgs/${orgId}/settings/models`}
+        onChange={onChange}
+        placeholder={setting.overridden ? undefined : 'Inherits app default — enter or fetch to override'}
+      />
+    );
+  }
 
   // Secret fields: render password input with show/hide and edit/clear controls.
   if (setting.secret) {

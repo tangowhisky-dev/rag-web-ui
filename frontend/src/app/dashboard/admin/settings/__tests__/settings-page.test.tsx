@@ -64,6 +64,13 @@ jest.mock('@/components/ui/tabs', () => ({
   TabsContent: ({ children }: any) => <div>{children}</div>,
 }));
 
+// Mock ModelPicker to avoid network calls
+jest.mock('@/components/settings/model-picker', () => ({
+  ModelPicker: ({ value, onChange, placeholder }: any) => (
+    <input value={value ?? ''} onChange={(e) => onChange(e.target.value || null)} placeholder={placeholder} data-testid="model-picker" />
+  ),
+}));
+
 import SuperAdminSettingsPage from '../page';
 
 const MOCK_SETTINGS = {
@@ -82,6 +89,9 @@ const MOCK_SETTINGS = {
       min: 1,
       max: 200,
       choices: null,
+      model_picker: false,
+      api_base_ref: null,
+      api_key_ref: null,
     },
     {
       key: 'CHUNK_SIZE',
@@ -97,6 +107,9 @@ const MOCK_SETTINGS = {
       min: 100,
       max: 8000,
       choices: null,
+      model_picker: false,
+      api_base_ref: null,
+      api_key_ref: null,
     },
     {
       key: 'RERANKER_ENABLED',
@@ -112,6 +125,9 @@ const MOCK_SETTINGS = {
       min: null,
       max: null,
       choices: null,
+      model_picker: false,
+      api_base_ref: null,
+      api_key_ref: null,
     },
   ],
 };

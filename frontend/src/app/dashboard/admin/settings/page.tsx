@@ -17,6 +17,7 @@ import {
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { AlertTriangle, Save, RotateCcw } from 'lucide-react';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
+import { ModelPicker } from '@/components/settings/model-picker';
 
 interface SettingItem {
   key: string;
@@ -34,6 +35,9 @@ interface SettingItem {
   choices: string[] | null;
   secret: boolean;
   is_set: boolean;
+  model_picker: boolean;
+  api_base_ref: string | null;
+  api_key_ref: string | null;
 }
 
 interface SettingsResponse {
@@ -207,6 +211,7 @@ export default function SuperAdminSettingsPage() {
                           preflightIssue={preflightIssues.find(i => i.key === s.key)}
                           onChange={(v) => updateValue(s.key, v)}
                           onReset={() => setConfirmKey(s.key)}
+                          getSettingValue={(key: string) => settings.find(x => x.key === key)?.value ?? null}
                         />
                       ))}
                     </div>
@@ -236,12 +241,14 @@ function SettingField({
   preflightIssue,
   onChange,
   onReset,
+  getSettingValue,
 }: {
   setting: SettingItem;
   dirty: boolean;
   preflightIssue?: PreflightIssue;
   onChange: (v: any) => void;
   onReset: () => void;
+  getSettingValue: (key: string) => any;
 }) {
   const showWarning = setting.requires_reindex || setting.reload === 'restart' || setting.reload === 'ingest';
   const hasError = preflightIssue?.severity === 'error';
@@ -294,14 +301,30 @@ function SettingField({
           )}
         </div>
       </div>
-      <SettingInput setting={setting} onChange={onChange} />
+      <SettingInput setting={setting} onChange={onChange} getSettingValue={getSettingValue} />
     </div>
   );
 }
 
-function SettingInput({ setting, onChange }: { setting: SettingItem; onChange: (v: any) => void }) {
+function SettingInput({ setting, onChange, getSettingValue }: { setting: SettingItem; onChange: (v: any) => void; getSettingValue: (key: string) => any }) {
   const [showSecret, setShowSecret] = useState(false);
   const [secretEditing, setSecretEditing] = useState(false);
+
+  // Model picker: render combobox with fetch button for model fields.
+  if (setting.model_picker) {
+    const apiBase = setting.api_base_ref ? getSettingValue(setting.api_base_ref) : null;
+    const apiKey = setting.api_key_ref ? getSettingValue(setting.api_key_ref) : null;
+    return (
+      <ModelPicker
+        value={setting.value}
+        apiBase={apiBase}
+        apiKey={apiKey}
+        fetchUrl="/api/admin/settings/models"
+        onChange={onChange}
+        placeholder={setting.is_set ? undefined : 'Enter or fetch model name'}
+      />
+    );
+  }
 
   // Secret fields: render password input with show/hide and edit/clear controls.
   if (setting.secret) {

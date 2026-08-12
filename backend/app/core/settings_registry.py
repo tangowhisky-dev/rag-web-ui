@@ -65,6 +65,9 @@ class SettingDef:
     requires_reindex: bool = False
     secret: bool = False
     description: str = ""
+    model_picker: bool = False         # render as combobox with "fetch models" button
+    api_base_ref: Optional[str] = None # setting key for the associated API base URL
+    api_key_ref: Optional[str] = None  # setting key for the associated API key
 
 
 # ── App-only settings (Super Admin; no org override) ──────────────────────
@@ -81,7 +84,8 @@ _APP_ONLY = [
                description="API key for dense embeddings. Falls back to .env OPENAI_API_KEY."),
     SettingDef("DENSE_EMBEDDINGS_MODEL", "Embeddings", "Dense embeddings model",
                "str", "local-embedding-model", scope="app", reload="restart",
-               description="Qdrant collections are dimension-locked; change requires reindex + restart."),
+               description="Qdrant collections are dimension-locked; change requires reindex + restart.",
+               model_picker=True, api_base_ref="EMBEDDING_API_BASE", api_key_ref="EMBEDDING_API_KEY"),
     SettingDef("DENSE_EMBEDDING_DIM", "Embeddings", "Embedding dimension",
                "int", 1024, scope="app", reload="restart", min_value=1,
                description="Must match the embeddings model; tied to collection schema."),
@@ -94,7 +98,8 @@ _APP_ONLY = [
                description="API key for vision/OCR. Falls back to OPENAI_API_KEY."),
     SettingDef("VISION_MODEL", "Vision / OCR", "Vision/OCR model",
                "str", None, scope="app", reload="ingest",
-               description="Multimodal model for OCR during ingestion. Super admin only."),
+               description="Multimodal model for OCR during ingestion. Super admin only.",
+               model_picker=True, api_base_ref="OPENAI_VISION_API_BASE", api_key_ref="VISION_API_KEY"),
     SettingDef("GRAPHRAG_API_BASE", "GraphRAG", "Graph extraction API base URL",
                "str", None, scope="app", reload="ingest",
                description="Base URL for graph extraction. Falls back to OPENAI_API_BASE."),
@@ -103,7 +108,8 @@ _APP_ONLY = [
                description="API key for graph extraction. Falls back to OPENAI_API_KEY."),
     SettingDef("GRAPHRAG_LLM", "GraphRAG", "Graph extraction model",
                "str", None, scope="app", reload="ingest",
-               description="LLM for graph extraction during ingestion. Super admin only."),
+               description="LLM for graph extraction during ingestion. Super admin only.",
+               model_picker=True, api_base_ref="GRAPHRAG_API_BASE", api_key_ref="GRAPHRAG_API_KEY"),
     SettingDef("MEMORY_ENABLED", "System", "Enable Redis long-term memory",
                "bool", True, scope="app", reload="restart",
                description="Redis checkpointer singleton; restart required."),
@@ -162,7 +168,8 @@ _ORG_OVERRIDABLE = [
                description="OpenAI-compatible API key for chat generation."),
     SettingDef("OPENAI_MODEL", "Response Model", "Response model",
                "str", "local-model", scope="org", reload="next_request",
-               description="Chat/response-generation model."),
+               description="Chat/response-generation model.",
+               model_picker=True, api_base_ref="OPENAI_API_BASE", api_key_ref="OPENAI_API_KEY"),
     SettingDef("OPENAI_MODEL_CONTEXT_SIZE", "Response Model", "Context window size",
                "int", 131072, scope="org", reload="next_request", min_value=1024,
                description="Total context window of the chat model in tokens."),
@@ -175,7 +182,8 @@ _ORG_OVERRIDABLE = [
                description="API key for query rewriting. Falls back to OPENAI_API_KEY."),
     SettingDef("QUERY_MODEL", "Query Rewrite Model", "Query rewrite model",
                "str", None, scope="org", reload="next_request",
-               description="Falls back to OPENAI_MODEL when unset."),
+               description="Falls back to OPENAI_MODEL when unset.",
+               model_picker=True, api_base_ref="QUERY_API_BASE", api_key_ref="QUERY_API_KEY"),
     # Reasoning Model — falls back to Response Model
     SettingDef("REASONING_API_BASE", "Reasoning Model", "Reasoning API base URL",
                "str", None, scope="org", reload="next_request",
@@ -185,7 +193,8 @@ _ORG_OVERRIDABLE = [
                description="API key for reasoning. Falls back to OPENAI_API_KEY."),
     SettingDef("REASONING_MODEL", "Reasoning Model", "Reasoning model",
                "str", None, scope="org", reload="next_request",
-               description="Falls back to OPENAI_MODEL when unset."),
+               description="Falls back to OPENAI_MODEL when unset.",
+               model_picker=True, api_base_ref="REASONING_API_BASE", api_key_ref="REASONING_API_KEY"),
 
     # Retrieval tuning
     SettingDef("RETRIEVAL_TOP_K", "Retrieval", "Top-K",

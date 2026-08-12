@@ -82,6 +82,9 @@ def get_app_settings_schema(
             max=d.max_value,
             choices=list(d.choices) if d.choices else None,
             secret=d.secret,
+            model_picker=d.model_picker,
+            api_base_ref=d.api_base_ref,
+            api_key_ref=d.api_key_ref,
         ))
     return SettingsSchemaResponse(settings=items)
 
@@ -144,6 +147,29 @@ def get_effective_app_settings(
     return get_org_settings(db, None)
 
 
+def _fetch_models_from_endpoint(api_base: str, api_key: str | None) -> list[str]:
+    """Call an OpenAI-compatible /models endpoint and return model IDs."""
+    from openai import SyncOpenAI
+    if not api_key:
+        api_key = "not-required"
+    client = SyncOpenAI(api_key=api_key, base_url=api_base)
+    models = client.models.list()
+    return sorted([m.id for m in models.data])
+
+
+@app_router.get("/settings/models")
+def fetch_app_models(
+    api_base: str,
+    api_key: str | None = None,
+    current_user: User = Depends(require_super_admin),
+):
+    """Fetch available models from an OpenAI-compatible endpoint (app scope)."""
+    try:
+        return {"models": _fetch_models_from_endpoint(api_base, api_key)}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch models: {exc}")
+
+
 # ── Admin: org-level settings ─────────────────────────────────────────────
 
 def _check_org_scope(db: Session, current_user: User, org_id: int) -> Organisation:
@@ -194,6 +220,9 @@ def get_org_settings_schema(
             max=d.max_value,
             choices=list(d.choices) if d.choices else None,
             secret=d.secret,
+            model_picker=d.model_picker,
+            api_base_ref=d.api_base_ref,
+            api_key_ref=d.api_key_ref,
         ))
     return SettingsSchemaResponse(settings=items)
 
@@ -275,3 +304,19 @@ def delete_all_org_settings(
     _check_org_scope(db, current_user, org_id)
     reset_all_org_settings(db, org_id)
     return {"status": "all_cleared", "org_id": org_id}
+
+
+@org_router.get("/orgs/{org_id}/settings/models")
+def fetch_org_models(
+    org_id: int,
+    api_base: str,
+    api_key: str | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Fetch available models from an OpenAI-compatible endpoint (org scope)."""
+    _check_org_scope(db, current_user, org_id)
+    try:
+        return {"models": _fetch_models_from_endpoint(api_base, api_key)}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch models: {exc}")

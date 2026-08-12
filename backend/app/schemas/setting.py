@@ -22,6 +22,9 @@ class SettingItem(BaseModel):
     choices: Optional[List[str]] = None
     secret: bool = False
     is_set: bool = False
+    model_picker: bool = False
+    api_base_ref: Optional[str] = None
+    api_key_ref: Optional[str] = None
 
 
 class SettingsListResponse(BaseModel):
@@ -51,6 +54,9 @@ class SettingSchemaItem(BaseModel):
     max: Optional[float] = None
     choices: Optional[List[str]] = None
     secret: bool = False
+    model_picker: bool = False
+    api_base_ref: Optional[str] = None
+    api_key_ref: Optional[str] = None
 
 
 class SettingsSchemaResponse(BaseModel):
