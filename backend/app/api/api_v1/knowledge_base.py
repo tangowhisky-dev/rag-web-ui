@@ -4,6 +4,7 @@ from typing import List, Any, Dict
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError as SAIntegrityError
 from qdrant_client import QdrantClient
 import logging
 from datetime import datetime, timedelta, timezone
@@ -128,6 +129,18 @@ def get_knowledge_bases(
     
     return result
 
+
+@router.get("/ocr-availability")
+async def get_ocr_availability(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+) -> Dict[str, bool]:
+    """Check whether OCR is available (VISION_MODEL configured)."""
+    from app.services.settings_service import get_setting
+    vision_model = get_setting(db, "VISION_MODEL", None)
+    return {"ocr_available": bool(vision_model)}
+
+
 @router.get("/{kb_id}", response_model=KnowledgeBaseResponse)
 def get_knowledge_base(
     *,
@@ -235,6 +248,7 @@ async def delete_knowledge_base(
     result, status = _delete_kb(db, kb_id, current_user.id)
     return JSONResponse(status_code=status, content=result)
 
+
 # Batch upload documents
 @router.post("/{kb_id}/documents/upload")
 async def upload_kb_documents(
@@ -265,6 +279,15 @@ async def upload_kb_documents(
 
         # 1. 计算文件 hash
         file_content = await file.read()
+
+        # Enforce file size limit
+        from app.services.ingestion.document_converter import MAX_FILE_SIZE
+        if len(file_content) > MAX_FILE_SIZE:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File '{file.filename}' exceeds maximum size of {MAX_FILE_SIZE // (1024 * 1024)}MB"
+            )
+
         file_hash = hashlib.sha256(file_content).hexdigest()
         
         # 2. 检查是否存在完全相同的文件（名称和hash都相同）
@@ -303,8 +326,27 @@ async def upload_kb_documents(
             temp_path=temp_path
         )
         db.add(upload)
-        db.commit()
-        db.refresh(upload)
+        try:
+            db.commit()
+            db.refresh(upload)
+        except SAIntegrityError:
+            db.rollback()
+            # Another concurrent request already created this upload — fetch it
+            existing_upload = db.query(DocumentUpload).filter(
+                DocumentUpload.knowledge_base_id == kb_id,
+                DocumentUpload.file_name == file.filename,
+                DocumentUpload.file_hash == file_hash,
+            ).first()
+            if existing_upload:
+                results.append({
+                    "upload_id": existing_upload.id,
+                    "file_name": file.filename,
+                    "temp_path": existing_upload.temp_path,
+                    "status": "pending",
+                    "skip_processing": False
+                })
+                continue
+            raise
         
         results.append({
             "upload_id": upload.id,
@@ -378,61 +420,86 @@ async def process_kb_documents(
     
     task_info = []
     upload_ids = []
-    
+
+    # Build a map of upload_id -> enable_ocr from the client request,
+    # deduplicating upload_ids (preserves first occurrence's OCR setting).
+    enable_ocr_map: Dict[int, Any] = {}
     for result in upload_results:
         if result.get("skip_processing"):
             continue
-        upload_ids.append(result["upload_id"])
-    
+        uid = result["upload_id"]
+        if uid not in enable_ocr_map:
+            enable_ocr_map[uid] = result.get("enable_ocr")
+            upload_ids.append(uid)
+
     if not upload_ids:
         return {"tasks": []}
-    
+
+    # Lock DocumentUpload rows to prevent concurrent process calls
     uploads = db.query(DocumentUpload).filter(
         DocumentUpload.id.in_(upload_ids),
         DocumentUpload.knowledge_base_id == kb_id
-    ).all()
+    ).with_for_update().all()
     uploads_dict = {upload.id: upload for upload in uploads}
     if len(uploads_dict) != len(set(upload_ids)):
         raise HTTPException(status_code=400, detail="One or more upload IDs are invalid")
-    
+
     all_tasks = []
     for upload_id in upload_ids:
         upload = uploads_dict.get(upload_id)
         if not upload:
             continue
-            
+
+        # Skip if a non-failed task already exists for this upload
+        existing_task = (
+            db.query(ProcessingTask)
+            .filter(
+                ProcessingTask.document_upload_id == upload_id,
+                ProcessingTask.status.in_(["pending", "processing"]),
+            )
+            .first()
+        )
+        if existing_task:
+            task_info.append({
+                "upload_id": upload_id,
+                "task_id": existing_task.id,
+            })
+            continue
+
         task = ProcessingTask(
             document_upload_id=upload_id,
             knowledge_base_id=kb_id,
             status="pending"
         )
         all_tasks.append(task)
-    
+
     db.add_all(all_tasks)
     db.commit()
-    
+
     for task in all_tasks:
         db.refresh(task)
-    
+
     task_data = []
-    for i, upload_id in enumerate(upload_ids):
-        if i < len(all_tasks):
-            task = all_tasks[i]
-            upload = uploads_dict.get(upload_id)
-            
-            task_info.append({
+    new_task_info = []
+    for task in all_tasks:
+        upload_id = task.document_upload_id
+        upload = uploads_dict.get(upload_id)
+
+        new_task_info.append({
+            "upload_id": upload_id,
+            "task_id": task.id
+        })
+
+        if upload:
+            task_data.append({
+                "task_id": task.id,
                 "upload_id": upload_id,
-                "task_id": task.id
+                "temp_path": upload.temp_path,
+                "file_name": upload.file_name,
+                "enable_ocr": enable_ocr_map.get(upload_id),
             })
-            
-            if upload:
-                task_data.append({
-                    "task_id": task.id,
-                    "upload_id": upload_id,
-                    "temp_path": upload.temp_path,
-                    "file_name": upload.file_name,
-                    "enable_ocr": result.get("enable_ocr"),  # None|True|False
-                })
+
+    task_info.extend(new_task_info)
     
     background_tasks.add_task(
         add_processing_tasks_to_queue,

@@ -113,6 +113,7 @@ export function DocumentUploadSteps({
   // Per-file OCR toggle. Defaults to false for PDFs >5 MB (memory pressure),
   // true for everything else (images, scanned docs genuinely need it).
   const [ocrEnabled, setOcrEnabled] = useState<{ [uploadId: number]: boolean }>({});
+  const [ocrAvailable, setOcrAvailable] = useState(true);
   const { toast } = useToast();
 
   // Fetch server-side chunk defaults from .env so the UI stays in sync.
@@ -122,6 +123,15 @@ export function DocumentUploadSteps({
       setChunkOverlap(data.chunk_overlap);
     }).catch(() => {
       // Non-fatal — fall back to hardcoded defaults if the endpoint fails.
+    });
+  }, []);
+
+  // Check whether OCR is available (VISION_MODEL configured).
+  useEffect(() => {
+    api.get("/api/knowledge-base/ocr-availability").then((data: { ocr_available: boolean }) => {
+      setOcrAvailable(data.ocr_available);
+    }).catch(() => {
+      // Non-fatal — assume available if the endpoint fails.
     });
   }, []);
 
@@ -702,17 +712,18 @@ export function DocumentUploadSteps({
                             <div className="flex items-center gap-2">
                               <Switch
                                 id={`ocr-${file.uploadId}`}
-                                checked={ocrEnabled[file.uploadId!] ?? true}
+                                checked={ocrAvailable && (ocrEnabled[file.uploadId!] ?? true)}
                                 onCheckedChange={(v) =>
                                   setOcrEnabled((prev) => ({ ...prev, [file.uploadId!]: v }))
                                 }
-                                disabled={isLoading}
+                                disabled={isLoading || !ocrAvailable}
                               />
                               <label
                                 htmlFor={`ocr-${file.uploadId}`}
                                 className="text-xs text-muted-foreground cursor-pointer select-none"
+                                title={ocrAvailable ? undefined : "OCR is not available — no vision model configured"}
                               >
-                                OCR
+                                OCR{!ocrAvailable && " (unavailable)"}
                               </label>
                             </div>
                             {task?.status === "failed" && (

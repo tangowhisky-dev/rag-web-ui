@@ -1,5 +1,6 @@
 """Tests for /api/knowledge-base CRUD and data-source linking."""
 from unittest.mock import patch
+from datetime import datetime, timezone
 
 import pytest
 from sqlalchemy.orm import sessionmaker
@@ -218,3 +219,98 @@ def test_ingest_status_endpoint(client, db):
     assert data["completed"] == 1
     assert data["pending"] == 1
     assert data["ready"] is False
+
+
+def test_ocr_availability_endpoint(client, db):
+    """GET /ocr-availability returns ocr_available based on VISION_MODEL setting."""
+    root = Organisation(name="Root", parent_id=None, path="/1")
+    db.add(root)
+    db.commit()
+    user = _create_user(db, "user_ocr", org=root)
+    token = _get_token(client, "user_ocr")
+
+    with patch("app.services.settings_service.get_setting", return_value=None):
+        resp = client.get(
+            "/api/knowledge-base/ocr-availability",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert resp.status_code == 200
+    assert resp.json()["ocr_available"] is False
+
+    with patch("app.services.settings_service.get_setting", return_value="gpt-4o"):
+        resp = client.get(
+            "/api/knowledge-base/ocr-availability",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert resp.status_code == 200
+    assert resp.json()["ocr_available"] is True
+
+
+def test_upload_rejects_oversized_file(client, db):
+    """POST /{kb_id}/documents/upload returns 413 for files > MAX_FILE_SIZE."""
+    root = Organisation(name="Root", parent_id=None, path="/1")
+    db.add(root)
+    db.commit()
+    user = _create_user(db, "user_big", org=root)
+    token = _get_token(client, "user_big")
+
+    kb = KnowledgeBase(name="KB-big", user_id=user.id, org_id=root.id)
+    db.add(kb)
+    db.commit()
+    db.refresh(kb)
+
+    # Create a file just over 10MB
+    from app.services.ingestion.document_converter import MAX_FILE_SIZE
+    big_content = b"x" * (MAX_FILE_SIZE + 1)
+
+    resp = client.post(
+        f"/api/knowledge-base/{kb.id}/documents/upload",
+        files={"files": ("big.txt", big_content, "text/plain")},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 413
+    assert "exceeds maximum size" in resp.json()["detail"]
+
+
+def test_process_endpoint_deduplicates_upload_ids(client, db):
+    """POST /{kb_id}/documents/process deduplicates upload_ids and skips
+    uploads that already have a pending/processing task."""
+    from app.models.knowledge import DocumentUpload
+
+    root = Organisation(name="Root", parent_id=None, path="/1")
+    db.add(root)
+    db.commit()
+    user = _create_user(db, "user_dedup", org=root)
+    token = _get_token(client, "user_dedup")
+
+    kb = KnowledgeBase(name="KB-dedup", user_id=user.id, org_id=root.id)
+    db.add(kb)
+    db.commit()
+    db.refresh(kb)
+
+    upload = DocumentUpload(
+        knowledge_base_id=kb.id,
+        file_name="test.txt",
+        file_hash="abc123",
+        file_size=100,
+        content_type="text/plain",
+        temp_path="temp/test.txt",
+        created_at=datetime.now(timezone.utc),
+    )
+    db.add(upload)
+    db.commit()
+    db.refresh(upload)
+
+    # Send the same upload_id twice in one request
+    resp = client.post(
+        f"/api/knowledge-base/{kb.id}/documents/process",
+        json=[
+            {"upload_id": upload.id, "enable_ocr": False},
+            {"upload_id": upload.id, "enable_ocr": True},
+        ],
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    tasks = resp.json()["tasks"]
+    # Should only create one task despite duplicate upload_id
+    assert len(tasks) == 1
