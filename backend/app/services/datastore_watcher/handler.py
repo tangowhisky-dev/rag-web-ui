@@ -125,9 +125,6 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
         # datastore_id -> list of pending changes
         self.pending_changes: Dict[int, List[Dict[str, Any]]] = {}
 
-        # datastore_id -> threading.Timer for batch processing
-        self._batch_timers: Dict[int, threading.Timer] = {}
-
         # Per-file debouncing: file_path -> last call timestamp (monotonic)
         self._last_call: Dict[str, float] = {}
 
@@ -159,9 +156,6 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
     def remove_folder(self, datastore_id: int) -> None:
         """Unregister a datastore folder path and flush pending changes."""
         with self._lock:
-            if datastore_id in self._batch_timers:
-                timer = self._batch_timers.pop(datastore_id)
-                timer.cancel()
             if datastore_id in self.pending_changes and self.pending_changes[datastore_id]:
                 # Flush pending changes before removing the folder
                 changes = self.pending_changes.pop(datastore_id)
@@ -234,33 +228,6 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
             self._last_call[src_path] = now
 
     # ------------------------------------------------------------------
-    # Batch timer management
-    # ------------------------------------------------------------------
-
-    def _start_batch_timer(self, datastore_id: int) -> None:
-        """Start a per-datastore batch timer. If one already exists, do nothing."""
-        with self._lock:
-            if datastore_id in self._batch_timers:
-                return
-            org_id, _, min_interval = self.folder_paths.get(datastore_id, (None, None, self.default_min_interval_seconds))
-            interval = min_interval if min_interval is not None else self.default_min_interval_seconds
-            timer = threading.Timer(interval, self._flush_batch, args=(datastore_id,))
-            timer.daemon = True
-            self._batch_timers[datastore_id] = timer
-            timer.start()
-            logger.info(
-                "[WATCHER] batch_timer_started datastore_id=%d interval=%ds",
-                datastore_id, interval,
-            )
-
-    def _stop_batch_timer(self, datastore_id: int) -> None:
-        """Stop a per-datastore batch timer."""
-        with self._lock:
-            timer = self._batch_timers.pop(datastore_id, None)
-            if timer:
-                timer.cancel()
-
-    # ------------------------------------------------------------------
     # Event queueing
     # ------------------------------------------------------------------
 
@@ -313,32 +280,10 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
             with self._lock:
                 self._processing.discard(datastore_id)
 
-    def _flush_batch(self, datastore_id: int) -> None:
-        """Process all pending changes for a datastore and stop its timer."""
-        with self._lock:
-            changes = self.pending_changes.pop(datastore_id, [])
-            self._stop_batch_timer(datastore_id)
-
-        if changes:
-            org_id = self.folder_paths.get(datastore_id, (None,))[0]
-            logger.info(
-                "[WATCHER] batch_flush datastore_id=%d pending=%d",
-                datastore_id, len(changes),
-            )
-            try:
-                self.callback(datastore_id, org_id, changes)
-            except Exception as e:
-                logger.error(
-                    "[WATCHER] batch_flush_error datastore_id=%d: %s",
-                    datastore_id, e,
-                    exc_info=True,
-                )
-
     def force_process_pending(self, datastore_id: int) -> None:
         """Force process pending changes for a datastore (used on shutdown)."""
         with self._lock:
             changes = self.pending_changes.pop(datastore_id, [])
-            self._stop_batch_timer(datastore_id)
 
         if changes:
             org_id = self.folder_paths.get(datastore_id, (None,))[0]
@@ -649,33 +594,9 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
             db.close()
 
     def _matches_pattern(self, filepath: str, scan_pattern: str = "*") -> bool:
-        """Check if a filepath matches the scan pattern.
-
-        Hidden files (basename starting with '.') are always excluded —
-        this is intentional design. Hidden files are typically config,
-        lock, or temporary files (e.g., .env, .DS_Store, .gitignore) and
-        are not meant to be ingested as documents regardless of the
-        scan_pattern setting.
-        """
-        fname = os.path.basename(filepath)
-        # Exclude hidden files regardless of pattern — intentional design.
-        # Hidden files are typically config/lock/temp files, not documents.
-        if fname.startswith("."):
-            return False
-        if scan_pattern == "*":
-            return True
-
-        patterns = [p.strip() for p in scan_pattern.split(",")]
-        for pat in patterns:
-            if "*" in pat:
-                # Use fnmatch for glob patterns
-                if fnmatch.fnmatch(fname, pat):
-                    return True
-            else:
-                # Exact match
-                if fname == pat:
-                    return True
-        return False
+        """Check if a filepath matches the scan pattern. Delegates to shared utility."""
+        from app.services.datastore_watcher.utils import matches_pattern
+        return matches_pattern(filepath, scan_pattern)
 
     def _compute_hash(self, path: str) -> str:
         """Compute SHA-256 hash of a file, aborting if the file changes mid-read."""
@@ -1211,25 +1132,9 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
             db.close()
 
     def _count_files_in_folder(self, folder_path: str, scan_pattern: str = "*") -> int:
-        """Count files matching pattern in folder."""
-        try:
-            path = Path(folder_path)
-            if not path.exists():
-                return 0
-
-            patterns = [p.strip() for p in scan_pattern.split(",")]
-            all_files = set()
-
-            for pattern in patterns:
-                if "*" in pattern:
-                    matched = list(path.rglob(pattern))
-                else:
-                    matched = list(path.glob(pattern))
-                all_files.update(f for f in matched if f.is_file() and not f.name.startswith("."))
-
-            return len(all_files)
-        except Exception:
-            return 0
+        """Count files matching pattern in folder. Delegates to shared utility."""
+        from app.services.datastore_watcher.utils import count_files_in_folder
+        return count_files_in_folder(folder_path, scan_pattern)
 
     # ------------------------------------------------------------------
     # Async ingestion runner

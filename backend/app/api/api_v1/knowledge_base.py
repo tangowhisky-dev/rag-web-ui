@@ -14,7 +14,7 @@ import asyncio
 
 from app.db.session import get_db
 from app.models.user import User
-from app.core.security import get_current_user
+from app.core.security import get_current_user, get_org_descendants
 from app.models.knowledge import KnowledgeBase, Document, ProcessingTask, DocumentChunk, DocumentUpload, KnowledgeBaseDataStore
 from app.models.datastore import DataStore, OrganizationDataStore
 from app.models.organisation import Organisation
@@ -22,26 +22,11 @@ from app.models.organisation import Organisation
 
 def _get_user_org_ids(db: Session, org_id: int) -> List[int]:
     """Get all org IDs in the user's hierarchy (user's org + all descendant orgs).
-    
-    Users can access data from their org and any child orgs.
+
+    Delegates to the shared get_org_descendants helper in app.core.security.
     """
-    org_ids = [org_id]
-    orgs_to_check = [org_id]
-    
-    for _ in range(100):  # Safety limit to prevent infinite loops
-        if not orgs_to_check:
-            break
-        parent_id = orgs_to_check.pop(0)
-        children = db.query(Organisation).filter(
-            Organisation.parent_id == parent_id,
-            Organisation.id != parent_id  # Exclude self-referencing root
-        ).all()
-        for child in children:
-            if child.id not in org_ids:
-                org_ids.append(child.id)
-                orgs_to_check.append(child.id)
-    
-    return org_ids
+    return get_org_descendants(db, org_id)
+
 from app.schemas.knowledge import (
     KnowledgeBaseCreate,
     KnowledgeBaseResponse,
@@ -672,6 +657,89 @@ async def delete_document(
         raise HTTPException(status_code=500, detail=f"Failed to delete document: {str(e)}")
 
 
+@router.post("/{kb_id}/documents/{doc_id}/retry", status_code=202)
+async def retry_document_ingestion(
+    *,
+    db: Session = Depends(get_db),
+    kb_id: int,
+    doc_id: int,
+    current_user: User = Depends(get_current_user)
+) -> Any:
+    """Retry ingestion for a failed document.
+
+    Resets the failed ProcessingTask to 'pending' and re-queues the
+    background ingestion pipeline. Only works for KB documents (not
+    DataStore documents — those are retried via scan/recovery).
+    """
+    # Verify KB ownership
+    kb = (
+        db.query(KnowledgeBase)
+        .filter(
+            KnowledgeBase.id == kb_id,
+            _kb_owner_filter(current_user)
+        )
+        .first()
+    )
+    if not kb:
+        raise HTTPException(status_code=404, detail="Knowledge base not found")
+
+    document = (
+        db.query(Document)
+        .filter(
+            Document.id == doc_id,
+            Document.knowledge_base_id == kb_id
+        )
+        .first()
+    )
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Find the failed task
+    task = (
+        db.query(ProcessingTask)
+        .filter(
+            ProcessingTask.document_id == doc_id,
+            ProcessingTask.status == "failed"
+        )
+        .first()
+    )
+    if not task:
+        raise HTTPException(
+            status_code=409,
+            detail=f"No failed task found for document {doc_id} (current status may already be processing or completed)"
+        )
+
+    # Verify the file still exists
+    if not document.file_path or not os.path.isfile(document.file_path):
+        raise HTTPException(
+            status_code=410,
+            detail=f"Source file no longer exists: {document.file_path}"
+        )
+
+    # Reset task to pending
+    task.status = "pending"
+    task.error_message = None
+    task.progress = 0
+    task.progress_message = "Queued for retry"
+    db.commit()
+
+    # Re-queue the background ingestion
+    asyncio.create_task(
+        process_document_background(
+            document.file_path,
+            document.file_name,
+            kb_id,
+            task.id,
+            None,
+            current_user.id,
+            document_id=document.id,
+        )
+    )
+
+    logger.info(f"Retry queued for document {doc_id} in KB {kb_id} (task {task.id})")
+    return {"message": "Retry queued", "task_id": task.id, "document_id": doc_id}
+
+
 @router.get("/{kb_id}/documents/{doc_id}", response_model=DocumentResponse)
 async def get_document(
     *,
@@ -927,24 +995,8 @@ def link_datastore_to_kb(
         raise HTTPException(status_code=404, detail="Knowledge base not found")
     
     # Verify datastore exists and is assigned to user's org or any descendant org
-    # Get all org IDs in the user's hierarchy (user's org + all descendants)
-    user_org_ids = [current_user.org_id]
-    
-    # Walk down the hierarchy to find all child orgs
-    orgs_to_check = [current_user.org_id]
-    for _ in range(100):  # Safety limit to prevent infinite loops
-        if not orgs_to_check:
-            break
-        parent_id = orgs_to_check.pop(0)
-        children = db.query(Organisation).filter(
-            Organisation.parent_id == parent_id,
-            Organisation.id != parent_id  # Exclude self-referencing root
-        ).all()
-        for child in children:
-            if child.id not in user_org_ids:
-                user_org_ids.append(child.id)
-                orgs_to_check.append(child.id)
-    
+    user_org_ids = _get_user_org_ids(db, current_user.org_id)
+
     ds = db.query(DataStore).join(OrganizationDataStore).filter(
         DataStore.id == request.data_store_id,
         OrganizationDataStore.org_id.in_(user_org_ids),

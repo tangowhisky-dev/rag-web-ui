@@ -435,24 +435,6 @@ class DataStoreWatcher:
 
         self._cleanup_stale_scans()
 
-    def _refresh_file_count(self, datastore_id: int) -> None:
-        """Refresh last_scan_total_files from the filesystem.
-
-        Called after file changes are detected so the UI always shows
-        the latest file count even before a manual scan runs.
-        """
-        db: Session = SessionLocal()
-        try:
-            ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
-            if not ds or not ds.folder_path:
-                return
-
-            count = self._count_files_in_folder(ds.folder_path, ds.scan_pattern)
-            ds.last_scan_total_files = count
-            db.commit()
-        finally:
-            db.close()
-
     def _cancel_scan(self, datastore_id: int) -> bool:
         """Cancel a running scan on a datastore. Returns True if cancelled."""
         db: Session = SessionLocal()
@@ -519,25 +501,9 @@ class DataStoreWatcher:
             logger.info("[WATCHER] cleanup_stale_scans removed=%d", len(stale_ids))
 
     def _count_files_in_folder(self, folder_path: str, scan_pattern: str = "*") -> int:
-        """Count files matching pattern in folder."""
-        try:
-            path = Path(folder_path)
-            if not path.exists():
-                return 0
-
-            patterns = [p.strip() for p in scan_pattern.split(",")]
-            all_files = set()
-
-            for pattern in patterns:
-                if "*" in pattern:
-                    matched = list(path.rglob(pattern))
-                else:
-                    matched = list(path.glob(pattern))
-                all_files.update(f for f in matched if f.is_file() and not f.name.startswith("."))
-
-            return len(all_files)
-        except Exception:
-            return 0
+        """Count files matching pattern in folder. Delegates to shared utility."""
+        from app.services.datastore_watcher.utils import count_files_in_folder
+        return count_files_in_folder(folder_path, scan_pattern)
 
     # ------------------------------------------------------------------
     # Scan endpoints
@@ -692,25 +658,9 @@ class DataStoreWatcher:
             db.close()
 
     def _matches_pattern(self, filepath: str, pattern: str = "*") -> bool:
-        """Check if a filepath matches the scan pattern."""
-        fname = os.path.basename(filepath)
-        # Exclude hidden files regardless of pattern
-        if fname.startswith("."):
-            return False
-        if pattern == "*":
-            return True
-
-        patterns = [p.strip() for p in pattern.split(",")]
-        for pat in patterns:
-            if "*" in pat:
-                # Use fnmatch for glob patterns
-                if fnmatch.fnmatch(fname, pat):
-                    return True
-            else:
-                # Exact match
-                if fname == pat:
-                    return True
-        return False
+        """Check if a filepath matches the scan pattern. Delegates to shared utility."""
+        from app.services.datastore_watcher.utils import matches_pattern
+        return matches_pattern(filepath, pattern)
 
     def _handle_file_in_scan(
         self,
