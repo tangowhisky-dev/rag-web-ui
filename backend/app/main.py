@@ -152,6 +152,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logging.getLogger(__name__).error("Failed to start recovery service: %s", e)
 
+    # Cross-store reconciliation: remove orphaned Qdrant vectors, Neo4j
+    # graph nodes, and MySQL chunk/task rows left by failed transactions
+    # or crashed workers.  Runs synchronously before the watcher starts
+    # so the system is consistent before new ingestion begins.
+    try:
+        from app.services.cleanup import run_reconciliation
+        run_reconciliation()
+    except Exception as e:
+        logging.getLogger(__name__).warning("Startup reconciliation failed: %s", e)
+
     # Start the DataStore watcher service after recovery
     global watcher_service
     from app.services.settings_service import get_setting
