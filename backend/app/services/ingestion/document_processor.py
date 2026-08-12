@@ -41,7 +41,7 @@ from app.services.ingestion.document_qdrant import (
 )
 from app.services.infrastructure import get_qdrant_client
 
-from app.models.knowledge import ProcessingTask, Document, DocumentChunk
+from app.models.knowledge import ProcessingTask, Document, DocumentChunk, DocumentUpload
 
 logger = logging.getLogger(__name__)
 
@@ -194,17 +194,25 @@ async def process_document_background(
     document: Optional[Document] = None    # set after Document record committed
 
     try:
+        # Separate session for progress writes so progress commits don't
+        # survive a main-transaction rollback (M5).
+        progress_db = SessionLocal()
+
         def _set_progress(pct: int, msg: str) -> None:
-            """Write progress to DB immediately — uses a fresh merge so it always
-            succeeds even if the main session has a pending rollback."""
+            """Write progress to DB using a separate session so progress
+            commits are independent of the main transaction."""
             try:
-                task.progress = pct
-                task.progress_message = msg
-                db.commit()
+                ptask = progress_db.query(ProcessingTask).filter(
+                    ProcessingTask.id == task_id
+                ).first()
+                if ptask:
+                    ptask.progress = pct
+                    ptask.progress_message = msg
+                    progress_db.commit()
                 pt.ping()
             except Exception:
                 try:
-                    db.rollback()
+                    progress_db.rollback()
                 except Exception:
                     pass
 
@@ -359,9 +367,19 @@ async def process_document_background(
             logger.info(f"Task {task_id}: Deleting old chunks for document_id={document.id}")
             # Delete old chunks from DB (must happen before new chunks are added,
             # so that if the Qdrant upsert fails, old chunks are still present)
+            # Build scope filter explicitly (M7: was a Python ternary that
+            # evaluated incorrectly for edge cases).
+            from sqlalchemy import and_
+            if data_store_id is not None:
+                scope_filter = DocumentChunk.data_store_id == data_store_id
+            else:
+                scope_filter = and_(
+                    DocumentChunk.kb_id == kb_id,
+                    DocumentChunk.data_store_id.is_(None),
+                )
             old_chunk_ids = db.query(DocumentChunk).filter(
                 DocumentChunk.document_id == document.id,
-                DocumentChunk.data_store_id == data_store_id if data_store_id else DocumentChunk.kb_id == kb_id,
+                scope_filter,
             ).with_entities(DocumentChunk.id).all()
             old_chunk_ids = [cid[0] for cid in old_chunk_ids]
             if old_chunk_ids:
@@ -373,10 +391,18 @@ async def process_document_background(
                     collection_name=collection_name,
                     points_selector=PointIdsList(points=point_ids),
                 )
-                # Delete from DB
+                # Delete from DB — rebuild scope_filter (SQLAlchemy clauses are
+                # single-use after being consumed by a query)
+                if data_store_id is not None:
+                    scope_filter = DocumentChunk.data_store_id == data_store_id
+                else:
+                    scope_filter = and_(
+                        DocumentChunk.kb_id == kb_id,
+                        DocumentChunk.data_store_id.is_(None),
+                    )
                 db.query(DocumentChunk).filter(
                     DocumentChunk.document_id == document.id,
-                    DocumentChunk.data_store_id == data_store_id if data_store_id else DocumentChunk.kb_id == kb_id,
+                    scope_filter,
                 ).delete(synchronize_session="fetch")
                 db.commit()
     
@@ -556,6 +582,31 @@ async def process_document_background(
             except Exception:
                 logger.warning(f"Task {task_id}: Failed to clean up file at {file_to_delete}")
 
+        # Clean up temp file if move_file failed (permanent_path was never set)
+        if data_store_id is None and permanent_path is None and temp_path:
+            try:
+                delete_file(temp_path)
+                logger.info(f"Task {task_id}: Temp file cleaned up at {temp_path}")
+            except Exception:
+                logger.warning(f"Task {task_id}: Failed to clean up temp file at {temp_path}")
+
+        # Clean up DocumentUpload record if this was a KB upload
+        if task and task.document_upload_id:
+            try:
+                upload = db.query(DocumentUpload).filter(
+                    DocumentUpload.id == task.document_upload_id
+                ).first()
+                if upload:
+                    db.delete(upload)
+                    db.commit()
+                    logger.info(f"Task {task_id}: DocumentUpload record cleaned up")
+            except Exception:
+                db.rollback()
+
     finally:
+        try:
+            progress_db.close()
+        except Exception:
+            pass
         if should_close_db and db:
             db.close()

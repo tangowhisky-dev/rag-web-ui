@@ -117,10 +117,10 @@ def _chunk_id_to_point_id(chunk_id: str) -> str:
     """
     Convert a SHA-256 hex chunk ID to the deterministic UUID Qdrant uses.
 
-    Mirrors document_processor._chunk_id_to_point_id so the UUID written
-    to Neo4j is always the exact UUID stored as the Qdrant point ID.
+    Delegates to the canonical implementation in document_qdrant.
     """
-    return str(uuid.uuid5(uuid.NAMESPACE_OID, chunk_id))
+    from app.services.ingestion.document_qdrant import _chunk_id_to_point_id as _impl
+    return _impl(chunk_id)
 
 
 # ── LLM pipeline path ─────────────────────────────────────────────────────────
@@ -867,22 +867,6 @@ def delete_graph_for_document(kb_id: Optional[int], document_id: int) -> None:
             rec["cleaned"] if rec else 0, document_id,
         )
 
-        # Defensive: sweep any Chunk nodes for this document that somehow
-        # survived (e.g. from a prior run that was interrupted mid-transaction).
-        rec = session.run(
-            """
-            MATCH (c:Chunk {document_id: $doc_id})
-            DETACH DELETE c
-            RETURN count(c) AS cleaned
-            """,
-            doc_id=str(document_id),
-        ).single()
-        if rec and rec["cleaned"]:
-            logger.info(
-                "GraphService: cleaned %d residual Chunk nodes for doc %d",
-                rec["cleaned"], document_id,
-            )
-
 
 def delete_graph_for_kb(kb_id: int) -> None:
     """
@@ -945,41 +929,6 @@ def delete_graph_for_kb(kb_id: int) -> None:
             "GraphService: cleaned %d orphaned entity nodes after kb_%d deletion",
             rec["cleaned"] if rec else 0, kb_id,
         )
-
-        # 4. Defensive: sweep any Chunk nodes that still carry this kb_id.
-        #    These would only survive if a prior deletion was blocked (e.g. by the
-        #    old GRAPHRAG_ENABLED gate) or interrupted partway through.
-        #    Running this last means entities above were already swept, so
-        #    DETACH DELETE here only removes the chunk nodes themselves.
-        rec = session.run(
-            """
-            MATCH (c:Chunk {kb_id: $kb_id})
-            DETACH DELETE c
-            RETURN count(c) AS cleaned
-            """,
-            kb_id=str(kb_id),
-        ).single()
-        if rec and rec["cleaned"]:
-            logger.info(
-                "GraphService: cleaned %d residual Chunk nodes for kb_%d",
-                rec["cleaned"], kb_id,
-            )
-            # Entity nodes whose only FROM_CHUNK edges pointed at those
-            # now-deleted chunks become newly orphaned — sweep again.
-            rec2 = session.run(
-                """
-                MATCH (e)
-                WHERE (e:__KGBuilder__ OR e:Entity OR e:__Entity__)
-                  AND NOT EXISTS { MATCH (e)-[:FROM_CHUNK]->() }
-                DETACH DELETE e
-                RETURN count(e) AS cleaned
-                """
-            ).single()
-            if rec2 and rec2["cleaned"]:
-                logger.info(
-                    "GraphService: cleaned %d newly-orphaned entity nodes after residual chunk sweep for kb_%d",
-                    rec2["cleaned"], kb_id,
-                )
 
 
 def purge_stale_graph_data(active_kb_ids: list[int]) -> None:
