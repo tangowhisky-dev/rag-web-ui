@@ -5,7 +5,7 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/components/ui/use-toast';
 import { api } from '@/lib/api';
-import { RefreshCw, ChevronDown } from 'lucide-react';
+import { RefreshCw } from 'lucide-react';
 
 interface ModelPickerProps {
   value: string | null;
@@ -70,36 +70,37 @@ export function ModelPicker({
   }, [open]);
 
   return (
-    <div ref={containerRef} className="relative flex items-center gap-2">
-      <Input
-        type="text"
-        value={value ?? ''}
-        onChange={(e) => {
-          onChange(e.target.value || null);
-          if (models.length > 0) setOpen(true);
-        }}
-        onFocus={() => { if (models.length > 0) setOpen(true); }}
-        placeholder={placeholder ?? 'Enter or select model'}
-        className="flex-1"
-      />
-      {open && models.length > 0 && (
-        <div className="absolute z-50 top-full left-0 right-10 mt-1 max-h-60 overflow-y-auto rounded-md border bg-popover shadow-md">
-          {models.map((m) => (
-            <button
-              key={m}
-              type="button"
-              className="flex w-full items-center px-3 py-1.5 text-sm hover:bg-accent text-left truncate"
-              onClick={() => {
-                onChange(m);
-                setOpen(false);
-              }}
-              title={m}
-            >
-              {m}
-            </button>
-          ))}
-        </div>
-      )}
+    <div ref={containerRef} className="flex items-center gap-2">
+      <div className="relative flex-1">
+        <Input
+          type="text"
+          value={value ?? ''}
+          onChange={(e) => {
+            onChange(e.target.value || null);
+            if (models.length > 0) setOpen(true);
+          }}
+          onFocus={() => { if (models.length > 0) setOpen(true); }}
+          placeholder={placeholder ?? 'Enter or select model'}
+        />
+        {open && models.length > 0 && (
+          <div className="absolute z-50 top-full left-0 right-0 mt-1 max-h-60 overflow-y-auto rounded-md border bg-popover shadow-md">
+            {models.map((m) => (
+              <button
+                key={m}
+                type="button"
+                className="flex w-full items-center px-3 py-1.5 text-sm hover:bg-accent text-left truncate"
+                onClick={() => {
+                  onChange(m);
+                  setOpen(false);
+                }}
+                title={m}
+              >
+                {m}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
       <Button
         type="button"
         variant="outline"
@@ -114,14 +115,8 @@ export function ModelPicker({
         disabled={!canFetch}
         title={apiBase ? 'Fetch available models from endpoint' : 'Enter API base URL first'}
       >
-        {fetching ? (
-          <RefreshCw className="h-3.5 w-3.5 mr-1 animate-spin" />
-        ) : models.length > 0 ? (
-          <ChevronDown className="h-3.5 w-3.5 mr-1" />
-        ) : (
-          <RefreshCw className="h-3.5 w-3.5 mr-1" />
-        )}
-        {models.length > 0 ? `${models.length}` : 'Fetch'}
+        <RefreshCw className={`h-3.5 w-3.5 mr-1 ${fetching ? 'animate-spin' : ''}`} />
+        Fetch
       </Button>
     </div>
   );
