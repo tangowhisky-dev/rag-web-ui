@@ -25,14 +25,23 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal as _SessionLocal
-from app.core.security import require_admin
+from app.core.security import require_admin, get_admin_org_ids
 from app.db.session import get_db
 from app.models.datastore import DataStore
+from app.models.user import User
 from app.services.datastore_watcher import DataStoreWatcher
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _check_datastore_scope(db: Session, datastore_id: int, current_user: User):
+    """Raise 403 if the datastore is not in the admin's org scope."""
+    from app.api.api_v1.datastores import _datastore_in_scope
+    admin_org_ids = get_admin_org_ids(db, current_user)
+    if not _datastore_in_scope(db, datastore_id, admin_org_ids):
+        raise HTTPException(status_code=403, detail="DataStore not in your organisation scope")
 
 
 # ---------------------------------------------------------------------------
@@ -118,12 +127,13 @@ def _count_files_in_folder(folder_path: str, scan_pattern: str = "*") -> int:
 def get_datastore_scan_progress(
     datastore_id: int,
     db: Session = Depends(get_db),
-    _: object = Depends(require_admin),
+    current_user: User = Depends(require_admin),
 ):
     """Get scan progress for a specific datastore."""
     ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
     if ds is None:
         raise HTTPException(status_code=404, detail="DataStore not found")
+    _check_datastore_scope(db, datastore_id, current_user)
 
     try:
         watcher = _get_watcher()
@@ -189,7 +199,7 @@ def get_datastore_scan_progress(
 def scan_progress_stream(
     datastore_id: int,
     db: Session = Depends(get_db),
-    _: object = Depends(require_admin),
+    current_user: User = Depends(require_admin),
 ):
     """SSE endpoint — streams scan progress for a datastore as real-time events.
 
@@ -203,6 +213,7 @@ def scan_progress_stream(
     ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
     if ds is None:
         raise HTTPException(status_code=404, detail="DataStore not found")
+    _check_datastore_scope(db, datastore_id, current_user)
 
     async def event_stream():
 
@@ -363,12 +374,21 @@ def scan_progress_stream(
 @router.get("/datastores/scan-status", response_model=ScanStatusResponse)
 def get_datastores_scan_status(
     db: Session = Depends(get_db),
-    _: object = Depends(require_admin),
+    current_user: User = Depends(require_admin),
 ):
-    """Get scan status for all datastores."""
+    """Get scan status for all datastores in the admin's org scope."""
+    admin_org_ids = get_admin_org_ids(db, current_user)
     try:
         watcher = _get_watcher()
         status = watcher.get_status()
+        # Filter datastores to admin's org scope
+        if admin_org_ids is not None:
+            from app.api.api_v1.datastores import _datastore_in_scope
+            scoped_ds_ids = [
+                ds_id for ds_id in status.get("datastores", [])
+                if isinstance(ds_id, dict) and _datastore_in_scope(db, ds_id.get("datastore_id"), admin_org_ids)
+            ]
+            status["datastores"] = scoped_ds_ids
         return ScanStatusResponse(
             running=status.get("running", False),
             active_scans=len(status.get("active_scans", [])),
@@ -386,12 +406,13 @@ def get_datastores_scan_status(
 def stop_datastore_scan(
     datastore_id: int,
     db: Session = Depends(get_db),
-    _: object = Depends(require_admin),
+    current_user: User = Depends(require_admin),
 ):
     """Cancel a running scan on a datastore."""
     ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
     if ds is None:
         raise HTTPException(status_code=404, detail="DataStore not found")
+    _check_datastore_scope(db, datastore_id, current_user)
 
     try:
         watcher = _get_watcher()
@@ -410,10 +431,10 @@ def stop_datastore_scan(
 async def trigger_datastore_scan(
     datastore_id: int,
     db: Session = Depends(get_db),
-    _: object = Depends(require_admin),
+    current_user: User = Depends(require_admin),
 ):
     """Asynchronously trigger a scan of a specific datastore.
-    
+
     Returns 202 Accepted immediately with a scan_id. Progress is tracked
     via the SSE endpoint (scan-progress-stream) or the polling endpoint
     (scan-progress). The scan runs in the background and updates the
@@ -422,6 +443,7 @@ async def trigger_datastore_scan(
     ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
     if ds is None:
         raise HTTPException(status_code=404, detail="DataStore not found")
+    _check_datastore_scope(db, datastore_id, current_user)
 
     if not ds.folder_path or not os.path.isdir(ds.folder_path):
         raise HTTPException(
@@ -582,7 +604,7 @@ async def trigger_datastore_scan(
 def flush_datastore_changes(
     datastore_id: int,
     db: Session = Depends(get_db),
-    _: object = Depends(require_admin),
+    current_user: User = Depends(require_admin),
 ):
     """Flush and process pending changes for a specific datastore.
 
@@ -593,6 +615,7 @@ def flush_datastore_changes(
     ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
     if ds is None:
         raise HTTPException(status_code=404, detail="DataStore not found")
+    _check_datastore_scope(db, datastore_id, current_user)
 
     if not ds.folder_path or not os.path.isdir(ds.folder_path):
         raise HTTPException(

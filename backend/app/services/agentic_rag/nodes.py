@@ -261,12 +261,13 @@ async def neo4j_expansion_node(
             from langchain_core.documents import Document as LangchainDocument
             from app.services.graph import expand_docs_via_graph
 
+            datastore_ids = get_effective_datastore_ids(kb_ids, org_id, db) if db else []
             lc_docs = [
                 LangchainDocument(page_content=d.get("page_content", ""), metadata=d.get("metadata", {}))
                 for d in docs
             ]
             loop = asyncio.get_event_loop()
-            expanded = await loop.run_in_executor(None, lambda: expand_docs_via_graph(lc_docs, kb_ids))
+            expanded = await loop.run_in_executor(None, lambda: expand_docs_via_graph(lc_docs, kb_ids, None, None, datastore_ids))
             existing_hashes = {content_hash(d.page_content) for d in lc_docs}
             new_docs = [
                 _serialise_doc(d)

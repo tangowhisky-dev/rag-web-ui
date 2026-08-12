@@ -568,6 +568,7 @@ def expand_docs_via_graph(
     kb_ids: list[int],
     db: Optional[Session] = None,
     org_id: Optional[int] = None,
+    datastore_ids: Optional[list[int]] = None,
 ) -> list[LangchainDocument]:
     """
     Graph-expanded retrieval: find additional chunks via Neo4j graph traversal
@@ -618,6 +619,8 @@ def expand_docs_via_graph(
     try:
         driver = _get_driver()
         collections = [f"kb_{kb_id}" for kb_id in kb_ids]
+        if datastore_ids:
+            collections += [f"ds_{ds_id}" for ds_id in datastore_ids]
 
         # Build dynamic path pattern for GRAPHRAG_RETRIEVAL_HOPS hops, starting
         # from the first-hop entity anchor `e` (already bounded below).

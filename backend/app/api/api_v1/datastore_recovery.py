@@ -19,13 +19,22 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.core.security import require_admin
+from app.core.security import require_admin, get_admin_org_ids
 from app.db.session import get_db
 from app.models.datastore import DataStore
+from app.models.user import User
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _check_datastore_scope(db: Session, datastore_id: int, current_user: User):
+    """Raise 403 if the datastore is not in the admin's org scope."""
+    from app.api.api_v1.datastores import _datastore_in_scope
+    admin_org_ids = get_admin_org_ids(db, current_user)
+    if not _datastore_in_scope(db, datastore_id, admin_org_ids):
+        raise HTTPException(status_code=403, detail="DataStore not in your organisation scope")
 
 
 # ---------------------------------------------------------------------------
@@ -89,9 +98,9 @@ def _map_recovery_status(scan: Dict[str, Any]) -> RecoveryStatusResponse:
 @router.get("/datastores/recovery-status", response_model=List[RecoveryStatusResponse])
 def get_all_recovery_status(
     db: Session = Depends(get_db),
-    _: object = Depends(require_admin),
+    current_user: User = Depends(require_admin),
 ):
-    """List recovery status for all datastores.
+    """List recovery status for all datastores in the admin's org scope.
 
     Returns a list of recovery status dicts (sorted by scan_id).
     Empty list when no recovery is in progress or the service is disabled.
@@ -100,7 +109,11 @@ def get_all_recovery_status(
     if recovery is None:
         return []
 
+    admin_org_ids = get_admin_org_ids(db, current_user)
+    from app.api.api_v1.datastores import _datastore_in_scope
     scans = recovery.get_all_status()
+    if admin_org_ids is not None:
+        scans = [s for s in scans if _datastore_in_scope(db, s.get("datastore_id", 0), admin_org_ids)]
     return [_map_recovery_status(s) for s in scans]
 
 
@@ -108,7 +121,7 @@ def get_all_recovery_status(
 def get_datastore_recovery_status(
     datastore_id: int,
     db: Session = Depends(get_db),
-    _: object = Depends(require_admin),
+    current_user: User = Depends(require_admin),
 ):
     """Get recovery status for a specific datastore.
 
@@ -118,6 +131,7 @@ def get_datastore_recovery_status(
     ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
     if ds is None:
         raise HTTPException(status_code=404, detail="DataStore not found")
+    _check_datastore_scope(db, datastore_id, current_user)
 
     recovery = _get_startup_recovery()
     if recovery is None:
@@ -134,7 +148,7 @@ def get_datastore_recovery_status(
 def recovery_status_stream(
     datastore_id: int,
     db: Session = Depends(get_db),
-    _: object = Depends(require_admin),
+    current_user: User = Depends(require_admin),
 ):
     """SSE endpoint — streams recovery progress for a datastore.
 
@@ -146,6 +160,7 @@ def recovery_status_stream(
     ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
     if ds is None:
         raise HTTPException(status_code=404, detail="DataStore not found")
+    _check_datastore_scope(db, datastore_id, current_user)
 
     async def event_stream():
         recovery = _get_startup_recovery()
@@ -286,7 +301,7 @@ def recovery_status_stream(
 def trigger_datastore_recovery(
     datastore_id: int,
     db: Session = Depends(get_db),
-    _: object = Depends(require_admin),
+    current_user: User = Depends(require_admin),
 ):
     """Asynchronously trigger a recovery scan of a specific datastore.
 
@@ -298,6 +313,7 @@ def trigger_datastore_recovery(
     ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
     if ds is None:
         raise HTTPException(status_code=404, detail="DataStore not found")
+    _check_datastore_scope(db, datastore_id, current_user)
 
     if not ds.folder_path or not os.path.isdir(ds.folder_path):
         raise HTTPException(

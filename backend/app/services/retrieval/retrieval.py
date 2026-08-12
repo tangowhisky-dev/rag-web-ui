@@ -712,7 +712,7 @@ async def hybrid_search_with_legs(
         try:
             from app.services.graph import expand_docs_via_graph
             loop = asyncio.get_running_loop()
-            expanded = await loop.run_in_executor(None, lambda: expand_docs_via_graph(docs, kb_ids, db, org_id))
+            expanded = await loop.run_in_executor(None, lambda: expand_docs_via_graph(docs, kb_ids, db, org_id, datastore_ids))
             if expanded:
                 existing_hashes = {content_hash(d.page_content) for d in docs}
                 new_docs = [d for d in expanded if content_hash(d.page_content) not in existing_hashes]
