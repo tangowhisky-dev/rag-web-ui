@@ -704,7 +704,8 @@ def _check_document_access(db: Session, document: Document, current_user: User) 
     """Check if the current user can access this document.
 
     - KB documents: user must own the KB.
-    - Data store documents: user must own a KB linked to the data store.
+    - Data store documents: user must own a KB linked to the data store,
+      AND the data store must still be assigned to the user's org.
     """
     if document.knowledge_base_id is not None:
         kb = db.query(KnowledgeBase).filter(
@@ -724,7 +725,24 @@ def _check_document_access(db: Session, document: Document, current_user: User) 
             )
             .first()
         )
-        return linked_kb is not None
+        if linked_kb is None:
+            return False
+
+        # Verify the datastore is still assigned to the user's org
+        if current_user.org_id:
+            user_org_ids = _get_user_org_ids(db, current_user.org_id)
+            org_link = (
+                db.query(OrganizationDataStore)
+                .filter(
+                    OrganizationDataStore.data_store_id == document.data_store_id,
+                    OrganizationDataStore.org_id.in_(user_org_ids),
+                    OrganizationDataStore.is_active == True,
+                )
+                .first()
+            )
+            return org_link is not None
+
+        return False
 
     return False
 

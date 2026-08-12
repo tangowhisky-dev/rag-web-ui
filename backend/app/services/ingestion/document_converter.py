@@ -5,6 +5,7 @@ Split from document_processor.py for maintainability.
 
 import logging
 import os
+import threading
 from typing import Optional
 
 from markitdown import MarkItDown
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 
 _markitdown: Optional[MarkItDown] = None
+_markitdown_lock = threading.Lock()
 
 # Supported file extensions (markitdown handles all of these)
 SUPPORTED_EXTENSIONS = {
@@ -83,49 +85,52 @@ def _get_markitdown() -> MarkItDown:
     """
     global _markitdown
     if _markitdown is None:
-        from app.services.settings_service import get_setting
-        from app.db.session import SessionLocal
-        _db = SessionLocal()
-        try:
-            vision_model = get_setting(_db, "VISION_MODEL", None)
-            if vision_model:
-                # Vision API key: VISION_API_KEY → OPENAI_API_KEY → placeholder
-                api_key = get_setting(_db, "VISION_API_KEY", None) or get_setting(_db, "OPENAI_API_KEY", None)
-                # Vision base URL: OPENAI_VISION_API_BASE → OPENAI_API_BASE → .env
-                api_base = get_setting(_db, "OPENAI_VISION_API_BASE", None) or get_setting(_db, "OPENAI_API_BASE", None)
-                if not api_key:
-                    api_key = "not-required"
-                vision_client = SyncOpenAI(
-                    api_key=api_key,
-                    base_url=api_base,
-                )
-                _markitdown = MarkItDown(
-                    enable_plugins=True,
-                    llm_client=vision_client,
-                    llm_model=vision_model,
-                    llm_prompt=(
-                        "Extract all text from this image into clean, naturally flowing paragraphs, "
-                        "while preserving document structure and any table or sub-element layout.\n\n"
-                        "Rules:\n"
-                        "- Remove unnatural line breaks within sentences\n"
-                        "- Join split words and sentences caused by column layout or line wrapping\n"
-                        "- Keep proper paragraph breaks where the topic clearly changes\n"
-                        "- Preserve tables using Markdown table syntax\n"
-                        "- Preserve all original meaning and technical terms exactly\n"
-                        "- Output only the extracted text, no explanations or commentary"
-                    ),
-                )
-                logger.info(
-                    "[markitdown] OCR enabled — vision_model=%s base=%s",
-                    vision_model, api_base,
-                )
-            else:
-                _markitdown = MarkItDown()
-                logger.info(
-                    "[markitdown] OCR disabled — VISION_MODEL not set"
-                )
-        finally:
-            _db.close()
+        with _markitdown_lock:
+            if _markitdown is not None:
+                return _markitdown
+            from app.services.settings_service import get_setting
+            from app.db.session import SessionLocal
+            _db = SessionLocal()
+            try:
+                vision_model = get_setting(_db, "VISION_MODEL", None)
+                if vision_model:
+                    # Vision API key: VISION_API_KEY → OPENAI_API_KEY → placeholder
+                    api_key = get_setting(_db, "VISION_API_KEY", None) or get_setting(_db, "OPENAI_API_KEY", None)
+                    # Vision base URL: OPENAI_VISION_API_BASE → OPENAI_API_BASE → .env
+                    api_base = get_setting(_db, "OPENAI_VISION_API_BASE", None) or get_setting(_db, "OPENAI_API_BASE", None)
+                    if not api_key:
+                        api_key = "not-required"
+                    vision_client = SyncOpenAI(
+                        api_key=api_key,
+                        base_url=api_base,
+                    )
+                    _markitdown = MarkItDown(
+                        enable_plugins=True,
+                        llm_client=vision_client,
+                        llm_model=vision_model,
+                        llm_prompt=(
+                            "Extract all text from this image into clean, naturally flowing paragraphs, "
+                            "while preserving document structure and any table or sub-element layout.\n\n"
+                            "Rules:\n"
+                            "- Remove unnatural line breaks within sentences\n"
+                            "- Join split words and sentences caused by column layout or line wrapping\n"
+                            "- Keep proper paragraph breaks where the topic clearly changes\n"
+                            "- Preserve tables using Markdown table syntax\n"
+                            "- Preserve all original meaning and technical terms exactly\n"
+                            "- Output only the extracted text, no explanations or commentary"
+                        ),
+                    )
+                    logger.info(
+                        "[markitdown] OCR enabled — vision_model=%s base=%s",
+                        vision_model, api_base,
+                    )
+                else:
+                    _markitdown = MarkItDown()
+                    logger.info(
+                        "[markitdown] OCR disabled — VISION_MODEL not set"
+                    )
+            finally:
+                _db.close()
     return _markitdown
 
 

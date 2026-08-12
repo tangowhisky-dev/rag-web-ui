@@ -6,7 +6,7 @@ from app.core.config import settings
 from app.core.security import get_password_hash
 from app.core.storage import init_storage
 from app.db.session import SessionLocal
-from app.models.knowledge import ProcessingTask
+from app.models.knowledge import ProcessingTask, Document
 from app.models.organisation import Organisation
 from app.models.user import User, UserRole
 from app.services.datastore_watcher import DataStoreWatcher
@@ -169,18 +169,30 @@ async def lifespan(app: FastAPI):
             logging.getLogger(__name__).error("Failed to start DataStoreWatcher: %s", e)
 
     # Reset any tasks left in "processing" state from a previous worker crash.
+    # KB tasks with a valid document are reset to "pending" so the user can
+    # retry via the manual retry endpoint. Tasks without a document are reset
+    # to "failed" since there's nothing to retry.
     db = SessionLocal()
     try:
         stuck = db.query(ProcessingTask).filter(ProcessingTask.status == "processing").all()
         if stuck:
             logger = logging.getLogger(__name__)
-            logger.warning(
-                f"Startup: resetting {len(stuck)} stuck 'processing' task(s) to 'failed'"
-            )
+            pending_count = 0
+            failed_count = 0
             for t in stuck:
-                t.status = "failed"
-                t.error_message = "Worker restarted while task was in progress"
+                doc = db.query(Document).filter(Document.id == t.document_id).first() if t.document_id else None
+                if doc and doc.knowledge_base_id is not None:
+                    t.status = "pending"
+                    t.error_message = "Worker restarted while task was in progress — ready for retry"
+                    pending_count += 1
+                else:
+                    t.status = "failed"
+                    t.error_message = "Worker restarted while task was in progress"
+                    failed_count += 1
             db.commit()
+            logger.warning(
+                f"Startup: reset {len(stuck)} stuck task(s) — {pending_count} to pending, {failed_count} to failed"
+            )
     finally:
         db.close()
 
