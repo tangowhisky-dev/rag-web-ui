@@ -106,7 +106,6 @@ def test_base_url_settings_registered(key):
     "DENSE_EMBEDDING_DIM",
     "EMBEDDING_API_KEY",
     "EMBEDDING_API_BASE",
-    "MEMORY_EMBEDDING_MODEL",
 ])
 def test_embedding_settings_not_org_overridable(key):
     """Embedding settings must not be org-overridable."""

@@ -18,6 +18,7 @@ import {
 } from '@/components/ui/select';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { ArrowLeft, Save, RotateCcw, Layers, AlertTriangle } from 'lucide-react';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 
 interface OrgSettingItem {
   key: string;
@@ -165,6 +166,16 @@ export default function OrgSettingsPage() {
     return Array.from(map.entries());
   }, [settings]);
 
+  // Tab groupings: each tab maps to a set of categories
+  const TAB_GROUPS: { tab: string; cats: string[] }[] = [
+    { tab: 'Models', cats: ['LLM & Models'] },
+    { tab: 'Retrieval', cats: ['Retrieval', 'Adaptive Retrieval', 'Reranker'] },
+    { tab: 'GraphRAG', cats: ['GraphRAG'] },
+    { tab: 'Agent', cats: ['Agentic'] },
+    { tab: 'Memory & Context', cats: ['Memory', 'Context'] },
+    { tab: 'Quality', cats: ['Quality', 'Query Classification'] },
+  ];
+
   const overrideCount = settings.filter(s => s.overridden).length;
 
   if (loading) {
@@ -213,25 +224,40 @@ export default function OrgSettingsPage() {
           )}
         </div>
 
-        {categories.map(([category, items]) => (
-          <div key={category} className="mb-8">
-            <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wide mb-3">
-              {category}
-            </h2>
-            <div className="space-y-4 rounded-lg border bg-card p-4">
-              {items.map(s => (
-                <OrgSettingField
-                  key={s.key}
-                  setting={s}
-                  dirty={dirtyKeys.has(s.key)}
-                  preflightIssue={preflightIssues.find(i => i.key === s.key)}
-                  onChange={(v) => updateValue(s.key, v)}
-                  onReset={() => setConfirmKey(s.key)}
-                />
-              ))}
-            </div>
-          </div>
-        ))}
+        <Tabs defaultValue={TAB_GROUPS[0].tab}>
+          <TabsList className="mb-4">
+            {TAB_GROUPS.map(({ tab }) => (
+              <TabsTrigger key={tab} value={tab}>{tab}</TabsTrigger>
+            ))}
+          </TabsList>
+          {TAB_GROUPS.map(({ tab, cats }) => (
+            <TabsContent key={tab} value={tab}>
+              {cats.map(category => {
+                const items = categories.find(([c]) => c === category)?.[1] ?? [];
+                if (items.length === 0) return null;
+                return (
+                  <div key={category} className="mb-8">
+                    <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wide mb-3">
+                      {category}
+                    </h2>
+                    <div className="space-y-4 rounded-lg border bg-card p-4">
+                      {items.map(s => (
+                        <OrgSettingField
+                          key={s.key}
+                          setting={s}
+                          dirty={dirtyKeys.has(s.key)}
+                          preflightIssue={preflightIssues.find(i => i.key === s.key)}
+                          onChange={(v) => updateValue(s.key, v)}
+                          onReset={() => setConfirmKey(s.key)}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </TabsContent>
+          ))}
+        </Tabs>
       </div>
 
       <ConfirmDialog

@@ -56,6 +56,14 @@ jest.mock('@/components/ui/confirm-dialog', () => ({
     ) : null,
 }));
 
+// Mock Tabs to render all content (avoid Radix portal/visibility issues)
+jest.mock('@/components/ui/tabs', () => ({
+  Tabs: ({ children }: any) => <div>{children}</div>,
+  TabsList: ({ children }: any) => <div>{children}</div>,
+  TabsTrigger: ({ children, value }: any) => <div data-tab={value}>{children}</div>,
+  TabsContent: ({ children }: any) => <div>{children}</div>,
+}));
+
 import SuperAdminSettingsPage from '../page';
 
 const MOCK_SETTINGS = {
@@ -119,9 +127,11 @@ describe('SuperAdminSettingsPage', () => {
     render(<SuperAdminSettingsPage />);
 
     await waitFor(() => {
-      expect(screen.getByText('Retrieval')).toBeInTheDocument();
-      expect(screen.getByText('Ingestion')).toBeInTheDocument();
-      expect(screen.getByText('Reranker')).toBeInTheDocument();
+      // Category headers appear in tab content; tab labels may also match.
+      // Use getAllByText to assert at least one element renders for each.
+      expect(screen.getAllByText('Retrieval').length).toBeGreaterThan(0);
+      expect(screen.getAllByText('Ingestion').length).toBeGreaterThan(0);
+      expect(screen.getAllByText('Reranker').length).toBeGreaterThan(0);
     });
   });
 

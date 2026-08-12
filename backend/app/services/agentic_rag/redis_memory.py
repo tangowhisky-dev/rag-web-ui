@@ -156,7 +156,7 @@ class RedisMemory:
             from app.db.session import SessionLocal
             _db = SessionLocal()
             try:
-                embedding_model = get_setting(_db, "MEMORY_EMBEDDING_MODEL", None) or get_setting(_db, "DENSE_EMBEDDINGS_MODEL", None)
+                embedding_model = get_setting(_db, "DENSE_EMBEDDINGS_MODEL", None)
                 api_key = get_setting(_db, "EMBEDDING_API_KEY", None) or get_setting(_db, "OPENAI_API_KEY", None)
                 api_base = get_setting(_db, "EMBEDDING_API_BASE", None) or get_setting(_db, "OPENAI_API_BASE", None)
             finally:
@@ -300,7 +300,7 @@ def _cleanup_embeddings() -> _StringEmbeddings:
     from app.db.session import SessionLocal
     _db = SessionLocal()
     try:
-        embedding_model = get_setting(_db, "MEMORY_EMBEDDING_MODEL", None) or get_setting(_db, "DENSE_EMBEDDINGS_MODEL", None)
+        embedding_model = get_setting(_db, "DENSE_EMBEDDINGS_MODEL", None)
         api_key = get_setting(_db, "EMBEDDING_API_KEY", None) or get_setting(_db, "OPENAI_API_KEY", None)
         api_base = get_setting(_db, "EMBEDDING_API_BASE", None) or get_setting(_db, "OPENAI_API_BASE", None)
     finally:

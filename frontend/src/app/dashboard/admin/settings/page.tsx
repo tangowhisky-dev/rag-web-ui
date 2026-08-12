@@ -16,6 +16,7 @@ import {
 } from '@/components/ui/select';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { AlertTriangle, Save, RotateCcw } from 'lucide-react';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 
 interface SettingItem {
   key: string;
@@ -143,6 +144,17 @@ export default function SuperAdminSettingsPage() {
     return Array.from(map.entries());
   }, [settings]);
 
+  // Tab groupings: each tab maps to a set of categories
+  const TAB_GROUPS: { tab: string; cats: string[] }[] = [
+    { tab: 'Models & Embeddings', cats: ['LLM & Models', 'GraphRAG'] },
+    { tab: 'Retrieval', cats: ['Retrieval', 'Adaptive Retrieval', 'Reranker'] },
+    { tab: 'Ingestion', cats: ['Ingestion'] },
+    { tab: 'Agent', cats: ['Agentic'] },
+    { tab: 'Memory & Context', cats: ['Memory', 'Context'] },
+    { tab: 'Quality', cats: ['Quality', 'Query Classification'] },
+    { tab: 'System', cats: ['System'] },
+  ];
+
   if (loading) {
     return <div className="px-4 sm:px-6 lg:px-8 py-6 pt-16">Loading...</div>;
   }
@@ -170,25 +182,40 @@ export default function SuperAdminSettingsPage() {
           </div>
         </div>
 
-        {categories.map(([category, items]) => (
-          <div key={category} className="mb-8">
-            <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wide mb-3">
-              {category}
-            </h2>
-            <div className="space-y-4 rounded-lg border bg-card p-4">
-              {items.map(s => (
-                <SettingField
-                  key={s.key}
-                  setting={s}
-                  dirty={dirtyKeys.has(s.key)}
-                  preflightIssue={preflightIssues.find(i => i.key === s.key)}
-                  onChange={(v) => updateValue(s.key, v)}
-                  onReset={() => setConfirmKey(s.key)}
-                />
-              ))}
-            </div>
-          </div>
-        ))}
+        <Tabs defaultValue={TAB_GROUPS[0].tab}>
+          <TabsList className="mb-4">
+            {TAB_GROUPS.map(({ tab }) => (
+              <TabsTrigger key={tab} value={tab}>{tab}</TabsTrigger>
+            ))}
+          </TabsList>
+          {TAB_GROUPS.map(({ tab, cats }) => (
+            <TabsContent key={tab} value={tab}>
+              {cats.map(category => {
+                const items = categories.find(([c]) => c === category)?.[1] ?? [];
+                if (items.length === 0) return null;
+                return (
+                  <div key={category} className="mb-8">
+                    <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wide mb-3">
+                      {category}
+                    </h2>
+                    <div className="space-y-4 rounded-lg border bg-card p-4">
+                      {items.map(s => (
+                        <SettingField
+                          key={s.key}
+                          setting={s}
+                          dirty={dirtyKeys.has(s.key)}
+                          preflightIssue={preflightIssues.find(i => i.key === s.key)}
+                          onChange={(v) => updateValue(s.key, v)}
+                          onReset={() => setConfirmKey(s.key)}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </TabsContent>
+          ))}
+        </Tabs>
       </div>
 
       <ConfirmDialog
