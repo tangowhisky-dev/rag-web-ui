@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useId } from 'react';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/components/ui/use-toast';
@@ -27,6 +27,7 @@ export function ModelPicker({
   const { toast } = useToast();
   const [models, setModels] = useState<string[]>([]);
   const [fetching, setFetching] = useState(false);
+  const listId = useId();
 
   const canFetch = !!apiBase && !fetching;
 
@@ -54,8 +55,6 @@ export function ModelPicker({
       setFetching(false);
     }
   }
-
-  const listId = `model-list-${fetchUrl.replace(/[^a-z0-9]/gi, '')}`;
 
   return (
     <div className="flex items-center gap-2">
