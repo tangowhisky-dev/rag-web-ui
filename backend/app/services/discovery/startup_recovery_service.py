@@ -397,71 +397,18 @@ class StartupRecoveryService:
         document_id: int,
         task_id: int,
     ) -> None:
-        """Run the async ingestion pipeline in a threadpool worker."""
-        try:
-            loop = asyncio.new_event_loop()
-            try:
-                asyncio.set_event_loop(loop)
+        """Run the async ingestion pipeline in a threadpool worker.
 
-                from app.services.ingestion import process_document_background
-
-                async def _do() -> None:
-                    await process_document_background(
-                        temp_path=file_path,
-                        file_name=file_name,
-                        data_store_id=datastore_id,
-                        file_path=file_path,
-                        document_id=document_id,
-                        task_id=task_id,
-                        kb_id=None,
-                        db=None,
-                    )
-
-                loop.run_until_complete(_do())
-
-                # Mark task as completed
-                try:
-                    fresh_db = SessionLocal()
-                    try:
-                        db_task = fresh_db.query(ProcessingTask).filter(ProcessingTask.id == task_id).first()
-                        if db_task:
-                            db_task.status = "completed"
-                            db_task.progress = 100
-                            db_task.progress_message = "Recovery ingestion completed"
-                            fresh_db.commit()
-                    finally:
-                        fresh_db.close()
-                except Exception:
-                    pass
-
-                logger.info(
-                    "[RECOVERY] ingestion_completed task_id=%s path=%s",
-                    task_id,
-                    file_path,
-                )
-            finally:
-                loop.close()
-        except Exception as e:
-            logger.error(
-                "[RECOVERY] ingestion_failed task_id=%s error=%s",
-                task_id,
-                e,
-                exc_info=True,
-            )
-            try:
-                fresh_db = SessionLocal()
-                try:
-                    db_task = fresh_db.query(ProcessingTask).filter(ProcessingTask.id == task_id).first()
-                    if db_task:
-                        db_task.status = "failed"
-                        db_task.progress = 0
-                        db_task.progress_message = f"Recovery ingestion failed: {str(e)}"
-                        fresh_db.commit()
-                finally:
-                    fresh_db.close()
-            except Exception:
-                pass
-            raise
+        Delegates to the centralized ingestion dispatcher.
+        """
+        from app.services.ingestion.ingestion_dispatcher import run_ingestion_in_thread
+        run_ingestion_in_thread(
+            file_path=file_path,
+            file_name=file_name,
+            task_id=task_id,
+            document_id=document_id,
+            data_store_id=datastore_id,
+        )
 
     def _on_ingestion_done(self, future, task_id: int, file_path: str) -> None:
         """Callback after recovery ingestion completes (success or failure)."""

@@ -18,6 +18,7 @@ from .document_qdrant import (
     UploadResult,
 )
 from .markdown_cleaner import clean_markdown
+from .ingestion_dispatcher import run_ingestion_in_thread
 
 __all__ = [
     "process_document_background",
@@ -33,4 +34,5 @@ __all__ = [
     "PreviewResult",
     "UploadResult",
     "clean_markdown",
+    "run_ingestion_in_thread",
 ]

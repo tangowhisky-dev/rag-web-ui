@@ -210,6 +210,8 @@ def _serialize_ds(ds: DataStore) -> dict:
         "last_scan_modified": ds.last_scan_modified or 0,
         "last_scan_skipped": ds.last_scan_skipped or 0,
         "last_scan_errors": ds.last_scan_errors or 0,
+        "last_event_processed": getattr(ds, "last_event_processed", 0) or 0,
+        "last_event_at": ds.last_event_at.isoformat() if getattr(ds, "last_event_at", None) else None,
         "created_at": ds.created_at.isoformat() if ds.created_at else None,
         "updated_at": ds.updated_at.isoformat() if ds.updated_at else None,
         "last_recovered_at": ds.last_recovered_at.isoformat() if ds.last_recovered_at else None,

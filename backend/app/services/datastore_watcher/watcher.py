@@ -674,6 +674,12 @@ class DataStoreWatcher:
         DataStore files are processed independently — no KB knowledge needed.
         """
         db: Session = SessionLocal()
+        # Acquire per-file advisory lock to prevent race with event-driven processing
+        from app.services.datastore_watcher.utils import acquire_file_lock, release_file_lock
+        if not acquire_file_lock(db, datastore_id, event_path):
+            logger.info("[WATCHER] file_locked path=%s — skipping (another process holds lock)", event_path)
+            db.close()
+            return
         try:
             # Compute hash (delegate to handler which has the method)
             file_hash = self._handler._compute_hash(event_path)
@@ -725,6 +731,7 @@ class DataStoreWatcher:
             )
             return future
         finally:
+            release_file_lock(db, datastore_id, event_path)
             db.close()
 
     def _ingest_file_in_scan(
@@ -1110,75 +1117,18 @@ class DataStoreWatcher:
     ) -> None:
         """Run the async ingestion pipeline in a dedicated event loop (threaded).
 
-        IMPORTANT: After ingestion completes, this updates the ProcessingTask
-        status to 'completed' or 'failed' and updates the datastore progress.
+        Delegates to the centralized ingestion dispatcher.
         """
-        try:
-            async def _do() -> None:
-                await process_document_background(
-                    temp_path=file_path,
-                    file_name=file_name,
-                    kb_id=kb_id,
-                    task_id=task_id,
-                    document_id=document_id,
-                    data_store_id=data_store_id,
-                    db=None,
-                )
-
-            asyncio.set_event_loop(loop)
-            if not loop.is_running():
-                loop.run_until_complete(_do())
-            else:
-                loop.close()
-                logger.warning(
-                    "[WATCHER] loop.already_running task_id=%s, closing and re-creating",
-                    task_id,
-                )
-                return
-
-            # Mark task as completed
-            try:
-                fresh_db = SessionLocal()
-                try:
-                    db_task = fresh_db.query(ProcessingTask).filter(ProcessingTask.id == task_id).first()
-                    if db_task:
-                        db_task.status = "completed"
-                        db_task.progress = 100
-                        db_task.progress_message = "Ingestion completed"
-                        fresh_db.commit()
-                finally:
-                    fresh_db.close()
-            except Exception:
-                pass
-
-            logger.info(
-                "[WATCHER] ingestion_completed task_id=%s path=%s",
-                task_id,
-                file_path,
-            )
-        except Exception as e:
-            logger.error(
-                "[WATCHER] ingestion_failed task_id=%s error=%s",
-                task_id,
-                e,
-                exc_info=True,
-            )
-            try:
-                fresh_db = SessionLocal()
-                try:
-                    db_task = fresh_db.query(ProcessingTask).filter(ProcessingTask.id == task_id).first()
-                    if db_task:
-                        db_task.status = "failed"
-                        db_task.progress = 0
-                        db_task.progress_message = f"Ingestion failed: {str(e)}"
-                        fresh_db.commit()
-                finally:
-                    fresh_db.close()
-            except Exception:
-                pass
-            raise
-        finally:
-            loop.close()
+        loop.close()  # caller created a loop we no longer need
+        from app.services.ingestion.ingestion_dispatcher import run_ingestion_in_thread
+        run_ingestion_in_thread(
+            file_path=file_path,
+            file_name=file_name,
+            task_id=task_id,
+            document_id=document_id,
+            kb_id=kb_id,
+            data_store_id=data_store_id,
+        )
 
     def _on_ingestion_done(self, future, task_id: int, event_path: str) -> None:
         """Callback after ingestion completes (success or failure)."""

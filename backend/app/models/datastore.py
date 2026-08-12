@@ -45,7 +45,7 @@ class DataStore(Base):
     auto_scan_enabled = Column(Boolean, default=False)
     auto_scan_interval_minutes = Column(Integer, default=60)
 
-    # Ingestion tracking
+    # Ingestion tracking — manual scans
     last_scan_at = Column(DateTime, nullable=True)
     last_scan_status = Column(String(50), default="never")
     last_scan_error = Column(Text, nullable=True)
@@ -55,6 +55,10 @@ class DataStore(Base):
     last_scan_modified = Column(Integer, default=0)
     last_scan_skipped = Column(Integer, default=0)
     last_scan_errors = Column(Integer, default=0)
+
+    # Event-driven processing tracking (separate from manual scans)
+    last_event_processed = Column(Integer, default=0)
+    last_event_at = Column(DateTime, nullable=True)
 
     # Recovery tracking
     last_recovered_at = Column(DateTime, nullable=True)

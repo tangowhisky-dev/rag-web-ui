@@ -57,15 +57,26 @@ export default function NewKnowledgeBasePage() {
       });
 
       // Link selected data sources
+      const linkFailures: string[] = [];
       for (const sourceId of selectedSources) {
         try {
           await api.post(`/api/knowledge-base/${data.id}/link-datastore`, {
             data_store_id: sourceId,
           });
         } catch (err) {
+          const source = availableSources.find((s) => s.id === sourceId);
+          const sourceName = source?.name ?? `ID ${sourceId}`;
+          linkFailures.push(sourceName);
           console.error(`Failed to link data source ${sourceId}:`, err);
-          // Don't fail the whole creation if linking fails
         }
+      }
+
+      if (linkFailures.length > 0) {
+        toast({
+          title: "Data source linking failed",
+          description: `Knowledge base created, but ${linkFailures.length} data source(s) failed to link: ${linkFailures.join(", ")}. You can retry from the KB page.`,
+          variant: "destructive",
+        });
       }
 
       router.push(`/dashboard/knowledge/${data.id}`);
