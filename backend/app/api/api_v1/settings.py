@@ -149,7 +149,7 @@ def get_effective_app_settings(
 
 def _fetch_models_from_endpoint(api_base: str, api_key: str | None) -> list[str]:
     """Call an OpenAI-compatible /models endpoint and return model IDs."""
-    from openai import SyncOpenAI
+    from openai import OpenAI as SyncOpenAI
     if not api_key:
         api_key = "not-required"
     client = SyncOpenAI(api_key=api_key, base_url=api_base)
