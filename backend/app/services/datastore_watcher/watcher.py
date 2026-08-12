@@ -805,7 +805,6 @@ class DataStoreWatcher:
             db.refresh(task)
 
             # Enqueue background processing
-            loop = asyncio.new_event_loop()
             future = self._executor.submit(
                 self._run_ingestion,
                 event_path,
@@ -815,7 +814,6 @@ class DataStoreWatcher:
                 doc.id,
                 datastore_id,
                 None,
-                loop,
             )
             future.add_done_callback(
                 lambda f: self._on_ingestion_done(f, task.id, event_path)
@@ -899,7 +897,6 @@ class DataStoreWatcher:
             db.commit()
 
             # Enqueue background re-processing
-            loop = asyncio.new_event_loop()
             future = self._executor.submit(
                 self._run_ingestion,
                 event_path,
@@ -909,7 +906,6 @@ class DataStoreWatcher:
                 document_id,
                 datastore_id,
                 None,
-                loop,
             )
             future.add_done_callback(
                 lambda f: self._on_ingestion_done(f, task.id, event_path)
@@ -1034,8 +1030,8 @@ class DataStoreWatcher:
             len(changes),
         )
 
-        # Process each change and update last_scan_processed so UI
-        # reflects ingestion progress, not just total file count.
+        # Process each change and update last_event_processed so UI
+        # reflects event-driven ingestion progress.
         changes_processed = 0
         for change in changes:
             fpath = change["path"]
@@ -1048,11 +1044,11 @@ class DataStoreWatcher:
                     "[WATCHER] handle_file_error path=%s event=%s: %s", fpath, event_type, e, exc_info=True
                 )
 
-        # Update last_scan_processed so UI reflects latest state.
-        # Delegate to handler's _update_scan_progress (+=) — the handler
-        # method handles accumulation and is protected by _progress_lock.
-        # The handler also calls _refresh_file_count internally, so we don't
-        # need to call it here — that would duplicate the refresh.
+        # Update last_event_processed so UI reflects latest state.
+        # The handler's _update_scan_progress increments last_event_processed
+        # atomically and is protected by _progress_lock.
+        if changes_processed > 0:
+            self._handler._update_scan_progress(datastore_id, changes_processed)
 
     def _handle_file(
         self,
@@ -1113,13 +1109,11 @@ class DataStoreWatcher:
         document_id: int,
         data_store_id: Optional[int],
         db: Session,
-        loop: asyncio.AbstractEventLoop,
     ) -> None:
         """Run the async ingestion pipeline in a dedicated event loop (threaded).
 
         Delegates to the centralized ingestion dispatcher.
         """
-        loop.close()  # caller created a loop we no longer need
         from app.services.ingestion.ingestion_dispatcher import run_ingestion_in_thread
         run_ingestion_in_thread(
             file_path=file_path,

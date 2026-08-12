@@ -192,6 +192,7 @@ async def process_document_background(
     # what DB objects to roll back — regardless of how far we got.
     permanent_path: Optional[str] = None   # set after move_file succeeds
     document: Optional[Document] = None    # set after Document record committed
+    progress_db = None
 
     try:
         # Separate session for progress writes so progress commits don't
@@ -604,9 +605,10 @@ async def process_document_background(
                 db.rollback()
 
     finally:
-        try:
-            progress_db.close()
-        except Exception:
-            pass
+        if progress_db is not None:
+            try:
+                progress_db.close()
+            except Exception:
+                pass
         if should_close_db and db:
             db.close()

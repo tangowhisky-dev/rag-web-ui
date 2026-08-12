@@ -780,7 +780,6 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
             )
 
             # Enqueue background processing
-            loop = asyncio.new_event_loop()
             future = self._executor.submit(
                 self._run_ingestion,
                 event_path,
@@ -790,7 +789,6 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
                 doc.id,
                 datastore_id,
                 None,
-                loop,
             )
             future.add_done_callback(
                 lambda f: self._on_ingestion_done(f, task.id, event_path)
@@ -891,7 +889,6 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
             )
 
             # Enqueue background re-processing
-            loop = asyncio.new_event_loop()
             future = self._executor.submit(
                 self._run_ingestion,
                 event_path,
@@ -901,7 +898,6 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
                 document_id,
                 datastore_id,
                 None,
-                loop,
             )
             future.add_done_callback(
                 lambda f: self._on_ingestion_done(f, task.id, event_path)
@@ -1163,13 +1159,11 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
         document_id: int,
         data_store_id: Optional[int],
         db,  # Session — kept for API compatibility with DataStoreWatcher
-        loop: asyncio.AbstractEventLoop,
     ) -> None:
         """Run the async ingestion pipeline in a dedicated event loop (threaded).
 
         Delegates to the centralized ingestion dispatcher.
         """
-        loop.close()  # caller created a loop we no longer need
         from app.services.ingestion.ingestion_dispatcher import run_ingestion_in_thread
         run_ingestion_in_thread(
             file_path=file_path,
@@ -1247,7 +1241,7 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
                     "[WATCHER] ingestion_future_error path=%s: %s", fpath, e, exc_info=True
                 )
 
-        # Update last_scan_processed so UI doesn't show stale 0
+        # Update last_event_processed so UI doesn't show stale 0
         self._update_scan_progress(datastore_id, changes_processed)
         # Refresh file count so UI reflects latest state
         self._refresh_file_count(datastore_id)

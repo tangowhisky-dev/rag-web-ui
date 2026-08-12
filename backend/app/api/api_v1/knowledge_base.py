@@ -1,6 +1,6 @@
 import hashlib
 import os
-from typing import List, Any, Dict
+from typing import List, Any, Dict, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
@@ -730,6 +730,7 @@ async def retry_document_ingestion(
     db: Session = Depends(get_db),
     kb_id: int,
     doc_id: int,
+    enable_ocr: Optional[bool] = None,
     current_user: User = Depends(get_current_user)
 ) -> Any:
     """Retry ingestion for a failed document.
@@ -800,6 +801,7 @@ async def retry_document_ingestion(
             None,
             current_user.id,
             document_id=document.id,
+            enable_ocr=enable_ocr,
         )
     )
 

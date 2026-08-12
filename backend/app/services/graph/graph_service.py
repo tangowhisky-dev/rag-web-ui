@@ -899,10 +899,10 @@ def delete_graph_for_kb(kb_id: int) -> None:
         #    DataStore document chunks are preserved — they belong to the datastore, not the KB.
         rec = session.run(
             """
-            MATCH (n {kb_id: $kb_id})
-            WHERE n.data_store_id IS NULL
-            DETACH DELETE n
-            RETURN count(n) AS deleted
+            MATCH (c:Chunk {kb_id: $kb_id})
+            WHERE c.data_store_id IS NULL
+            DETACH DELETE c
+            RETURN count(c) AS deleted
             """,
             kb_id=str(kb_id),
         ).single()
