@@ -191,28 +191,23 @@ export default function DataSourcesPage() {
 
     const fetchRecoveryStatuses = async () => {
       try {
-        const response = await fetch('/api/admin/datastores/recovery-status', {
-          credentials: 'include',
-        });
-        if (response.ok) {
-          const statuses: RecoveryStatus[] = await response.json();
-          const statusMap: Record<number, RecoveryStatus> = {};
-          const progressMap: Record<number, RecoveryProgress | undefined> = {};
-          for (const s of statuses) {
-            statusMap[s.datastore_id] = s;
-            const st = s.recovery_status;
-            if (st === 'running' || st === 'complete' || st === 'error') {
-              progressMap[s.datastore_id] = {
-                status: st,
-                new_files: s.file_counts.new_files ?? 0,
-                modified: s.file_counts.modified ?? 0,
-                deleted: s.file_counts.deleted ?? 0,
-              };
-            }
+        const statuses = await api.get('/api/admin/datastores/recovery-status') as RecoveryStatus[];
+        const statusMap: Record<number, RecoveryStatus> = {};
+        const progressMap: Record<number, RecoveryProgress | undefined> = {};
+        for (const s of statuses) {
+          statusMap[s.datastore_id] = s;
+          const st = s.recovery_status;
+          if (st === 'running' || st === 'complete' || st === 'error') {
+            progressMap[s.datastore_id] = {
+              status: st,
+              new_files: s.file_counts.new_files ?? 0,
+              modified: s.file_counts.modified ?? 0,
+              deleted: s.file_counts.deleted ?? 0,
+            };
           }
-          setRecoveryStatuses(statusMap);
-          setRecoveryProgress(progressMap);
         }
+        setRecoveryStatuses(statusMap);
+        setRecoveryProgress(progressMap);
       } catch {
         // Recovery service may not be ready yet
       }
@@ -334,86 +329,107 @@ export default function DataSourcesPage() {
 
     try {
       // Start the scan
-      const scanResp = await fetch(`/api/admin/datastores/${dsId}/scan`, {
-        method: 'POST',
-        credentials: 'include',
-      });
-      if (!scanResp.ok) {
-        throw new Error(`Scan start failed with status ${scanResp.status}: ${scanResp.statusText}`);
-      }
+      await api.post(`/api/admin/datastores/${dsId}/scan`);
 
-      // Poll for scan progress instead of using SSE (SSE doesn't work through
-      // Next.js rewrites which buffer streaming responses).
+      // Poll for scan progress using setTimeout recursion (M10: was a while
+      // loop that continued after component unmount).
       const pollInterval = 500;
       const timeout = 120_000; // 2 minutes max
       const startTime = Date.now();
 
-      while (scanPollRef.current.active && scanPollRef.current.dsId === dsId && Date.now() - startTime < timeout) {
-        await new Promise((resolve) => setTimeout(resolve, pollInterval));
-
-        const progressResp = await fetch(`/api/admin/datastores/${dsId}/scan-progress`, {
-          credentials: 'include',
-        });
-
-        if (!progressResp.ok) {
-          continue;
-        }
-
-        const data = (await progressResp.json()) as ScanProgress;
-
-        setScanProgress((prev) => ({
-          ...prev,
-          [dsId]: {
-            total_files: data.total_files || 0,
-            processed_files: data.processed_files || 0,
-            status: data.status || 'running',
-            new_files: data.new_files || 0,
-            modified_files: data.modified_files || 0,
-            skipped_files: data.skipped_files || 0,
-            error_files: data.error_files || 0,
-            error_message: data.error_message,
-          },
-        }));
-
-        if (data.status === 'completed') {
-          const parts = [
-            `Scanned: ${data.processed_files || 0}`,
-            `New: ${data.new_files || 0}`,
-            `Modified: ${data.modified_files || 0}`,
-            `Skipped: ${data.skipped_files || 0}`,
-          ];
-          if (data.error_files && data.error_files > 0) {
-            parts.push(`Errors: ${data.error_files}`);
+      const pollScan = async () => {
+        if (!scanPollRef.current.active || scanPollRef.current.dsId !== dsId || Date.now() - startTime >= timeout) {
+          // Timeout or cancelled — clean up and refresh
+          if (Date.now() - startTime >= timeout) {
+            setScanProgress((prev) => ({ ...prev, [dsId]: undefined }));
+            await fetchData();
           }
-          toast({
-            title: 'Scan completed',
-            description: parts.join(' | '),
+          scanPollRef.current = { active: false, dsId: null };
+          setTriggering((prev) => {
+            const next = new Set(prev);
+            next.delete(dsId);
+            return next;
           });
-          setScanProgress((prev) => ({ ...prev, [dsId]: undefined }));
-          await fetchData();
-          break;
-        } else if (data.status === 'error') {
-          const errorMsg = data.error_message || `Errors: ${data.error_files || 1}`;
-          toast({
-            title: 'Scan failed',
-            description: errorMsg,
-            variant: 'destructive',
-          });
-          setScanProgress((prev) => ({ ...prev, [dsId]: undefined }));
-          await fetchData();
-          break;
-        } else if (data.status === 'cancelled') {
-          setScanProgress((prev) => ({ ...prev, [dsId]: undefined }));
-          await fetchData();
-          break;
+          return;
         }
-      }
 
-      // Timeout — clean up and refresh
-      if (Date.now() - startTime >= timeout) {
-        setScanProgress((prev) => ({ ...prev, [dsId]: undefined }));
-        await fetchData();
-      }
+        try {
+          const data = await api.get(`/api/admin/datastores/${dsId}/scan-progress`) as ScanProgress;
+
+          setScanProgress((prev) => ({
+            ...prev,
+            [dsId]: {
+              total_files: data.total_files || 0,
+              processed_files: data.processed_files || 0,
+              status: data.status || 'running',
+              new_files: data.new_files || 0,
+              modified_files: data.modified_files || 0,
+              skipped_files: data.skipped_files || 0,
+              error_files: data.error_files || 0,
+              error_message: data.error_message,
+            },
+          }));
+
+          if (data.status === 'completed') {
+            const parts = [
+              `Scanned: ${data.processed_files || 0}`,
+              `New: ${data.new_files || 0}`,
+              `Modified: ${data.modified_files || 0}`,
+              `Skipped: ${data.skipped_files || 0}`,
+            ];
+            if (data.error_files && data.error_files > 0) {
+              parts.push(`Errors: ${data.error_files}`);
+            }
+            toast({
+              title: 'Scan completed',
+              description: parts.join(' | '),
+            });
+            setScanProgress((prev) => ({ ...prev, [dsId]: undefined }));
+            await fetchData();
+            scanPollRef.current = { active: false, dsId: null };
+            setTriggering((prev) => {
+              const next = new Set(prev);
+              next.delete(dsId);
+              return next;
+            });
+            return;
+          } else if (data.status === 'error') {
+            const errorMsg = data.error_message || `Errors: ${data.error_files || 1}`;
+            toast({
+              title: 'Scan failed',
+              description: errorMsg,
+              variant: 'destructive',
+            });
+            setScanProgress((prev) => ({ ...prev, [dsId]: undefined }));
+            await fetchData();
+            scanPollRef.current = { active: false, dsId: null };
+            setTriggering((prev) => {
+              const next = new Set(prev);
+              next.delete(dsId);
+              return next;
+            });
+            return;
+          } else if (data.status === 'cancelled') {
+            setScanProgress((prev) => ({ ...prev, [dsId]: undefined }));
+            await fetchData();
+            scanPollRef.current = { active: false, dsId: null };
+            setTriggering((prev) => {
+              const next = new Set(prev);
+              next.delete(dsId);
+              return next;
+            });
+            return;
+          }
+
+          // Continue polling
+          setTimeout(pollScan, pollInterval);
+        } catch {
+          // Non-fatal — retry
+          setTimeout(pollScan, pollInterval);
+        }
+      };
+
+      setTimeout(pollScan, pollInterval);
     } catch (err) {
       toast({
         title: 'Error',
@@ -421,7 +437,6 @@ export default function DataSourcesPage() {
         variant: 'destructive',
       });
       setScanProgress((prev) => ({ ...prev, [dsId]: undefined }));
-    } finally {
       scanPollRef.current = { active: false, dsId: null };
       setTriggering((prev) => {
         const next = new Set(prev);
@@ -464,14 +479,7 @@ export default function DataSourcesPage() {
       [dsId]: { status: 'running', new_files: 0, modified: 0, deleted: 0 },
     }));
     try {
-      const res = await fetch(`/api/admin/datastores/${dsId}/recover`, {
-        method: 'POST',
-        credentials: 'include',
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.detail ?? `Recovery failed with status ${res.status}`);
-      }
+      await api.post(`/api/admin/datastores/${dsId}/recover`);
     } catch (err) {
       toast({
         title: 'Error',

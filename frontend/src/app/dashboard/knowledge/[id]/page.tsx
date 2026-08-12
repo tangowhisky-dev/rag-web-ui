@@ -33,7 +33,7 @@ interface DataSource {
 }
 
 interface AvailableDataSource extends DataSource {
-  assigned_orgs: Array<{ org_id: number; org_name: string }>;
+  assigned_orgs: Array<{ id: number; name: string }>;
 }
 
 export default function KnowledgeBasePage() {

@@ -11,7 +11,7 @@ interface DataSource {
   name: string;
   folder_path: string;
   description: string | null;
-  assigned_orgs?: Array<{ org_id: number; org_name: string }>;
+  assigned_orgs?: Array<{ id: number; name: string }>;
 }
 
 export default function NewKnowledgeBasePage() {
