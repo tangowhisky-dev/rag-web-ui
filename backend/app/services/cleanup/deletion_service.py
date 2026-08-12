@@ -186,19 +186,22 @@ def delete_kb(
         except Exception as e:
             cleanup_errors.append(f"Failed to clean up storage files: {e}")
 
-    # ── 2. Qdrant cleanup (direct uploads only) ──────────────────────────
+    # ── 2. DB cleanup ────────────────────────────────────────────────────
+    # Delete the KB record first. If this commit fails, vector/graph data
+    # is still intact and the user can retry. If it succeeds but
+    # Qdrant/Neo4j cleanup fails below, the orphaned data is invisible to
+    # users (KB no longer in their scope) and reconciliation will clean it
+    # up on next startup.
+    db.delete(kb)
+    db.commit()
+
+    # ── 3. Qdrant cleanup (direct uploads only) ──────────────────────────
     if direct_docs:
         _delete_qdrant_for_kb(kb_id)
 
-    # ── 3. Neo4j cleanup (direct uploads only) ───────────────────────────
+    # ── 4. Neo4j cleanup (direct uploads only) ───────────────────────────
     if direct_docs:
         _delete_neo4j_for_kb(db, kb_id)
-
-    # ── 4. DB cleanup ────────────────────────────────────────────────────
-    # Event listener handles conditional document deletion (direct uploads
-    # are deleted; DataStore links are severed).
-    db.delete(kb)
-    db.commit()
 
     # ── 5. Response ──────────────────────────────────────────────────────
     logger.info(
@@ -258,16 +261,11 @@ def delete_datastore(
 
     datastore_docs = [d for d in datastore_docs if d.data_store_id is not None]
 
-    # ── 1. Qdrant cleanup ────────────────────────────────────────────────
-    if datastore_docs:
-        _delete_qdrant_for_ds(db, datastore_id)
-
-    # ── 2. Neo4j cleanup ─────────────────────────────────────────────────
-    _delete_neo4j_for_ds(datastore_id)
-
-    # ── 3. DB cleanup ────────────────────────────────────────────────────
-    # Delete junction records before DataStore (ORM cascade won't handle NOT
-    # NULL FK constraints cleanly).
+    # ── 1. DB cleanup ────────────────────────────────────────────────────
+    # Delete DB records first. If this commit fails, vector/graph data is
+    # still intact and the user can retry. If it succeeds but Qdrant/Neo4j
+    # cleanup fails below, orphaned data is invisible to users (DataStore no
+    # longer in their scope) and reconciliation will clean it up on startup.
     db.query(KnowledgeBaseDataStore).filter(
         KnowledgeBaseDataStore.data_store_id == datastore_id
     ).delete(synchronize_session=False)
@@ -276,14 +274,19 @@ def delete_datastore(
         OrganizationDataStore.data_store_id == datastore_id
     ).delete(synchronize_session=False)
 
-    # Delete documents explicitly (so we can log), then delete DataStore
-    # — CASCADE handles chunks/tasks automatically.
     for doc in datastore_docs:
         db.delete(doc)
     db.commit()
 
     db.delete(ds)
     db.commit()
+
+    # ── 2. Qdrant cleanup ────────────────────────────────────────────────
+    if datastore_docs:
+        _delete_qdrant_for_ds(db, datastore_id)
+
+    # ── 3. Neo4j cleanup ─────────────────────────────────────────────────
+    _delete_neo4j_for_ds(datastore_id)
     logger.info("Datastore deleted id=%d name=%s", ds.id, ds.name)
 
     return {"message": "Datastore and all associated data deleted successfully"}, 204
