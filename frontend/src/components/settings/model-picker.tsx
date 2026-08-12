@@ -1,6 +1,8 @@
 'use client';
 
-import { useState, useId } from 'react';
+import { useState } from 'react';
+
+let _idCounter = 0;
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/components/ui/use-toast';
@@ -27,7 +29,7 @@ export function ModelPicker({
   const { toast } = useToast();
   const [models, setModels] = useState<string[]>([]);
   const [fetching, setFetching] = useState(false);
-  const listId = useId();
+  const listId = useState(() => `model-list-${++_idCounter}`)[0];
 
   const canFetch = !!apiBase && !fetching;
 
