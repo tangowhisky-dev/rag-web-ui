@@ -198,6 +198,7 @@ def _delete_orphan_points(
 ) -> None:
     """Delete Qdrant points whose chunk_id has no matching DocumentChunk row."""
     from qdrant_client.models import PointIdsList, ScrollRequest
+    from app.services.ingestion import _chunk_id_to_point_id
 
     try:
         # Get all point IDs from Qdrant via scroll
