@@ -38,7 +38,7 @@ interface AvailableDataSource extends DataSource {
 
 export default function KnowledgeBasePage() {
   const params = useParams();
-  const knowledgeBaseId = parseInt(params.id as string);
+  const knowledgeBaseId = parseInt(params?.id as string);
   const [refreshKey, setRefreshKey] = useState(0);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [kbName, setKbName] = useState<string>("Loading...");

@@ -29,7 +29,7 @@ const SUPER_ADMIN_ITEMS = [
 
 
 export default function AdminSidebar({ isOpen, onClose, userRole }: AdminSidebarProps) {
-  const pathname = usePathname();
+  const pathname = usePathname() ?? "";
   const { collapsed, toggleCollapse } = useSidebarCollapse("admin-sidebar-collapsed");
 
   return (

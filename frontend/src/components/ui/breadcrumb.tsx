@@ -10,7 +10,7 @@ interface BreadcrumbProps {
 }
 
 const Breadcrumb = ({ overrideLastLabel }: BreadcrumbProps) => {
-  const pathname = usePathname();
+  const pathname = usePathname() ?? "";
 
   const generateBreadcrumbs = () => {
     const paths = pathname.split("/").filter(Boolean);

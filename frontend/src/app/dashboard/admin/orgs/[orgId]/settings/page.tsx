@@ -58,7 +58,7 @@ interface PreflightIssue {
 
 export default function OrgSettingsPage() {
   const params = useParams();
-  const orgId = Number(params.orgId);
+  const orgId = Number(params?.orgId);
   const { toast } = useToast();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);

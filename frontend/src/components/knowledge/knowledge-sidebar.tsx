@@ -20,7 +20,7 @@ interface KnowledgeSidebarProps {
 
 export default function KnowledgeSidebar({ isOpen, onClose }: KnowledgeSidebarProps) {
   const router = useRouter();
-  const pathname = usePathname();
+  const pathname = usePathname() ?? "";
   const { kbList, activeKbId, renameKb, deleteKb } = useKnowledgeContext();
   const { toast } = useToast();
 
