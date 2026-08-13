@@ -204,6 +204,8 @@ When the user corrects your approach, append a one-line rule here before ending 
 - Never restart Docker containers unless the user explicitly asks; when a restart is required, use `docker compose -f docker-compose.dev.yml`.
 - Always run backend pytest inside the `rag-web-ui-backend-1` container (e.g. `docker exec rag-web-ui-backend-1 pytest`) because the backend requires the container's installed dependencies, database patches, and environment.
 - Always run frontend tests inside the `rag-web-ui-frontend-1` container (e.g. `docker exec rag-web-ui-frontend-1 npm run test:ci`) because the container's node_modules may differ from local.
+- Always run frontend builds inside the `rag-web-ui-frontend-1` container (e.g. `docker exec rag-web-ui-frontend-1 npm run build`) for the same reason.
+- pnpm 11+ requires Node.js 22+; the frontend container runs Node.js 20, so pnpm must stay on 10.x until Node is upgraded.
 
 ---
 
