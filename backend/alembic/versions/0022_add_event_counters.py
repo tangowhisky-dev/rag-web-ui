@@ -20,10 +20,10 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.add_column("datastores", sa.Column("last_event_processed", sa.Integer(), nullable=True, server_default="0"))
-    op.add_column("datastores", sa.Column("last_event_at", sa.DateTime(), nullable=True))
+    op.add_column("data_stores", sa.Column("last_event_processed", sa.Integer(), nullable=True, server_default="0"))
+    op.add_column("data_stores", sa.Column("last_event_at", sa.DateTime(), nullable=True))
 
 
 def downgrade() -> None:
-    op.drop_column("datastores", "last_event_at")
-    op.drop_column("datastores", "last_event_processed")
+    op.drop_column("data_stores", "last_event_at")
+    op.drop_column("data_stores", "last_event_processed")

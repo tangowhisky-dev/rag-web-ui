@@ -17,6 +17,12 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
+    # Widen alembic_version.version_num for long revision IDs
+    op.alter_column('alembic_version', 'version_num',
+                    existing_type=sa.String(32),
+                    type_=sa.String(128),
+                    existing_nullable=False)
+
     # Create users table
     op.create_table(
         'users',

@@ -15,7 +15,16 @@ depends_on = None
 
 def upgrade() -> None:
     op.add_column('messages', sa.Column('retrieval_score', sa.Integer(), nullable=True))
-    op.drop_column('messages', 'citation_quality')
+    # Conditionally drop citation_quality — it may not exist if the DB
+    # was created from migrations (never added by any prior migration).
+    conn = op.get_bind()
+    result = conn.execute(sa.text(
+        "SELECT COUNT(*) FROM information_schema.columns "
+        "WHERE table_schema = DATABASE() AND table_name = 'messages' "
+        "AND column_name = 'citation_quality'"
+    )).scalar()
+    if result:
+        op.drop_column('messages', 'citation_quality')
 
 
 def downgrade() -> None:
