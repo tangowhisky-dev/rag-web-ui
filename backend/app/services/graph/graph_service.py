@@ -314,6 +314,8 @@ async def _extract_with_llm(
     chunks: list[str],
     qdrant_point_ids: list[str],
     pt=None,            # optional ProgressTimeout for periodic pings
+    max_chunks: int = 0,
+    neo4j_llm_context: int = 12000,
 ) -> tuple[int, int]:
     """Run neo4j-graphrag LLM pipeline on context-sized batches of chunks.
 
@@ -552,6 +554,8 @@ async def build_graph_for_document(
             chunks=chunks,
             qdrant_point_ids=qdrant_point_ids,
             pt=pt,
+            max_chunks=max_chunks,
+            neo4j_llm_context=neo4j_llm_context,
         )
 
     logger.info(
