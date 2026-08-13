@@ -182,25 +182,35 @@ export const AgenticProgress = ({ agentSteps, isStreaming, toolCalls, toolObserv
   if (lines.length === 0) return null;
 
   return (
-    <div className="flex flex-col justify-end gap-0 overflow-hidden" style={{ minHeight: `${lines.length * 16}px` }}>
+    <div className="flex flex-col justify-end gap-0.5 overflow-hidden" style={{ minHeight: `${lines.length * 18}px` }}>
       <AnimatePresence initial={false} mode="popLayout">
         {lines.map((line, i) => {
           const isCurrent = i === lines.length - 1;
           return (
-            <motion.span
+            <motion.div
               key={line}
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.2 }}
-              className={
-                isCurrent
-                  ? "text-[12px] font-semibold text-zinc-600 dark:text-zinc-300 leading-tight"
-                  : "text-[11px] font-normal text-zinc-400 dark:text-zinc-500 leading-tight"
-              }
+              initial={{ opacity: 0, y: 4 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -4 }}
+              transition={{ duration: 0.2, ease: "easeOut" }}
+              className="flex items-center gap-1.5 leading-tight"
             >
-              {line}
-            </motion.span>
+              {isCurrent && (
+                <span
+                  className="shrink-0 w-1 h-1 rounded-full bg-muted-foreground"
+                  style={{ animation: "loading-dot-pulse 1.4s ease-in-out infinite" }}
+                />
+              )}
+              <span
+                className={
+                  isCurrent
+                    ? "text-[12px] font-medium text-zinc-600 dark:text-zinc-300"
+                    : "text-[11px] font-normal text-zinc-400 dark:text-zinc-500"
+                }
+              >
+                {line}
+              </span>
+            </motion.div>
           );
         })}
       </AnimatePresence>

@@ -6,6 +6,7 @@ import Link from "next/link";
 import { api, ApiError } from "@/lib/api";
 import { useChatContext } from "@/contexts/chat-context";
 import { useToast } from "@/components/ui/use-toast";
+import { LoadingDots } from "@/components/ui/loading-dots";
 import { Plus } from "lucide-react";
 
 interface KnowledgeBase {
@@ -122,7 +123,7 @@ export default function NewChatPage() {
           <div className="grid gap-4 md:grid-cols-2">
             {isLoading ? (
               <div className="col-span-2 flex justify-center py-8">
-                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary" />
+                <LoadingDots label="Loading knowledge bases" />
               </div>
             ) : (
               knowledgeBases.map((kb) => (

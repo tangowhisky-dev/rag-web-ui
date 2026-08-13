@@ -42,14 +42,12 @@ SUPPORTED_EXTENSIONS = {
     ".odt", ".ods", ".odp",
     ".rtf", ".epub",
     # Text / markup (direct read)
-    ".txt", ".md", ".html", ".htm", ".mhtml",
+    ".txt", ".md", ".html", ".htm",
     ".csv", ".json", ".xml",
-    # Email (stdlib email module / fallback)
-    ".msg", ".eml",
+    # Email (stdlib email module — handles both .eml and .mhtml)
+    ".eml", ".mhtml",
     # Images (vision OCR)
-    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff",
-    # Archives
-    ".zip",
+    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".webp",
 }
 
 CONTENT_TYPE_MAP = {
@@ -77,11 +75,10 @@ CONTENT_TYPE_MAP = {
     ".md":    "text/markdown",
     ".html":  "text/html",
     ".htm":   "text/html",
-    ".mhtml": "message/rfc822",
+    ".mhtml": "application/x-mimearchive",
     ".csv":   "text/csv",
     ".json":  "application/json",
     ".xml":   "application/xml",
-    ".msg":   "application/vnd.ms-outlook",
     ".eml":   "message/rfc822",
     ".jpg":   "image/jpeg",
     ".jpeg":  "image/jpeg",
@@ -89,7 +86,7 @@ CONTENT_TYPE_MAP = {
     ".gif":   "image/gif",
     ".bmp":   "image/bmp",
     ".tiff":  "image/tiff",
-    ".zip":   "application/zip",
+    ".webp":  "image/webp",
 }
 
 # Extensions handled by anydoc natively
@@ -105,10 +102,13 @@ _ANYDOC_EXTENSIONS = {
 _TEXT_EXTENSIONS = {".txt", ".md", ".json", ".xml"}
 
 # Extensions that need HTML-to-text conversion
-_HTML_EXTENSIONS = {".html", ".htm", ".mhtml"}
+_HTML_EXTENSIONS = {".html", ".htm"}
+
+# Email / MHTML (stdlib email module)
+_EMAIL_EXTENSIONS = {".eml", ".mhtml"}
 
 # Image extensions (OCR via vision model)
-_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff"}
+_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".webp"}
 
 # Minimum pixel count for an embedded PDF image to be considered worth OCR'ing.
 # Filters out 1×1 mask objects and decorative dots.
@@ -218,8 +218,8 @@ def _ocr_image_bytes(image_bytes: bytes, config: VisionConfig) -> str:
 
 def _ocr_pdf_page(pdf_path: str, page_num_1indexed: int, config: VisionConfig) -> str:
     """Render a PDF page to an image and OCR it."""
-    import fitz
-    with fitz.open(pdf_path) as doc:
+    import pymupdf
+    with pymupdf.open(pdf_path) as doc:
         page = doc[page_num_1indexed - 1]
         pix = page.get_pixmap(dpi=150)
         image_bytes = pix.tobytes("png")
@@ -229,9 +229,9 @@ def _ocr_pdf_page(pdf_path: str, page_num_1indexed: int, config: VisionConfig) -
 def _detect_pdf_images(pdf_path: str) -> list:
     """Return [(page_1indexed, img_index, image_bytes, ext, width, height)]
     for embedded raster images above _MIN_IMAGE_PIXELS."""
-    import fitz
+    import pymupdf
     big_images = []
-    with fitz.open(pdf_path) as doc:
+    with pymupdf.open(pdf_path) as doc:
         for page_idx in range(doc.page_count):
             page = doc[page_idx]
             for img_idx, img in enumerate(page.get_images(full=True), start=1):
@@ -267,11 +267,10 @@ class AnydocEngine:
     PDF:  pdf-inspector for text extraction + per-page OCR routing.
           Embedded raster images above a size threshold are OCR'd too.
     Office docs (docx, pptx, xlsx, odt, rtf, epub, csv, …): anydoc.
-    Images (jpg, png, …): vision model OCR.
+    Images (jpg, png, webp, …): vision model OCR.
     Text (txt, md, json, xml): direct UTF-8 read.
     HTML: tag-stripped to text via BeautifulSoup.
-    EML: stdlib email module → plain text.
-    Other (msg, zip, …): raw UTF-8 fallback.
+    EML / MHTML: stdlib email module → extract text/plain and text/html parts.
     """
 
     name = "anydoc"
@@ -289,10 +288,10 @@ class AnydocEngine:
             markdown = self._read_text(abs_path)
         elif ext in _HTML_EXTENSIONS:
             markdown = self._convert_html(abs_path)
-        elif ext == ".eml":
-            markdown = self._convert_eml(abs_path)
+        elif ext in _EMAIL_EXTENSIONS:
+            markdown = self._convert_email(abs_path)
         else:
-            # .msg, .zip, or anything else — raw text fallback
+            # Unknown extension — raw text fallback
             markdown = self._read_text(abs_path)
 
         cleaned = strip_reasoning_tags(markdown)
@@ -401,7 +400,13 @@ class AnydocEngine:
         except Exception:
             return self._read_text(abs_path)
 
-    def _convert_eml(self, abs_path: str) -> str:
+    def _convert_email(self, abs_path: str) -> str:
+        """Parse .eml and .mhtml files via the stdlib email module.
+
+        Extracts text/plain parts directly, and converts text/html parts
+        to plain text via BeautifulSoup. Skips binary attachments (images,
+        application/* parts).
+        """
         import email
         try:
             with open(abs_path, "rb") as f:
@@ -415,17 +420,34 @@ class AnydocEngine:
                 if val:
                     parts.append(f"**{header}:** {val}")
             parts.append("")
+
+            def _extract_part(part) -> None:
+                ctype = part.get_content_type()
+                payload = part.get_payload(decode=True)
+                if not payload:
+                    return
+                text = payload.decode("utf-8", errors="replace")
+                if ctype == "text/plain":
+                    parts.append(text)
+                elif ctype == "text/html":
+                    from bs4 import BeautifulSoup
+                    soup = BeautifulSoup(text, "html.parser")
+                    for tag in soup(["script", "style"]):
+                        tag.decompose()
+                    html_text = soup.get_text(separator="\n")
+                    lines = [line.strip() for line in html_text.splitlines()]
+                    cleaned = "\n".join(line for line in lines if line)
+                    if cleaned:
+                        parts.append(cleaned)
+
             if msg.is_multipart():
                 for part in msg.walk():
-                    ctype = part.get_content_type()
-                    if ctype == "text/plain":
-                        payload = part.get_payload(decode=True)
-                        if payload:
-                            parts.append(payload.decode("utf-8", errors="replace"))
+                    if part.is_multipart():
+                        continue
+                    _extract_part(part)
             else:
-                payload = msg.get_payload(decode=True)
-                if payload:
-                    parts.append(payload.decode("utf-8", errors="replace"))
+                _extract_part(msg)
+
             return "\n".join(parts)
         except Exception:
             return self._read_text(abs_path)

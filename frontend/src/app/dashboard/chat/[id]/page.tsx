@@ -29,6 +29,7 @@ import { MessageFileChip, type UploadedFile } from "@/components/chat/file-attac
 import { BranchPicker } from "@/components/chat/branch-picker";
 import ClarificationDialog from "@/components/chat/clarification-dialog";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { LoadingDots } from "@/components/ui/loading-dots";
 
 interface AgentStep {
   node: string;
@@ -882,9 +883,9 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     }
   };
 
-  const handleSubmit = async () => {
+  const handleSubmit = async (overrideInput?: string) => {
 
-    const trimmedInput = input.trim();
+    const trimmedInput = (overrideInput ?? input).trim();
     if (!trimmedInput || isLoading) {
       return;
     }
@@ -1239,6 +1240,10 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     if (patch.model_name !== undefined) setModelName(patch.model_name);
   };
 
+  const handleFollowUp = useCallback((query: string) => {
+    handleSubmit(query);
+  }, [handleSubmit]);
+
   return (
     <>
       <div className="flex flex-col h-full relative">
@@ -1263,7 +1268,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
           <div ref={topSentinelRef} className="h-px" />
           {isLoadingMore && (
             <div className="flex justify-center py-3">
-              <div className="h-4 w-4 rounded-full border-2 border-primary border-t-transparent animate-spin" />
+              <LoadingDots size="sm" />
             </div>
           )}
           {processedMessages.length === 0 && !isLoading && !isInitialLoad ? (
@@ -1326,6 +1331,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                           lastAnswerObject={message.lastAnswerObject}
                           chartOption={message.chartOption}
                           chartOptions={message.chartOptions}
+                          onFollowUp={handleFollowUp}
                         />
                       )}
                     </div>

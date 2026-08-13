@@ -24,7 +24,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Tuple
 
-import fitz
+import pymupdf
 import pytest
 from openai import OpenAI
 from PIL import Image
@@ -123,7 +123,7 @@ def _vision_ocr(client: CountingOpenAIClient, image_bytes: bytes, ext: str = "pn
 def _detect_big_images(path: str) -> List[Tuple[int, int, bytes, str, int, int]]:
     """Return (page_1_indexed, image_index, bytes, ext, width, height) for real images."""
     big_images = []
-    with fitz.open(path) as doc:
+    with pymupdf.open(path) as doc:
         for page_index in range(doc.page_count):
             page = doc[page_index]
             for img_index, img in enumerate(page.get_images(full=True), start=1):
@@ -208,7 +208,7 @@ def _convert_anydoc_auto(path: str, client: CountingOpenAIClient) -> dict:
 
     # 5. OCR any pages that pdf-inspector says are scanned / image-only
     for page_num in pages_needing_ocr:
-        with fitz.open(path) as doc:
+        with pymupdf.open(path) as doc:
             page = doc[page_num - 1]
             pix = page.get_pixmap(dpi=150)
             image_bytes = pix.tobytes("png")

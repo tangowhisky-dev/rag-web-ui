@@ -18,6 +18,7 @@ import {
 import { FileText, Trash2 } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { LoadingDots } from "@/components/ui/loading-dots";
 
 interface ProcessingTask {
   id: number;
@@ -191,10 +192,7 @@ export function DocumentList({ knowledgeBaseId, refreshKey }: DocumentListProps)
   if (loading) {
     return (
       <div className="flex justify-center items-center p-8">
-        <div className="space-y-4">
-          <div className="w-8 h-8 border-4 border-primary/30 border-t-primary rounded-full animate-spin mx-auto" />
-          <p className="text-muted-foreground animate-pulse">Loading documents...</p>
-        </div>
+        <LoadingDots label="Loading documents" />
       </div>
     );
   }
@@ -302,7 +300,10 @@ export function DocumentList({ knowledgeBaseId, refreshKey }: DocumentListProps)
                   title={isInProgress ? "Cannot delete while processing" : "Delete document"}
                 >
                   {deletingId === doc.id ? (
-                    <div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                    <span
+                      className="w-3 h-3 rounded-full bg-current"
+                      style={{ animation: "loading-dot-pulse 1.4s ease-in-out infinite" }}
+                    />
                   ) : (
                     <Trash2 className="h-4 w-4" />
                   )}

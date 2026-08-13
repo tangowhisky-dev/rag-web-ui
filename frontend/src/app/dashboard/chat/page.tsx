@@ -2,8 +2,8 @@
 
 import { useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { Loader2 } from "lucide-react";
 import { useChatContext } from "@/contexts/chat-context";
+import { LoadingDots } from "@/components/ui/loading-dots";
 
 function ChatIndexInner() {
   const router = useRouter();
@@ -45,7 +45,7 @@ function ChatIndexInner() {
 
   return (
     <div className="flex items-center justify-center h-full">
-      <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+      <LoadingDots />
     </div>
   );
 }

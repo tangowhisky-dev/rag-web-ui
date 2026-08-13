@@ -8,6 +8,7 @@ import KnowledgeLayout from "@/components/layout/knowledge-layout";
 import { useKnowledgeContext } from "@/contexts/knowledge-context";
 import { ApiError } from "@/lib/api";
 import { useToast } from "@/components/ui/use-toast";
+import { LoadingDots } from "@/components/ui/loading-dots";
 
 function KnowledgeBaseList() {
   const [deleteTarget, setDeleteTarget] = useState<number | null>(null);
@@ -137,10 +138,7 @@ function KnowledgeBaseList() {
 
           {loading && (
             <div className="flex items-center justify-center py-12">
-              <div className="space-y-4">
-                <div className="w-8 h-8 border-4 border-primary/30 border-t-primary rounded-full animate-spin mx-auto"></div>
-                <p className="text-muted-foreground animate-pulse">Loading knowledge bases...</p>
-              </div>
+              <LoadingDots label="Loading knowledge bases" />
             </div>
           )}
         </div>

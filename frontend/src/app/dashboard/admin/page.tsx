@@ -4,6 +4,7 @@ import { Building2, Database, Users } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
+import { LoadingDots } from '@/components/ui/loading-dots';
 
 interface AdminCounts {
   organizations: number;
@@ -59,7 +60,7 @@ export default function AdminPage() {
 
         {loading && (
           <div className="flex justify-center py-12">
-            <div className="w-8 h-8 border-4 border-primary/30 border-t-primary rounded-full animate-spin" />
+            <LoadingDots />
           </div>
         )}
 

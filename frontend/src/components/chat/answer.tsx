@@ -11,6 +11,7 @@ import { AnchorHTMLAttributes } from "react";
 import { Copy, Trash2, FileText, FileImage, FileType, Brain } from "lucide-react";
 import { AgenticProgress, AgentStepEvent } from "./agentic-progress";
 import { AgentLoopPanel } from "./agent-loop-panel";
+import { SelectionActions } from "./selection-actions";
 import {
   Popover,
   PopoverContent,
@@ -177,7 +178,8 @@ export const Answer: FC<{
   lastAnswerObject?: Record<string, unknown>;
   chartOption?: Record<string, unknown>;
   chartOptions?: Array<Record<string, unknown>>;
-}> = React.memo(({ messageId, chatId, markdown, citations = [], rewrittenQuery, confidence, confidenceScore, suggestion, failedLegs, agentSteps, taskList, isStreaming = false, onDelete, finalConfidence, finalConfidenceLevel, faithfulness, completeness, retrievalScore, toolCalls, toolObservations, chartOption, chartOptions }) => {
+  onFollowUp?: (query: string) => void;
+}> = React.memo(({ messageId, chatId, markdown, citations = [], rewrittenQuery, confidence, confidenceScore, suggestion, failedLegs, agentSteps, taskList, isStreaming = false, onDelete, finalConfidence, finalConfidenceLevel, faithfulness, completeness, retrievalScore, toolCalls, toolObservations, chartOption, chartOptions, onFollowUp }) => {
   const [citationInfoMap, setCitationInfoMap] = useState<
     Record<string, CitationInfo>
   >({});
@@ -658,8 +660,10 @@ export const Answer: FC<{
     return text;
   }, [parsedContent.answerText]);
 
+  const contentRef = useRef<HTMLDivElement>(null);
+
   return (
-    <div className="prose prose-sm max-w-full">
+    <div className="prose prose-sm max-w-full" ref={contentRef}>
       {/* Subtask checklist — shown during streaming for complex multi-part queries */}
       {taskList && taskList.length > 1 && (
         <SubtaskList tasks={taskList as SubtaskItem[]} />
@@ -697,6 +701,15 @@ export const Answer: FC<{
       
       {isStreaming && (
         <span className="inline-block w-2 h-4 ml-0.5 align-middle bg-foreground/80 animate-pulse" aria-hidden="true" />
+      )}
+
+      {/* Selection actions — floating toolbar on text selection */}
+      {onFollowUp && !isStreaming && parsedContent.answerText && (
+        <SelectionActions
+          containerRef={contentRef}
+          onAction={onFollowUp}
+          disabled={isStreaming}
+        />
       )}
 
       {/* ── Bottom bar: actions left, confidence right ─────────────────────── */}

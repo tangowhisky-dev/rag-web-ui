@@ -23,6 +23,7 @@ import {
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { useToast } from '@/components/ui/use-toast';
+import { LoadingDots } from '@/components/ui/loading-dots';
 
 interface Org {
   id: number;
@@ -654,7 +655,7 @@ export default function DataSourcesPage() {
                         return (
                           <div className="space-y-2">
                             <div className="flex items-center gap-2">
-                              <div className="w-3 h-3 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+                              <LoadingDots size="sm" />
                               <span className="text-xs text-blue-600">Processing...</span>
                             </div>
                             <div className="w-full bg-gray-200 rounded-full h-2">
@@ -683,7 +684,7 @@ export default function DataSourcesPage() {
                         return (
                           <div className="space-y-2">
                             <div className="flex items-center gap-2">
-                              <div className="w-3 h-3 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+                              <LoadingDots size="sm" />
                               <span className="text-xs text-blue-600">Processing...</span>
                             </div>
                             <div className="w-full bg-gray-200 rounded-full h-2">
@@ -746,7 +747,7 @@ export default function DataSourcesPage() {
                         <div className="space-y-1">
                           <div className="flex items-center gap-2">
                             {rp.status === 'running' && (
-                              <div className="w-3 h-3 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+                              <LoadingDots size="sm" />
                             )}
                             <Badge variant="secondary" className={`${rc.cls} text-[10px]`}>{rc.label}</Badge>
                           </div>
