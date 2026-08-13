@@ -65,10 +65,15 @@ describe('Answer Component - Issue #69 Fix', () => {
       },
     ];
 
-    // Render with initial citations
-    const { rerender } = render(
-      <Answer markdown="Test content [citation](1)" citations={initialCitations} />
-    );
+    // Render with initial citations — wrap in act to catch the initial
+    // useEffect that fires fetchCitationInfo after the debounce delay.
+    let rerender: (ui: React.ReactElement) => void;
+    await act(async () => {
+      const result = render(
+        <Answer markdown="Test content [citation](1)" citations={initialCitations} />
+      );
+      rerender = result.rerender;
+    });
 
     // Simulate rapid streaming updates (like what happens during LLM streaming)
     const updates = 10;
@@ -96,9 +101,13 @@ describe('Answer Component - Issue #69 Fix', () => {
       jest.advanceTimersByTime(350);
     });
 
-    // Wait for async operations
-    await waitFor(() => {
-      expect(api.get).toHaveBeenCalled();
+    // Wait for async operations — flush microtasks inside act to avoid
+    // "state update not wrapped in act()" warnings from the async
+    // fetchCitationInfo setState calls.
+    await act(async () => {
+      await waitFor(() => {
+        expect(api.get).toHaveBeenCalled();
+      });
     });
 
     // With debounce, API calls should be significantly reduced
@@ -123,7 +132,11 @@ describe('Answer Component - Issue #69 Fix', () => {
       return <Answer markdown="Test" citations={citations} />;
     }
 
-    const { rerender } = render(<TestWrapper citations={[]} />);
+    let rerender: (ui: React.ReactElement) => void;
+    await act(async () => {
+      const result = render(<TestWrapper citations={[]} />);
+      rerender = result.rerender;
+    });
 
     // Simulate 50 rapid updates (simulating streaming)
     for (let i = 0; i < 50; i++) {
@@ -149,8 +162,10 @@ describe('Answer Component - Issue #69 Fix', () => {
       jest.advanceTimersByTime(300);
     });
 
-    await waitFor(() => {
-      expect(api.get).toHaveBeenCalled();
+    await act(async () => {
+      await waitFor(() => {
+        expect(api.get).toHaveBeenCalled();
+      });
     });
 
     // Render count should be reasonable (initial + 50 updates + potential state updates)
@@ -181,7 +196,9 @@ describe('Answer Component - Issue #69 Fix', () => {
       },
     ];
 
-    render(<Answer markdown="Test [citation](1)" citations={citations} />);
+    await act(async () => {
+      render(<Answer markdown="Test [citation](1)" citations={citations} />);
+    });
 
     // Fast-forward through debounce delay
     act(() => {
@@ -189,9 +206,11 @@ describe('Answer Component - Issue #69 Fix', () => {
     });
 
     // Wait for API calls to complete
-    await waitFor(() => {
-      expect(api.get).toHaveBeenCalledWith('/api/knowledge-base/1');
-      expect(api.get).toHaveBeenCalledWith('/api/knowledge-base/1/documents/1');
+    await act(async () => {
+      await waitFor(() => {
+        expect(api.get).toHaveBeenCalledWith('/api/knowledge-base/1');
+        expect(api.get).toHaveBeenCalledWith('/api/knowledge-base/1/documents/1');
+      });
     });
   });
 });

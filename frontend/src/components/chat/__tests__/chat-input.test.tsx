@@ -27,14 +27,26 @@ describe("InputBar", () => {
     mockedApi.get.mockResolvedValue([]);
   });
 
+  // Flush the async fetchKbs effect that fires on every mount.
+  // InputBar calls api.get() in a useEffect; the resolved promise
+  // triggers setSelectedKbIds in a microtask. This helper wraps
+  // render + microtask flush in act() to avoid spurious warnings.
+  async function renderInputBar(
+    props: Partial<React.ComponentProps<typeof InputBar>> = {}
+  ) {
+    const result = render(<InputBar {...defaultProps} {...props} />);
+    await act(async () => { await Promise.resolve(); });
+    return result;
+  }
+
   describe("auto-resize textarea", () => {
-    it("renders textarea with correct data-testid", () => {
-      render(<InputBar {...defaultProps} />);
+    it("renders textarea with correct data-testid", async () => {
+      await renderInputBar();
       expect(screen.getByTestId("chat-input-textarea")).toBeInTheDocument();
     });
 
     it("textarea starts with rows=1 and uses auto-resize for height", async () => {
-      render(<InputBar {...defaultProps} />);
+      await renderInputBar();
       const textarea = screen.getByTestId("chat-input-textarea") as HTMLTextAreaElement;
       expect(textarea.rows).toBe(1);
       // useAutoResize sets height to MIN_HEIGHT_PX (48px) via requestAnimationFrame
@@ -45,7 +57,7 @@ describe("InputBar", () => {
     });
 
     it("textarea min-height is 48px (2 lines) via useAutoResize", async () => {
-      render(<InputBar {...defaultProps} />);
+      await renderInputBar();
       const textarea = screen.getByTestId("chat-input-textarea") as HTMLTextAreaElement;
       // useAutoResize sets MIN_HEIGHT_PX = 2 * LINE_HEIGHT_PX = 48px via rAF
       await act(async () => {
@@ -54,9 +66,9 @@ describe("InputBar", () => {
       expect(parseInt(textarea.style.height)).toBeGreaterThanOrEqual(48);
     });
 
-    it("textarea responds to content changes via onChange", () => {
+    it("textarea responds to content changes via onChange", async () => {
       const onChange = jest.fn();
-      render(<InputBar {...defaultProps} onChange={onChange} />);
+      await renderInputBar({onChange: onChange});
       const textarea = screen.getByTestId("chat-input-textarea");
 
       // Simulate multi-line input
@@ -67,18 +79,18 @@ describe("InputBar", () => {
   });
 
   describe("keyboard shortcuts", () => {
-    it("Enter submits the form", () => {
+    it("Enter submits the form", async () => {
       const onSubmit = jest.fn();
-      render(<InputBar {...defaultProps} value="hello" onSubmit={onSubmit} />);
+      await renderInputBar({ value: "hello", onSubmit: onSubmit });
       const textarea = screen.getByTestId("chat-input-textarea");
 
       fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
       expect(onSubmit).toHaveBeenCalledTimes(1);
     });
 
-    it("Shift+Enter does not submit (inserts newline)", () => {
+    it("Shift+Enter does not submit (inserts newline)", async () => {
       const onChange = jest.fn();
-      render(<InputBar {...defaultProps} value="hello" onChange={onChange} />);
+      await renderInputBar({onChange: onChange});
       const textarea = screen.getByTestId("chat-input-textarea");
 
       // Simulate Shift+Enter by changing value to include newline
@@ -86,18 +98,18 @@ describe("InputBar", () => {
       expect(onChange).toHaveBeenCalledWith("hello\n");
     });
 
-    it("Enter does not submit when value is empty", () => {
+    it("Enter does not submit when value is empty", async () => {
       const onSubmit = jest.fn();
-      render(<InputBar {...defaultProps} value="" onSubmit={onSubmit} />);
+      await renderInputBar({onSubmit: onSubmit});
       const textarea = screen.getByTestId("chat-input-textarea");
 
       fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
       expect(onSubmit).not.toHaveBeenCalled();
     });
 
-    it("Enter does not submit when value is only whitespace", () => {
+    it("Enter does not submit when value is only whitespace", async () => {
       const onSubmit = jest.fn();
-      render(<InputBar {...defaultProps} value="   " onSubmit={onSubmit} />);
+      await renderInputBar({onSubmit: onSubmit});
       const textarea = screen.getByTestId("chat-input-textarea");
 
       fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
@@ -106,41 +118,41 @@ describe("InputBar", () => {
   });
 
   describe("send button", () => {
-    it("renders send button with correct data-testid", () => {
-      render(<InputBar {...defaultProps} />);
+    it("renders send button with correct data-testid", async () => {
+      await renderInputBar();
       expect(screen.getByTestId("chat-input-send-button")).toBeInTheDocument();
     });
 
-    it("renders stop button when disabled prop is true", () => {
-      render(<InputBar {...defaultProps} disabled={true} />);
+    it("renders stop button when disabled prop is true", async () => {
+      await renderInputBar({disabled: true});
       const button = screen.getByTestId("chat-input-stop-button");
       expect(button).toBeInTheDocument();
     });
 
-    it("send button is disabled when value is empty", () => {
-      render(<InputBar {...defaultProps} value="" />);
+    it("send button is disabled when value is empty", async () => {
+      await renderInputBar({ value: "" });
       const button = screen.getByTestId("chat-input-send-button");
       expect(button).toBeDisabled();
     });
 
-    it("send button is enabled when value has content", () => {
-      render(<InputBar {...defaultProps} value="hello" />);
+    it("send button is enabled when value has content", async () => {
+      await renderInputBar({ value: "hello" });
       const button = screen.getByTestId("chat-input-send-button");
       expect(button).not.toBeDisabled();
     });
 
-    it("clicking send button calls onSubmit", () => {
+    it("clicking send button calls onSubmit", async () => {
       const onSubmit = jest.fn();
-      render(<InputBar {...defaultProps} value="hello" onSubmit={onSubmit} />);
+      await renderInputBar({ value: "hello", onSubmit: onSubmit });
       const button = screen.getByTestId("chat-input-send-button");
 
       fireEvent.click(button);
       expect(onSubmit).toHaveBeenCalledTimes(1);
     });
 
-    it("stop button calls onStop when clicked", () => {
+    it("stop button calls onStop when clicked", async () => {
       const onStop = jest.fn();
-      render(<InputBar {...defaultProps} value="hello" disabled={true} onStop={onStop} />);
+      await renderInputBar({disabled: true, onStop: onStop});
       const button = screen.getByTestId("chat-input-stop-button");
       fireEvent.click(button);
       expect(onStop).toHaveBeenCalledTimes(1);
@@ -155,17 +167,19 @@ describe("InputBar", () => {
       ]);
 
       // Force re-render to trigger the effect
-      const { rerender } = render(<InputBar {...defaultProps} />);
-      // Wait for async fetch
-      await new Promise((r) => setTimeout(r, 10));
+      const { rerender } = await renderInputBar();
+      // Wait for async fetch — wrap in act to avoid setState warnings
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 10));
+      });
       rerender(<InputBar {...defaultProps} />);
 
       expect(screen.getByTestId("chat-input-kb-selector")).toBeInTheDocument();
     });
 
-    it("does not render KB selector when no KBs available", () => {
+    it("does not render KB selector when no KBs available", async () => {
       mockedApi.get.mockResolvedValue([]);
-      render(<InputBar {...defaultProps} />);
+      await renderInputBar();
       // When empty, no KB selector renders
       const selector = screen.queryByTestId("chat-input-kb-selector");
       expect(selector).not.toBeInTheDocument();
@@ -173,19 +187,19 @@ describe("InputBar", () => {
   });
 
   describe("file button", () => {
-    it("renders file attachment button with correct data-testid", () => {
-      render(<InputBar {...defaultProps} />);
+    it("renders file attachment button with correct data-testid", async () => {
+      await renderInputBar();
       expect(screen.getByTestId("chat-input-file-button")).toBeInTheDocument();
     });
 
-    it("file button is enabled by default", () => {
-      render(<InputBar {...defaultProps} />);
+    it("file button is enabled by default", async () => {
+      await renderInputBar();
       const button = screen.getByTestId("chat-input-file-button");
       expect(button).not.toBeDisabled();
     });
 
-    it("file button is disabled when disabled prop is true", () => {
-      render(<InputBar {...defaultProps} disabled={true} />);
+    it("file button is disabled when disabled prop is true", async () => {
+      await renderInputBar({disabled: true});
       // label elements don't support disabled attribute; check the inner input
       const label = screen.getByTestId("chat-input-file-button");
       const input = label.querySelector("input");
@@ -194,22 +208,22 @@ describe("InputBar", () => {
   });
 
   describe("file chip", () => {
-    it("renders file chip when uploadedFile prop is provided", () => {
+    it("renders file chip when uploadedFile prop is provided", async () => {
       const uf = { id: 1, file_name: "test.pdf", file_size: 1024, status: "ready" as const };
-      render(<InputBar {...defaultProps} uploadedFile={uf} onFileAccepted={jest.fn()} />);
+      await renderInputBar({uploadedFile: uf, onFileAccepted: jest.fn()});
       expect(screen.getByTestId("file-chip")).toBeInTheDocument();
       expect(screen.getByText(/test\.pdf/)).toBeInTheDocument();
     });
 
-    it("does not render file chip when no uploadedFile", () => {
-      render(<InputBar {...defaultProps} uploadedFile={null} onFileAccepted={jest.fn()} />);
+    it("does not render file chip when no uploadedFile", async () => {
+      await renderInputBar({uploadedFile: null, onFileAccepted: jest.fn()});
       expect(screen.queryByTestId("file-chip")).not.toBeInTheDocument();
     });
 
-    it("X button on file chip calls onFileRemove", () => {
+    it("X button on file chip calls onFileRemove", async () => {
       const onFileRemove = jest.fn();
       const uf = { id: 1, file_name: "report.pdf", file_size: 1024, status: "ready" as const };
-      render(<InputBar {...defaultProps} uploadedFile={uf} onFileRemove={onFileRemove} />);
+      await renderInputBar({uploadedFile: uf, onFileRemove: onFileRemove});
       const removeBtn = screen.getByTestId("file-chip-remove");
       fireEvent.click(removeBtn);
       expect(onFileRemove).toHaveBeenCalled();
@@ -217,13 +231,13 @@ describe("InputBar", () => {
   });
 
   describe("file error display", () => {
-    it("shows error message when fileError is provided", () => {
-      render(<InputBar {...defaultProps} fileError="File exceeds 10 MB limit." onFileError={jest.fn()} />);
+    it("shows error message when fileError is provided", async () => {
+      await renderInputBar({ fileError: "File exceeds 10 MB limit.", onFileError: jest.fn() });
       expect(screen.getByTestId("file-error")).toHaveTextContent("File exceeds 10 MB limit.");
     });
 
-    it("does not show error element when fileError is empty", () => {
-      render(<InputBar {...defaultProps} fileError="" onFileError={jest.fn()} />);
+    it("does not show error element when fileError is empty", async () => {
+      await renderInputBar({onFileError: jest.fn()});
       expect(screen.queryByTestId("file-error")).not.toBeInTheDocument();
     });
   });
@@ -233,10 +247,12 @@ describe("InputBar", () => {
       mockedApi.get.mockResolvedValue([
         { id: 1, name: "Test KB" },
       ]);
-      render(<InputBar {...defaultProps} />);
+      await renderInputBar();
 
       // Wait for KB fetch
-      await new Promise((r) => setTimeout(r, 10));
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 10));
+      });
       expect(screen.getByTestId("chat-input-textarea")).toBeInTheDocument();
       expect(screen.getByTestId("chat-input-send-button")).toBeInTheDocument();
       expect(screen.getByTestId("chat-input-file-button")).toBeInTheDocument();
@@ -244,9 +260,9 @@ describe("InputBar", () => {
   });
 
   describe("onChange", () => {
-    it("calls onChange with new value on textarea change", () => {
+    it("calls onChange with new value on textarea change", async () => {
       const onChange = jest.fn();
-      render(<InputBar {...defaultProps} onChange={onChange} />);
+      await renderInputBar({onChange: onChange});
       const textarea = screen.getByTestId("chat-input-textarea");
 
       fireEvent.change(textarea, { target: { value: "new text" } });
@@ -255,14 +271,14 @@ describe("InputBar", () => {
   });
 
   describe("placeholder", () => {
-    it("renders custom placeholder", () => {
-      render(<InputBar {...defaultProps} placeholder="Ask me anything..." />);
+    it("renders custom placeholder", async () => {
+      await renderInputBar({ placeholder: "Ask me anything..." });
       const textarea = screen.getByTestId("chat-input-textarea") as HTMLTextAreaElement;
       expect(textarea.placeholder).toBe("Ask me anything...");
     });
 
-    it("uses default placeholder when not specified", () => {
-      render(<InputBar {...defaultProps} />);
+    it("uses default placeholder when not specified", async () => {
+      await renderInputBar();
       const textarea = screen.getByTestId("chat-input-textarea") as HTMLTextAreaElement;
       expect(textarea.placeholder).toBe("Type your message...");
     });
