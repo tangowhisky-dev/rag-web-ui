@@ -141,6 +141,134 @@ async def get_ocr_availability(
     return {"ocr_available": bool(vision_model)}
 
 
+# ── Static-path GET routes (must be declared before /{kb_id}) ──────────────
+
+@router.get("/available-datastores")
+def list_available_datastores(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Any:
+    """List datastores assigned to the current user's org hierarchy.
+
+    Returns datastores that the user can link to their knowledge bases.
+    Org-level assignment makes a datastore visible for linking; it does NOT
+    make it queryable — the user must explicitly link it to a KB first.
+    """
+    if not current_user.org_id:
+        return []
+
+    user_org_ids = _get_user_org_ids(db, current_user.org_id)
+
+    datastores = (
+        db.query(DataStore)
+        .join(OrganizationDataStore)
+        .filter(
+            OrganizationDataStore.org_id.in_(user_org_ids),
+            OrganizationDataStore.is_active == True,
+            DataStore.is_active == True,
+        )
+        .distinct()
+        .order_by(DataStore.id)
+        .all()
+    )
+
+    result = []
+    for ds in datastores:
+        links = (
+            db.query(OrganizationDataStore)
+            .join(Organisation)
+            .filter(
+                OrganizationDataStore.data_store_id == ds.id,
+                OrganizationDataStore.is_active == True,
+            )
+            .all()
+        )
+        result.append({
+            "id": ds.id,
+            "name": ds.name,
+            "description": ds.description,
+            "folder_path": ds.folder_path,
+            "assigned_orgs": [
+                {"id": link.organisation.id, "name": link.organisation.name}
+                for link in links
+            ],
+        })
+    return result
+
+
+@router.get("/documents/{doc_id}")
+async def get_document_by_id(
+    *,
+    db: Session = Depends(get_db),
+    doc_id: int,
+    current_user: User = Depends(get_current_user),
+) -> Any:
+    """
+    Get document details by document ID alone (works for KB and data store docs).
+    Used by citation popups that only have document_id from citation metadata.
+    """
+    document = db.query(Document).filter(Document.id == doc_id).first()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    if not _check_document_access(db, document, current_user):
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Build a response that includes the parent name (KB or data store)
+    parent_name = None
+    if document.knowledge_base_id is not None:
+        kb = db.query(KnowledgeBase).filter(KnowledgeBase.id == document.knowledge_base_id).first()
+        parent_name = kb.name if kb else None
+    elif document.data_store_id is not None:
+        from app.models.datastore import DataStore
+        ds = db.query(DataStore).filter(DataStore.id == document.data_store_id).first()
+        parent_name = ds.name if ds else None
+
+    return {
+        "id": document.id,
+        "file_name": document.file_name,
+        "file_path": document.file_path,
+        "file_size": document.file_size,
+        "content_type": document.content_type,
+        "knowledge_base_id": document.knowledge_base_id,
+        "data_store_id": document.data_store_id,
+        "parent_name": parent_name,
+    }
+
+
+@router.get("/documents/{doc_id}/download")
+def download_document_by_id(
+    doc_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Download a document by ID alone (works for KB and data store docs)."""
+    document = db.query(Document).filter(Document.id == doc_id).first()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    if not _check_document_access(db, document, current_user):
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    if not document.file_path:
+        raise HTTPException(status_code=404, detail="File no longer available on disk")
+
+    file_path = document.file_path
+    if not os.path.isabs(file_path):
+        file_path = os.path.join(settings.UPLOAD_DIR, file_path)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File no longer available on disk")
+
+    from fastapi.responses import FileResponse
+    return FileResponse(
+        path=file_path,
+        filename=document.file_name,
+        media_type=document.content_type or "application/octet-stream",
+    )
+
+
+# ── Parameterised routes ────────────────────────────────────────────────────
+
 @router.get("/{kb_id}", response_model=KnowledgeBaseResponse)
 def get_knowledge_base(
     *,
@@ -884,77 +1012,6 @@ def _check_document_access(db: Session, document: Document, current_user: User) 
     return False
 
 
-@router.get("/documents/{doc_id}")
-async def get_document_by_id(
-    *,
-    db: Session = Depends(get_db),
-    doc_id: int,
-    current_user: User = Depends(get_current_user),
-) -> Any:
-    """
-    Get document details by document ID alone (works for KB and data store docs).
-    Used by citation popups that only have document_id from citation metadata.
-    """
-    document = db.query(Document).filter(Document.id == doc_id).first()
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
-
-    if not _check_document_access(db, document, current_user):
-        raise HTTPException(status_code=404, detail="Document not found")
-
-    # Build a response that includes the parent name (KB or data store)
-    parent_name = None
-    if document.knowledge_base_id is not None:
-        kb = db.query(KnowledgeBase).filter(KnowledgeBase.id == document.knowledge_base_id).first()
-        parent_name = kb.name if kb else None
-    elif document.data_store_id is not None:
-        from app.models.datastore import DataStore
-        ds = db.query(DataStore).filter(DataStore.id == document.data_store_id).first()
-        parent_name = ds.name if ds else None
-
-    return {
-        "id": document.id,
-        "file_name": document.file_name,
-        "file_path": document.file_path,
-        "file_size": document.file_size,
-        "content_type": document.content_type,
-        "knowledge_base_id": document.knowledge_base_id,
-        "data_store_id": document.data_store_id,
-        "parent_name": parent_name,
-    }
-
-
-@router.get("/documents/{doc_id}/download")
-def download_document_by_id(
-    doc_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Download a document by ID alone (works for KB and data store docs)."""
-    document = db.query(Document).filter(Document.id == doc_id).first()
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
-
-    if not _check_document_access(db, document, current_user):
-        raise HTTPException(status_code=404, detail="Document not found")
-
-    if not document.file_path:
-        raise HTTPException(status_code=404, detail="File no longer available on disk")
-
-    file_path = document.file_path
-    if not os.path.isabs(file_path):
-        file_path = os.path.join(settings.UPLOAD_DIR, file_path)
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="File no longer available on disk")
-
-    from fastapi.responses import FileResponse
-    return FileResponse(
-        path=file_path,
-        filename=document.file_name,
-        media_type=document.content_type or "application/octet-stream",
-    )
-
-
 @router.get("/{kb_id}/documents/{doc_id}/download")
 def download_document(
     kb_id: int,
@@ -1132,56 +1189,3 @@ def unlink_datastore_from_kb(
     ds = db.query(DataStore).filter(DataStore.id == data_store_id).first()
     logger.info("Data source '%s' unlinked from knowledge base '%s' (kb_id=%d)", ds.name if ds else data_store_id, kb.name, kb_id)
     return {"message": f"Data source unlinked from knowledge base '{kb.name}'"}
-
-
-@router.get("/available-datastores")
-def list_available_datastores(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-) -> Any:
-    """List datastores assigned to the current user's org hierarchy.
-
-    Returns datastores that the user can link to their knowledge bases.
-    Org-level assignment makes a datastore visible for linking; it does NOT
-    make it queryable — the user must explicitly link it to a KB first.
-    """
-    if not current_user.org_id:
-        return []
-
-    user_org_ids = _get_user_org_ids(db, current_user.org_id)
-
-    datastores = (
-        db.query(DataStore)
-        .join(OrganizationDataStore)
-        .filter(
-            OrganizationDataStore.org_id.in_(user_org_ids),
-            OrganizationDataStore.is_active == True,
-            DataStore.is_active == True,
-        )
-        .distinct()
-        .order_by(DataStore.id)
-        .all()
-    )
-
-    result = []
-    for ds in datastores:
-        links = (
-            db.query(OrganizationDataStore)
-            .join(Organisation)
-            .filter(
-                OrganizationDataStore.data_store_id == ds.id,
-                OrganizationDataStore.is_active == True,
-            )
-            .all()
-        )
-        result.append({
-            "id": ds.id,
-            "name": ds.name,
-            "description": ds.description,
-            "folder_path": ds.folder_path,
-            "assigned_orgs": [
-                {"id": link.organisation.id, "name": link.organisation.name}
-                for link in links
-            ],
-        })
-    return result

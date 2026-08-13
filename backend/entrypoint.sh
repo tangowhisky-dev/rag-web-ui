@@ -17,18 +17,20 @@ done
 echo "MySQL started"
 
 echo "Running migrations..."
-HEADS=$(alembic heads 2>/dev/null | sed 's/ (head)//')
-if echo "$HEADS" | grep -q "^$"; then
+HEADS=$(alembic heads 2>&1 | sed 's/ (head)//')
+if [ -z "$HEADS" ]; then
   echo "No migrations to apply"
-elif echo "$HEADS" | grep -q "^$" || echo "$HEADS" | wc -l | grep -q "^1$"; then
-  # Single head — normal upgrade (never fall back to stamping)
-  if alembic upgrade head 2>/dev/null; then
+elif [ "$(echo "$HEADS" | wc -l)" -eq 1 ]; then
+  # Single head — normal upgrade
+  if alembic upgrade head 2>&1; then
     echo "Migrations completed successfully"
   else
-    echo "Migrations already applied, skipping upgrade"
+    echo "ERROR: alembic upgrade head failed."
+    echo "Fix: resolve the migration error above, then restart."
+    exit 1
   fi
 else
-  # Multiple heads — this is a real migration error; do NOT stamp silently.
+  # Multiple heads — real migration error; do NOT stamp silently.
   echo "ERROR: Multiple migration heads detected:"
   echo "$HEADS"
   echo "Fix: resolve migration branches or run 'alembic upgrade head' manually."
