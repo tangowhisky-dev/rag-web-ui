@@ -183,7 +183,7 @@ async def process_document_background(
         from app.services.settings_service import get_setting
         chunk_overlap = int(get_setting(db, "CHUNK_SIZE", None) * get_setting(db, "OVERLAP_PERCENTAGE", None))
 
-    task = db.query(ProcessingTask).get(task_id)
+    task = db.get(ProcessingTask, task_id)
     if not task:
         logger.error(f"Task {task_id} not found")
         return
@@ -335,7 +335,7 @@ async def process_document_background(
             
             if document_id:
                 # Update existing document
-                document = db.query(Document).get(document_id)
+                document = db.get(Document, document_id)
                 if document:
                     document.file_path = doc_file_path
                     document.file_hash = doc_file_hash

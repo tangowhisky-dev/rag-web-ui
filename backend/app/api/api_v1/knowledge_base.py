@@ -338,7 +338,7 @@ def update_knowledge_base(
     if not kb:
         raise HTTPException(status_code=404, detail="Knowledge base not found")
 
-    for field, value in kb_in.dict(exclude_unset=True).items():
+    for field, value in kb_in.model_dump(exclude_unset=True).items():
         setattr(kb, field, value)
 
     db.add(kb)

@@ -158,7 +158,8 @@ class TestDeclaredStateKeys:
         assert route_think(state) == "reflect_final"
 
     def test_clarification_question_declared_once(self):
-        source = open("/app/app/services/agentic_rag/graph_state.py").read()
+        with open("/app/app/services/agentic_rag/graph_state.py") as f:
+            source = f.read()
         assert source.count("clarification_question: Annotated") == 1
 
 
