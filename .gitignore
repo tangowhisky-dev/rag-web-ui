@@ -107,3 +107,4 @@ lpt[1-9].*
 /data
 /.gsd-backups
 /frontend/.pnpm-store
+/backend/benchmark_outputs
