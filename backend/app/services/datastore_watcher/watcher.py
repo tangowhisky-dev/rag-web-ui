@@ -814,6 +814,9 @@ class DataStoreWatcher:
                 doc.id,
                 datastore_id,
                 None,
+                file_hash=file_hash,
+                file_size=file_size,
+                content_type=content_type,
             )
             future.add_done_callback(
                 lambda f: self._on_ingestion_done(f, task.id, event_path)
@@ -906,6 +909,9 @@ class DataStoreWatcher:
                 document_id,
                 datastore_id,
                 None,
+                file_hash=file_hash,
+                file_size=file_size,
+                content_type=content_type,
             )
             future.add_done_callback(
                 lambda f: self._on_ingestion_done(f, task.id, event_path)
@@ -1109,6 +1115,9 @@ class DataStoreWatcher:
         document_id: int,
         data_store_id: Optional[int],
         db: Session,
+        file_hash: Optional[str] = None,
+        file_size: Optional[int] = None,
+        content_type: Optional[str] = None,
     ) -> None:
         """Run the async ingestion pipeline in a dedicated event loop (threaded).
 
@@ -1122,6 +1131,9 @@ class DataStoreWatcher:
             document_id=document_id,
             kb_id=kb_id,
             data_store_id=data_store_id,
+            file_hash=file_hash,
+            file_size=file_size,
+            content_type=content_type,
         )
 
     def _on_ingestion_done(self, future, task_id: int, event_path: str) -> None:

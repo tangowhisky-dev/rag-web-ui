@@ -384,6 +384,8 @@ class StartupRecoveryService:
             datastore_id,
             doc.id,
             task_id,
+            file_hash,
+            file_size,
         )
         future.add_done_callback(
             lambda f: self._on_ingestion_done(f, task_id, file_path)
@@ -396,6 +398,8 @@ class StartupRecoveryService:
         datastore_id: int,
         document_id: int,
         task_id: int,
+        file_hash: Optional[str] = None,
+        file_size: Optional[int] = None,
     ) -> None:
         """Run the async ingestion pipeline in a threadpool worker.
 
@@ -408,6 +412,8 @@ class StartupRecoveryService:
             task_id=task_id,
             document_id=document_id,
             data_store_id=datastore_id,
+            file_hash=file_hash,
+            file_size=file_size,
         )
 
     def _on_ingestion_done(self, future, task_id: int, file_path: str) -> None:

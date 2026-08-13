@@ -582,7 +582,7 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
                     logger.info(
                         "[WATCHER] file_modified path=%s old_hash=%s new_hash=%s datastore_id=%s doc_id=%s",
                         event_path,
-                        existing.file_hash[:8],
+                        (existing.file_hash or "none")[:8],
                         hash_prefix,
                         datastore_id,
                         existing.id,
@@ -789,6 +789,9 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
                 doc.id,
                 datastore_id,
                 None,
+                file_hash=file_hash,
+                file_size=file_size,
+                content_type=content_type,
             )
             future.add_done_callback(
                 lambda f: self._on_ingestion_done(f, task.id, event_path)
@@ -898,6 +901,9 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
                 document_id,
                 datastore_id,
                 None,
+                file_hash=file_hash,
+                file_size=file_size,
+                content_type=content_type,
             )
             future.add_done_callback(
                 lambda f: self._on_ingestion_done(f, task.id, event_path)
@@ -1159,6 +1165,9 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
         document_id: int,
         data_store_id: Optional[int],
         db,  # Session — kept for API compatibility with DataStoreWatcher
+        file_hash: Optional[str] = None,
+        file_size: Optional[int] = None,
+        content_type: Optional[str] = None,
     ) -> None:
         """Run the async ingestion pipeline in a dedicated event loop (threaded).
 
@@ -1172,6 +1181,9 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
             document_id=document_id,
             kb_id=kb_id,
             data_store_id=data_store_id,
+            file_hash=file_hash,
+            file_size=file_size,
+            content_type=content_type,
         )
 
     def _on_ingestion_done(self, future, task_id: int, event_path: str) -> None:
