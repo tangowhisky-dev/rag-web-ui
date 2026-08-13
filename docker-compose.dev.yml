@@ -22,10 +22,14 @@ services:
     networks:
       - app_network
     depends_on:
-      - db
-      - qdrant
-      - neo4j
-      - redis
+      db:
+        condition: service_started
+      qdrant:
+        condition: service_started
+      neo4j:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: on-failure
     deploy:
       restart_policy:
