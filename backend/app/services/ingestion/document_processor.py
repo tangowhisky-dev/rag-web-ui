@@ -239,8 +239,8 @@ async def process_document_background(
     
             # ── Step 1: Parse ────────────────────────────────────────────────────
             _set_progress(5, "Parsing document…")
-            logger.info(f"Task {task_id}: Converting document with markitdown (enable_ocr={enable_ocr})")
-            # Run in a thread pool — markitdown is synchronous and CPU/IO-bound.
+            logger.info(f"Task {task_id}: Converting document (enable_ocr={enable_ocr})")
+            # Run in a thread pool — conversion is synchronous and CPU/IO-bound.
             # Blocking the event loop here starves the poll endpoint for 60-120s on
             # large PDFs, causing ECONNRESET storms on the frontend.
             loop = asyncio.get_event_loop()
