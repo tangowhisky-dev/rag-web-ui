@@ -415,8 +415,9 @@ async def process_document_background(
                 payloads = []
                 db_chunks = []
                 for i, chunk in enumerate(chunks):
+                    scope_prefix = f"ds:{data_store_id}" if data_store_id else f"kb:{kb_id}"
                     chunk_id = hashlib.sha256(
-                        f"{data_store_id if data_store_id else kb_id}:{file_name}:{chunk.page_content}".encode()
+                        f"{scope_prefix}:{file_name}:{chunk.page_content}".encode()
                     ).hexdigest()
                     chunk.metadata["source"] = file_name
                     source_metadata = {
