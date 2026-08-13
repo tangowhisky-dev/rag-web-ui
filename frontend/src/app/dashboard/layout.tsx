@@ -1,17 +1,11 @@
-"use client";
+import { DashboardClientLayout } from "@/components/layout/dashboard-client-layout";
 
-import { ChatProvider } from "@/contexts/chat-context";
-import { PreflightCheck } from "@/components/preflight-check";
+export const dynamic = "force-dynamic";
 
 export default function DashboardLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
-  return (
-    <ChatProvider>
-      <PreflightCheck />
-      {children}
-    </ChatProvider>
-  );
+  return <DashboardClientLayout>{children}</DashboardClientLayout>;
 }

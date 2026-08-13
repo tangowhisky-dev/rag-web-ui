@@ -8,6 +8,8 @@ import { APP_NAME, APP_DESCRIPTION } from "@/lib/app-config";
 
 const inter = Inter({ subsets: ["latin"] });
 
+export const dynamic = "force-dynamic";
+
 export const metadata: Metadata = {
   title: APP_NAME,
   description: APP_DESCRIPTION,
