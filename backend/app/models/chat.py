@@ -81,7 +81,7 @@ class Message(Base, TimestampMixin):
     role = Column(String(50), nullable=False)
     chat_id = Column(Integer, ForeignKey("chats.id"), nullable=False)
     # Branching fields
-    parent_message_id = Column(Integer, ForeignKey("messages.id"), nullable=True, index=True)
+    parent_message_id = Column(Integer, ForeignKey("messages.id", ondelete="CASCADE"), nullable=True, index=True)
     branch_index = Column(Integer, nullable=False, default=0, server_default="0")
     # Confidence fields — populated for assistant messages only
     confidence_level = Column(String(20), nullable=True)
