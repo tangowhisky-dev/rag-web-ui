@@ -146,12 +146,6 @@ export const Answer: FC<{
   confidenceBreakdown?: Record<string, unknown>;
   suggestion?: string | null;
   failedLegs?: string[];
-  queryClassification?: {
-    type: string;
-    confidence: number;
-    latency_ms: number;
-    fallback: boolean;
-  };
   toolTrace?: Array<{
     tool_name: string;
     params?: Record<string, unknown>;

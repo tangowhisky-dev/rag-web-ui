@@ -1,7 +1,5 @@
 from .retrieval import (
     hybrid_search,
-    hybrid_search_with_legs,
-    get_retrieval_config,
     get_effective_datastore_ids,
     dense_search_docs,
     sparse_search_docs,
@@ -13,8 +11,6 @@ from .query_expander import expand
 
 __all__ = [
     "hybrid_search",
-    "hybrid_search_with_legs",
-    "get_retrieval_config",
     "get_effective_datastore_ids",
     "dense_search_docs",
     "sparse_search_docs",

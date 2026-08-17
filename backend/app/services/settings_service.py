@@ -256,13 +256,6 @@ class OrgSettings:
     def chunk_overlap(self) -> int:
         return int(self.CHUNK_SIZE * self.OVERLAP_PERCENTAGE)
 
-    @property
-    def retrieval_config_presets(self) -> dict:
-        raw = self.RETRIEVAL_CONFIG_PRESETS
-        if isinstance(raw, str):
-            return json.loads(raw)
-        return raw or {}
-
 
 # ── CRUD ──────────────────────────────────────────────────────────────────
 

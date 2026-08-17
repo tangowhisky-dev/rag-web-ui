@@ -114,7 +114,7 @@ def score_retrieval(
 
     All docs have already cleared the reranker threshold.
 
-    retrieval_info shape (from hybrid_search_with_legs):
+    retrieval_info shape (from rag_retrieve):
       {
         "legs": {
           "dense":         {"status": "ok"|"failed"|"disabled", "count": N},

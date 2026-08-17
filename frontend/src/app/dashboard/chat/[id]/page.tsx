@@ -55,12 +55,6 @@ interface Message {
   confidenceBreakdown?: Record<string, unknown>;
   suggestion?: string | null;
   failedLegs?: string[];
-  queryClassification?: {
-    type: string;
-    confidence: number;
-    latency_ms: number;
-    fallback: boolean;
-  };
   toolTrace?: Array<{
     tool_name: string;
     params?: Record<string, unknown>;
@@ -490,12 +484,6 @@ function ChatPageInner({ params }: { params: { id: string } }) {
           suggestion?: string | null;
           failed_legs?: string[];
           breakdown?: Record<string, unknown>;
-          query_classification?: {
-            type: string;
-            confidence: number;
-            latency_ms: number;
-            fallback: boolean;
-          };
           tool_trace?: Array<{
             tool_name: string;
             params?: Record<string, unknown>;
@@ -516,7 +504,6 @@ function ChatPageInner({ params }: { params: { id: string } }) {
           confidenceBreakdown: payload.breakdown,
           suggestion: payload.suggestion,
           failedLegs: payload.failed_legs,
-          queryClassification: payload.query_classification,
           toolTrace: payload.tool_trace,
           synthesisMode: payload.synthesis_mode,
         }));
@@ -1079,7 +1066,6 @@ function ChatPageInner({ params }: { params: { id: string } }) {
             toolObservations: undefined,
             toolTrace: undefined,
             plan: undefined,
-            queryClassification: undefined,
             synthesisMode: undefined,
             rewrittenQuery: undefined,
             suggestion: undefined,
@@ -1320,7 +1306,6 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                           confidenceBreakdown={message.confidenceBreakdown}
                           suggestion={message.suggestion}
                           failedLegs={message.failedLegs}
-                          queryClassification={message.id === lastAssistantId ? message.queryClassification : undefined}
                           toolTrace={message.id === lastAssistantId ? message.toolTrace : undefined}
                           agentSteps={message.id === lastAssistantId ? message.agentSteps : undefined}
                           taskList={message.id === lastAssistantId ? taskList : undefined}

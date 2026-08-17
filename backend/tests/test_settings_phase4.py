@@ -2,14 +2,11 @@
 test_settings_phase4.py — Phase 4: retrieval + graph query + ingestion settings.
 
 Tests:
-  1. hybrid_search_with_legs resolves org-overridable retrieval settings.
-  2. hybrid_search resolves org-overridable retrieval settings.
-  3. Org override of RETRIEVAL_TOP_K affects the pool size.
-  4. Org override of RETRIEVAL_DENSE_ENABLED disables the dense leg.
-  5. get_retrieval_config resolves org-overridable weights.
-  6. expand_docs_via_graph resolves org-overridable hops/limit/fanout.
-  7. Ingestion settings (CHUNK_SIZE, OVERLAP_PERCENTAGE) are app-only.
-  8. Graph ingestion settings (GRAPHRAG_ENABLED, MAX_CHUNKS, NEO4J_LLM_CONTEXT) are app-only.
+  1. hybrid_search resolves org-overridable retrieval settings.
+  2. Org override of RETRIEVAL_DENSE_ENABLED disables the dense leg.
+  3. expand_docs_via_graph resolves org-overridable hops/limit/fanout.
+  4. Ingestion settings (CHUNK_SIZE, OVERLAP_PERCENTAGE) are app-only.
+  5. Graph ingestion settings (GRAPHRAG_ENABLED, MAX_CHUNKS, NEO4J_LLM_CONTEXT) are app-only.
 """
 import pytest
 from unittest.mock import patch, MagicMock
@@ -26,10 +23,7 @@ import app.models.setting  # noqa
 from app.services.settings_service import (
     upsert_app_setting, upsert_org_setting, clear_cache, get_setting,
 )
-from app.services.retrieval.retrieval import (
-    hybrid_search, hybrid_search_with_legs, get_retrieval_config,
-)
-from app.models.query_classifier import QueryType
+from app.services.retrieval.retrieval import hybrid_search
 
 
 @pytest.fixture()
@@ -68,26 +62,8 @@ def _create_org(db, name="TestOrg"):
 
 
 # ---------------------------------------------------------------------------
-# 1-2. hybrid_search_with_legs / hybrid_search resolve org settings
+# 1. hybrid_search resolves org settings
 # ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_hybrid_search_with_legs_uses_org_top_k(db_session):
-    """Org override of RETRIEVAL_TOP_K affects the search pool."""
-    org = _create_org(db_session)
-    upsert_org_setting(db_session, org.id, "RETRIEVAL_TOP_K", 5)
-    clear_cache()
-
-    # Mock the internal leg functions to avoid needing Qdrant/MySQL
-    with patch("app.services.retrieval.retrieval._dense_search", return_value={}), \
-         patch("app.services.retrieval.retrieval._sparse_search", return_value={}), \
-         patch("app.services.retrieval.retrieval._exact_search", return_value={}), \
-         patch("app.services.retrieval.retrieval._rrf_merge_candidates", return_value=[]):
-        result = await hybrid_search_with_legs(
-            query="test", kb_ids=[], db=db_session, org_id=org.id
-        )
-    assert result["docs"] == []
-
 
 @pytest.mark.asyncio
 async def test_hybrid_search_uses_org_top_k(db_session):
@@ -107,7 +83,7 @@ async def test_hybrid_search_uses_org_top_k(db_session):
 
 
 # ---------------------------------------------------------------------------
-# 3. Org override disables a leg
+# 2. Org override disables a leg
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -127,7 +103,7 @@ async def test_org_override_disables_dense_leg(db_session):
          patch("app.services.retrieval.retrieval._sparse_search", return_value={}), \
          patch("app.services.retrieval.retrieval._exact_search", return_value={}), \
          patch("app.services.retrieval.retrieval._rrf_merge_candidates", return_value=[]):
-        await hybrid_search_with_legs(
+        await hybrid_search(
             query="test", kb_ids=[], db=db_session, org_id=org.id
         )
 
@@ -150,7 +126,7 @@ async def test_app_level_disables_dense_leg(db_session):
          patch("app.services.retrieval.retrieval._sparse_search", return_value={}), \
          patch("app.services.retrieval.retrieval._exact_search", return_value={}), \
          patch("app.services.retrieval.retrieval._rrf_merge_candidates", return_value=[]):
-        await hybrid_search_with_legs(
+        await hybrid_search(
             query="test", kb_ids=[], db=db_session, org_id=None
         )
 
@@ -158,47 +134,7 @@ async def test_app_level_disables_dense_leg(db_session):
 
 
 # ---------------------------------------------------------------------------
-# 4. get_retrieval_config resolves org-overridable weights
-# ---------------------------------------------------------------------------
-
-def test_get_retrieval_config_with_org_override(db_session):
-    """get_retrieval_config uses org-overridable weights when db and org_id are provided.
-    Note: preset values take precedence over org settings for keys the preset defines.
-    We test with a key that the FACTUAL preset does NOT set (sparse_weight is set,
-    but we can test the fallback behavior by checking a non-preset key).
-    Since FACTUAL sets all 4 keys, we test that the org-level top_k is used as
-    the fallback when no preset exists for a custom query type.
-    """
-    org = _create_org(db_session)
-    upsert_org_setting(db_session, org.id, "HYBRID_DENSE_WEIGHT", 0.9)
-    upsert_org_setting(db_session, org.id, "RETRIEVAL_TOP_K", 15)
-    clear_cache()
-
-    # FACTUAL preset has dense_weight=0.5, top_k=10 — these override org settings
-    config = get_retrieval_config(QueryType.FACTUAL, db_session, org.id)
-    # Preset values take precedence
-    assert config["dense_weight"] == 0.5  # from FACTUAL preset
-    assert config["top_k"] == 10  # from FACTUAL preset
-
-    # But the org-level values are used as fallbacks when no preset key exists.
-    # We can verify the org-level values are correctly resolved by checking
-    # get_setting directly.
-    assert get_setting(db_session, "HYBRID_DENSE_WEIGHT", org.id) == 0.9
-    assert get_setting(db_session, "RETRIEVAL_TOP_K", org.id) == 15
-
-
-def test_get_retrieval_config_without_db_uses_env_defaults():
-    """get_retrieval_config without db falls back to .env/config.py defaults.
-    Note: preset values still take precedence over env defaults for keys the preset defines.
-    """
-    config = get_retrieval_config(QueryType.FACTUAL)
-    # FACTUAL preset has dense_weight=0.5, top_k=10 — these override registry defaults
-    assert config["dense_weight"] == 0.5  # from FACTUAL preset
-    assert config["top_k"] == 10  # from FACTUAL preset
-
-
-# ---------------------------------------------------------------------------
-# 5. expand_docs_via_graph resolves org-overridable settings
+# 3. expand_docs_via_graph resolves org-overridable settings
 # ---------------------------------------------------------------------------
 
 def test_expand_docs_via_graph_accepts_db_and_org_id(db_session):
@@ -215,7 +151,7 @@ def test_expand_docs_via_graph_accepts_db_and_org_id(db_session):
 
 
 # ---------------------------------------------------------------------------
-# 6. Ingestion settings are app-only (cannot be org-overridden)
+# 4. Ingestion settings are app-only (cannot be org-overridden)
 # ---------------------------------------------------------------------------
 
 def test_chunk_size_is_app_only(db_session):
@@ -254,7 +190,7 @@ def test_graphrag_enabled_is_app_only():
 
 
 # ---------------------------------------------------------------------------
-# 7. App-level ingestion settings are readable via settings service
+# 5. App-level ingestion settings are readable via settings service
 # ---------------------------------------------------------------------------
 
 def test_app_level_chunk_size_readable(db_session):
@@ -274,7 +210,7 @@ def test_app_level_graphrag_max_chunks_readable(db_session):
 
 
 # ---------------------------------------------------------------------------
-# 8. Org-overridable retrieval settings are correctly classified
+# 6. Org-overridable retrieval settings are correctly classified
 # ---------------------------------------------------------------------------
 
 def test_retrieval_top_k_is_org_overridable():

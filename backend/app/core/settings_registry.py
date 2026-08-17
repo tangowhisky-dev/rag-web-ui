@@ -17,26 +17,7 @@ Scope = Literal["app", "org"]          # "app" = app-only; "org" = app-default +
 Reload = Literal["next_request", "restart", "ingest"]
 
 
-import json as _json
 
-_DEFAULT_RETRIEVAL_PRESETS = _json.dumps({
-    "FACTUAL": {
-        "dense_weight": 0.5, "sparse_weight": 0.3, "exact_weight": 0.2,
-        "top_k": 10
-    },
-    "ENTITY_CENTRIC": {
-        "dense_weight": 0.6, "sparse_weight": 0.2, "exact_weight": 0.2,
-        "top_k": 10
-    },
-    "MULTI_PART": {
-        "dense_weight": 0.5, "sparse_weight": 0.5, "exact_weight": 0.0,
-        "top_k": 10
-    },
-    "AMBIGUOUS": {
-        "dense_weight": 0.4, "sparse_weight": 0.4, "exact_weight": 0.2,
-        "top_k": 15
-    }
-})
 
 
 @dataclass(frozen=True)
@@ -213,9 +194,6 @@ _ORG_OVERRIDABLE = [
     SettingDef("RETRIEVAL_GRAPH_ENABLED", "Retrieval", "Enable graph leg",
                "bool", True, scope="org", reload="next_request",
                description="Graph retrieval leg toggle at query time. Ingestion unaffected."),
-    SettingDef("RETRIEVAL_CONFIG_PRESETS", "Retrieval", "Per-query-type presets",
-               "json", _DEFAULT_RETRIEVAL_PRESETS, scope="org", reload="next_request",
-               description="JSON object: FACTUAL, ENTITY_CENTRIC, MULTI_PART, AMBIGUOUS presets."),
     SettingDef("ENTITY_AWARE_ENABLED", "Retrieval", "Enable entity-aware retrieval",
                "bool", True, scope="org", reload="next_request"),
     SettingDef("ENTITY_BOOST_FACTOR", "Retrieval", "Entity boost factor",
