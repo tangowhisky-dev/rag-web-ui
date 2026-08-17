@@ -311,6 +311,8 @@ async def _extract_with_llm(
     pt=None,            # optional ProgressTimeout for periodic pings
     max_chunks: int = 0,
     neo4j_llm_context: int = 12000,
+    kb_id: Optional[int] = None,
+    data_store_id: Optional[int] = None,
 ) -> tuple[int, int]:
     """Run neo4j-graphrag LLM extraction on context-sized batches of chunks.
 
@@ -365,7 +367,30 @@ async def _extract_with_llm(
                         examples="",
                     )
 
-                    # 2. Write the extracted graph to Neo4j
+                    # 2. Inject kb_id/data_store_id into entity node properties
+                    #    so entities are scoped per-KB/per-datastore. This
+                    #    prevents entity cross-contamination between KBs.
+                    scope_props = {}
+                    if kb_id is not None:
+                        scope_props["kb_id"] = str(kb_id)
+                    if data_store_id is not None:
+                        scope_props["data_store_id"] = str(data_store_id)
+
+                    if scope_props:
+                        from neo4j_graphrag.experimental.components.types import Neo4jNode as _Neo4jNode
+                        scoped_nodes = []
+                        for n in graph.nodes:
+                            merged_props = {**n.properties, **scope_props}
+                            scoped_nodes.append(_Neo4jNode(
+                                id=n.id,
+                                label=n.label,
+                                properties=merged_props,
+                                embedding_properties=n.embedding_properties,
+                            ))
+                        from neo4j_graphrag.experimental.components.types import Neo4jGraph as _Neo4jGraph
+                        graph = _Neo4jGraph(nodes=scoped_nodes, relationships=graph.relationships)
+
+                    # 3. Write the extracted graph to Neo4j
                     writer_result = await writer.run(graph=graph)
 
                     status = getattr(writer_result, "status", None)
@@ -376,10 +401,11 @@ async def _extract_with_llm(
                         )
                         return 0, 0
 
-                    # 3. Link ONLY the entities extracted from this batch to
+                    # 4. Link ONLY the entities extracted from this batch to
                     #    the batch's chunk nodes. Collect entity (name, label)
                     #    pairs from the extracted graph — these are the entities
                     #    the LLM actually found in this batch's text.
+                    #    Filter by kb_id/data_store_id to ensure scope isolation.
                     batch_entities = [
                         (n.properties.get("name"), n.label)
                         for n in graph.nodes
@@ -390,19 +416,28 @@ async def _extract_with_llm(
                         return 0, 0
 
                     def _link_batch_chunks(
-                        entities=batch_entities, pids=batch_point_ids
+                        entities=batch_entities, pids=batch_point_ids,
+                        scope=scope_props
                     ):
                         linked_total = 0
                         with driver.session() as session:
-                            # Single query: link only the batch's entities to
-                            # the batch's chunks via FROM_CHUNK.
+                            # Build scope filter dynamically
+                            scope_clauses = []
+                            if "kb_id" in scope:
+                                scope_clauses.append("e.kb_id = $kb_id")
+                            if "data_store_id" in scope:
+                                scope_clauses.append("e.data_store_id = $ds_id")
+                            scope_filter = " AND ".join(scope_clauses) if scope_clauses else "true"
+
                             rec = session.run(
-                                """
+                                f"""
                                 UNWIND $entities AS ent
                                 UNWIND $point_ids AS pid
                                 MATCH (e:__Entity__)
-                                WHERE e.name = ent.name AND ent.label IN labels(e)
-                                MATCH (c:Chunk {qdrant_point_id: pid})
+                                WHERE e.name = ent.name
+                                  AND ent.label IN labels(e)
+                                  AND {scope_filter}
+                                MATCH (c:Chunk {{qdrant_point_id: pid}})
                                 MERGE (e)-[:FROM_CHUNK]->(c)
                                 RETURN count(*) AS linked
                                 """,
@@ -411,6 +446,8 @@ async def _extract_with_llm(
                                     for name, label in entities
                                 ],
                                 point_ids=pids,
+                                kb_id=scope.get("kb_id"),
+                                ds_id=scope.get("data_store_id"),
                             ).single()
                             linked_total += rec["linked"] if rec else 0
                         return linked_total
@@ -564,6 +601,8 @@ async def build_graph_for_document(
             pt=pt,
             max_chunks=max_chunks,
             neo4j_llm_context=neo4j_llm_context,
+            kb_id=kb_id,
+            data_store_id=data_store_id,
         )
 
     logger.info(
@@ -634,6 +673,23 @@ def expand_docs_via_graph(
         if datastore_ids:
             collections += [f"ds_{ds_id}" for ds_id in datastore_ids]
 
+        # Build scope filter for entities — ensures graph traversal stays
+        # within the queried KB(s)/datastore(s) and doesn't cross-contaminate
+        # via shared entity nodes from other KBs.
+        kb_scope = [str(k) for k in kb_ids] if kb_ids else []
+        ds_scope = [str(d) for d in datastore_ids] if datastore_ids else []
+        scope_clauses = []
+        if kb_scope:
+            scope_clauses.append("e.kb_id IN $kb_scope")
+        if ds_scope:
+            scope_clauses.append("e.data_store_id IN $ds_scope")
+        # Entities without scope props are from older ingestion runs —
+        # include them for backward compatibility.
+        if scope_clauses:
+            scope_filter = "(" + " OR ".join(scope_clauses) + " OR e.kb_id IS NULL AND e.data_store_id IS NULL)"
+        else:
+            scope_filter = "true"
+
         # Build dynamic path pattern for GRAPHRAG_RETRIEVAL_HOPS hops, starting
         # from the first-hop entity anchor `e` (already bounded below).
         # 1 hop: (e)-[:FROM_CHUNK]->(c2)
@@ -649,6 +705,15 @@ def expand_docs_via_graph(
             parts.append("-[:FROM_CHUNK]->(c2)")
             rest_pattern = " ".join(parts)
 
+        # Build scope filter for intermediate entities (e2, e3, ...) in multi-hop
+        if hops > 1:
+            interm_clauses = []
+            for i in range(2, hops + 1):
+                interm_clauses.append(f"(e{i}.kb_id IN $kb_scope OR e{i}.data_store_id IN $ds_scope OR (e{i}.kb_id IS NULL AND e{i}.data_store_id IS NULL))")
+            interm_filter = " AND ".join(interm_clauses)
+        else:
+            interm_filter = "true"
+
         # Traverse from seed chunks via entity relationships to connected chunks.
         # The first hop's distinct entities are capped (GRAPHRAG_ENTITY_FANOUT_CAP)
         # before expanding further, so a handful of highly-connected "hub"
@@ -662,11 +727,13 @@ def expand_docs_via_graph(
                 WHERE c.qdrant_point_id IN $seen_ids
                   AND c.qdrant_collection IN $collections
                 MATCH (c)<-[:FROM_CHUNK]-(e)
+                WHERE {scope_filter}
                 WITH DISTINCT e LIMIT $entity_cap
                 MATCH {rest_pattern}
                 WHERE c2.qdrant_point_id IS NOT NULL
                   AND NOT c2.qdrant_point_id IN $seen_ids
                   AND c2.qdrant_collection IN $collections
+                  AND {interm_filter}
                 RETURN DISTINCT c2.qdrant_point_id AS point_id,
                                 c2.qdrant_collection AS collection
                 LIMIT $limit
@@ -675,6 +742,8 @@ def expand_docs_via_graph(
                 collections=collections,
                 entity_cap=max(1, fanout_val),
                 limit=max(1, limit_val),
+                kb_scope=kb_scope,
+                ds_scope=ds_scope,
             )
             expansion_targets = [
                 (rec["point_id"], rec["collection"]) for rec in result
@@ -839,7 +908,11 @@ def enrich_docs_with_graph(
 
 # ── Deletion ───────────────────────────────────────────────────────────────────
 
-def delete_graph_for_document(kb_id: Optional[int], document_id: int) -> None:
+def delete_graph_for_document(
+    kb_id: Optional[int],
+    document_id: int,
+    data_store_id: Optional[int] = None,
+) -> None:
     """
     Remove all Neo4j Chunk nodes for a deleted document, and clean up
     any Entity nodes that no longer have any Chunk connections.
@@ -865,14 +938,25 @@ def delete_graph_for_document(kb_id: Optional[int], document_id: int) -> None:
             rec["deleted"] if rec else 0, document_id,
         )
 
+        # Clean up orphaned entity nodes. With per-KB/datastore scoping,
+        # entities from other KBs are separate nodes and won't be affected.
+        # Only delete entities that have no remaining FROM_CHUNK edges.
+        # Scope the cleanup to avoid deleting orphaned entities from other KBs.
         rec = session.run(
             """
             MATCH (e)
             WHERE (e:__KGBuilder__ OR e:Entity OR e:__Entity__)
               AND NOT EXISTS { MATCH (e)-[:FROM_CHUNK]->() }
+              AND (
+                ($kb_id IS NOT NULL AND e.kb_id = $kb_id)
+                OR ($ds_id IS NOT NULL AND e.data_store_id = $ds_id)
+                OR (e.kb_id IS NULL AND e.data_store_id IS NULL)
+              )
             DETACH DELETE e
             RETURN count(e) AS cleaned
-            """
+            """,
+            kb_id=str(kb_id) if kb_id is not None else None,
+            ds_id=str(data_store_id) if data_store_id is not None else None,
         ).single()
         logger.info(
             "GraphService: cleaned %d orphaned entity nodes after doc %d deletion",
@@ -923,19 +1007,20 @@ def delete_graph_for_kb(kb_id: int) -> None:
             rec["deleted"] if rec else 0, kb_id,
         )
 
-        # 3. Sweep entity nodes that have no remaining FROM_CHUNK edges.
-        #    Covers: (a) ReLiK Entity nodes (b) LLM-pipeline __Entity__ nodes
-        #            (c) neo4j-graphrag __KGBuilder__ bookkeeping nodes.
-        #    The FROM_CHUNK direction is always entity→chunk, so checking the
-        #    outgoing side is sufficient.
+        # 3. Sweep entity nodes scoped to this KB that have no remaining
+        #    FROM_CHUNK edges. With per-KB scoping, entities from other KBs
+        #    are separate nodes and won't be affected.
+        #    Also covers legacy entities (no kb_id property) that were orphaned.
         rec = session.run(
             """
             MATCH (e)
             WHERE (e:__KGBuilder__ OR e:Entity OR e:__Entity__)
+              AND (e.kb_id = $kb_id OR e.kb_id IS NULL)
               AND NOT EXISTS { MATCH (e)-[:FROM_CHUNK]->() }
             DETACH DELETE e
             RETURN count(e) AS cleaned
-            """
+            """,
+            kb_id=str(kb_id),
         ).single()
         logger.info(
             "GraphService: cleaned %d orphaned entity nodes after kb_%d deletion",
@@ -1010,7 +1095,7 @@ def purge_stale_graph_data(active_kb_ids: list[int]) -> None:
                     break
         logger.info("GraphService: purged %d chunks for stale kb_%s", total_chunks, stale_id)
 
-        # Entity nodes now orphaned — also batch in case there are many
+        # Entity nodes scoped to this KB now orphaned — batch delete
         total_entities = 0
         while True:
             with driver.session() as session:
@@ -1018,11 +1103,13 @@ def purge_stale_graph_data(active_kb_ids: list[int]) -> None:
                     """
                     MATCH (e)
                     WHERE (e:__KGBuilder__ OR e:Entity OR e:__Entity__)
+                      AND (e.kb_id = $kb_id OR e.kb_id IS NULL)
                       AND NOT EXISTS { MATCH (e)-[:FROM_CHUNK]->() }
                     WITH e LIMIT 500
                     DETACH DELETE e
                     RETURN count(e) AS n
-                    """
+                    """,
+                    kb_id=stale_id,
                 ).single()
                 n = rec["n"] if rec else 0
                 total_entities += n

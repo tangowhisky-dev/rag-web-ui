@@ -994,7 +994,7 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
                     # Clean up Neo4j graph nodes for this document
                     try:
                         from app.services.graph import delete_graph_for_document
-                        delete_graph_for_document(kb_id=None, document_id=doc.id)
+                        delete_graph_for_document(kb_id=None, document_id=doc.id, data_store_id=datastore_id)
                         logger.info(
                             "[WATCHER] Neo4j cleanup done for document_id=%s",
                             doc.id,

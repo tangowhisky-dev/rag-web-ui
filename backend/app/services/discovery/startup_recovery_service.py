@@ -487,7 +487,7 @@ class StartupRecoveryService:
             # Clean up Neo4j graph nodes for this document
             try:
                 from app.services.graph import delete_graph_for_document  # noqa: T100
-                delete_graph_for_document(kb_id=None, document_id=doc.id)
+                delete_graph_for_document(kb_id=None, document_id=doc.id, data_store_id=datastore_id)
                 logger.info("[RECOVERY] deletion_done datastore_id=%s doc_id=%s reason=neo4j_cleanup", datastore_id, doc.id)
             except Exception as e:
                 logger.warning("[RECOVERY] Neo4j cleanup failed for doc_id=%s: %s", doc.id, e)
