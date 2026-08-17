@@ -408,14 +408,6 @@ async def upload_kb_documents(
         # 1. 计算文件 hash
         file_content = await file.read()
 
-        # Enforce file size limit
-        from app.services.ingestion.document_converter import MAX_FILE_SIZE
-        if len(file_content) > MAX_FILE_SIZE:
-            raise HTTPException(
-                status_code=413,
-                detail=f"File '{file.filename}' exceeds maximum size of {MAX_FILE_SIZE // (1024 * 1024)}MB"
-            )
-
         file_hash = hashlib.sha256(file_content).hexdigest()
         
         # 2. 检查是否存在完全相同的文件（名称和hash都相同）

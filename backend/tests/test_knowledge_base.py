@@ -246,8 +246,8 @@ def test_ocr_availability_endpoint(client, db):
     assert resp.json()["ocr_available"] is True
 
 
-def test_upload_rejects_oversized_file(client, db):
-    """POST /{kb_id}/documents/upload returns 413 for files > MAX_FILE_SIZE."""
+def test_upload_accepts_large_file(client, db):
+    """POST /{kb_id}/documents/upload accepts files > 10MB (no size limit on ingestion)."""
     root = Organisation(name="Root", parent_id=None, path="/1")
     db.add(root)
     db.commit()
@@ -259,7 +259,7 @@ def test_upload_rejects_oversized_file(client, db):
     db.commit()
     db.refresh(kb)
 
-    # Create a file just over 10MB
+    # Create a file over 10MB — should NOT be rejected with 413
     from app.services.ingestion.document_converter import MAX_FILE_SIZE
     big_content = b"x" * (MAX_FILE_SIZE + 1)
 
@@ -268,8 +268,8 @@ def test_upload_rejects_oversized_file(client, db):
         files={"files": ("big.txt", big_content, "text/plain")},
         headers={"Authorization": f"Bearer {token}"},
     )
-    assert resp.status_code == 413
-    assert "exceeds maximum size" in resp.json()["detail"]
+    # Must not be 413 — the size limit has been removed for KB ingestion.
+    assert resp.status_code != 413
 
 
 def test_process_endpoint_deduplicates_upload_ids(client, db):

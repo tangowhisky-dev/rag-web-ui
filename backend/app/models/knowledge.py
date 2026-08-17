@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, Text, DateTime, JSON, BigInteger, TIMESTAMP, text
+from sqlalchemy import Column, Integer, String, ForeignKey, Text, DateTime, JSON, BigInteger
 from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.orm import relationship
 from app.models.base import Base, TimestampMixin
@@ -82,7 +82,7 @@ class DocumentUpload(Base):
     file_size = Column(BigInteger, nullable=False)
     content_type = Column(String, nullable=False)
     temp_path = Column(String, nullable=False)
-    created_at = Column(TIMESTAMP, nullable=False, server_default=text("now()"))
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
     status = Column(String, nullable=False, server_default="pending")
     error_message = Column(Text)
     
