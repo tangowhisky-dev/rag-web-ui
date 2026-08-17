@@ -507,6 +507,7 @@ async def process_document_background(
                             chunk_ids=_chunk_ids,
                             data_store_id=data_store_id,
                             pt=pt,
+                            task_id=_task_id,
                         )
                         _db2 = _SessionLocal()
                         try:

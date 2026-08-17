@@ -17,6 +17,7 @@ others.  Each pass logs a summary of what was cleaned.
 from __future__ import annotations
 
 import logging
+import traceback
 from typing import List
 
 from sqlalchemy.orm import Session
@@ -48,6 +49,7 @@ def run_reconciliation() -> dict:
     try:
         active_kb_ids = [kb.id for kb in db.query(KnowledgeBase.id).all()]
         active_ds_ids = [ds.id for ds in db.query(DataStore.id).all()]
+        logger.info("[RECONCILE] active_kb_ids=%s active_ds_ids=%s", active_kb_ids, active_ds_ids)
     except Exception as e:
         logger.warning("[RECONCILE] Could not query active KB/DataStore IDs: %s", e)
         db.close()
@@ -146,11 +148,15 @@ def _reconcile_qdrant(summary: dict, active_kb_ids: List[int], active_ds_ids: Li
         logger.warning("[RECONCILE] Qdrant: could not list collections: %s", e)
         return
 
+    logger.info("[RECONCILE] Qdrant: collections=%s", collections)
+
     # ── Drop stale kb_ collections ────────────────────────────────
     active_kb_names = {f"kb_{kid}" for kid in active_kb_ids}
     stale_kb_collections = [c for c in collections if c.startswith("kb_") and c not in active_kb_names]
+    logger.info("[RECONCILE] Qdrant: active_kb_names=%s stale_kb_collections=%s", active_kb_names, stale_kb_collections)
     for cname in stale_kb_collections:
         try:
+            logger.warning("[RECONCILE] Qdrant: ABOUT TO DELETE collection %s — caller traceback:\n%s", cname, "".join(traceback.format_stack()))
             qdrant.delete_collection(cname)
             logger.info("[RECONCILE] Qdrant: dropped stale collection %s", cname)
         except Exception as e:
@@ -160,8 +166,10 @@ def _reconcile_qdrant(summary: dict, active_kb_ids: List[int], active_ds_ids: Li
     # ── Drop stale ds_ collections ────────────────────────────────
     active_ds_names = {f"ds_{did}" for did in active_ds_ids}
     stale_ds_collections = [c for c in collections if c.startswith("ds_") and c not in active_ds_names]
+    logger.info("[RECONCILE] Qdrant: active_ds_names=%s stale_ds_collections=%s", active_ds_names, stale_ds_collections)
     for cname in stale_ds_collections:
         try:
+            logger.warning("[RECONCILE] Qdrant: ABOUT TO DELETE collection %s — caller traceback:\n%s", cname, "".join(traceback.format_stack()))
             qdrant.delete_collection(cname)
             logger.info("[RECONCILE] Qdrant: dropped stale collection %s", cname)
         except Exception as e:

@@ -15,7 +15,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { FileText, Trash2 } from "lucide-react";
+import { FileText, Trash2, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { LoadingDots } from "@/components/ui/loading-dots";
@@ -26,6 +26,10 @@ interface ProcessingTask {
   error_message: string | null;
   progress?: number;
   progress_message?: string;
+  graph_status?: string | null;
+  graph_error?: string | null;
+  graph_progress?: number | null;
+  graph_progress_message?: string | null;
 }
 
 interface Document {
@@ -94,7 +98,7 @@ export function DocumentList({ knowledgeBaseId, refreshKey }: DocumentListProps)
       const taskIds: number[] = [];
       for (const doc of docs) {
         for (const t of doc.processing_tasks) {
-          if (t.status === "pending" || t.status === "processing") {
+          if (t.status === "pending" || t.status === "processing" || t.graph_status === "pending") {
             taskIds.push(t.id);
           }
         }
@@ -104,7 +108,7 @@ export function DocumentList({ knowledgeBaseId, refreshKey }: DocumentListProps)
       // (handles the case where the dialog was closed before the KB list refreshed)
       setTaskProgress((prev) => {
         for (const [idStr, t] of Object.entries(prev)) {
-          if (t.status === "pending" || t.status === "processing") {
+          if (t.status === "pending" || t.status === "processing" || t.graph_status === "pending") {
             const id = parseInt(idStr);
             if (!taskIds.includes(id)) taskIds.push(id);
           }
@@ -125,6 +129,7 @@ export function DocumentList({ knowledgeBaseId, refreshKey }: DocumentListProps)
           const id = parseInt(idStr);
           updates[id] = info as ProcessingTask;
           if (info.status === "pending" || info.status === "processing") anyRunning = true;
+          if (info.graph_status === "pending") anyRunning = true;
           if (info.status === "completed" || info.status === "failed") anyFinished = true;
         }
         setTaskProgress((prev) => ({ ...prev, ...updates }));
@@ -156,7 +161,10 @@ export function DocumentList({ knowledgeBaseId, refreshKey }: DocumentListProps)
         docsRef.current = docs;
         const hasInProgress = docs.some((d) =>
           d.processing_tasks.some(
-            (t) => t.status === "pending" || t.status === "processing"
+            (t) =>
+              t.status === "pending" ||
+              t.status === "processing" ||
+              t.graph_status === "pending"
           )
         );
         if (hasInProgress) schedulePoll();
@@ -263,17 +271,34 @@ export function DocumentList({ knowledgeBaseId, refreshKey }: DocumentListProps)
               <TableCell className="min-w-[200px]">
                 {taskDisplay && (
                   <div className="space-y-1">
-                    <Badge
-                      variant={
-                        taskDisplay.status === "completed"
-                          ? "secondary"
-                          : taskDisplay.status === "failed"
-                          ? "destructive"
-                          : "default"
-                      }
-                    >
-                      {taskDisplay.status}
-                    </Badge>
+                    <div className="flex items-center gap-1.5">
+                      <Badge
+                        variant={
+                          taskDisplay.status === "completed"
+                            ? "secondary"
+                            : taskDisplay.status === "failed"
+                            ? "destructive"
+                            : "default"
+                        }
+                      >
+                        {taskDisplay.status}
+                      </Badge>
+                      {taskDisplay.graph_status === "pending" && (
+                        <span title={taskDisplay.graph_progress_message || "Building knowledge graph"}>
+                          <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                        </span>
+                      )}
+                      {taskDisplay.graph_status === "completed" && (
+                        <span title="Knowledge graph built">
+                          <CheckCircle2 className="h-3.5 w-3.5 text-muted-foreground" />
+                        </span>
+                      )}
+                      {taskDisplay.graph_status === "failed" && (
+                        <span title={taskDisplay.graph_error || "Graph extraction failed"}>
+                          <AlertCircle className="h-3.5 w-3.5 text-amber-500" />
+                        </span>
+                      )}
+                    </div>
                     {isInProgress && (
                       <div className="space-y-0.5">
                         <Progress
@@ -283,6 +308,19 @@ export function DocumentList({ knowledgeBaseId, refreshKey }: DocumentListProps)
                         {taskDisplay.progress_message && (
                           <p className="text-xs text-muted-foreground truncate max-w-[220px]">
                             {taskDisplay.progress_message}
+                          </p>
+                        )}
+                      </div>
+                    )}
+                    {taskDisplay.graph_status === "pending" && taskDisplay.graph_progress != null && (
+                      <div className="space-y-0.5">
+                        <Progress
+                          value={taskDisplay.graph_progress}
+                          className="h-1.5 w-full"
+                        />
+                        {taskDisplay.graph_progress_message && (
+                          <p className="text-xs text-muted-foreground truncate max-w-[220px]">
+                            {taskDisplay.graph_progress_message}
                           </p>
                         )}
                       </div>

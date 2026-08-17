@@ -713,18 +713,32 @@ async def get_processing_tasks(
         .all()
     )
     
-    return {
-        task.id: {
+    from app.services.graph import get_graph_batch_progress
+
+    result = {}
+    for task in tasks:
+        batch_progress = get_graph_batch_progress(task.id)
+        if batch_progress:
+            completed, total = batch_progress
+            graph_progress = int(completed / total * 100) if total > 0 else 0
+            graph_progress_message = f"Building knowledge graph ({completed}/{total} batches)"
+        else:
+            graph_progress = None
+            graph_progress_message = None
+        result[task.id] = {
             "document_id": task.document_id,
             "status": task.status,
             "error_message": task.error_message,
             "progress": task.progress or 0,
             "progress_message": task.progress_message or "",
             "upload_id": task.document_upload_id,
-            "file_name": task.document_upload.file_name if task.document_upload else None
+            "file_name": task.document_upload.file_name if task.document_upload else None,
+            "graph_status": task.graph_status,
+            "graph_error": task.graph_error,
+            "graph_progress": graph_progress,
+            "graph_progress_message": graph_progress_message,
         }
-        for task in tasks
-    }
+    return result
 
 @router.delete("/{kb_id}/documents/{doc_id}")
 async def delete_document(

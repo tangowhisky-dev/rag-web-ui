@@ -65,6 +65,8 @@ class ProcessingTask(ProcessingTaskBase):
     knowledge_base_id: int
     progress: Optional[int] = None
     progress_message: Optional[str] = None
+    graph_status: Optional[str] = None
+    graph_error: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

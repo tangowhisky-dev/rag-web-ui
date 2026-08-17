@@ -78,6 +78,15 @@ logger = logging.getLogger(__name__)
 # ── Module-level singletons (lazy) ────────────────────────────────────────────
 _neo4j_driver: Optional[neo4j.Driver] = None
 
+# In-memory graph extraction progress: task_id → (completed_batches, total_batches)
+# Ephemeral by design — lost on restart, but so is the interrupted extraction.
+_graph_batch_progress: dict[int, tuple[int, int]] = {}
+
+
+def get_graph_batch_progress(task_id: int) -> tuple[int, int] | None:
+    """Return (completed_batches, total_batches) for an in-progress graph extraction."""
+    return _graph_batch_progress.get(task_id)
+
 def _get_driver() -> neo4j.Driver:
     global _neo4j_driver
     if _neo4j_driver is None:
@@ -313,6 +322,7 @@ async def _extract_with_llm(
     neo4j_llm_context: int = 12000,
     kb_id: Optional[int] = None,
     data_store_id: Optional[int] = None,
+    task_id: Optional[int] = None,
 ) -> tuple[int, int]:
     """Run neo4j-graphrag LLM extraction on context-sized batches of chunks.
 
@@ -353,6 +363,12 @@ async def _extract_with_llm(
     )
 
     _batch_sem = asyncio.Semaphore(4)
+
+    # Track per-batch progress in-memory for the API to read
+    total_batches = len(batches)
+    completed_batches = 0
+    if task_id is not None:
+        _graph_batch_progress[task_id] = (0, total_batches)
 
     async def _process_batch(
         batch_idx: int, combined_text: str, batch_point_ids: list[str]
@@ -455,6 +471,10 @@ async def _extract_with_llm(
                     linked = await loop.run_in_executor(None, _link_batch_chunks)
                     if pt:
                         pt.ping()  # signal progress after LLM extraction batch
+                    if task_id is not None:
+                        nonlocal completed_batches
+                        completed_batches += 1
+                        _graph_batch_progress[task_id] = (completed_batches, total_batches)
                     return linked, 0
 
                 except Exception as exc:
@@ -476,6 +496,10 @@ async def _extract_with_llm(
         _process_batch(idx, text, pids)
         for idx, (text, pids) in enumerate(batches)
     ])
+
+    # Clean up in-memory progress tracking
+    if task_id is not None:
+        _graph_batch_progress.pop(task_id, None)
 
     # Final accurate count from Neo4j.
     def _count_nodes_rels():
@@ -510,6 +534,7 @@ async def build_graph_for_document(
     pt=None,            # optional ProgressTimeout for periodic pings
     db: Optional[Session] = None,
     org_id: Optional[int] = None,
+    task_id: Optional[int] = None,
 ) -> None:
     """
     Extract entity/relationship graph from document chunks and store in Neo4j.
@@ -603,6 +628,7 @@ async def build_graph_for_document(
             neo4j_llm_context=neo4j_llm_context,
             kb_id=kb_id,
             data_store_id=data_store_id,
+            task_id=task_id,
         )
 
     logger.info(
