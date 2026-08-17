@@ -312,19 +312,6 @@ export function DocumentList({ knowledgeBaseId, refreshKey }: DocumentListProps)
                         )}
                       </div>
                     )}
-                    {taskDisplay.graph_status === "pending" && taskDisplay.graph_progress != null && (
-                      <div className="space-y-0.5">
-                        <Progress
-                          value={taskDisplay.graph_progress}
-                          className="h-1.5 w-full"
-                        />
-                        {taskDisplay.graph_progress_message && (
-                          <p className="text-xs text-muted-foreground truncate max-w-[220px]">
-                            {taskDisplay.graph_progress_message}
-                          </p>
-                        )}
-                      </div>
-                    )}
                   </div>
                 )}
               </TableCell>

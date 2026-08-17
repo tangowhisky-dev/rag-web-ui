@@ -131,7 +131,6 @@ export default function DataSourcesPage() {
   const [scanProgress, setScanProgress] = useState<Record<number, ScanProgress | undefined>>({});
   const [recoveryProgress, setRecoveryProgress] = useState<Record<number, RecoveryProgress | undefined>>({});
   const [recoveryStatuses, setRecoveryStatuses] = useState<Record<number, RecoveryStatus>>({});
-  const [recovering, setRecovering] = useState<Set<number>>(new Set());
   const pollingRef = useRef<NodeJS.Timeout | null>(null);
   const scanPollRef = useRef<{ active: boolean; dsId: number | null }>({ active: false, dsId: null });
 
@@ -482,30 +481,6 @@ export default function DataSourcesPage() {
     });
   }
 
-  async function handleRecover(dsId: number) {
-    setRecovering((prev) => new Set(prev).add(dsId));
-    setRecoveryProgress((prev) => ({
-      ...prev,
-      [dsId]: { status: 'running', new_files: 0, modified: 0, deleted: 0 },
-    }));
-    try {
-      await api.post(`/api/admin/datastores/${dsId}/recover`);
-    } catch (err) {
-      toast({
-        title: 'Error',
-        description: (err as ApiError).message ?? 'Failed to start recovery',
-        variant: 'destructive',
-      });
-      setRecoveryProgress((prev) => ({ ...prev, [dsId]: undefined }));
-    } finally {
-      setRecovering((prev) => {
-        const next = new Set(prev);
-        next.delete(dsId);
-        return next;
-      });
-    }
-  }
-
   async function handleStopScan(dsId: number) {
     try {
       const resp = (await api.post(
@@ -831,17 +806,6 @@ export default function DataSourcesPage() {
                         >
                           Edit
                         </Button>
-                        {ds.is_active && !recovering.has(ds.id) && recoveryStatuses[ds.id]?.recovery_status !== 'running' && (
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => handleRecover(ds.id)}
-                            disabled={recovering.has(ds.id)}
-                            title="Run recovery scan"
-                          >
-                            {recovering.has(ds.id) ? '⏳' : '♻'}
-                          </Button>
-                        )}
                         <Button
                           variant="destructive"
                           size="sm"

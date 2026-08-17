@@ -13,10 +13,7 @@ Covers:
   10. test_recovery_get_status_idle — without running recovery, get_status returns idle
   11. test_recovery_get_all_status — get_all_status returns list with all active datastores
   12. test_recovery_status_includes_last_recovered_at — last_recovered_at set on DataStore after recovery
-  13. test_trigger_manual_recovery — POST /recover starts recovery scan and returns 202
-  14. test_trigger_manual_recovery_inactive_datastore — POST /recover returns 400 if folder missing
-  15. test_datastore_response_includes_last_recovered_at — DataStoreResponse includes last_recovered_at
-  16. test_manual_recovery_already_running — POST /recover returns 409 if already running
+  13. test_datastore_response_includes_last_recovered_at — DataStoreResponse includes last_recovered_at
 """
 import json
 import os
@@ -1147,58 +1144,6 @@ class TestRecoveryStatusIncludesLastRecoveredAt:
             service.stop()
 
 
-class TestTriggerManualRecovery:
-    """Verify the POST /recover endpoint works correctly."""
-
-    def test_trigger_manual_recovery(self, client, db):
-        """POST /recover starts recovery scan and returns 202."""
-        import app.api.api_v1.datastore_recovery as ds_api
-
-        with tempfile.TemporaryDirectory() as tmp_str:
-            tmp_path = Path(tmp_str)
-            folder = tmp_path / "recover_store"
-            folder.mkdir()
-
-            ds_id = create_datastore(db, str(folder), name="Recover Store")
-            create_admin_user(db, prefix="recover")
-            token = get_token(client, prefix="recover")
-
-            # Mock the recovery service — use MagicMock for _active_scans
-            # because dict.__setitem__ is read-only and the route handler
-            # does recovery._active_scans[scan_id] = {...}
-            mock_recovery = MagicMock()
-            mock_recovery._active_scans = MagicMock()
-            mock_recovery._next_scan_id = MagicMock(return_value=99)
-            mock_recovery.executor = MagicMock()
-
-            with patch.object(ds_api, '_get_startup_recovery', return_value=mock_recovery):
-                resp = client.post(
-                    f"/api/admin/datastores/{ds_id}/recover",
-                    headers={"Authorization": f"Bearer {token}"},
-                )
-
-            assert resp.status_code == 202, f"Expected 202, got {resp.status_code}: {resp.text}"
-            data = resp.json()
-            assert data["status"] == "accepted"
-            assert data["scan_id"] == 99
-
-    def test_trigger_manual_recovery_inactive_datastore(self, client, db):
-        """POST /recover returns 400 if folder is missing."""
-        create_admin_user(db, prefix="recover_fail")
-        token = get_token(client, prefix="recover_fail")
-
-        # Create a datastore pointing to a non-existent folder
-        ds_id = create_datastore(db, "/nonexistent/folder/path/99999", name="Ghost Store")
-
-        resp = client.post(
-            f"/api/admin/datastores/{ds_id}/recover",
-            headers={"Authorization": f"Bearer {token}"},
-        )
-
-        assert resp.status_code == 400, f"Expected 400, got {resp.status_code}: {resp.text}"
-        assert "does not exist" in resp.json()["detail"].lower() or "folder" in resp.json()["detail"].lower()
-
-
 class TestDataStoreResponseIncludesLastRecoveredAt:
     """Verify DataStoreResponse serialization includes the last_recovered_at field."""
 
@@ -1257,48 +1202,3 @@ class TestDataStoreResponseIncludesLastRecoveredAt:
         resp2 = DataStoreResponse(**serialized2)
         assert resp2.last_recovered_at is None
         assert resp2.model_dump()["last_recovered_at"] is None
-
-
-class TestManualRecoveryAlreadyRunning:
-    """Verify 409 when recovery is already in progress for the same datastore."""
-
-    def test_manual_recovery_already_running(self, client, db):
-        """POST /recover returns 409 if recovery already in progress for the same datastore."""
-        import app.api.api_v1.datastore_recovery as ds_api
-
-        with tempfile.TemporaryDirectory() as tmp_str:
-            tmp_path = Path(tmp_str)
-            folder = tmp_path / "already_running_store"
-            folder.mkdir()
-
-            ds_id = create_datastore(db, str(folder), name="Running Store")
-            create_admin_user(db, prefix="already")
-            token = get_token(client, prefix="already")
-
-            # Mock the recovery service with an already-running scan
-            mock_recovery = MagicMock()
-            mock_recovery._active_scans = {
-                1: {
-                    "datastore_id": ds_id,
-                    "datastore_name": "Running Store",
-                    "status": "running",
-                    "scan_id": 1,
-                    "total_files": 5,
-                    "processed_files": 2,
-                    "new_files": 0,
-                    "modified_files": 0,
-                    "deleted_files": 0,
-                    "error_message": None,
-                    "started_at": datetime.now(timezone.utc).isoformat(),
-                }
-            }
-            mock_recovery.executor = MagicMock()
-
-            with patch.object(ds_api, '_get_startup_recovery', return_value=mock_recovery):
-                resp = client.post(
-                    f"/api/admin/datastores/{ds_id}/recover",
-                    headers={"Authorization": f"Bearer {token}"},
-                )
-
-            assert resp.status_code == 409, f"Expected 409, got {resp.status_code}: {resp.text}"
-            assert "already running" in resp.json()["detail"].lower()
