@@ -413,6 +413,9 @@ async def create_message(
     # When branching (edit), the frontend sends the branched user message's
     # DB id so the assistant reply can be linked to it via parent_message_id.
     parent_message_id: Optional[int] = messages.get("parent_message_id") or None
+    # Per-message KB scope: if the frontend sends kb_ids, filter the chat's
+    # KBs to only those IDs. Otherwise use all KBs associated with the chat.
+    requested_kb_ids: Optional[list[int]] = messages.get("kb_ids") or None
 
     # ── File context injection ─────────────────────────────────────────────────
     # Build augmented query from: attached file (current turn) + any files from
@@ -458,7 +461,11 @@ async def create_message(
     if file_context_parts:
         query_text = "\n\n".join(file_context_parts) + "\n\n" + query_text
 
-    knowledge_base_ids = [kb.id for kb in chat.knowledge_bases]
+    all_kb_ids = {kb.id for kb in chat.knowledge_bases}
+    if requested_kb_ids:
+        knowledge_base_ids = [kb_id for kb_id in requested_kb_ids if kb_id in all_kb_ids]
+    else:
+        knowledge_base_ids = list(all_kb_ids)
 
     async def response_stream():
         async for chunk in generate_response(
@@ -496,6 +503,7 @@ async def create_message_with_file(
     file: UploadFile = File(...),
     message: str = Form(...),
     messages: str = Form(...),
+    kb_ids: Optional[str] = Form(default=None),
     current_user: User = Depends(get_current_user),
 ) -> StreamingResponse:
     """Accept multipart/form-data with a file + message; prepend file content as context."""
@@ -551,7 +559,19 @@ async def create_message_with_file(
     except Exception:
         raise HTTPException(status_code=400, detail="'messages' must be valid JSON.")
 
-    knowledge_base_ids = [kb.id for kb in chat.knowledge_bases]
+    # Parse optional per-message KB scope
+    requested_kb_ids: Optional[list[int]] = None
+    if kb_ids:
+        try:
+            requested_kb_ids = _json.loads(kb_ids)
+        except Exception:
+            requested_kb_ids = None
+
+    all_kb_ids = {kb.id for kb in chat.knowledge_bases}
+    if requested_kb_ids:
+        knowledge_base_ids = [kb_id for kb_id in requested_kb_ids if kb_id in all_kb_ids]
+    else:
+        knowledge_base_ids = list(all_kb_ids)
 
     async def response_stream():
         async for chunk in generate_response(
@@ -1045,7 +1065,6 @@ async def submit_clarification(
     memory = await get_redis_memory()
     thread_id = f"chat-{body.chat_id}"
     config = {"configurable": {"thread_id": thread_id}}
-    kb_ids = [kb.id for kb in chat.knowledge_bases]
     org_cfg = get_org_llm(current_user.org_id, db, role="chat")
     ctx = ToolContext(
         db=db,

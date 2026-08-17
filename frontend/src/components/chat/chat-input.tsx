@@ -3,20 +3,11 @@
 import { useState, useRef, useEffect } from "react";
 import { Paperclip, ArrowUp, Square } from "lucide-react";
 import { cn } from "@/lib/utils";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { api } from "@/lib/api";
 import { FileChip, useFileDropzone, type UploadedFile } from "./file-attachment";
 
-interface KnowledgeBase {
+interface KbPill {
   id: number;
   name: string;
-  description?: string;
 }
 
 interface InputBarProps {
@@ -37,6 +28,12 @@ interface InputBarProps {
   onFileError?: (msg: string) => void;
   /** Called when user clicks stop during generation */
   onStop?: () => void;
+  /** KBs associated with this chat (from ChatResponse) */
+  knowledgeBases?: KbPill[];
+  /** Currently selected KB IDs (controlled from parent) */
+  selectedKbIds?: number[];
+  /** Called when user toggles a KB pill */
+  onKbToggle?: (kbId: number) => void;
 }
 
 const LINE_HEIGHT_PX = 24;
@@ -67,10 +64,10 @@ export function InputBar({
   fileError = "",
   onFileError,
   onStop,
+  knowledgeBases = [],
+  selectedKbIds = [],
+  onKbToggle,
 }: InputBarProps) {
-  const [kbOpen, setKbOpen] = useState(false);
-  const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]);
-  const [selectedKbIds, setSelectedKbIds] = useState<number[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   useAutoResize(textareaRef, value);
 
@@ -98,32 +95,6 @@ export function InputBar({
     disabled,
   });
 
-  // Fetch KBs on mount
-  useEffect(() => {
-    let cancelled = false;
-    const fetchKbs = async () => {
-      try {
-        const data = await api.get("/api/knowledge-base");
-        if (!cancelled) {
-          const kbs = Array.isArray(data) ? data : data.items || [];
-          setKnowledgeBases(kbs);
-          // Default: select all KBs
-          setSelectedKbIds(kbs.map((kb: KnowledgeBase) => kb.id));
-        }
-      } catch {
-        // KB endpoint may not exist yet in dev — silently ignore
-        if (!cancelled) {
-          setKnowledgeBases([]);
-          setSelectedKbIds([]);
-        }
-      }
-    };
-    fetchKbs();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -135,14 +106,6 @@ export function InputBar({
 
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     onChange(e.target.value);
-  };
-
-  const handleKbToggle = (kbId: number, checked: boolean) => {
-    if (checked) {
-      setSelectedKbIds((prev) => [...prev, kbId]);
-    } else {
-      setSelectedKbIds((prev) => prev.filter((id) => id !== kbId));
-    }
   };
 
   return (
@@ -208,8 +171,8 @@ export function InputBar({
         )}
       </div>
 
-      {/* Bottom row: attach + KB chips */}
-      <div className="flex items-center justify-start px-2 pb-2 gap-2">
+      {/* Bottom row: attach + KB pills */}
+      <div className="flex items-center justify-start px-2 pb-2 gap-2 flex-wrap">
         {/* File attach button */}
         <label
           className={cn(
@@ -236,39 +199,26 @@ export function InputBar({
           />
         </label>
 
-        {/* KB selector pills */}
-        {knowledgeBases.length > 0 && (
-          <Select open={kbOpen} onOpenChange={setKbOpen}>
-            <SelectTrigger
-              className="h-7 w-auto gap-1 rounded-full border px-2.5 text-xs shrink-0"
-              data-testid="chat-input-kb-selector"
+        {/* KB pills — click to toggle selection */}
+        {knowledgeBases.map((kb) => {
+          const selected = selectedKbIds.includes(kb.id);
+          return (
+            <button
+              key={kb.id}
+              type="button"
+              onClick={() => onKbToggle?.(kb.id)}
+              className={cn(
+                "h-7 rounded-full border px-2.5 text-xs shrink-0 transition-colors",
+                selected
+                  ? "border-primary bg-primary/10 text-primary"
+                  : "border-border bg-muted/50 text-muted-foreground hover:bg-muted"
+              )}
+              data-testid="chat-input-kb-pill"
             >
-              <SelectValue placeholder="KBs" />
-            </SelectTrigger>
-            <SelectContent>
-              {knowledgeBases.map((kb) => (
-                <SelectItem
-                  key={kb.id}
-                  value={String(kb.id)}
-                  onSelect={(e) => {
-                    e.preventDefault();
-                    handleKbToggle(kb.id, !selectedKbIds.includes(kb.id));
-                  }}
-                >
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="checkbox"
-                      checked={selectedKbIds.includes(kb.id)}
-                      onChange={() => {}}
-                      className="h-3 w-3"
-                    />
-                    <span className="truncate max-w-[160px]">{kb.name}</span>
-                  </div>
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        )}
+              {kb.name}
+            </button>
+          );
+        })}
       </div>
 
       {/* File error */}

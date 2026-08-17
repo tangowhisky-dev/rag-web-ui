@@ -152,7 +152,14 @@ async def _run_retrieval_pass(
 
 async def _rag_retrieve(ctx: ToolContext, input_obj: RagRetrieveInput) -> dict:
     t0 = time.monotonic()
-    rbac = enforce_rbac(ctx, kb_ids=input_obj.kb_ids)
+    # When the LLM doesn't specify kb_ids, fall back to the per-message
+    # scope set by the chat endpoint (which may be a subset of the chat's
+    # KBs if the user deselected some pills). enforce_rbac will still
+    # intersect with chat.knowledge_bases for safety.
+    effective_kb_ids = input_obj.kb_ids
+    if effective_kb_ids is None and ctx.state is not None:
+        effective_kb_ids = ctx.state.get("kb_ids")
+    rbac = enforce_rbac(ctx, kb_ids=effective_kb_ids)
     kb_ids = rbac["kb_ids"]
     if not kb_ids and ctx.state is not None:
         kb_ids = ctx.state.get("kb_ids", [])

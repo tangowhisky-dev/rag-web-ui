@@ -90,6 +90,11 @@ class SearchResult(BaseModel):
     message_id: int
 
 
+class KbInfo(BaseModel):
+    id: int
+    name: str
+
+
 class ChatResponse(ChatBase):
     id: int
     user_id: int
@@ -101,15 +106,17 @@ class ChatResponse(ChatBase):
     updated_at: datetime
     messages: List[MessageResponse] = []
     knowledge_base_ids: List[int] = []
+    knowledge_bases: List[KbInfo] = []
 
     @field_serializer("created_at", "updated_at")
     def serialise_datetimes(self, v): return _as_utc_iso(v)
 
     @model_validator(mode='before')
     @classmethod
-    def extract_kb_ids(cls, data: Any) -> Any:
+    def extract_kb_info(cls, data: Any) -> Any:
         if hasattr(data, 'knowledge_bases'):
             data.__dict__['knowledge_base_ids'] = [kb.id for kb in data.knowledge_bases]
+            data.__dict__['knowledge_bases'] = [{"id": kb.id, "name": kb.name} for kb in data.knowledge_bases]
         return data
 
     model_config = ConfigDict(from_attributes=True)

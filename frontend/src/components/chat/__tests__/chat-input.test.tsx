@@ -3,16 +3,6 @@ import { render, screen, fireEvent, act } from "@testing-library/react";
 import "@testing-library/jest-dom";
 import { InputBar } from "../chat-input";
 
-// Mock the api module
-jest.mock("@/lib/api", () => ({
-  api: {
-    get: jest.fn(),
-  },
-}));
-
-import { api } from "@/lib/api";
-const mockedApi = api as jest.Mocked<typeof api>;
-
 describe("InputBar", () => {
   const defaultProps = {
     value: "",
@@ -24,13 +14,9 @@ describe("InputBar", () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    mockedApi.get.mockResolvedValue([]);
   });
 
-  // Flush the async fetchKbs effect that fires on every mount.
-  // InputBar calls api.get() in a useEffect; the resolved promise
-  // triggers setSelectedKbIds in a microtask. This helper wraps
-  // render + microtask flush in act() to avoid spurious warnings.
+  // Flush any pending effects after render.
   async function renderInputBar(
     props: Partial<React.ComponentProps<typeof InputBar>> = {}
   ) {
@@ -159,30 +145,55 @@ describe("InputBar", () => {
     });
   });
 
-  describe("KB selector", () => {
-    it("renders KB selector with correct data-testid when KBs are available", async () => {
-      mockedApi.get.mockResolvedValue([
-        { id: 1, name: "Docs KB" },
-        { id: 2, name: "Code KB" },
-      ]);
-
-      // Force re-render to trigger the effect
-      const { rerender } = await renderInputBar();
-      // Wait for async fetch — wrap in act to avoid setState warnings
-      await act(async () => {
-        await new Promise((r) => setTimeout(r, 10));
+  describe("KB pills", () => {
+    it("renders KB pills when knowledgeBases are provided", async () => {
+      await renderInputBar({
+        knowledgeBases: [
+          { id: 1, name: "Docs KB" },
+          { id: 2, name: "Code KB" },
+        ],
+        selectedKbIds: [1, 2],
+        onKbToggle: jest.fn(),
       });
-      rerender(<InputBar {...defaultProps} />);
 
-      expect(screen.getByTestId("chat-input-kb-selector")).toBeInTheDocument();
+      const pills = screen.getAllByTestId("chat-input-kb-pill");
+      expect(pills).toHaveLength(2);
+      expect(pills[0]).toHaveTextContent("Docs KB");
+      expect(pills[1]).toHaveTextContent("Code KB");
     });
 
-    it("does not render KB selector when no KBs available", async () => {
-      mockedApi.get.mockResolvedValue([]);
+    it("does not render KB pills when no knowledgeBases provided", async () => {
       await renderInputBar();
-      // When empty, no KB selector renders
-      const selector = screen.queryByTestId("chat-input-kb-selector");
-      expect(selector).not.toBeInTheDocument();
+      const pills = screen.queryAllByTestId("chat-input-kb-pill");
+      expect(pills).toHaveLength(0);
+    });
+
+    it("calls onKbToggle when pill is clicked", async () => {
+      const onKbToggle = jest.fn();
+      await renderInputBar({
+        knowledgeBases: [{ id: 1, name: "Docs KB" }],
+        selectedKbIds: [1],
+        onKbToggle,
+      });
+
+      const pill = screen.getByTestId("chat-input-kb-pill");
+      fireEvent.click(pill);
+      expect(onKbToggle).toHaveBeenCalledWith(1);
+    });
+
+    it("selected pill has primary styling, deselected has muted styling", async () => {
+      await renderInputBar({
+        knowledgeBases: [
+          { id: 1, name: "Docs KB" },
+          { id: 2, name: "Code KB" },
+        ],
+        selectedKbIds: [1],
+        onKbToggle: jest.fn(),
+      });
+
+      const pills = screen.getAllByTestId("chat-input-kb-pill");
+      expect(pills[0].className).toContain("border-primary");
+      expect(pills[1].className).toContain("border-border");
     });
   });
 
@@ -244,18 +255,16 @@ describe("InputBar", () => {
 
   describe("data-testid attributes", () => {
     it("all required data-testid attributes are present", async () => {
-      mockedApi.get.mockResolvedValue([
-        { id: 1, name: "Test KB" },
-      ]);
-      await renderInputBar();
-
-      // Wait for KB fetch
-      await act(async () => {
-        await new Promise((r) => setTimeout(r, 10));
+      await renderInputBar({
+        knowledgeBases: [{ id: 1, name: "Test KB" }],
+        selectedKbIds: [1],
+        onKbToggle: jest.fn(),
       });
+
       expect(screen.getByTestId("chat-input-textarea")).toBeInTheDocument();
       expect(screen.getByTestId("chat-input-send-button")).toBeInTheDocument();
       expect(screen.getByTestId("chat-input-file-button")).toBeInTheDocument();
+      expect(screen.getByTestId("chat-input-kb-pill")).toBeInTheDocument();
     });
   });
 

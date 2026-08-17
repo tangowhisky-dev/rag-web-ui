@@ -104,6 +104,7 @@ interface ChatMeta {
   title: string;
   temperature?: number;
   model_name?: string;
+  knowledge_bases?: Array<{ id: number; name: string }>;
   [key: string]: unknown;
 }
 
@@ -122,6 +123,8 @@ function ChatPageInner({ params }: { params: { id: string } }) {
   const [chatTitle, setChatTitle] = useState<string | undefined>();
   const [temperature, setTemperature] = useState(0.7);
   const [modelName, setModelName] = useState("gpt-4o");
+  const [chatKbs, setChatKbs] = useState<Array<{ id: number; name: string }>>([]);
+  const [selectedKbIds, setSelectedKbIds] = useState<number[]>([]);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -284,6 +287,9 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       setChatTitle(meta.title);
       setTemperature((meta as ChatMeta).temperature ?? 0.7);
       setModelName((meta as ChatMeta).model_name ?? "gpt-4o");
+      const kbs = (meta as ChatMeta).knowledge_bases ?? [];
+      setChatKbs(kbs);
+      setSelectedKbIds(kbs.map((kb) => kb.id));
       console.log("[FETCH] paginated messages:", page.messages.map((m: any) => ({ id: m.id, role: m.role, content: m.content?.slice(0, 30) })));
       setMessages(page.messages.map(formatMessage));
       setHasMoreMessages(page.has_more);
@@ -832,6 +838,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
         messages: requestMessages,
         ...(fileId ? { file_id: fileId } : {}),
         ...(parentMessageId ? { parent_message_id: parentMessageId } : {}),
+        ...(selectedKbIds.length > 0 ? { kb_ids: selectedKbIds } : {}),
       }),
       signal: controller.signal,
     });
@@ -1238,6 +1245,16 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     handleSubmit(query);
   }, [handleSubmit]);
 
+  const handleKbToggle = useCallback((kbId: number) => {
+    setSelectedKbIds((prev) =>
+      prev.includes(kbId)
+        ? prev.length > 1
+          ? prev.filter((id) => id !== kbId)
+          : prev  // don't allow deselecting the last KB
+        : [...prev, kbId]
+    );
+  }, []);
+
   return (
     <>
       <div className="flex flex-col h-full relative">
@@ -1424,6 +1441,9 @@ function ChatPageInner({ params }: { params: { id: string } }) {
               onFileRemove={handleFileRemove}
               fileError={fileError}
               onFileError={setFileError}
+              knowledgeBases={chatKbs}
+              selectedKbIds={selectedKbIds}
+              onKbToggle={handleKbToggle}
             />
           </div>
         </div>

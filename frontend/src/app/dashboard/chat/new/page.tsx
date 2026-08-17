@@ -18,7 +18,7 @@ interface KnowledgeBase {
 export default function NewChatPage() {
   const router = useRouter();
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]);
-  const [selectedKB, setSelectedKB] = useState<number | null>(null);
+  const [selectedKBs, setSelectedKBs] = useState<number[]>([]);
   const [title, setTitle] = useState("");
   const [error, setError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -45,13 +45,13 @@ export default function NewChatPage() {
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!selectedKB) { setError("Please select a knowledge base"); return; }
+    if (selectedKBs.length === 0) { setError("Please select at least one knowledge base"); return; }
     setError("");
     setIsSubmitting(true);
     try {
       const data = await api.post("/api/chat", {
         title,
-        knowledge_base_ids: [selectedKB],
+        knowledge_base_ids: selectedKBs,
       });
       addChat({
         id: data.id,
@@ -117,9 +117,8 @@ export default function NewChatPage() {
 
         <div className="space-y-1">
           <label className="text-sm font-medium leading-none">
-            Select a knowledge base to chat with
+            Select knowledge bases to chat with
           </label>
-          <div className="text-xs text-muted-foreground">Multiple selection coming soon...</div>
           <div className="grid gap-4 md:grid-cols-2">
             {isLoading ? (
               <div className="col-span-2 flex justify-center py-8">
@@ -130,15 +129,20 @@ export default function NewChatPage() {
                 <label
                   key={kb.id}
                   className={`group flex items-center space-x-3 rounded-lg border p-4 cursor-pointer transition-all duration-200 hover:shadow-md ${
-                    selectedKB === kb.id ? "border-primary bg-primary/5 shadow-sm" : "hover:border-primary/50"
+                    selectedKBs.includes(kb.id) ? "border-primary bg-primary/5 shadow-sm" : "hover:border-primary/50"
                   }`}
                 >
                   <input
-                    type="radio"
-                    name="knowledge-base"
-                    className="peer h-4 w-4 shrink-0 rounded-full border border-primary"
-                    checked={selectedKB === kb.id}
-                    onChange={() => setSelectedKB(kb.id)}
+                    type="checkbox"
+                    className="peer h-4 w-4 shrink-0 rounded border border-primary"
+                    checked={selectedKBs.includes(kb.id)}
+                    onChange={() => {
+                      setSelectedKBs((prev) =>
+                        prev.includes(kb.id)
+                          ? prev.filter((id) => id !== kb.id)
+                          : [...prev, kb.id]
+                      );
+                    }}
                   />
                   <div className="flex-1 space-y-1">
                     <p className="font-medium group-hover:text-primary transition-colors">{kb.name}</p>
@@ -164,7 +168,7 @@ export default function NewChatPage() {
           </button>
           <button
             type="submit"
-            disabled={isSubmitting || !selectedKB}
+            disabled={isSubmitting || selectedKBs.length === 0}
             className="inline-flex items-center justify-center rounded-md text-sm font-medium bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 h-10 px-4 py-2"
           >
             {isSubmitting ? "Creating..." : "Start Chat"}
