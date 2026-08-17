@@ -41,6 +41,7 @@ def _get_embedding_dim() -> int:
 logger = logging.getLogger(__name__)
 
 _EMBED_BATCH_SIZE = 32
+_EMBED_CONCURRENCY = 4   # concurrent dense embedding API calls
 _QDRANT_UPSERT_BATCH = 100
 
 
@@ -105,8 +106,10 @@ async def _embed_texts_batch(
 ) -> List[List[float]]:
     """Compute dense embeddings via the OpenAI-compatible API, in batches.
 
-    progress_cb(pct, msg) is called after each batch, with pct mapped between
-    progress_start and progress_end so callers can slot this into a larger bar.
+    Up to _EMBED_CONCURRENCY batches are sent concurrently to reduce wall time.
+    progress_cb(pct, msg) is called after each batch completes, with pct mapped
+    between progress_start and progress_end so callers can slot this into a
+    larger bar.
     """
     # Embeddings API key/base are super_admin-only (app scope).
     from app.services.settings_service import get_setting
@@ -125,20 +128,35 @@ async def _embed_texts_batch(
         api_key=api_key,
         base_url=api_base,
     )
-    all_embeddings: List[List[float]] = []
-    total_batches = max(1, (len(texts) + _EMBED_BATCH_SIZE - 1) // _EMBED_BATCH_SIZE)
-    for batch_idx, i in enumerate(range(0, len(texts), _EMBED_BATCH_SIZE)):
-        batch = texts[i : i + _EMBED_BATCH_SIZE]
-        response = await client.embeddings.create(
-            input=batch,
-            model=embed_model,
-        )
-        all_embeddings.extend(r.embedding for r in response.data)
+
+    # Slice into batches
+    batches = [texts[i : i + _EMBED_BATCH_SIZE]
+               for i in range(0, len(texts), _EMBED_BATCH_SIZE)]
+    total_batches = len(batches)
+
+    sem = asyncio.Semaphore(_EMBED_CONCURRENCY)
+    done_count = 0
+
+    async def _embed_one(batch_idx: int, batch: List[str]) -> List[List[float]]:
+        nonlocal done_count
+        async with sem:
+            response = await client.embeddings.create(input=batch, model=embed_model)
+        # Report progress outside the semaphore so slow batches don't block it
+        done_count += 1
         if progress_cb is not None:
-            frac = (batch_idx + 1) / total_batches
+            frac = done_count / total_batches
             pct = int(progress_start + frac * (progress_end - progress_start))
-            done = min(i + _EMBED_BATCH_SIZE, len(texts))
+            done = min(batch_idx * _EMBED_BATCH_SIZE + len(batch), len(texts))
             progress_cb(pct, f"Embedding chunks {done}/{len(texts)}…")
+        return [r.embedding for r in response.data]
+
+    results = await asyncio.gather(
+        *[_embed_one(i, b) for i, b in enumerate(batches)]
+    )
+    # Flatten in order
+    all_embeddings: List[List[float]] = []
+    for emb_list in results:
+        all_embeddings.extend(emb_list)
     return all_embeddings
 
 
@@ -184,6 +202,31 @@ def _build_qdrant_points(
     return points
 
 
+async def _embed_sparse_batch(
+    texts: List[str],
+    pt=None,
+) -> list:
+    """Compute sparse (BM25) embeddings in batches, yielding the event loop.
+
+    fastembed BM25 tokenization is Python/numpy — does NOT release the GIL.
+    Batch it with asyncio.sleep(0) yields between batches so poll requests
+    get served.
+    """
+    loop = asyncio.get_event_loop()
+    sparse_embs: list = []
+    embedder = get_sparse_embedder()
+    for batch_start in range(0, len(texts), _EMBED_BATCH_SIZE):
+        batch = texts[batch_start : batch_start + _EMBED_BATCH_SIZE]
+        batch_sparse = await loop.run_in_executor(
+            None, lambda b=batch: list(embedder.embed(b))
+        )
+        sparse_embs.extend(batch_sparse)
+        if pt:
+            pt.ping()
+        await asyncio.sleep(0)  # yield — let poll requests through
+    return sparse_embs
+
+
 async def _upsert_to_qdrant(
     chunk_payloads: List[Tuple[str, str, dict, int]],
     kb_id: Optional[int] = None,
@@ -197,42 +240,34 @@ async def _upsert_to_qdrant(
 ) -> None:
     """Compute both vector types and upsert all points to Qdrant.
 
-    progress_cb is called after each embedding batch with the current progress
-    percentage (mapped from progress_start to progress_end) and a message.
+    Dense and sparse embeddings are computed concurrently to halve wall time.
+    progress_cb is called after each dense embedding batch with the current
+    progress percentage (mapped from progress_start to progress_end) and a
+    message.
     """
     if not chunk_payloads:
         return
     texts = [p[1] for p in chunk_payloads]
-    dense_embs = await _embed_texts_batch(
-        texts,
-        progress_cb=progress_cb,
-        progress_start=progress_start,
-        progress_end=progress_end,
+
+    # Run dense and sparse embeddings concurrently
+    dense_embs, sparse_embs = await asyncio.gather(
+        _embed_texts_batch(
+            texts,
+            progress_cb=progress_cb,
+            progress_start=progress_start,
+            progress_end=progress_end,
+        ),
+        _embed_sparse_batch(texts, pt=pt),
     )
     if pt:
-        pt.ping()  # signal progress after dense embeddings complete
-    # fastembed BM25 tokenization is Python/numpy — does NOT release the GIL.
-    # Running the full 2795-text corpus in one executor call still blocks the
-    # event loop for 10-30s. Batch it with asyncio.sleep(0) yields between
-    # batches so poll requests get served.
-    loop = asyncio.get_event_loop()
-    sparse_embs: list = []
-    embedder = get_sparse_embedder()
-    for batch_start in range(0, len(texts), _EMBED_BATCH_SIZE):
-        batch = texts[batch_start : batch_start + _EMBED_BATCH_SIZE]
-        batch_sparse = await loop.run_in_executor(
-            None, lambda b=batch: list(embedder.embed(b))
-        )
-        sparse_embs.extend(batch_sparse)
-        if pt:
-            pt.ping()  # signal progress after sparse embeddings complete
-        await asyncio.sleep(0)  # yield — let poll requests through
+        pt.ping()  # signal progress after embeddings complete
 
     # Build point structs and upsert in batches, yielding the event loop between
     # each batch via asyncio.sleep(0). Pure-Python object construction holds the
     # GIL even inside run_in_executor, so we must yield explicitly to let poll
     # requests through — otherwise the event loop is blocked for 10-30 seconds
     # while 2795 PointStruct objects are built, causing ECONNRESET on the frontend.
+    loop = asyncio.get_event_loop()
     client = get_qdrant_client()
     collection_name = _get_qdrant_collection_name(data_store_id, kb_id)
     _ensure_qdrant_collection(client, collection_name)
