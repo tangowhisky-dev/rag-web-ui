@@ -786,12 +786,19 @@ async def delete_document(
         if chunk_ids:
             try:
                 qdrant = QdrantClient(host=settings.QDRANT_HOST, port=settings.QDRANT_PORT)
-                point_ids = [_chunk_id_to_point_id(cid) for cid in chunk_ids]
-                qdrant.delete(
-                    collection_name=f"kb_{kb_id}",
-                    points_selector=PointIdsList(points=point_ids),
-                )
-                logger.info(f"Deleted {len(point_ids)} Qdrant points for document {doc_id}")
+                collection_name = f"kb_{kb_id}"
+                # Check if collection exists — it may not if ingestion failed
+                # before the Qdrant upsert step, or if it was never created.
+                existing = {c.name for c in qdrant.get_collections().collections}
+                if collection_name not in existing:
+                    logger.info(f"Qdrant collection {collection_name} does not exist — skipping point deletion for document {doc_id}")
+                else:
+                    point_ids = [_chunk_id_to_point_id(cid) for cid in chunk_ids]
+                    qdrant.delete(
+                        collection_name=collection_name,
+                        points_selector=PointIdsList(points=point_ids),
+                    )
+                    logger.info(f"Deleted {len(point_ids)} Qdrant points for document {doc_id}")
             except Exception as e:
                 cleanup_warnings.append(f"Qdrant cleanup warning: {str(e)}")
                 logger.error(f"Failed to delete Qdrant points for document {doc_id}: {e}")
