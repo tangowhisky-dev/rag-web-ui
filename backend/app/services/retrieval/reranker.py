@@ -23,7 +23,7 @@ and in chat_history_retrieval_node() for prior-answer scoring.
 import logging
 import os
 import threading
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from langchain_core.documents import Document as LangchainDocument
 
@@ -64,6 +64,8 @@ def rerank(
     query: str,
     docs: List[LangchainDocument],
     score_threshold: Optional[float] = None,
+    db: Any = None,
+    org_id: Any = None,
 ) -> List[LangchainDocument]:
     """
     Re-score docs against query using the cross-encoder and filter by threshold.
@@ -84,8 +86,12 @@ def rerank(
         return docs
 
     if score_threshold is None:
-        from app.core.settings_registry import get_def
-        score_threshold = get_def("RERANKER_SCORE_THRESHOLD").default
+        if db is not None:
+            from app.services.settings_service import get_setting
+            score_threshold = get_setting(db, "RERANKER_SCORE_THRESHOLD", org_id)
+        else:
+            from app.core.settings_registry import get_def
+            score_threshold = get_def("RERANKER_SCORE_THRESHOLD").default
 
     encoder = _get_cross_encoder()
 

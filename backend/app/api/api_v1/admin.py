@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
-from app.core.security import get_admin_org_ids, require_admin
+from app.core.security import get_admin_org_ids, require_admin, require_super_admin
 from app.db.session import get_db
 from app.models.organisation import Organisation
 from app.models.organisation import OrgAbbreviation
@@ -36,15 +36,36 @@ def list_orgs(
         o.id: db.query(User).filter(User.org_id == o.id).count()
         for o in orgs
     }
+    # Build a name lookup that includes ancestor orgs (not in admin scope)
+    # so we can compute the full hierarchy_name for the tooltip.
+    all_org_ids_in_paths = set()
+    for o in orgs:
+        if o.path:
+            for part in o.path.split("/"):
+                if part:
+                    all_org_ids_in_paths.add(int(part))
+    ancestor_ids = all_org_ids_in_paths - {o.id for o in orgs}
+    ancestor_names = {
+        a.id: a.name
+        for a in db.query(Organisation).filter(Organisation.id.in_(ancestor_ids)).all()
+    } if ancestor_ids else {}
+    name_lookup = {o.id: o.name for o in orgs}
+    name_lookup.update(ancestor_names)
+
     result = []
     for org in orgs:
         resp = OrgResponse.model_validate(org)
         resp.user_count = user_counts.get(org.id, 0)
         # level = number of segments in path minus 1 (root = level 0)
         if org.path:
-            resp.level = max(0, len([p for p in org.path.split("/") if p]) - 1)
+            parts = [p for p in org.path.split("/") if p]
+            resp.level = max(0, len(parts) - 1)
+            resp.hierarchy_name = " → ".join(
+                name_lookup.get(int(p), f"#{p}") for p in parts
+            )
         else:
             resp.level = 0
+            resp.hierarchy_name = org.name
         result.append(resp)
     # Sort hierarchically: by path (depth-first), then alphabetically within same level
     result.sort(key=lambda o: (o.path or "", o.name))
@@ -100,6 +121,22 @@ def update_org(
     if admin_org_ids is not None and org.id not in admin_org_ids:
         raise HTTPException(status_code=403, detail="Org is outside your organisation scope")
 
+    # Org admins cannot edit their own org or ancestors — only descendants
+    if current_user.role == UserRole.admin and current_user.org_id is not None:
+        if org.id == current_user.org_id:
+            raise HTTPException(
+                status_code=403,
+                detail="You cannot edit your own organisation. Only super admin can do that.",
+            )
+        # Check if the org is an ancestor of the admin's org
+        if org.path and current_user.org_id:
+            admin_org = db.query(Organisation).filter(Organisation.id == current_user.org_id).first()
+            if admin_org and admin_org.path and admin_org.path.startswith(org.path + "/"):
+                raise HTTPException(
+                    status_code=403,
+                    detail="You cannot edit a parent organisation. Only super admin can do that.",
+                )
+
     if payload.name is not None:
         if payload.name != org.name and db.query(Organisation).filter(
             Organisation.name == payload.name, Organisation.id != org_id
@@ -150,6 +187,21 @@ def delete_org(
     admin_org_ids = get_admin_org_ids(db, current_user)
     if admin_org_ids is not None and org.id not in admin_org_ids:
         raise HTTPException(status_code=403, detail="Org is outside your organisation scope")
+
+    # Org admins cannot delete their own org or ancestors — only descendants
+    if current_user.role == UserRole.admin and current_user.org_id is not None:
+        if org.id == current_user.org_id:
+            raise HTTPException(
+                status_code=403,
+                detail="You cannot delete your own organisation. Only super admin can do that.",
+            )
+        if org.path and current_user.org_id:
+            admin_org = db.query(Organisation).filter(Organisation.id == current_user.org_id).first()
+            if admin_org and admin_org.path and admin_org.path.startswith(org.path + "/"):
+                raise HTTPException(
+                    status_code=403,
+                    detail="You cannot delete a parent organisation. Only super admin can do that.",
+                )
 
     children = db.query(Organisation).filter(Organisation.parent_id == org_id).count()
     if children:
@@ -429,6 +481,13 @@ def update_user(
     if admin_org_ids is not None and user.org_id not in admin_org_ids:
         raise HTTPException(status_code=403, detail="User is outside your organisation scope")
 
+    # Org admins can only edit normal users — not other admins or super_admins
+    if current_user.role == UserRole.admin and user.role != UserRole.user:
+        raise HTTPException(
+            status_code=403,
+            detail="Org admins can only manage normal users",
+        )
+
     if payload.role is not None:
         # Only super_admin can promote a user to admin or super_admin role
         if current_user.role == UserRole.admin and payload.role not in ("user",):
@@ -466,16 +525,28 @@ def change_user_password(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
-    """Change a user's password. Only super_admin can change other users' passwords."""
-    if current_user.role != UserRole.super_admin:
-        raise HTTPException(
-            status_code=403,
-            detail="Only super admin can change user passwords",
-        )
+    """Change a user's password.
 
+    super_admin: can change any user's password.
+    org admin: can change passwords of normal users in their org scope.
+    """
     user = db.query(User).filter(User.id == user_id).first()
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
+
+    if current_user.role != UserRole.super_admin:
+        # Org admins can only change passwords of normal users in their scope
+        if user.role != UserRole.user:
+            raise HTTPException(
+                status_code=403,
+                detail="Org admins can only manage normal users",
+            )
+        admin_org_ids = get_admin_org_ids(db, current_user)
+        if admin_org_ids is not None and user.org_id not in admin_org_ids:
+            raise HTTPException(
+                status_code=403,
+                detail="User is outside your organisation scope",
+            )
 
     user.hashed_password = get_password_hash(payload.new_password)
     user.token_version += 1

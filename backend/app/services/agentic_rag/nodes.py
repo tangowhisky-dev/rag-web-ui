@@ -37,7 +37,7 @@ from .utils import format_context_string
 logger = logging.getLogger(__name__)
 
 
-def select_recent_history(messages: list, max_pairs: int | None = None) -> list:
+def select_recent_history(messages: list, max_pairs: int | None = None, db: Any = None, org_id: Any = None) -> list:
     """Return up to ``max_pairs`` of recent user/assistant turns.
 
     The last message is assumed to be the current user query and is excluded.
@@ -48,8 +48,8 @@ def select_recent_history(messages: list, max_pairs: int | None = None) -> list:
     from langchain_core.messages import HumanMessage, AIMessage
 
     if max_pairs is None:
-        from app.core.settings_registry import get_def
-        max_pairs = get_def("AGENT_HISTORY_PAIRS").default
+        from app.services.settings_service import get_setting
+        max_pairs = get_setting(db, "AGENT_HISTORY_PAIRS", org_id) if db is not None else get_def("AGENT_HISTORY_PAIRS").default
 
     history: list = []
     # Skip the final message (current query).
@@ -171,6 +171,8 @@ async def rewrite_query_node(
     api_base: Optional[str] = None,
     api_key: Optional[str] = None,
     query_model: Optional[str] = None,
+    db: Any = None,
+    org_id: Any = None,
 ) -> dict:
     """Resolve the user's message into a standalone *retrieval* query.
 
@@ -186,7 +188,7 @@ async def rewrite_query_node(
     with _agent_step("rewrite_query"):
         messages = state.get("messages", [])
         query = state.get("original_query", "")
-        recent_history = select_recent_history(messages)
+        recent_history = select_recent_history(messages, db=db, org_id=org_id)
 
         # A clarification answer is part of the request, not a new turn:
         # fold it into the text sent to the resolver.
@@ -336,7 +338,7 @@ def reranking_node(
 # Node: filter (applies RERANKER_SCORE_THRESHOLD)
 # ---------------------------------------------------------------------------
 
-def filter_node(state: AgentState, threshold: Optional[float] = None) -> dict:
+def filter_node(state: AgentState, threshold: Optional[float] = None, db: Any = None, org_id: Any = None) -> dict:
     """Filter scored docs by RERANKER_SCORE_THRESHOLD (or an override).
 
     Keeps only docs whose _reranker_score >= threshold.
@@ -347,7 +349,12 @@ def filter_node(state: AgentState, threshold: Optional[float] = None) -> dict:
         if not docs:
             return {"retrieved_docs": []}
 
-        threshold = get_def("RERANKER_SCORE_THRESHOLD").default if threshold is None else threshold
+        if threshold is None:
+            if db is not None:
+                from app.services.settings_service import get_setting
+                threshold = get_setting(db, "RERANKER_SCORE_THRESHOLD", org_id)
+            else:
+                threshold = get_def("RERANKER_SCORE_THRESHOLD").default
 
         filtered = [
             d for d in docs
@@ -362,45 +369,6 @@ def filter_node(state: AgentState, threshold: Optional[float] = None) -> dict:
 
         return {
             "retrieved_docs": filtered,
-        }
-
-
-# ---------------------------------------------------------------------------
-# Node: adaptive_reranking (re-filter with lower threshold)
-# ---------------------------------------------------------------------------
-
-def adaptive_reranking_node(state: Any = None, db: Any = None) -> dict:
-    """Adaptive reranking: re-filter all_scored_docs with lower threshold.
-
-    Since all docs already have _reranker_score from the initial run,
-    this just re-filters with ADAPTIVE_RETRIEVAL_RERANKER_THRESHOLD (-5.0).
-    """
-    with _agent_step("adaptive_reranking"):
-        all_docs = state.get("all_scored_docs", [])
-        if not all_docs:
-            return {"adaptive_rerunning": False, "adaptive_reran": True}
-
-        threshold = get_def("ADAPTIVE_RETRIEVAL_RERANKER_THRESHOLD").default
-
-        filtered = [
-            d for d in all_docs
-            if d.get("metadata", {}).get("_reranker_score", -float("inf")) >= threshold
-        ]
-        filtered.sort(
-            key=lambda d: d.get("metadata", {}).get("_reranker_score", -float("inf")),
-            reverse=True,
-        )
-
-        logger.info("[ADAPTIVE_FILTER] threshold=%.2f | input=%d | passed=%d", threshold, len(all_docs), len(filtered))
-
-        conf_result = score_retrieval(filtered, {}) if filtered else None
-        new_conf = conf_result.score / 100.0 if conf_result else 0.0
-
-        return {
-            "adaptive_rerunning": True,
-            "adaptive_reran": True,
-            "retrieved_docs": filtered,
-            "retrieval_confidence": new_conf,
         }
 
 

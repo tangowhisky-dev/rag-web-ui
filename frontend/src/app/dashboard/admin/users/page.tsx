@@ -346,18 +346,22 @@ export default function AdminUsersPage() {
                     )}
                   </TableCell>
                   <TableCell className="space-x-1">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => openChangePassword(user)}
-                      title="Change password"
-                    >
-                      Password
-                    </Button>
-                    <Button variant="outline" size="sm" onClick={() => openEdit(user)}>
-                      Edit
-                    </Button>
-                    {user.role !== 'super_admin' && (
+                    {!(currentRole !== 'super_admin' && user.role !== 'user') && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => openChangePassword(user)}
+                        title="Change password"
+                      >
+                        Password
+                      </Button>
+                    )}
+                    {!(currentRole !== 'super_admin' && user.role !== 'user') && (
+                      <Button variant="outline" size="sm" onClick={() => openEdit(user)}>
+                        Edit
+                      </Button>
+                    )}
+                    {currentRole === 'super_admin' && user.role !== 'super_admin' && (
                       <Button
                         variant="destructive"
                         size="sm"

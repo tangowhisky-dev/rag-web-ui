@@ -25,7 +25,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal as _SessionLocal
-from app.core.security import require_admin, get_admin_org_ids
+from app.core.security import require_admin, require_super_admin, get_admin_org_ids
 from app.db.session import get_db
 from app.models.datastore import DataStore
 from app.models.user import User
@@ -406,7 +406,7 @@ def get_datastores_scan_status(
 def stop_datastore_scan(
     datastore_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_super_admin),
 ):
     """Cancel a running scan on a datastore."""
     ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
@@ -431,7 +431,7 @@ def stop_datastore_scan(
 async def trigger_datastore_scan(
     datastore_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_super_admin),
 ):
     """Asynchronously trigger a scan of a specific datastore.
 
@@ -604,7 +604,7 @@ async def trigger_datastore_scan(
 def flush_datastore_changes(
     datastore_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_super_admin),
 ):
     """Flush and process pending changes for a specific datastore.
 

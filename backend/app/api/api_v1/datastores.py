@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 from pydantic.config import ConfigDict
 from sqlalchemy.orm import Session
 
-from app.core.security import get_admin_org_ids, require_admin
+from app.core.security import get_admin_org_ids, require_admin, require_super_admin
 from app.db.session import get_db
 from app.models.datastore import DataStore, OrganizationDataStore
 from app.models.organisation import Organisation
@@ -294,7 +294,7 @@ def list_datastores(
 def create_datastore(
     payload: DataStoreCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_super_admin),
 ):
     """Create a new datastore. Non-super-admins are auto-assigned to their own org."""
     # Validate folder exists and is under /app/data
@@ -404,7 +404,7 @@ def update_datastore(
     datastore_id: int,
     payload: DataStoreUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_super_admin),
 ):
     """Update a datastore."""
     admin_org_ids = get_admin_org_ids(db, current_user)
@@ -486,7 +486,7 @@ def update_datastore(
 def delete_datastore(
     datastore_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_super_admin),
 ):
     """
     Delete a datastore and all its associated data.
@@ -512,7 +512,7 @@ def assign_datastore_to_orgs(
     datastore_id: int,
     payload: AssignRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_super_admin),
 ):
     """Assign a datastore to one or more organisations within the admin's scope."""
     admin_org_ids = get_admin_org_ids(db, current_user)
@@ -580,7 +580,7 @@ def unassign_datastore_from_orgs(
     datastore_id: int,
     payload: AssignRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_super_admin),
 ):
     """Unassign a datastore from orgs within the admin's scope."""
     admin_org_ids = get_admin_org_ids(db, current_user)

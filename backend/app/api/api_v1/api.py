@@ -16,9 +16,9 @@ api_router.include_router(admin.org_router, prefix="/admin", tags=["admin"])
 api_router.include_router(admin.user_router, prefix="/admin", tags=["admin"])
 api_router.include_router(settings_router.app_router, prefix="/admin", tags=["settings"])
 api_router.include_router(settings_router.org_router, prefix="/admin", tags=["settings"])
+api_router.include_router(datastore_recovery.router, prefix="/admin", tags=["datastores"])
 api_router.include_router(datastores.router, prefix="/admin", tags=["datastores"])
 api_router.include_router(datastore_scan.router, prefix="/admin", tags=["datastores"])
-api_router.include_router(datastore_recovery.router, prefix="/admin", tags=["datastores"])
 
 
 @api_router.get("/config", tags=["config"])

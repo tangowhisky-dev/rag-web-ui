@@ -284,6 +284,8 @@ def apply_entity_boost(
     docs: List[LangchainDocument],
     entities: List[Entity],
     neighbors: Optional[List[EntityNeighbor]] = None,
+    db: Any = None,
+    org_id: Any = None,
 ) -> List[LangchainDocument]:
     """
     Apply entity mention boost to chunk scores.
@@ -306,8 +308,9 @@ def apply_entity_boost(
     if not entities:
         return docs
 
+    from app.services.settings_service import get_setting
     from app.core.settings_registry import get_def
-    boost_factor = get_def("ENTITY_BOOST_FACTOR").default
+    boost_factor = get_setting(db, "ENTITY_BOOST_FACTOR", org_id) if db is not None else get_def("ENTITY_BOOST_FACTOR").default
 
     # Build (pattern, entity_name) pairs — query entities get full weight,
     # expanded neighbors get half weight (they're one hop away).
@@ -377,4 +380,4 @@ def extract_expand_boost(
         return docs
 
     neighbors = expand_query_entities(entities, kb_ids)
-    return apply_entity_boost(docs, entities, neighbors)
+    return apply_entity_boost(docs, entities, neighbors, db=db, org_id=org_id)

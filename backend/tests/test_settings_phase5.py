@@ -4,10 +4,9 @@ test_settings_phase5.py — Phase 5: agentic + context + memory settings.
 Tests:
   1. _tool_call_budget resolves org-overridable AGENT_MAX_RETRIEVALS/CODE_EXEC.
   2. ContextBudget resolves org-overridable context settings.
-  3. retrieve_historical_memory resolves org-overridable HISTORICAL_MEMORY_ENABLED.
-  4. App-only settings (TOOL_CALL_MODE) are correctly classified.
-  5. Org-overridable settings (AGENT_MAX_ITERATIONS, COMPACTION_*, etc.) are correctly classified.
-  6. get_setting gracefully falls back to env defaults on DB errors.
+  3. App-only settings (TOOL_CALL_MODE) are correctly classified.
+  4. Org-overridable settings (AGENT_MAX_ITERATIONS, COMPACTION_*, etc.) are correctly classified.
+  5. get_setting gracefully falls back to env defaults on DB errors.
 """
 import pytest
 from unittest.mock import MagicMock, patch
@@ -132,35 +131,7 @@ def test_context_budget_without_db_uses_env():
 
 
 # ---------------------------------------------------------------------------
-# 3. retrieve_historical_memory
-# ---------------------------------------------------------------------------
-
-def test_historical_memory_disabled_via_org_override(db_session):
-    """Org override of HISTORICAL_MEMORY_ENABLED=False disables historical memory."""
-    org = _create_org(db_session)
-    upsert_org_setting(db_session, org.id, "HISTORICAL_MEMORY_ENABLED", False)
-    clear_cache()
-
-    # Mock the DB execute to return some rows
-    from types import SimpleNamespace
-    mock_db = MagicMock()
-    mock_db.execute.return_value.fetchall.return_value = [
-        SimpleNamespace(id=1, content="test", content_length=4),
-    ]
-
-    from app.services.chat import retrieve_historical_memory
-    result = retrieve_historical_memory(
-        chat_id=1, query="test", db=mock_db, org_id=org.id
-    )
-    # When disabled, it returns the last top_k raw docs (not [])
-    # But wait — the disabled path returns last top_k raw docs only if there are docs
-    # Actually, when HISTORICAL_MEMORY_ENABLED is False, the function returns []
-    # before reaching the reranker check
-    assert result == []
-
-
-# ---------------------------------------------------------------------------
-# 4-5. Setting classification
+# 3-4. Setting classification
 # ---------------------------------------------------------------------------
 
 def test_tool_call_mode_is_app_only():
@@ -198,11 +169,6 @@ def test_context_reserved_generation_is_org_overridable():
     assert is_org_overridable("CONTEXT_RESERVED_GENERATION")
 
 
-def test_highlights_token_cap_is_org_overridable():
-    from app.core.settings_registry import is_org_overridable
-    assert is_org_overridable("HIGHLIGHTS_TOKEN_CAP")
-
-
 def test_answer_quality_grading_enabled_is_org_overridable():
     from app.core.settings_registry import is_org_overridable
     assert is_org_overridable("ANSWER_QUALITY_GRADING_ENABLED")
@@ -211,16 +177,6 @@ def test_answer_quality_grading_enabled_is_org_overridable():
 def test_processing_timeout_silence_s_is_org_overridable():
     from app.core.settings_registry import is_org_overridable
     assert is_org_overridable("PROCESSING_TIMEOUT_SILENCE_S")
-
-
-def test_historical_memory_enabled_is_org_overridable():
-    from app.core.settings_registry import is_org_overridable
-    assert is_org_overridable("HISTORICAL_MEMORY_ENABLED")
-
-
-def test_historical_memory_top_k_is_org_overridable():
-    from app.core.settings_registry import is_org_overridable
-    assert is_org_overridable("HISTORICAL_MEMORY_TOP_K")
 
 
 def test_memory_enabled_is_app_only():

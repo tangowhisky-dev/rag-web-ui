@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
+import { fetchTokenClaims } from '@/lib/auth';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
@@ -30,6 +31,7 @@ interface Org {
   path: string;
   level: number;
   user_count: number;
+  hierarchy_name: string;
 }
 
 interface OrgIngestionStatus {
@@ -82,6 +84,8 @@ export default function AdminOrgsPage() {
   const [orgs, setOrgs] = useState<Org[]>([]);
   const [loading, setLoading] = useState(true);
   const [ingestionStatuses, setIngestionStatuses] = useState<Record<number, OrgIngestionStatus>>({});
+  const [isSuperAdmin, setIsSuperAdmin] = useState(false);
+  const [currentOrgId, setCurrentOrgId] = useState<number | null>(null);
 
   // Create dialog
   const [createOpen, setCreateOpen] = useState(false);
@@ -104,7 +108,10 @@ export default function AdminOrgsPage() {
   const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
-    // Auth check is handled by the layout.tsx middleware.
+    fetchTokenClaims().then((claims) => {
+      setIsSuperAdmin(claims?.role === 'super_admin');
+      setCurrentOrgId(claims?.org_id ?? null);
+    });
     fetchOrgs();
   }, [router]);
 
@@ -229,19 +236,6 @@ export default function AdminOrgsPage() {
     }
   }
 
-  // Build full hierarchy path: "GrandParent -> Parent -> Current"
-  const hierarchyPath = (org: Org): string => {
-    if (!org.path) return org.name;
-    const parts = org.path.split('/').filter(Boolean);
-    const names: string[] = [];
-    for (const part of parts) {
-      const id = parseInt(part, 10);
-      const found = orgs.find((o) => o.id === id);
-      if (found) names.push(found.name);
-    }
-    return names.join(' → ');
-  };
-
   // Filter by search (case-insensitive on name)
   const filteredOrgs = orgs.filter((o) =>
     o.name.toLowerCase().includes(search.toLowerCase())
@@ -258,6 +252,17 @@ export default function AdminOrgsPage() {
   const availableParents = selectedOrg
     ? orgs.filter((o) => !isDescendantOf(o, selectedOrg))
     : orgs;
+
+  // Whether the current user can edit/delete this org.
+  // super_admin: yes for any org.
+  // org admin: yes only for strict descendants of their own org.
+  const canManageOrg = (org: Org): boolean => {
+    if (isSuperAdmin) return true;
+    if (currentOrgId === null) return false;
+    const myOrg = orgs.find((o) => o.id === currentOrgId);
+    if (!myOrg || !myOrg.path || !org.path) return false;
+    return org.path.startsWith(myOrg.path + '/') && org.id !== currentOrgId;
+  };
 
   return (
     <div className="px-4 sm:px-6 lg:px-8 py-6 pt-16 space-y-4">
@@ -292,7 +297,6 @@ export default function AdminOrgsPage() {
               <TableHead>ID</TableHead>
               <TableHead>Name</TableHead>
               <TableHead>Users</TableHead>
-              <TableHead>Path</TableHead>
               <TableHead>Ingestion Status</TableHead>
               <TableHead>Actions</TableHead>
             </TableRow>
@@ -300,13 +304,13 @@ export default function AdminOrgsPage() {
           <TableBody>
             {orgs.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={6} className="text-center text-muted-foreground">
+                <TableCell colSpan={5} className="text-center text-muted-foreground">
                   No organisations yet.
                 </TableCell>
               </TableRow>
             ) : (
               filteredOrgs.map((org) => (
-                <TableRow key={org.id} title={hierarchyPath(org)}>
+                <TableRow key={org.id} title={org.hierarchy_name || org.name}>
                   <TableCell>{org.id}</TableCell>
                   <TableCell className="font-medium">
                     <div className="flex items-center gap-1">
@@ -319,20 +323,21 @@ export default function AdminOrgsPage() {
                     </div>
                   </TableCell>
                   <TableCell>{org.user_count}</TableCell>
-                  <TableCell className="text-xs text-muted-foreground">{org.path}</TableCell>
                   <TableCell>
                     <IngestionBadge status={ingestionStatuses[org.id]} />
                   </TableCell>
                   <TableCell className="space-x-2">
-                    <Button variant="outline" size="sm" onClick={() => openEdit(org)} title="Change name and parent organization">
-                      Edit
-                    </Button>
+                    {canManageOrg(org) && (
+                      <Button variant="outline" size="sm" onClick={() => openEdit(org)} title="Change name and parent organization">
+                        Edit
+                      </Button>
+                    )}
                     <Link href={`/dashboard/admin/orgs/${org.id}/settings`}>
                       <Button variant="outline" size="sm" title="Full organisation settings (retrieval, agentic, memory, etc.)">
                         Settings
                       </Button>
                     </Link>
-                    {org.parent_id !== null && (
+                    {canManageOrg(org) && org.parent_id !== null && (
                       <Button variant="destructive" size="sm" onClick={() => openDelete(org)} title="Permanently delete this organization">
                         Delete
                       </Button>

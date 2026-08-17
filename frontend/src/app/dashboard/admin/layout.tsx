@@ -47,7 +47,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
           </button>
           <Breadcrumb overrideLastLabel="Admin" />
           <div className="ml-auto flex items-center gap-1">
-            <NavActions showPasswordButton={false} />
+            <NavActions />
           </div>
         </div>
       </header>

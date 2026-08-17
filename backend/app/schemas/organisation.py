@@ -29,6 +29,7 @@ class OrgResponse(OrgBase):
     path: Optional[str] = None
     level: int = 0
     user_count: int = 0
+    hierarchy_name: str = ""
     created_at: datetime
     updated_at: datetime
 

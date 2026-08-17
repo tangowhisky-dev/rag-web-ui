@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.core.security import require_admin, get_admin_org_ids
+from app.core.security import require_admin, require_super_admin, get_admin_org_ids
 from app.db.session import get_db
 from app.models.datastore import DataStore
 from app.models.user import User
@@ -301,7 +301,7 @@ def recovery_status_stream(
 def trigger_datastore_recovery(
     datastore_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_super_admin),
 ):
     """Asynchronously trigger a recovery scan of a specific datastore.
 

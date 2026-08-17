@@ -1773,7 +1773,9 @@ def build_agent_graph(ctx: ToolContext):
     graph.add_node("rewrite_query", partial(rewrite_query_node,
                                             api_base=query_cfg["api_base"],
                                             api_key=query_cfg["api_key"],
-                                            query_model=query_cfg["model_name"]))
+                                            query_model=query_cfg["model_name"],
+                                            db=ctx.db,
+                                            org_id=ctx.org_id))
     graph.add_node("plan", partial(plan_node, ctx=ctx))
     graph.add_node("clarify_interrupt", clarify_interrupt_node)
     graph.add_node("think", partial(think_node, ctx=ctx))

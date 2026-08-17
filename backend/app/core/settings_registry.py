@@ -17,17 +17,6 @@ Scope = Literal["app", "org"]          # "app" = app-only; "org" = app-default +
 Reload = Literal["next_request", "restart", "ingest"]
 
 
-_DEFAULT_CLASSIFIER_PROMPT = (
-    "Classify this query into exactly one category. Respond with only the category name.\n\n"
-    "Categories:\n"
-    "FACTUAL — Questions asking for specific facts, definitions, or concrete information (e.g., 'What is RRF?', 'Define BM25 scoring')\n"
-    "ENTITY_CENTRIC — Questions about specific entities, organizations, people, or products (e.g., 'What did Apple acquire?', 'Who founded Microsoft?')\n"
-    "MULTI_PART — Questions comparing/contrasting things, asking for pros/cons, or requesting multiple aspects (e.g., 'Compare RRF and BM25', 'Pros and cons of vector databases')\n"
-    "AMBIGUOUS — Vague, context-dependent, or incomplete queries (e.g., 'Tell me about that', 'What do you think?')\n\n"
-    "Query: {query}\n\n"
-    "Category: "
-)
-
 import json as _json
 
 _DEFAULT_RETRIEVAL_PRESETS = _json.dumps({
@@ -153,9 +142,6 @@ _APP_ONLY = [
                "str", "auto", scope="app", reload="next_request",
                choices=("native", "json_text", "auto"),
                description="Agent protocol choice: native, json_text, or auto."),
-    SettingDef("QUERY_CLASSIFIER_PROMPT", "Query Classification", "Classifier prompt template",
-               "text", _DEFAULT_CLASSIFIER_PROMPT, scope="app", reload="next_request",
-               description="Large template; should be consistent across orgs. Enable toggle is org-overridable."),
 ]
 
 
@@ -264,23 +250,13 @@ _ORG_OVERRIDABLE = [
                "int", 50, scope="org", reload="next_request", min_value=1,
                description="Bounds hub-entity fan-out."),
 
-    # Query classification (prompt is app-only; enable is org-overridable)
-    SettingDef("QUERY_CLASSIFIER_ENABLED", "Query Classification", "Enable query classifier",
-               "bool", True, scope="org", reload="next_request"),
-
     # Agentic features
-    SettingDef("TOOL_CALLING_ENABLED", "Agentic", "Enable tool calling",
-               "bool", True, scope="org", reload="next_request"),
-    SettingDef("SYNTHESIS_MODE_ENABLED", "Agentic", "Enable synthesis mode",
-               "bool", True, scope="org", reload="next_request"),
     SettingDef("AGENT_MAX_ITERATIONS", "Agentic", "Max agent iterations",
                "int", 8, scope="org", reload="next_request", min_value=1),
     SettingDef("AGENT_MAX_RETRIEVALS", "Agentic", "Max agent retrievals",
                "int", 3, scope="org", reload="next_request", min_value=0),
     SettingDef("AGENT_MAX_CODE_EXEC", "Agentic", "Max code executions",
                "int", 3, scope="org", reload="next_request", min_value=0),
-    SettingDef("AGENT_MAX_REFLECTIONS", "Agentic", "Max reflections",
-               "int", 2, scope="org", reload="next_request", min_value=0),
     SettingDef("AGENT_REFLECT_EVERY", "Agentic", "Reflect every N iterations",
                "int", 2, scope="org", reload="next_request", min_value=1),
     SettingDef("AGENT_MAX_TOOL_RETRIES", "Agentic", "Max tool retries",
@@ -294,21 +270,11 @@ _ORG_OVERRIDABLE = [
     SettingDef("AGENT_MAX_WALL_SECONDS", "Agentic", "Agent wall-clock budget (s)",
                "float", 120, scope="org", reload="next_request", min_value=1.0),
 
-    # Historical memory
-    SettingDef("HISTORICAL_MEMORY_ENABLED", "Memory", "Enable historical memory",
-               "bool", True, scope="org", reload="next_request"),
-    SettingDef("HISTORICAL_MEMORY_TOP_K", "Memory", "Historical memory top-K",
-               "int", 5, scope="org", reload="next_request", min_value=1),
-    SettingDef("HISTORICAL_MEMORY_SCORE_THRESHOLD", "Memory", "Historical memory score threshold",
-               "float", 2.0, scope="org", reload="next_request"),
-
     # Context, compaction & quality
     SettingDef("CONTEXT_RESERVED_GENERATION", "Context", "Reserved generation tokens",
                "int", 4096, scope="org", reload="next_request", min_value=256),
     SettingDef("CONTEXT_TOOL_BUDGET", "Context", "Tool context budget",
                "int", 8192, scope="org", reload="next_request", min_value=512),
-    SettingDef("HIGHLIGHTS_TOKEN_CAP", "Context", "Highlights token cap",
-               "int", 2000, scope="org", reload="next_request", min_value=100),
     SettingDef("CONTEXT_COMPACTION_TRIGGER_RATIO", "Context", "Compaction trigger ratio",
                "float", 0.85, scope="org", reload="next_request", min_value=0.1, max_value=1.0),
     SettingDef("COMPACTION_ENABLED", "Memory", "Enable compaction",
@@ -320,7 +286,7 @@ _ORG_OVERRIDABLE = [
     SettingDef("ANSWER_QUALITY_GRADING_ENABLED", "Quality", "Enable answer grading",
                "bool", True, scope="org", reload="next_request"),
     SettingDef("PROCESSING_TIMEOUT_SILENCE_S", "Quality", "Processing silence timeout (s)",
-               "int", 300, scope="org", reload="next_request", min_value=10),
+               "int", 300, scope="app", reload="next_request", min_value=10),
 ]
 
 

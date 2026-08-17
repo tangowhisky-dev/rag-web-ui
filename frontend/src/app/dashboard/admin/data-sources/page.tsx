@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { api, ApiError } from '@/lib/api';
+import { fetchTokenClaims } from '@/lib/auth';
 
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -124,6 +125,7 @@ export default function DataSourcesPage() {
   const [datastores, setDatastores] = useState<DataStore[]>([]);
   const [orgs, setOrgs] = useState<Org[]>([]);
   const [loading, setLoading] = useState(true);
+  const [isSuperAdmin, setIsSuperAdmin] = useState(false);
   const [triggering, setTriggering] = useState<Set<number>>(new Set());
   const [flushing, setFlushing] = useState<Set<number>>(new Set());
   const [scanProgress, setScanProgress] = useState<Record<number, ScanProgress | undefined>>({});
@@ -156,6 +158,13 @@ export default function DataSourcesPage() {
   const [assignOpen, setAssignOpen] = useState(false);
   const [assigningId, setAssigningId] = useState<number | null>(null);
   const [selectedOrgIds, setSelectedOrgIds] = useState<number[]>([]);
+
+  // Fetch user role on mount
+  useEffect(() => {
+    fetchTokenClaims().then((claims) => {
+      setIsSuperAdmin(claims?.role === 'super_admin');
+    });
+  }, []);
 
   // Poll for scan progress when ANY datastore is processing or scanning
   // Note: SSE is used for real-time progress during manual scans, but we
@@ -565,7 +574,7 @@ export default function DataSourcesPage() {
             Manage local folders for automatic document ingestion
           </p>
         </div>
-        <Button onClick={openCreate}>+ New Data Store</Button>
+        {isSuperAdmin && <Button onClick={openCreate}>+ New Data Store</Button>}
       </div>
 
       {loading ? (
@@ -778,67 +787,73 @@ export default function DataSourcesPage() {
                     })()}
                   </TableCell>
                   <TableCell className="space-x-1">
-                    <Button
-                      variant={ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' || (scanProgress[ds.id]?.status !== 'completed' && scanProgress[ds.id]) ? 'destructive' : 'outline'}
-                      size="sm"
-                      onClick={() => {
-                        if (ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' || (scanProgress[ds.id]?.status !== 'completed' && scanProgress[ds.id])) {
-                          handleStopScan(ds.id);
-                        } else {
-                          handleTriggerScan(ds.id);
-                        }
-                      }}
-                      disabled={triggering.has(ds.id)}
-                      title={ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' || (scanProgress[ds.id]?.status !== 'completed' && scanProgress[ds.id]) ? 'Stop scan' : 'Trigger manual scan'}
-                    >
-                      {ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' || (scanProgress[ds.id]?.status !== 'completed' && scanProgress[ds.id]) ? 'Stop' : 'Scan'}
-                    </Button>
-                    {ds.pending_changes > 0 && (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => handleFlushChanges(ds.id)}
-                        disabled={flushing.has(ds.id)}
-                        title="Flush pending changes"
-                      >
-                        {flushing.has(ds.id) ? '⏳' : '⟳'}
-                      </Button>
+                    {isSuperAdmin ? (
+                      <>
+                        <Button
+                          variant={ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' || (scanProgress[ds.id]?.status !== 'completed' && scanProgress[ds.id]) ? 'destructive' : 'outline'}
+                          size="sm"
+                          onClick={() => {
+                            if (ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' || (scanProgress[ds.id]?.status !== 'completed' && scanProgress[ds.id])) {
+                              handleStopScan(ds.id);
+                            } else {
+                              handleTriggerScan(ds.id);
+                            }
+                          }}
+                          disabled={triggering.has(ds.id)}
+                          title={ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' || (scanProgress[ds.id]?.status !== 'completed' && scanProgress[ds.id]) ? 'Stop scan' : 'Trigger manual scan'}
+                        >
+                          {ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' || (scanProgress[ds.id]?.status !== 'completed' && scanProgress[ds.id]) ? 'Stop' : 'Scan'}
+                        </Button>
+                        {ds.pending_changes > 0 && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => handleFlushChanges(ds.id)}
+                            disabled={flushing.has(ds.id)}
+                            title="Flush pending changes"
+                          >
+                            {flushing.has(ds.id) ? '⏳' : '⟳'}
+                          </Button>
+                        )}
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => openAssign(ds.id)}
+                          title="Assign to organisations"
+                        >
+                          Assign
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => openEdit(ds)}
+                          title="Edit data store"
+                        >
+                          Edit
+                        </Button>
+                        {ds.is_active && !recovering.has(ds.id) && recoveryStatuses[ds.id]?.recovery_status !== 'running' && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => handleRecover(ds.id)}
+                            disabled={recovering.has(ds.id)}
+                            title="Run recovery scan"
+                          >
+                            {recovering.has(ds.id) ? '⏳' : '♻'}
+                          </Button>
+                        )}
+                        <Button
+                          variant="destructive"
+                          size="sm"
+                          onClick={() => openDelete(ds)}
+                          title="Delete data store"
+                        >
+                          Delete
+                        </Button>
+                      </>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">Read-only</span>
                     )}
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => openAssign(ds.id)}
-                      title="Assign to organisations"
-                    >
-                      Assign
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => openEdit(ds)}
-                      title="Edit data store"
-                    >
-                      Edit
-                    </Button>
-                    {ds.is_active && !recovering.has(ds.id) && recoveryStatuses[ds.id]?.recovery_status !== 'running' && (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => handleRecover(ds.id)}
-                        disabled={recovering.has(ds.id)}
-                        title="Run recovery scan"
-                      >
-                        {recovering.has(ds.id) ? '⏳' : '♻'}
-                      </Button>
-                    )}
-                    <Button
-                      variant="destructive"
-                      size="sm"
-                      onClick={() => openDelete(ds)}
-                      title="Delete data store"
-                    >
-                      Delete
-                    </Button>
                   </TableCell>
                 </TableRow>
               ))
