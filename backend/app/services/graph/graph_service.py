@@ -77,7 +77,6 @@ logger = logging.getLogger(__name__)
 
 # ── Module-level singletons (lazy) ────────────────────────────────────────────
 _neo4j_driver: Optional[neo4j.Driver] = None
-_llm_pipeline = None   # neo4j_graphrag Pipeline — only built when GRAPHRAG_LLM is set
 
 def _get_driver() -> neo4j.Driver:
     global _neo4j_driver
@@ -125,22 +124,25 @@ def _chunk_id_to_point_id(chunk_id: str) -> str:
 
 # ── LLM pipeline path ─────────────────────────────────────────────────────────
 
-def _get_llm_pipeline():
-    """
-    Build (once) a neo4j-graphrag Pipeline with LLMEntityRelationExtractor.
+_global_extractor = None
+_global_writer = None
 
-    Pipeline topology:
-      extractor (LLMEntityRelationExtractor)
-          └─[graph: Neo4jGraph]──► writer (Neo4jWriter)
+
+def _get_extractor_and_writer():
+    """
+    Build (once) the LLM entity-relation extractor and Neo4j writer as
+    separate components so we can intercept the extracted graph between
+    extraction and writing — specifically to link only the batch's extracted
+    entities to the batch's chunks via FROM_CHUNK edges.
 
     use_structured_output=True makes the LLM return a JSON Schema-validated
     Neo4jGraph object — no regex post-processing, no json.loads guesswork.
     The LLM must support response_format=json_schema (OpenAI GPT-4 class and
     most modern OpenAI-compatible endpoints do).
     """
-    global _llm_pipeline
-    if _llm_pipeline is not None:
-        return _llm_pipeline
+    global _global_extractor, _global_writer
+    if _global_extractor is not None and _global_writer is not None:
+        return _global_extractor, _global_writer
 
     from neo4j_graphrag.llm import OpenAILLM
     from neo4j_graphrag.experimental.components.entity_relation_extractor import (
@@ -153,7 +155,6 @@ def _get_llm_pipeline():
         Neo4jWriter,
     )
     from neo4j_graphrag.experimental.components.types import Neo4jNode, Neo4jGraph
-    from neo4j_graphrag.experimental.pipeline.pipeline import Pipeline
 
     class _SafeNeo4jWriter(Neo4jWriter):
         """Strips empty/non-finite embedding_properties before writing to Neo4j.
@@ -219,7 +220,7 @@ def _get_llm_pipeline():
         api_key=api_key,
     )
 
-    extractor = LLMEntityRelationExtractor(
+    _global_extractor = LLMEntityRelationExtractor(
         llm=llm,
         use_structured_output=True,
         on_error=OnError.IGNORE,
@@ -227,20 +228,14 @@ def _get_llm_pipeline():
         max_concurrency=1,   # 1 = fully sequential; local models OOM at >1
     )
 
-    writer = _SafeNeo4jWriter(
+    _global_writer = _SafeNeo4jWriter(
         driver=_get_driver(),
         neo4j_database="neo4j",
         batch_size=500,
     )
 
-    pipe = Pipeline()
-    pipe.add_component(extractor, "extractor")
-    pipe.add_component(writer, "writer")
-    pipe.connect("extractor", "writer", input_config={"graph": "extractor"})
-
-    _llm_pipeline = pipe
-    logger.info("GraphService[llm]: pipeline built with model=%s", graph_model)
-    return _llm_pipeline
+    logger.info("GraphService[llm]: extractor+writer built with model=%s", graph_model)
+    return _global_extractor, _global_writer
 
 
 def _strip_overlap(prev: str, curr: str, max_search: int) -> str:
@@ -317,24 +312,24 @@ async def _extract_with_llm(
     max_chunks: int = 0,
     neo4j_llm_context: int = 12000,
 ) -> tuple[int, int]:
-    """Run neo4j-graphrag LLM pipeline on context-sized batches of chunks.
+    """Run neo4j-graphrag LLM extraction on context-sized batches of chunks.
 
     Consecutive chunks are merged into batches sized to NEO4J_LLM_CONTEXT
     (with overlap stripped) before being sent to the LLM. This gives the
     extractor broader context than single-chunk calls, reducing duplicate
     entities at chunk boundaries and surfacing intra-document relationships.
 
-    After each pipe.run(), FROM_CHUNK edges are written to ALL Qdrant chunk
-    nodes in the batch — so entity→chunk links remain granular even though
-    extraction ran on the merged text.
+    The extractor and writer are called separately (not via Pipeline) so we
+    can intercept the extracted Neo4jGraph and link ONLY the entities from
+    this batch to the batch's chunks via FROM_CHUNK edges.
 
-    Up to 4 batches run concurrently (local _chunk_sem). All synchronous Neo4j
-    I/O is dispatched via run_in_executor.
+    Up to 4 batches run concurrently. All synchronous Neo4j I/O is
+    dispatched via run_in_executor.
     """
     from neo4j_graphrag.experimental.components.types import TextChunks, TextChunk
 
     loop = asyncio.get_event_loop()
-    pipe = _get_llm_pipeline()
+    extractor, writer = _get_extractor_and_writer()
     driver = _get_driver()
 
     # Cap chunks to avoid OOM on low-RAM local models. Qdrant still has all chunks.
@@ -364,21 +359,16 @@ async def _extract_with_llm(
             last_exc = None
             for attempt in range(1, 4):  # up to 3 attempts
                 try:
-                    pipe_result = await pipe.run({
-                        "extractor": {
-                            "chunks": TextChunks(chunks=[TextChunk(text=combined_text, index=batch_idx)]),
-                            "examples": "",
-                        },
-                        "writer": {},
-                    })
-                    writer_output = None
-                    raw = getattr(pipe_result, "result", None)
-                    if isinstance(raw, dict):
-                        writer_output = raw.get("writer")
-                    elif hasattr(raw, "status"):
-                        writer_output = raw
+                    # 1. Extract entities/relationships from the batch text
+                    graph = await extractor.run(
+                        chunks=TextChunks(chunks=[TextChunk(text=combined_text, index=batch_idx)]),
+                        examples="",
+                    )
 
-                    status = getattr(writer_output, "status", None)
+                    # 2. Write the extracted graph to Neo4j
+                    writer_result = await writer.run(graph=graph)
+
+                    status = getattr(writer_result, "status", None)
                     if status == "FAILURE":
                         logger.warning(
                             "GraphService[llm]: writer FAILURE for doc %d batch %d — skipping FROM_CHUNK links",
@@ -386,25 +376,43 @@ async def _extract_with_llm(
                         )
                         return 0, 0
 
-                    # Fan out FROM_CHUNK edges to every chunk in the batch.
-                    def _link_batch_chunks(pids=batch_point_ids):
+                    # 3. Link ONLY the entities extracted from this batch to
+                    #    the batch's chunk nodes. Collect entity (name, label)
+                    #    pairs from the extracted graph — these are the entities
+                    #    the LLM actually found in this batch's text.
+                    batch_entities = [
+                        (n.properties.get("name"), n.label)
+                        for n in graph.nodes
+                        if n.properties.get("name")
+                    ]
+
+                    if not batch_entities:
+                        return 0, 0
+
+                    def _link_batch_chunks(
+                        entities=batch_entities, pids=batch_point_ids
+                    ):
                         linked_total = 0
                         with driver.session() as session:
-                            for pid in pids:
-                                rec = session.run(
-                                    """
-                                    MATCH (e:__Entity__)
-                                    WHERE NOT EXISTS {
-                                        MATCH (e)-[:FROM_CHUNK]->(:Chunk {qdrant_point_id: $point_id})
-                                    }
-                                    WITH e LIMIT 500
-                                    MATCH (c:Chunk {qdrant_point_id: $point_id})
-                                    MERGE (e)-[:FROM_CHUNK]->(c)
-                                    RETURN count(e) AS linked
-                                    """,
-                                    point_id=pid,
-                                ).single()
-                                linked_total += rec["linked"] if rec else 0
+                            # Single query: link only the batch's entities to
+                            # the batch's chunks via FROM_CHUNK.
+                            rec = session.run(
+                                """
+                                UNWIND $entities AS ent
+                                UNWIND $point_ids AS pid
+                                MATCH (e:__Entity__)
+                                WHERE e.name = ent.name AND ent.label IN labels(e)
+                                MATCH (c:Chunk {qdrant_point_id: pid})
+                                MERGE (e)-[:FROM_CHUNK]->(c)
+                                RETURN count(*) AS linked
+                                """,
+                                entities=[
+                                    {"name": name, "label": label}
+                                    for name, label in entities
+                                ],
+                                point_ids=pids,
+                            ).single()
+                            linked_total += rec["linked"] if rec else 0
                         return linked_total
 
                     linked = await loop.run_in_executor(None, _link_batch_chunks)
@@ -415,7 +423,7 @@ async def _extract_with_llm(
                 except Exception as exc:
                     last_exc = exc
                     logger.warning(
-                        "GraphService[llm]: pipeline failed for doc %d batch %d (attempt %d/3): %s",
+                        "GraphService[llm]: extraction failed for doc %d batch %d (attempt %d/3): %s",
                         document_id, batch_idx, attempt, exc,
                     )
                     if attempt < 3:
