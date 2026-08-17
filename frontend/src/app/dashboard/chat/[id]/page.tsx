@@ -19,7 +19,7 @@ import { Copy, Trash2, ChevronDown } from "lucide-react";
 import { useChatContext } from "@/contexts/chat-context";
 import ChatSettings from "@/components/chat/chat-settings";
 import type { ChatPatch } from "@/components/chat/chat-settings";
-import { api, ApiError } from "@/lib/api";
+import { api, ApiError, handleAuthRedirect } from "@/lib/api";
 import { APP_LOGO_SRC } from "@/lib/app-config";
 import { cancelStream } from "@/lib/cancel-stream";
 import { useToast } from "@/components/ui/use-toast";
@@ -849,6 +849,10 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       signal: controller.signal,
     });
 
+    if (await handleAuthRedirect(response)) {
+      return;
+    }
+
     if (!response.ok || !response.body) {
       throw new Error(`Request failed with status ${response.status}`);
     }
@@ -1147,6 +1151,10 @@ function ChatPageInner({ params }: { params: { id: string } }) {
         }),
         signal: abortController.signal,
       });
+
+      if (await handleAuthRedirect(res)) {
+        return;
+      }
 
       if (!res.ok || !res.body) {
         throw new Error(`Clarification submission failed: ${res.status}`);

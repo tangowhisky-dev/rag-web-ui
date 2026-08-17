@@ -48,22 +48,32 @@ function buildConfig(options: FetchOptions): RequestInit {
   return config;
 }
 
+/**
+ * Check a raw fetch Response for 401 and redirect to login if needed.
+ * Use this after any raw `fetch()` call that bypasses `fetchRaw`.
+ * Returns true if the response is a 401 that was handled (caller should bail).
+ */
+export async function handleAuthRedirect(response: Response, url?: string): Promise<boolean> {
+  if (response.status !== 401) return false;
+  if (url && (url.includes('/api/auth/token') || url.includes('/api/auth/logout'))) return false;
+  if (typeof window !== 'undefined') {
+    try {
+      await api.post('/api/auth/logout');
+    } catch {
+      // best effort
+    }
+    window.location.href = '/';
+  }
+  return true;
+}
+
 /** Fetch with auth + error handling, returning the raw Response (for blob/stream cases). */
 export async function fetchRaw(fullUrl: string, options: FetchOptions = {}): Promise<Response> {
   const config = buildConfig(options);
   try {
     const response = await fetch(fullUrl, config);
 
-    // Skip 401 redirect for login/logout endpoints
-    if (response.status === 401 && !fullUrl.includes('/api/auth/token') && !fullUrl.includes('/api/auth/logout')) {
-      if (typeof window !== 'undefined') {
-        try {
-          await api.post('/api/auth/logout');
-        } catch {
-          // best effort
-        }
-        window.location.href = '/';
-      }
+    if (await handleAuthRedirect(response, fullUrl)) {
       throw new ApiError(401, 'Unauthorized - Please log in again');
     }
 

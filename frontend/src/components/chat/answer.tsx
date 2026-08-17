@@ -35,7 +35,7 @@ const EChartsDiagramDynamic = dynamic(
   () => import("./echarts-diagram"),
   { ssr: false, loading: () => <div className="h-72 w-full animate-pulse bg-muted rounded" /> }
 );
-import { api } from "@/lib/api";
+import { api, handleAuthRedirect } from "@/lib/api";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { cleanChunkText } from "@/lib/utils";
 import { FileIcon } from "react-file-icon";
@@ -623,6 +623,7 @@ export const Answer: FC<{
     const url = `/api/chat/${chatId}/messages/${messageId}/export?format=${format}`;
     try {
       const res = await fetch(url, { credentials: "include" });
+      if (await handleAuthRedirect(res)) return;
       if (!res.ok) throw new Error(`Export failed: ${res.status}`);
       const blob = await res.blob();
       const a = document.createElement("a");
