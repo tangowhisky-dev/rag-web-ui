@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 class CodeExecuteInput(BaseModel):
     code: str = Field(description="Python code to execute. Set the 'result' variable to return a value, or use print() to capture stdout.")
     data: Optional[dict] = Field(default=None, description="Variables to inject.")
-    timeout_s: int = Field(default=10, ge=1, le=60)
+    timeout_s: int = Field(default=30, ge=1, le=180)
 
 
 _SAFE_IMPORT_TOP_LEVEL = frozenset({

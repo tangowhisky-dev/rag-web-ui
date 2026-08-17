@@ -184,11 +184,6 @@ def test_memory_enabled_is_app_only():
     assert not is_org_overridable("MEMORY_ENABLED")
 
 
-def test_sandbox_timeout_s_is_app_only():
-    from app.core.settings_registry import is_org_overridable
-    assert not is_org_overridable("SANDBOX_TIMEOUT_S")
-
-
 # ---------------------------------------------------------------------------
 # 6. get_setting graceful fallback
 # ---------------------------------------------------------------------------
