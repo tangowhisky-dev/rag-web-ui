@@ -108,3 +108,4 @@ lpt[1-9].*
 /.gsd-backups
 /frontend/.pnpm-store
 /backend/benchmark_outputs
+/frontend/public/assets/models

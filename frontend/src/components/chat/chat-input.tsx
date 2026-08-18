@@ -79,7 +79,7 @@ export function InputBar({
   const [internalError, setInternalError] = useState("");
   const activeError = onFileError !== undefined ? fileError : internalError;
 
-  const { isListening, isSupported: voiceSupported, interim, start: startVoice, stop: stopVoice } = useVoiceInput(
+  const { isListening, isModelLoading, isSupported: voiceSupported, interim, start: startVoice, stop: stopVoice } = useVoiceInput(
     (text) => {
       const trimmed = text.trim();
       if (!trimmed) return;
@@ -161,18 +161,21 @@ export function InputBar({
           style={{ lineHeight: `${LINE_HEIGHT_PX}px`, height: `${LINE_HEIGHT_PX}px` }}
           data-testid="chat-input-textarea"
         />
-        {/* Mic button — voice-to-text (Chrome/Edge only) */}
+        {/* Mic button — voice-to-text (local Whisper, offline) */}
         {voiceSupported && !disabled && (
           <button
             type="button"
             onClick={isListening ? stopVoice : startVoice}
+            disabled={isModelLoading}
             className={cn(
               "h-8 w-8 rounded-full flex items-center justify-center transition-all shrink-0",
               isListening
                 ? "bg-red-500 text-white animate-pulse"
-                : "bg-muted text-muted-foreground hover:bg-muted/80"
+                : isModelLoading
+                  ? "bg-muted text-muted-foreground animate-spin"
+                  : "bg-muted text-muted-foreground hover:bg-muted/80"
             )}
-            aria-label={isListening ? "Stop voice input" : "Start voice input"}
+            aria-label={isListening ? "Stop voice input" : isModelLoading ? "Loading voice model…" : "Start voice input"}
             data-testid="chat-input-mic-button"
           >
             <Mic className="h-4 w-4" />
