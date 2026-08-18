@@ -35,6 +35,8 @@ interface InputBarProps {
   selectedKbIds?: number[];
   /** Called when user toggles a KB pill */
   onKbToggle?: (kbId: number) => void;
+  /** When true, KB pills are disabled (PATCH in-flight) */
+  kbToggling?: boolean;
 }
 
 const LINE_HEIGHT_PX = 24;
@@ -68,6 +70,7 @@ export function InputBar({
   knowledgeBases = [],
   selectedKbIds = [],
   onKbToggle,
+  kbToggling = false,
 }: InputBarProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   useAutoResize(textareaRef, value);
@@ -208,11 +211,13 @@ export function InputBar({
               key={kb.id}
               type="button"
               onClick={() => onKbToggle?.(kb.id)}
+              disabled={kbToggling}
               className={cn(
                 "h-7 rounded-full border px-2.5 text-xs shrink-0 transition-colors",
                 associated
                   ? "border-primary bg-primary/10 text-primary"
-                  : "border-border bg-muted/40 text-muted-foreground/60 hover:bg-muted hover:text-muted-foreground"
+                  : "border-border bg-muted/40 text-muted-foreground/60 hover:bg-muted hover:text-muted-foreground",
+                kbToggling && "animate-pulse cursor-not-allowed opacity-60"
               )}
               data-testid="chat-input-kb-pill"
             >

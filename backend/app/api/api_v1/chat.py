@@ -708,6 +708,7 @@ def update_chat(
 ) -> Any:
     chat = (
         db.query(Chat)
+        .options(joinedload(Chat.knowledge_bases))
         .filter(
             Chat.id == chat_id,
             _chat_owner_filter(current_user)

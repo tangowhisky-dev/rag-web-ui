@@ -1229,22 +1229,29 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     handleSubmit(query);
   }, [handleSubmit]);
 
+  const [kbToggling, setKbToggling] = useState(false);
+  const kbPatchInFlight = useRef<Promise<unknown> | null>(null);
+
   const handleKbToggle = useCallback(async (kbId: number) => {
-    setAssociatedKbIds((prev) => {
-      const isAssociated = prev.includes(kbId);
-      if (isAssociated && prev.length <= 1) return prev;  // don't remove the last KB
-      const next = isAssociated
-        ? prev.filter((id) => id !== kbId)
-        : [...prev, kbId];
-      // Persist the new association set
-      api.patch(`/api/chat/${params.id}`, { knowledge_base_ids: next }).catch((err) => {
+    if (kbPatchInFlight.current) return;  // block while in-flight
+    const prev = associatedKbIds;
+    const isAssociated = prev.includes(kbId);
+    if (isAssociated && prev.length <= 1) return;  // don't remove the last KB
+    const next = isAssociated
+      ? prev.filter((id) => id !== kbId)
+      : [...prev, kbId];
+    setAssociatedKbIds(next);
+    setKbToggling(true);
+    const patch = api.patch(`/api/chat/${params.id}`, { knowledge_base_ids: next })
+      .then(() => { kbPatchInFlight.current = null; })
+      .catch((err) => {
         console.error("Failed to update chat KBs:", err);
-        // Revert on failure
-        setAssociatedKbIds(prev);
-      });
-      return next;
-    });
-  }, [params.id]);
+        setAssociatedKbIds(prev);  // revert
+        kbPatchInFlight.current = null;
+      })
+      .finally(() => setKbToggling(false));
+    kbPatchInFlight.current = patch;
+  }, [params.id, associatedKbIds]);
 
   return (
     <>
@@ -1421,6 +1428,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
               knowledgeBases={allKbs}
               selectedKbIds={associatedKbIds}
               onKbToggle={handleKbToggle}
+              kbToggling={kbToggling}
             />
           </div>
         </div>
