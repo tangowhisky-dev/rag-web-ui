@@ -11,7 +11,8 @@ Downloads:
   1. FastEmbed SPLADE sparse-embedding model (hybrid retrieval, sparse leg)
   2. FastEmbed ONNX cross-encoder reranker model (post-RRF reranking)
   3. Whisper tiny.en ONNX model (browser-based voice-to-text)
-  4. HuggingFace tokenizer files (accurate token counting in the backend)
+
+Tokenizer files (assets/tokenizers/) are handled separately and manually.
 
 Usage:
     python download_assets.py [options]
@@ -22,12 +23,9 @@ Options:
     --reranker-cache-dir PATH Reranker cache directory
     --reranker-model MODEL    Cross-encoder model name
     --whisper-dir PATH        Whisper model directory
-    --tokenizer-dir PATH      Tokenizer base directory
-    --tokenizer-repo REPO     HuggingFace repo for tokenizer (e.g. google/gemma-2-2b)
     --skip-splade             Skip SPLADE download
     --skip-reranker           Skip reranker download
     --skip-whisper            Skip Whisper model download
-    --skip-tokenizer          Skip tokenizer download
 """
 
 import argparse
@@ -188,48 +186,6 @@ def download_whisper(dest_dir: str) -> None:
     print(f"Done in {elapsed:.1f}s.\n")
 
 
-def download_tokenizer(dest_dir: str, repo_id: str) -> None:
-    """Download tokenizer files from a HuggingFace model repo.
-
-    Only downloads the files needed for tokenization — not model weights.
-    """
-    print(f"  repo       : {repo_id}")
-    print(f"  dest_dir   : {os.path.abspath(dest_dir)}")
-
-    base_url = f"https://huggingface.co/{repo_id}/resolve/main"
-    tokenizer_files = [
-        "tokenizer.json", "tokenizer_config.json",
-        "special_tokens_map.json", "vocab.json", "merges.txt",
-        "config.json",
-    ]
-
-    os.makedirs(dest_dir, exist_ok=True)
-
-    t0 = time.time()
-    downloaded = 0
-    for fname in tokenizer_files:
-        fpath = os.path.join(dest_dir, fname)
-        if os.path.exists(fpath):
-            continue
-        url = f"{base_url}/{fname}"
-        try:
-            urllib.request.urlretrieve(url, fpath)
-            downloaded += 1
-            print(f"  Downloaded {fname}")
-        except urllib.error.HTTPError as e:
-            if e.code in (401, 403, 404):
-                # File requires auth, is forbidden, or doesn't exist in this repo.
-                # Not all repos have all files (e.g. merges.txt is BPE-only,
-                # some repos are gated). Skip silently.
-                continue
-            raise
-
-    if downloaded == 0:
-        print("  (all files already present or skipped)")
-    elapsed = time.time() - t0
-    print(f"Done in {elapsed:.1f}s.\n")
-
-
 # ─── Main ────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -243,8 +199,6 @@ def main() -> None:
     default_reranker_cache = _env_or_default("RERANKER_CACHE_DIR", os.path.join(assets_dir, "reranker"))
     default_reranker_model = _env_or_default("RERANKER_MODEL", "Xenova/ms-marco-MiniLM-L-12-v2")
     default_whisper_dir    = os.path.join(assets_dir, "whisper")
-    default_tokenizer_dir  = os.path.join(assets_dir, "tokenizers", "Google", "Gemma4-12B")
-    default_tokenizer_repo = "google/gemma-2-2b"
 
     parser = argparse.ArgumentParser(description="Pre-download RAG-Web-UI model assets.")
     parser.add_argument("--cache-dir", default=default_splade_cache,
@@ -257,18 +211,12 @@ def main() -> None:
                         help=f"Cross-encoder model name (default: {default_reranker_model})")
     parser.add_argument("--whisper-dir", default=default_whisper_dir,
                         help=f"Whisper model directory (default: {default_whisper_dir})")
-    parser.add_argument("--tokenizer-dir", default=default_tokenizer_dir,
-                        help=f"Tokenizer destination directory (default: {default_tokenizer_dir})")
-    parser.add_argument("--tokenizer-repo", default=default_tokenizer_repo,
-                        help=f"HuggingFace repo for tokenizer (default: {default_tokenizer_repo})")
     parser.add_argument("--skip-splade", action="store_true",
                         help="Skip SPLADE model download")
     parser.add_argument("--skip-reranker", action="store_true",
                         help="Skip reranker model download")
     parser.add_argument("--skip-whisper", action="store_true",
                         help="Skip Whisper model download")
-    parser.add_argument("--skip-tokenizer", action="store_true",
-                        help="Skip tokenizer download")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -287,9 +235,6 @@ def main() -> None:
     if not args.skip_whisper:
         steps.append(("Whisper tiny.en model (browser STT, ONNX quantized)",
                       lambda: download_whisper(dest_dir=args.whisper_dir)))
-    if not args.skip_tokenizer:
-        steps.append(("HuggingFace tokenizer (backend token counting)",
-                      lambda: download_tokenizer(dest_dir=args.tokenizer_dir, repo_id=args.tokenizer_repo)))
 
     for i, (label, fn) in enumerate(steps, 1):
         print(f"\n[{i}/{len(steps)}] {label}")
