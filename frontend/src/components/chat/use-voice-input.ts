@@ -20,11 +20,15 @@ export function useVoiceInput(onFinal: (text: string) => void) {
   const [isListening, setIsListening] = useState(false);
   const [isModelLoading, setIsModelLoading] = useState(false);
   const [interim, setInterim] = useState("");
-  const [isSupported] = useState(
-    typeof window !== "undefined" &&
-      !!window.AudioContext &&
-      typeof Worker !== "undefined"
-  );
+  const [isSupported, setIsSupported] = useState(false);
+
+  // Defer browser-capability check to after hydration so SSR and client
+  // render the same initial UI (no hydration mismatch).
+  useEffect(() => {
+    setIsSupported(
+      !!window.AudioContext && typeof Worker !== "undefined"
+    );
+  }, []);
 
   const onFinalRef = useRef(onFinal);
   onFinalRef.current = onFinal;
