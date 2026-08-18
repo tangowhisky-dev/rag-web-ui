@@ -4,7 +4,7 @@ import { pipeline, env } from "@huggingface/transformers";
 
 // Serve model from our own server, never download from HuggingFace.
 env.allowRemoteModels = false;
-env.localModelPath = "/assets/models/";
+env.localModelPath = "/assets/";
 env.allowLocalModels = true;
 
 // Use a separate ONNX runtime thread pool inside the worker.
@@ -18,7 +18,7 @@ let loading: Promise<any> | null = null;
 async function getTranscriber() {
   if (transcriber) return transcriber;
   if (loading) return loading;
-  loading = pipeline("automatic-speech-recognition", "Xenova/whisper-tiny.en", {
+  loading = pipeline("automatic-speech-recognition", "whisper", {
     dtype: "q8",
   }).then((t) => {
     transcriber = t;

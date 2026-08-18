@@ -13,6 +13,10 @@ module.exports = {
         source: "/api/:path*",
         destination: `${process.env.BACKEND_URL || "http://backend:8000"}/api/:path*`,
       },
+      {
+        source: "/assets/:path*",
+        destination: `${process.env.BACKEND_URL || "http://backend:8000"}/assets/:path*`,
+      },
     ];
   },
 };

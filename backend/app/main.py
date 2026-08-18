@@ -230,6 +230,14 @@ watcher_service = None
 # Include routers
 app.include_router(api_router, prefix=settings.API_V1_STR)
 
+# Serve shared assets directory (e.g. Whisper model files for browser STT).
+# Mounted at /assets so the frontend can proxy /assets/* here.
+import os as _os
+from fastapi.staticfiles import StaticFiles as _StaticFiles
+_assets_dir = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))), "assets")
+if _os.path.isdir(_assets_dir):
+    app.mount("/assets", _StaticFiles(directory=_assets_dir), name="assets")
+
 
 @app.get("/")
 def root():
