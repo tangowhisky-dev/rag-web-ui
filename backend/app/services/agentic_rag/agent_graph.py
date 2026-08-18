@@ -1397,6 +1397,10 @@ async def finalize_node(state: AgentState, ctx: ToolContext) -> dict:
                             "output_tokens": chunk_usage.get("output_tokens", 0),
                             "total_tokens": chunk_usage.get("total_tokens", 0),
                         }
+                        # Calibrate the token estimator using the exact
+                        # prompt_tokens reported by the provider.
+                        from app.services.agentic_rag.token_budget import record_usage
+                        record_usage(system + user, chunk_usage.get("input_tokens", 0))
                     content = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
                     if content:
                         writer({"event": "token", "content": content})

@@ -62,9 +62,6 @@ class Settings(BaseSettings):
     RERANKER_MODEL: str = os.getenv("RERANKER_MODEL", "Xenova/ms-marco-MiniLM-L-12-v2")
     RERANKER_CACHE_DIR: str = os.getenv("RERANKER_CACHE_DIR", "/app/assets/reranker")
 
-    # Tokenizer for accurate token counting (local HuggingFace tokenizer directory)
-    TOKENIZER_MODEL: Optional[str] = os.getenv("TOKENIZER_MODEL") or None
-
     # Qdrant vector store
     QDRANT_HOST: str = os.getenv("QDRANT_HOST", "qdrant")
     QDRANT_PORT: int = int(os.getenv("QDRANT_PORT", "6333"))

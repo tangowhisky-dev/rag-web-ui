@@ -12,7 +12,8 @@ Downloads:
   2. FastEmbed ONNX cross-encoder reranker model (post-RRF reranking)
   3. Whisper tiny.en ONNX model (browser-based voice-to-text)
 
-Tokenizer files (assets/tokenizers/) are handled separately and manually.
+Tokenizer files are not needed — token counting uses a character-based
+heuristic calibrated by provider-reported usage data.
 
 Usage:
     python download_assets.py [options]

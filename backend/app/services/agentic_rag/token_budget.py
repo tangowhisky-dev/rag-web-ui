@@ -1,153 +1,90 @@
-"""Token-accurate context budgeting for the agent loop."""
+"""Token estimation for the agent loop.
+
+Uses a character-based heuristic (4 chars ≈ 1 token) for pre-request
+estimates, calibrated by provider-reported usage data when available.
+No model-specific tokenizer files are required — the heuristic adapts
+automatically regardless of which LLM an admin selects.
+
+The calibration ratio is updated whenever the provider returns exact
+prompt_tokens for a known text. Subsequent estimates for similar text
+use the calibrated ratio instead of the default 4 chars/token.
+"""
 
 from __future__ import annotations
 
 import logging
-import os
-from typing import Any, Optional, Union
+import threading
+from typing import Optional, Union
 from sqlalchemy.orm import Session
-
-from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-try:
-    import tiktoken
-except Exception:  # pragma: no cover - optional dependency guard
-    tiktoken = None  # type: ignore
+# ─── Heuristic ───────────────────────────────────────────────────────────
 
-try:
-    from transformers import AutoTokenizer  # type: ignore
-except Exception:  # pragma: no cover - optional dependency guard
-    AutoTokenizer = None  # type: ignore
+CHARS_PER_TOKEN = 4  # industry-standard rough estimate, same as Pi
 
 
-# Module-level singleton: loaded once, reused across all count_tokens calls.
-_tokenizer: Any = None
-_tokenizer_loaded: bool = False
+def estimate_tokens(text: str) -> int:
+    """Estimate token count from character length."""
+    return max(len(text), 1) // CHARS_PER_TOKEN
 
 
-def _is_local_path(name: str) -> bool:
-    """True if ``name`` points to a local directory (HF repo id or mounted path)."""
-    return os.path.isdir(name)
+# ─── Calibration ─────────────────────────────────────────────────────────
+
+_calibration_lock = threading.Lock()
+_calibration_ratio: float = CHARS_PER_TOKEN  # chars per token, adjustable
+_calibrated: bool = False
 
 
-def _tiktoken_encoder(model_name: str):
-    """Return a tiktoken encoder, falling back to cl100k_base."""
-    if tiktoken is None:
-        return None
-    try:
-        return tiktoken.encoding_for_model(model_name)
-    except Exception:
-        try:
-            return tiktoken.get_encoding(model_name)
-        except Exception:
-            return None
+def calibrate(chars: int, actual_tokens: int) -> None:
+    """Update the calibration ratio from a provider-reported usage pair.
 
-
-def _hf_tokenizer(model_name: str):
-    """Return a HuggingFace tokenizer.
-
-    Uses ``local_files_only=True`` when ``model_name`` is a local directory
-    (offline deployment) so AutoTokenizer never tries to hit the network.
+    Called after an LLM response includes ``prompt_tokens`` for a prompt
+    whose character length is known. The ratio is smoothed to avoid
+    over-fitting to a single request.
     """
-    if AutoTokenizer is None:
-        return None
-    try:
-        local_only = _is_local_path(model_name)
-        return AutoTokenizer.from_pretrained(model_name, local_files_only=local_only)
-    except Exception as exc:
-        logger.warning("HF tokenizer load failed for '%s': %s", model_name, exc)
-        return None
+    global _calibration_ratio, _calibrated
+    if chars <= 0 or actual_tokens <= 0:
+        return
+    observed = chars / actual_tokens
+    with _calibration_lock:
+        if not _calibrated:
+            _calibration_ratio = observed
+            _calibrated = True
+        else:
+            # Exponential moving average — smooth out per-request variance.
+            _calibration_ratio = 0.7 * _calibration_ratio + 0.3 * observed
+        logger.debug("[token_budget] calibration ratio: %.2f chars/token", _calibration_ratio)
 
 
-def get_tokenizer(model_name: Optional[str] = None):
-    """Load and cache a tokenizer for the given model name.
+def _current_ratio() -> float:
+    with _calibration_lock:
+        return _calibration_ratio
 
-    Order:
-    1. If ``TOKENIZER_MODEL`` is set (explicit override), try HF first.
-       This is the offline-deployment path: a local directory mounted in
-       the container.
-    2. tiktoken (OpenAI-compatible models).
-    3. HuggingFace AutoTokenizer (HF Hub repo id or local path).
-    4. tiktoken cl100k_base fallback.
 
-    The result is cached as a module-level singleton — the first call pays
-    the load cost, subsequent calls reuse it.
-    """
-    global _tokenizer, _tokenizer_loaded
-    if _tokenizer_loaded:
-        return _tokenizer
-
-    resolved = model_name or settings.TOKENIZER_MODEL
-    if not resolved:
-        from app.services.settings_service import get_setting
-        from app.db.session import SessionLocal
-        _db = SessionLocal()
-        try:
-            resolved = get_setting(_db, "OPENAI_MODEL", None)
-        finally:
-            _db.close()
-    if not resolved:
-        _tokenizer_loaded = True
-        return None
-
-    # Explicit TOKENIZER_MODEL override → HF first (offline local path).
-    if settings.TOKENIZER_MODEL and not model_name:
-        enc = _hf_tokenizer(resolved)
-        if enc is not None:
-            _tokenizer = enc
-            _tokenizer_loaded = True
-            return _tokenizer
-        # Fall through to tiktoken / cl100k_base below.
-
-    # tiktoken for OpenAI-compatible model names.
-    enc = _tiktoken_encoder(resolved)
-    if enc is not None:
-        _tokenizer = enc
-        _tokenizer_loaded = True
-        return _tokenizer
-
-    # HF as a secondary fallback (HF Hub repo id that transformers can resolve).
-    enc = _hf_tokenizer(resolved)
-    if enc is not None:
-        _tokenizer = enc
-        _tokenizer_loaded = True
-        return _tokenizer
-
-    # Last resort: cl100k_base (approximate for non-OpenAI models).
-    if tiktoken is not None:
-        try:
-            enc = tiktoken.get_encoding("cl100k_base")
-            logger.warning(
-                "No exact tokenizer for '%s'; using cl100k_base fallback", resolved
-            )
-            _tokenizer = enc
-            _tokenizer_loaded = True
-            return _tokenizer
-        except Exception:
-            pass
-
-    logger.warning(
-        "No tokenizer available for '%s'; count_tokens will use character heuristic",
-        resolved,
-    )
-    _tokenizer_loaded = True
-    return None
-
+# ─── Public API ──────────────────────────────────────────────────────────
 
 def count_tokens(text: Union[str, list, dict], model_name: Optional[str] = None) -> int:
-    """Count tokens in ``text`` using the best available tokenizer."""
+    """Estimate token count for ``text``.
+
+    The ``model_name`` argument is accepted for backward compatibility but
+    is no longer used — the heuristic + calibration approach is model-agnostic.
+    """
     if not isinstance(text, str):
         text = str(text)
-    tokenizer = get_tokenizer(model_name)
-    if tokenizer is not None:
-        try:
-            return len(tokenizer.encode(text))
-        except Exception:
-            pass
-    # Final fallback: rough character heuristic (1 token ≈ 4 characters).
-    return len(text) // 4
+    if not text:
+        return 0
+    return max(len(text) // int(_current_ratio()), 1)
+
+
+def record_usage(prompt_text: str, prompt_tokens: int) -> None:
+    """Calibrate the estimator using provider-reported usage.
+
+    Call this when the LLM response includes ``prompt_tokens`` (or
+    ``input_tokens``) and the corresponding prompt text is available.
+    """
+    if prompt_tokens > 0 and prompt_text:
+        calibrate(len(prompt_text), prompt_tokens)
 
 
 class ContextBudget:
@@ -168,7 +105,6 @@ class ContextBudget:
             self.tool_budget = tool_budget or get_setting(db, "CONTEXT_TOOL_BUDGET", org_id)
             self.trigger_ratio = get_setting(db, "CONTEXT_COMPACTION_TRIGGER_RATIO", org_id)
         else:
-            # No db session — resolve from app-level settings via a temporary session
             from app.services.settings_service import get_setting
             from app.db.session import SessionLocal
             _db = SessionLocal()

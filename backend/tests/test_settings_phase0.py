@@ -35,7 +35,6 @@ def test_infrastructure_settings_on_settings():
         "UPLOAD_DIR", "WATCH_DIR",
         "SPLADE_MODEL", "FASTEMBED_CACHE_DIR",
         "RERANKER_MODEL", "RERANKER_CACHE_DIR",
-        "TOKENIZER_MODEL",
         "SANDBOX_BACKEND",
         "LOG_LEVEL",
     }
