@@ -234,7 +234,12 @@ app.include_router(api_router, prefix=settings.API_V1_STR)
 # Mounted at /assets so the frontend can proxy /assets/* here.
 import os as _os
 from fastapi.staticfiles import StaticFiles as _StaticFiles
-_assets_dir = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))), "assets")
+# In Docker: backend at /app/app/main.py, assets at /app/assets.
+# On host:  backend at backend/app/main.py, assets at ./assets.
+_app_root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+_assets_dir = _os.path.join(_app_root, "assets")
+if not _os.path.isdir(_assets_dir):
+    _assets_dir = "/app/assets"  # Docker absolute path
 if _os.path.isdir(_assets_dir):
     app.mount("/assets", _StaticFiles(directory=_assets_dir), name="assets")
 
