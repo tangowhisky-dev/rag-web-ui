@@ -7,10 +7,14 @@ env.allowRemoteModels = false;
 env.localModelPath = "/assets/";
 env.allowLocalModels = true;
 
-// Use a separate ONNX runtime thread pool inside the worker.
+// Force WASM backend — the quantized ONNX model is incompatible with WebGPU
+// (missing dequantization scales for QDQ nodes).
 if (env.backends.onnx?.wasm) {
   env.backends.onnx.wasm.numThreads = 1;
 }
+env.backends.onnx = env.backends.onnx || {};
+env.backends.onnx.wasm = env.backends.onnx.wasm || {};
+env.backends.onnx.wasm.proxy = false;
 
 let transcriber: any = null;
 let loading: Promise<any> | null = null;
@@ -20,6 +24,7 @@ async function getTranscriber() {
   if (loading) return loading;
   loading = pipeline("automatic-speech-recognition", "whisper", {
     dtype: "q8",
+    device: "wasm",
   }).then((t) => {
     transcriber = t;
     loading = null;
