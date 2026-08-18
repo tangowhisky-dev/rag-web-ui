@@ -267,14 +267,6 @@ def test_org_settings_computed_chunk_overlap(db_session):
     assert os.chunk_overlap == int(os.CHUNK_SIZE * os.OVERLAP_PERCENTAGE)
 
 
-def test_org_settings_retrieval_config_presets(db_session):
-    """retrieval_config_presets returns a dict."""
-    os = OrgSettings(db_session, None)
-    presets = os.retrieval_config_presets
-    assert isinstance(presets, dict)
-    assert "FACTUAL" in presets
-
-
 def test_org_settings_unknown_attr_raises(db_session):
     os = OrgSettings(db_session, None)
     with pytest.raises(AttributeError):

@@ -413,9 +413,6 @@ async def create_message(
     # When branching (edit), the frontend sends the branched user message's
     # DB id so the assistant reply can be linked to it via parent_message_id.
     parent_message_id: Optional[int] = messages.get("parent_message_id") or None
-    # Per-message KB scope: if the frontend sends kb_ids, filter the chat's
-    # KBs to only those IDs. Otherwise use all KBs associated with the chat.
-    requested_kb_ids: Optional[list[int]] = messages.get("kb_ids") or None
 
     # ── File context injection ─────────────────────────────────────────────────
     # Build augmented query from: attached file (current turn) + any files from
@@ -461,11 +458,7 @@ async def create_message(
     if file_context_parts:
         query_text = "\n\n".join(file_context_parts) + "\n\n" + query_text
 
-    all_kb_ids = {kb.id for kb in chat.knowledge_bases}
-    if requested_kb_ids:
-        knowledge_base_ids = [kb_id for kb_id in requested_kb_ids if kb_id in all_kb_ids]
-    else:
-        knowledge_base_ids = list(all_kb_ids)
+    knowledge_base_ids = [kb.id for kb in chat.knowledge_bases]
 
     async def response_stream():
         async for chunk in generate_response(
@@ -503,7 +496,6 @@ async def create_message_with_file(
     file: UploadFile = File(...),
     message: str = Form(...),
     messages: str = Form(...),
-    kb_ids: Optional[str] = Form(default=None),
     current_user: User = Depends(get_current_user),
 ) -> StreamingResponse:
     """Accept multipart/form-data with a file + message; prepend file content as context."""
@@ -560,18 +552,7 @@ async def create_message_with_file(
         raise HTTPException(status_code=400, detail="'messages' must be valid JSON.")
 
     # Parse optional per-message KB scope
-    requested_kb_ids: Optional[list[int]] = None
-    if kb_ids:
-        try:
-            requested_kb_ids = _json.loads(kb_ids)
-        except Exception:
-            requested_kb_ids = None
-
-    all_kb_ids = {kb.id for kb in chat.knowledge_bases}
-    if requested_kb_ids:
-        knowledge_base_ids = [kb_id for kb_id in requested_kb_ids if kb_id in all_kb_ids]
-    else:
-        knowledge_base_ids = list(all_kb_ids)
+    knowledge_base_ids = [kb.id for kb in chat.knowledge_bases]
 
     async def response_stream():
         async for chunk in generate_response(
@@ -739,6 +720,21 @@ def update_chat(
         chat.title = chat_in.title
     if chat_in.pinned is not None:
         chat.pinned = chat_in.pinned
+    if chat_in.knowledge_base_ids is not None:
+        knowledge_bases = (
+            db.query(KnowledgeBase)
+            .filter(
+                KnowledgeBase.id.in_(chat_in.knowledge_base_ids),
+                KnowledgeBase.user_id == current_user.id,
+            )
+            .all()
+        )
+        if len(knowledge_bases) != len(chat_in.knowledge_base_ids):
+            raise HTTPException(
+                status_code=400,
+                detail="One or more knowledge bases not found"
+            )
+        chat.knowledge_bases = knowledge_bases
     db.commit()
     db.refresh(chat)
     return chat

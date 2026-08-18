@@ -17,8 +17,6 @@ import { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback } fr
 import { useRouter } from "next/navigation";
 import { Copy, Trash2, ChevronDown } from "lucide-react";
 import { useChatContext } from "@/contexts/chat-context";
-import ChatSettings from "@/components/chat/chat-settings";
-import type { ChatPatch } from "@/components/chat/chat-settings";
 import { api, ApiError, handleAuthRedirect } from "@/lib/api";
 import { APP_LOGO_SRC } from "@/lib/app-config";
 import { cancelStream } from "@/lib/cancel-stream";
@@ -101,9 +99,6 @@ interface ChatMessage {
 
 interface ChatMeta {
   id: number;
-  title: string;
-  temperature?: number;
-  model_name?: string;
   knowledge_bases?: Array<{ id: number; name: string }>;
   [key: string]: unknown;
 }
@@ -120,12 +115,8 @@ function ChatPageInner({ params }: { params: { id: string } }) {
   const { toast } = useToast();
   const { setActiveChat, setGraphRagActive, bumpChatToTop } = useChatContext();
   const [isInitialLoad, setIsInitialLoad] = useState(true);
-  const [chatTitle, setChatTitle] = useState<string | undefined>();
-  const [temperature, setTemperature] = useState(0.7);
-  const [modelName, setModelName] = useState("gpt-4o");
-  const [chatKbs, setChatKbs] = useState<Array<{ id: number; name: string }>>([]);
-  const [selectedKbIds, setSelectedKbIds] = useState<number[]>([]);
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [allKbs, setAllKbs] = useState<Array<{ id: number; name: string }>>([]);
+  const [associatedKbIds, setAssociatedKbIds] = useState<number[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -279,17 +270,16 @@ function ChatPageInner({ params }: { params: { id: string } }) {
 
   const fetchChat = useCallback(async () => {
     try {
-      // Fetch metadata (no messages) and first page in parallel
-      const [meta, page] = await Promise.all([
+      // Fetch metadata (no messages), first page, and all accessible KBs in parallel
+      const [meta, page, kbList] = await Promise.all([
         api.get(`/api/chat/${params.id}?include_messages=false`),
         api.get(`/api/chat/${params.id}/messages/paginated?limit=20`),
+        api.get("/api/knowledge-base"),
       ]);
-      setChatTitle(meta.title);
-      setTemperature((meta as ChatMeta).temperature ?? 0.7);
-      setModelName((meta as ChatMeta).model_name ?? "gpt-4o");
       const kbs = (meta as ChatMeta).knowledge_bases ?? [];
-      setChatKbs(kbs);
-      setSelectedKbIds(kbs.map((kb) => kb.id));
+      setAssociatedKbIds(kbs.map((kb) => kb.id));
+      const allKbList = Array.isArray(kbList) ? kbList : (kbList as any).items ?? [];
+      setAllKbs(allKbList.map((kb: any) => ({ id: kb.id, name: kb.name })));
       console.log("[FETCH] paginated messages:", page.messages.map((m: any) => ({ id: m.id, role: m.role, content: m.content?.slice(0, 30) })));
       setMessages(page.messages.map(formatMessage));
       setHasMoreMessages(page.has_more);
@@ -838,7 +828,6 @@ function ChatPageInner({ params }: { params: { id: string } }) {
         messages: requestMessages,
         ...(fileId ? { file_id: fileId } : {}),
         ...(parentMessageId ? { parent_message_id: parentMessageId } : {}),
-        ...(selectedKbIds.length > 0 ? { kb_ids: selectedKbIds } : {}),
       }),
       signal: controller.signal,
     });
@@ -1236,42 +1225,30 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     return last;
   }, [processedMessages]);
 
-  const handleSettingsUpdate = (patch: Partial<ChatPatch>) => {
-    if (patch.temperature !== undefined) setTemperature(patch.temperature);
-    if (patch.model_name !== undefined) setModelName(patch.model_name);
-  };
-
   const handleFollowUp = useCallback((query: string) => {
     handleSubmit(query);
   }, [handleSubmit]);
 
-  const handleKbToggle = useCallback((kbId: number) => {
-    setSelectedKbIds((prev) =>
-      prev.includes(kbId)
-        ? prev.length > 1
-          ? prev.filter((id) => id !== kbId)
-          : prev  // don't allow deselecting the last KB
-        : [...prev, kbId]
-    );
-  }, []);
+  const handleKbToggle = useCallback(async (kbId: number) => {
+    setAssociatedKbIds((prev) => {
+      const isAssociated = prev.includes(kbId);
+      if (isAssociated && prev.length <= 1) return prev;  // don't remove the last KB
+      const next = isAssociated
+        ? prev.filter((id) => id !== kbId)
+        : [...prev, kbId];
+      // Persist the new association set
+      api.patch(`/api/chat/${params.id}`, { knowledge_base_ids: next }).catch((err) => {
+        console.error("Failed to update chat KBs:", err);
+        // Revert on failure
+        setAssociatedKbIds(prev);
+      });
+      return next;
+    });
+  }, [params.id]);
 
   return (
     <>
       <div className="flex flex-col h-full relative">
-
-
-        {isSettingsOpen && (
-          <ChatSettings
-            chat={{
-              id: Number(params.id),
-              title: chatTitle ?? "",
-              temperature,
-              model_name: modelName,
-            }}
-            onClose={() => setIsSettingsOpen(false)}
-            onUpdate={handleSettingsUpdate}
-          />
-        )}
 
         {/* Scroll area */}
         <div ref={scrollContainerRef} className="flex-1 overflow-y-auto min-h-0 pt-14 pb-28">
@@ -1441,8 +1418,8 @@ function ChatPageInner({ params }: { params: { id: string } }) {
               onFileRemove={handleFileRemove}
               fileError={fileError}
               onFileError={setFileError}
-              knowledgeBases={chatKbs}
-              selectedKbIds={selectedKbIds}
+              knowledgeBases={allKbs}
+              selectedKbIds={associatedKbIds}
               onKbToggle={handleKbToggle}
             />
           </div>

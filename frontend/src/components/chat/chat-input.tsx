@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { Paperclip, ArrowUp, Square } from "lucide-react";
+import { Paperclip, ArrowUp, Square, Plus } from "lucide-react";
+import Link from "next/link";
 import { cn } from "@/lib/utils";
 import { FileChip, useFileDropzone, type UploadedFile } from "./file-attachment";
 
@@ -199,9 +200,9 @@ export function InputBar({
           />
         </label>
 
-        {/* KB pills — click to toggle selection */}
+        {/* KB pills — colored if associated, greyed if not; click to toggle */}
         {knowledgeBases.map((kb) => {
-          const selected = selectedKbIds.includes(kb.id);
+          const associated = selectedKbIds.includes(kb.id);
           return (
             <button
               key={kb.id}
@@ -209,9 +210,9 @@ export function InputBar({
               onClick={() => onKbToggle?.(kb.id)}
               className={cn(
                 "h-7 rounded-full border px-2.5 text-xs shrink-0 transition-colors",
-                selected
+                associated
                   ? "border-primary bg-primary/10 text-primary"
-                  : "border-border bg-muted/50 text-muted-foreground hover:bg-muted"
+                  : "border-border bg-muted/40 text-muted-foreground/60 hover:bg-muted hover:text-muted-foreground"
               )}
               data-testid="chat-input-kb-pill"
             >
@@ -219,6 +220,16 @@ export function InputBar({
             </button>
           );
         })}
+
+        {/* + button — link to KB creation page */}
+        <Link
+          href="/dashboard/knowledge"
+          className="h-7 w-7 rounded-full border border-dashed border-border flex items-center justify-center text-muted-foreground hover:text-foreground hover:border-foreground transition-colors shrink-0"
+          aria-label="Create new knowledge base"
+          data-testid="chat-input-kb-add"
+        >
+          <Plus className="h-3.5 w-3.5" />
+        </Link>
       </div>
 
       {/* File error */}

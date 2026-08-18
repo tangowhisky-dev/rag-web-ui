@@ -6,7 +6,7 @@ import Link from "next/link";
 import { motion } from "framer-motion";
 import {
   Plus, Pencil, Trash2, X, MessageSquare, Pin, Search,
-  Settings, Download, PanelLeftClose, PanelLeftOpen, FolderPlus,
+  Download, PanelLeftClose, PanelLeftOpen, FolderPlus,
 } from "lucide-react";
 import { DndContext, DragEndEvent, useDraggable } from "@dnd-kit/core";
 import { CSS } from "@dnd-kit/utilities";
@@ -343,13 +343,6 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
               <PanelLeftOpen className="h-4 w-4" />
             </button>
             <div className="flex-1" />
-            <Link
-              href="/dashboard/settings"
-              className="p-2 rounded-lg hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
-              aria-label="Settings"
-            >
-              <Settings className="h-4 w-4" />
-            </Link>
           </div>
         )}
 
@@ -504,17 +497,6 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
               )}
               {unpinned.map(renderChatItem)}
             </nav>
-
-            {/* Bottom: Settings */}
-            <div className="border-t px-3 py-3 shrink-0">
-              <Link
-                href="/dashboard/settings"
-                className="flex items-center gap-2 w-full rounded-lg px-3 py-2 text-sm text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-              >
-                <Settings className="h-4 w-4 shrink-0" />
-                Settings
-              </Link>
-            </div>
           </DndContext>
         )}
       </aside>

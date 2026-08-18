@@ -244,6 +244,8 @@ _ORG_OVERRIDABLE = [
                "int", 3, scope="org", reload="next_request", min_value=0),
     SettingDef("AGENT_MAX_WALL_SECONDS", "Agentic", "Agent wall-clock budget (s)",
                "float", 120, scope="org", reload="next_request", min_value=1.0),
+    SettingDef("GENERATION_TEMPERATURE", "Agentic", "Answer generation temperature",
+               "float", 0.7, scope="org", reload="next_request", min_value=0.0, max_value=2.0),
 
     # Context, compaction & quality
     SettingDef("CONTEXT_RESERVED_GENERATION", "Context", "Reserved generation tokens",

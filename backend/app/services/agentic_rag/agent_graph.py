@@ -1381,7 +1381,8 @@ async def finalize_node(state: AgentState, ctx: ToolContext) -> dict:
                 summary_text = state.get("compaction_summary") or ""
                 user = _build_finalize_user_prompt()
             try:
-                llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=0.7, streaming=True)
+                gen_temp = get_setting(ctx.db, "GENERATION_TEMPERATURE", ctx.org_id)
+                llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=gen_temp, streaming=True)
                 final = ""
                 async for chunk in llm.astream([
                     {"role": "system", "content": system},

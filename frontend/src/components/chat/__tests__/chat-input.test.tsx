@@ -168,6 +168,13 @@ describe("InputBar", () => {
       expect(pills).toHaveLength(0);
     });
 
+    it("renders + button linking to KB creation page", async () => {
+      await renderInputBar();
+      const addBtn = screen.getByTestId("chat-input-kb-add");
+      expect(addBtn).toBeInTheDocument();
+      expect(addBtn.closest("a")).toHaveAttribute("href", "/dashboard/knowledge");
+    });
+
     it("calls onKbToggle when pill is clicked", async () => {
       const onKbToggle = jest.fn();
       await renderInputBar({
@@ -265,6 +272,7 @@ describe("InputBar", () => {
       expect(screen.getByTestId("chat-input-send-button")).toBeInTheDocument();
       expect(screen.getByTestId("chat-input-file-button")).toBeInTheDocument();
       expect(screen.getByTestId("chat-input-kb-pill")).toBeInTheDocument();
+      expect(screen.getByTestId("chat-input-kb-add")).toBeInTheDocument();
     });
   });
 
