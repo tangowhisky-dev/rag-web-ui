@@ -8,17 +8,19 @@ module.exports = {
     proxyTimeout: 120000,
   },
   webpack: (config, { isServer }) => {
-    // @huggingface/transformers ships a Node.js bundle (transformers.node.mjs)
-    // that imports onnxruntime-node and native WASM files. The whisper worker
-    // runs in the browser and only needs the WASM (web) bundle.
-    const browserBundle = require.resolve(
-      "@huggingface/transformers/dist/transformers.web.js"
+    // @huggingface/transformers resolves to the Node.js bundle under the
+    // "node" exports condition, which pulls in onnxruntime-node (native
+    // .node binary) and WASM files webpack can't bundle. The whisper worker
+    // runs in the browser, so alias to the browser bundle directly.
+    const fs = require("fs");
+    const path = require("path");
+    const realDir = fs.realpathSync(
+      path.resolve("node_modules/@huggingface/transformers")
     );
     config.resolve.alias = {
       ...config.resolve.alias,
-      "@huggingface/transformers": browserBundle,
+      "@huggingface/transformers": path.join(realDir, "dist", "transformers.web.js"),
     };
-    // Externalize native bindings so webpack never tries to parse .node files.
     config.externals = config.externals || [];
     config.externals.push({
       "onnxruntime-node": "commonjs onnxruntime-node",
