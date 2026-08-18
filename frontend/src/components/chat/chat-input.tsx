@@ -1,10 +1,11 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { Paperclip, ArrowUp, Square, Plus } from "lucide-react";
+import { Paperclip, ArrowUp, Square, Plus, Mic } from "lucide-react";
 import Link from "next/link";
 import { cn } from "@/lib/utils";
 import { FileChip, useFileDropzone, type UploadedFile } from "./file-attachment";
+import { useVoiceInput } from "./use-voice-input";
 
 interface KbPill {
   id: number;
@@ -78,6 +79,14 @@ export function InputBar({
   const [internalError, setInternalError] = useState("");
   const activeError = onFileError !== undefined ? fileError : internalError;
 
+  const { isListening, isSupported: voiceSupported, interim, start: startVoice, stop: stopVoice } = useVoiceInput(
+    (text) => {
+      const trimmed = text.trim();
+      if (!trimmed) return;
+      onChange(value ? `${value} ${trimmed}` : trimmed);
+    }
+  );
+
   const handleFileAccepted = (f: File) => {
     if (onFileAcceptedProp) onFileAcceptedProp(f);
     if (onFileError) onFileError(""); else setInternalError("");
@@ -102,6 +111,7 @@ export function InputBar({
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
+      if (isListening) { stopVoice(); return; }
       if (value.trim()) {
         onSubmit();
       }
@@ -109,7 +119,13 @@ export function InputBar({
   };
 
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    onChange(e.target.value);
+    // While listening, textarea shows value+interim; user edits should
+    // only affect the committed value, not the interim preview.
+    if (isListening) {
+      onChange(e.target.value.slice(0, e.target.value.length - interim.length));
+    } else {
+      onChange(e.target.value);
+    }
   };
 
   return (
@@ -127,11 +143,11 @@ export function InputBar({
         </div>
       )}
 
-      {/* Textarea + send button — right-center aligned */}
+      {/* Textarea + mic + send button — right-center aligned */}
       <div className="flex items-center px-3 pt-3 pb-1 gap-2">
         <textarea
           ref={textareaRef}
-          value={value}
+          value={isListening ? value + interim : value}
           onChange={handleInputChange}
           onKeyDown={handleKeyDown}
           placeholder={placeholder}
@@ -145,6 +161,23 @@ export function InputBar({
           style={{ lineHeight: `${LINE_HEIGHT_PX}px`, height: `${LINE_HEIGHT_PX}px` }}
           data-testid="chat-input-textarea"
         />
+        {/* Mic button — voice-to-text (Chrome/Edge only) */}
+        {voiceSupported && !disabled && (
+          <button
+            type="button"
+            onClick={isListening ? stopVoice : startVoice}
+            className={cn(
+              "h-8 w-8 rounded-full flex items-center justify-center transition-all shrink-0",
+              isListening
+                ? "bg-red-500 text-white animate-pulse"
+                : "bg-muted text-muted-foreground hover:bg-muted/80"
+            )}
+            aria-label={isListening ? "Stop voice input" : "Start voice input"}
+            data-testid="chat-input-mic-button"
+          >
+            <Mic className="h-4 w-4" />
+          </button>
+        )}
         {/* Send / Stop button — right-center of input */}
         {disabled ? (
           <button
