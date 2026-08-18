@@ -8,18 +8,21 @@ module.exports = {
     proxyTimeout: 120000,
   },
   webpack: (config, { isServer }) => {
-    // @huggingface/transformers pulls in onnxruntime-node which ships
-    // native .node binaries. Webpack can't parse these — exclude them.
-    // The worker only uses onnxruntime-web (WASM), not the native binding.
+    // @huggingface/transformers ships a Node.js bundle (transformers.node.mjs)
+    // that imports onnxruntime-node and native WASM files. The whisper worker
+    // runs in the browser and only needs the WASM (web) bundle.
+    const browserBundle = require.resolve(
+      "@huggingface/transformers/dist/transformers.web.js"
+    );
+    config.resolve.alias = {
+      ...config.resolve.alias,
+      "@huggingface/transformers": browserBundle,
+    };
+    // Externalize native bindings so webpack never tries to parse .node files.
     config.externals = config.externals || [];
     config.externals.push({
       "onnxruntime-node": "commonjs onnxruntime-node",
     });
-    if (isServer) {
-      config.externals.push({
-        "onnxruntime-web": "commonjs onnxruntime-web",
-      });
-    }
     return config;
   },
   async rewrites() {
