@@ -159,9 +159,10 @@ def download_whisper(dest_dir: str) -> None:
         "config.json", "tokenizer.json", "tokenizer_config.json",
         "normalizer.json", "preprocessor_config.json",
         "special_tokens_map.json", "vocab.json", "merges.txt",
+        "generation_config.json",
     ]
     onnx_files = [
-        "encoder_model_quantized.onnx",
+        "encoder_model.onnx",
         "decoder_model_merged_quantized.onnx",
         "decoder_with_past_model_quantized.onnx",
     ]

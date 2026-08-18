@@ -79,7 +79,7 @@ export function InputBar({
   const [internalError, setInternalError] = useState("");
   const activeError = onFileError !== undefined ? fileError : internalError;
 
-  const { isListening, isModelLoading, isSupported: voiceSupported, interim, start: startVoice, stop: stopVoice } = useVoiceInput(
+  const { isListening, isModelLoading, isSupported: voiceSupported, interim, audioLevel, start: startVoice, stop: stopVoice } = useVoiceInput(
     (text) => {
       const trimmed = text.trim();
       if (!trimmed) return;
@@ -163,23 +163,40 @@ export function InputBar({
         />
         {/* Mic button — voice-to-text (local Whisper, offline) */}
         {voiceSupported && !disabled && (
-          <button
-            type="button"
-            onClick={isListening ? stopVoice : startVoice}
-            disabled={isModelLoading}
-            className={cn(
-              "h-8 w-8 rounded-full flex items-center justify-center transition-all shrink-0",
-              isListening
-                ? "bg-red-500 text-white animate-pulse"
-                : isModelLoading
-                  ? "bg-muted text-muted-foreground animate-spin"
-                  : "bg-muted text-muted-foreground hover:bg-muted/80"
+          <div className="relative flex flex-col items-center shrink-0">
+            <button
+              type="button"
+              onClick={isListening ? stopVoice : startVoice}
+              disabled={isModelLoading}
+              className={cn(
+                "h-8 w-8 rounded-full flex items-center justify-center transition-all",
+                isListening
+                  ? "bg-red-500 text-white"
+                  : isModelLoading
+                    ? "bg-muted text-muted-foreground animate-spin"
+                    : "bg-muted text-muted-foreground hover:bg-muted/80"
+              )}
+              aria-label={isListening ? "Stop voice input" : isModelLoading ? "Loading voice model…" : "Start voice input"}
+              data-testid="chat-input-mic-button"
+            >
+              <Mic className="h-4 w-4" />
+            </button>
+            {/* Waveform animation — shows live audio amplitude */}
+            {isListening && (
+              <div className="absolute -bottom-3 flex items-end gap-0.5 h-3">
+                {[0, 1, 2, 3, 4].map((i) => (
+                  <div
+                    key={i}
+                    className="w-0.5 rounded-full bg-red-500 transition-all duration-75"
+                    style={{
+                      height: `${Math.max(2, audioLevel * 12 * (1 - Math.abs(i - 2) * 0.3))}px`,
+                      opacity: 0.4 + audioLevel * 0.6,
+                    }}
+                  />
+                ))}
+              </div>
             )}
-            aria-label={isListening ? "Stop voice input" : isModelLoading ? "Loading voice model…" : "Start voice input"}
-            data-testid="chat-input-mic-button"
-          >
-            <Mic className="h-4 w-4" />
-          </button>
+          </div>
         )}
         {/* Send / Stop button — right-center of input */}
         {disabled ? (
