@@ -24,6 +24,9 @@ async function getTranscriber() {
     transcriber = t;
     loading = null;
     return t;
+  }).catch((err) => {
+    loading = null;
+    throw err;
   });
   return loading;
 }
@@ -32,9 +35,12 @@ self.addEventListener("message", async (e: MessageEvent) => {
   const { type, audio } = e.data;
   if (type === "load") {
     try {
+      console.log("[whisper-worker] loading model…");
       await getTranscriber();
+      console.log("[whisper-worker] model loaded, posting ready");
       (self as any).postMessage({ type: "ready" });
     } catch (err) {
+      console.error("[whisper-worker] load failed:", err);
       (self as any).postMessage({ type: "error", error: String(err) });
     }
     return;
@@ -49,6 +55,7 @@ self.addEventListener("message", async (e: MessageEvent) => {
       });
       (self as any).postMessage({ type: "result", text: output.text.trim() });
     } catch (err) {
+      console.error("[whisper-worker] transcribe failed:", err);
       (self as any).postMessage({ type: "error", error: String(err) });
     }
     return;

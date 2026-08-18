@@ -51,6 +51,9 @@ export function useVoiceInput(onFinal: (text: string) => void) {
       type: "module",
     });
     workerRef.current = worker;
+    worker.onerror = (e) => {
+      console.error("[voice] worker error:", e.message, e.filename, e.lineno);
+    };
     return new Promise<Worker>((resolve, reject) => {
       const onReady = (e: MessageEvent) => {
         if (e.data.type === "ready") {
