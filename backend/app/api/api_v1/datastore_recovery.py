@@ -62,12 +62,13 @@ class RecoveryStatusResponse(BaseModel):
 
 
 def _get_startup_recovery():
-    """Access the module-level startup_recovery from main.py."""
-    from app.main import startup_recovery
+    """Access the startup recovery service stored in main._services."""
+    from app.main import _services
 
-    if startup_recovery is None:
+    recovery = _services.get("recovery")
+    if recovery is None:
         return None
-    return startup_recovery
+    return recovery
 
 
 def _map_recovery_status(scan: Dict[str, Any]) -> RecoveryStatusResponse:

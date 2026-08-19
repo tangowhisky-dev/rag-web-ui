@@ -128,6 +128,10 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
         # Per-file debouncing: file_path -> last call timestamp (monotonic)
         self._last_call: Dict[str, float] = {}
 
+        # Track delayed-dispatch threads so we can wait for them on shutdown.
+        self._delayed_threads: List[threading.Thread] = []
+        self._delayed_threads_lock = threading.Lock()
+
         # Processing state flag — per-datastore set to allow independent
         # processing across different datastores (a slow ingestion for one
         # datastore doesn't block others).
@@ -426,14 +430,28 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
 
         def _delayed_dispatch(p, et):
             _time.sleep(1.0)
-            # Create a synthetic event with is_directory and event_type attributes
-            event = _SyntheticEvent(src_path=p, is_directory=False, event_type=et)
-            ds_id = self._resolve_datastore(p)
-            if ds_id is not None:
-                self._queue_change(ds_id, event, et)
-                self._process_pending_changes(ds_id)
+            try:
+                # Create a synthetic event with is_directory and event_type attributes
+                event = _SyntheticEvent(src_path=p, is_directory=False, event_type=et)
+                ds_id = self._resolve_datastore(p)
+                if ds_id is not None:
+                    self._queue_change(ds_id, event, et)
+                    self._process_pending_changes(ds_id)
+            except Exception as e:
+                logger.warning("[WATCHER] delayed_dispatch error path=%s: %s", p, e)
+            finally:
+                with self._delayed_threads_lock:
+                    try:
+                        self._delayed_threads.remove(threading.current_thread())
+                    except ValueError:
+                        pass
 
-        _threading.Thread(target=_delayed_dispatch, args=(path, event_type), daemon=True).start()
+        t = _threading.Thread(target=_delayed_dispatch, args=(path, event_type), daemon=True)
+        with self._delayed_threads_lock:
+            # Prune finished threads to prevent unbounded list growth
+            self._delayed_threads = [th for th in self._delayed_threads if th.is_alive()]
+            self._delayed_threads.append(t)
+        t.start()
 
     # ------------------------------------------------------------------
     # Watchdog dispatch — called by observer to route events to on_* methods

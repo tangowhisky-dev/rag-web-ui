@@ -77,13 +77,13 @@ class DataStoreCreate(BaseModel):
 
 
 class DataStoreUpdate(BaseModel):
-    name: Optional[str] = None
+    name: Optional[str] = Field(default=None, min_length=1, max_length=255)
     description: Optional[str] = None
-    folder_path: Optional[str] = None
+    folder_path: Optional[str] = Field(default=None, min_length=1, max_length=1024)
     scan_pattern: Optional[str] = None
     is_active: Optional[bool] = None
     auto_scan_enabled: Optional[bool] = None
-    auto_scan_interval_minutes: Optional[int] = None
+    auto_scan_interval_minutes: Optional[int] = Field(default=None, ge=1, le=1440)
 
 
 class DataStoreResponse(BaseModel):
@@ -121,6 +121,10 @@ class DataStoreResponse(BaseModel):
 
 class AssignRequest(BaseModel):
     org_ids: List[int]
+    # When true, an empty org_ids list removes all in-scope assignments.
+    # Without this flag, empty org_ids is rejected to prevent accidental
+    # mass-unassignment from a misclicked empty payload.
+    force_clear: bool = False
 
 
 class DataStoreStatusResponse(BaseModel):
@@ -230,12 +234,28 @@ def _serialize_ds(ds: DataStore) -> dict:
 # ---------------------------------------------------------------------------
 
 
-@router.get("/datastores", response_model=List[DataStoreResponse])
+class DataStoreListResponse(BaseModel):
+    items: List[DataStoreResponse]
+    total: int
+    skip: int
+    limit: int
+
+
+@router.get("/datastores", response_model=DataStoreListResponse)
 def list_datastores(
+    skip: int = 0,
+    limit: int = 50,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
-    """List datastores visible to the current admin's organisation scope."""
+    """List datastores visible to the current admin's organisation scope.
+
+    Paginated — use ``skip`` and ``limit`` query params. Default page
+    size is 50, max 200.
+    """
+    limit = min(max(limit, 1), 200)
+    skip = max(skip, 0)
+
     admin_org_ids = get_admin_org_ids(db, current_user)
     query = db.query(DataStore)
     if admin_org_ids is not None:
@@ -248,7 +268,8 @@ def list_datastores(
             )
             .distinct()
         )
-    datastores = query.order_by(DataStore.id).all()
+    total = query.count()
+    datastores = query.order_by(DataStore.id).offset(skip).limit(limit).all()
     result = []
     for ds in datastores:
         resp = _serialize_ds(ds)
@@ -294,7 +315,7 @@ def list_datastores(
         except HTTPException:
             pass
         result.append(DataStoreResponse(**resp))
-    return result
+    return DataStoreListResponse(items=result, total=total, skip=skip, limit=limit)
 
 
 @router.post("/datastores", response_model=DataStoreResponse, status_code=201)
@@ -526,6 +547,12 @@ def assign_datastore_to_orgs(
     _get_datastore_or_404(db, datastore_id)
 
     if not payload.org_ids:
+        if not payload.force_clear:
+            raise HTTPException(
+                status_code=400,
+                detail="Empty org_ids would remove all assignments. "
+                       "Set force_clear=true to confirm.",
+            )
         # Remove only assignments within the admin's scope
         deleted = (
             db.query(OrganizationDataStore)
@@ -594,36 +621,28 @@ def unassign_datastore_from_orgs(
     _get_datastore_or_404(db, datastore_id)
 
     if not payload.org_ids:
-        # Empty list = unassign only from orgs in the admin's scope
-        deleted = (
+        raise HTTPException(
+            status_code=400,
+            detail="org_ids required — cannot unassign without specifying "
+                   "which organisations to remove.",
+        )
+
+    for org_id in payload.org_ids:
+        if admin_org_ids is not None and org_id not in admin_org_ids:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Organisation outside your scope (id={org_id})",
+            )
+        link = (
             db.query(OrganizationDataStore)
             .filter(
                 OrganizationDataStore.data_store_id == datastore_id,
-                OrganizationDataStore.org_id.in_(admin_org_ids or []),
+                OrganizationDataStore.org_id == org_id,
             )
-            .delete(synchronize_session=False)
+            .first()
         )
-        logger.info(
-            "[DATASTORE] unassigned id=%d from in-scope orgs (%d removed)",
-            datastore_id, deleted,
-        )
-    else:
-        for org_id in payload.org_ids:
-            if admin_org_ids is not None and org_id not in admin_org_ids:
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"Organisation outside your scope (id={org_id})",
-                )
-            link = (
-                db.query(OrganizationDataStore)
-                .filter(
-                    OrganizationDataStore.data_store_id == datastore_id,
-                    OrganizationDataStore.org_id == org_id,
-                )
-                .first()
-            )
-            if link:
-                db.delete(link)
+        if link:
+            db.delete(link)
 
     db.commit()
 

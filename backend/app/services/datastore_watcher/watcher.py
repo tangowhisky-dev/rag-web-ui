@@ -61,6 +61,7 @@ class DataStoreWatcher:
         self._observer = None
         self._lock = threading.Lock()
         self._running = False
+        self._health_thread = None
         self._executor = ThreadPoolExecutor(
             max_workers=4, thread_name_prefix="watcher"
         )
@@ -170,10 +171,31 @@ class DataStoreWatcher:
 
         # Register the observer on the root folder with recursive=True
         # This tells the observer to watch subdirectories as well
+        import os as _os
+        if not _os.path.isdir("/app/data"):
+            logger.warning(
+                "[WATCHER] root directory /app/data does not exist — "
+                "creating it so the observer can be scheduled"
+            )
+            try:
+                _os.makedirs("/app/data", exist_ok=True)
+            except OSError as e:
+                logger.error("[WATCHER] failed to create /app/data: %s — watcher will not detect file changes", e)
+                return
         self._observer.schedule(self._handler, "/app/data", recursive=True)
         logger.info("[WATCHER] observer registered on root=/app/data (recursive=True)")
 
         self._sync_watchers_with_database()
+
+        # Start a lightweight health-check thread that restarts the
+        # observer if it dies unexpectedly (e.g. inotify exhaustion,
+        # too many open files, OS-level resource limits).
+        self._health_thread = threading.Thread(
+            target=self._health_check_loop,
+            name="watcher-health",
+            daemon=True,
+        )
+        self._health_thread.start()
 
         logger.info("[WATCHER] service started")
 
@@ -197,6 +219,38 @@ class DataStoreWatcher:
 
         self._executor.shutdown(wait=False, cancel_futures=True)
         logger.info("[WATCHER] service stopped")
+
+    def _health_check_loop(self) -> None:
+        """Monitor the observer thread and restart it if it dies."""
+        import time as _time
+        while True:
+            _time.sleep(30)
+            with self._lock:
+                if not self._running:
+                    return
+                observer = self._observer
+            if observer is None:
+                continue
+            # watchdog observers set ._stopped_event when they finish
+            if getattr(observer, "is_alive", lambda: False)():
+                continue
+            logger.warning("[WATCHER] observer thread died — attempting restart")
+            try:
+                from watchdog.observers import Observer
+                from watchdog.observers.polling import PollingObserver
+                from app.core.settings_registry import get_def
+                poll_interval = get_def("WATCH_POLL_INTERVAL").default
+                if settings.WATCHER_USE_INOTIFY:
+                    new_observer = Observer(timeout=poll_interval)
+                else:
+                    new_observer = PollingObserver(timeout=poll_interval)
+                new_observer.start()
+                new_observer.schedule(self._handler, "/app/data", recursive=True)
+                with self._lock:
+                    self._observer = new_observer
+                logger.info("[WATCHER] observer restarted successfully")
+            except Exception as e:
+                logger.error("[WATCHER] observer restart failed: %s — will retry in 30s", e)
 
     @property
     def is_running(self) -> bool:

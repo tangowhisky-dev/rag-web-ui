@@ -15,10 +15,8 @@ env.allowLocalModels = true;
 // (missing dequantization scales for QDQ nodes).
 if (env.backends.onnx?.wasm) {
   env.backends.onnx.wasm.numThreads = 1;
+  env.backends.onnx.wasm.proxy = false;
 }
-env.backends.onnx = env.backends.onnx || {};
-env.backends.onnx.wasm = env.backends.onnx.wasm || {};
-env.backends.onnx.wasm.proxy = false;
 
 let transcriber: any = null;
 let loading: Promise<any> | null = null;

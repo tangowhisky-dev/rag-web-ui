@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -198,6 +198,7 @@ def get_datastore_scan_progress(
 @router.get("/datastores/{datastore_id}/scan-progress-stream")
 def scan_progress_stream(
     datastore_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
@@ -229,6 +230,9 @@ def scan_progress_stream(
         # the datastore — not a stale completed scan from a previous run.
         start_time = time.monotonic()
         while time.monotonic() - start_time < 5:
+            if await request.is_disconnected():
+                logger.info("[SSE] client disconnected (wait phase) datastore_id=%d", datastore_id)
+                return
             scan = None
             for scan_id in reversed(watcher._active_scans.keys()):
                 scan = watcher._active_scans[scan_id]
@@ -299,6 +303,10 @@ def scan_progress_stream(
         last_status = None
 
         while True:
+            if await request.is_disconnected():
+                logger.info("[SSE] client disconnected datastore_id=%d", datastore_id)
+                break
+
             scan = None
             for scan_id in reversed(watcher._active_scans.keys()):
                 scan = watcher._active_scans[scan_id]
@@ -476,12 +484,14 @@ async def trigger_datastore_scan(
     # Clean up any stale scans from previous runs
     if watcher is not None:
         stale_scan_id = None
-        for sid, info in watcher._active_scans.items():
-            if info.get("datastore_id") == datastore_id:
-                stale_scan_id = sid
-                break
+        with watcher._active_scans_lock:
+            for sid, info in watcher._active_scans.items():
+                if info.get("datastore_id") == datastore_id:
+                    stale_scan_id = sid
+                    break
+            if stale_scan_id is not None:
+                watcher._active_scans.pop(stale_scan_id, None)
         if stale_scan_id is not None:
-            watcher._active_scans.pop(stale_scan_id, None)
             logger.info(
                 "[DATASTORE] cleanup_stale_scan scan_id=%d datastore_id=%d",
                 stale_scan_id, datastore_id,

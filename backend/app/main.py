@@ -154,29 +154,38 @@ async def lifespan(app: FastAPI):
 
     # Cross-store reconciliation: remove orphaned Qdrant vectors, Neo4j
     # graph nodes, and MySQL chunk/task rows left by failed transactions
-    # or crashed workers.  Runs synchronously before the watcher starts
-    # so the system is consistent before new ingestion begins.
-    try:
-        from app.services.cleanup import run_reconciliation
-        run_reconciliation()
-    except Exception as e:
-        logging.getLogger(__name__).warning("Startup reconciliation failed: %s", e)
-
-    # Start the DataStore watcher service after recovery
-    global watcher_service
-    from app.services.settings_service import get_setting
-    _db = SessionLocal()
-    try:
-        _watcher_enabled = get_setting(_db, "WATCHER_ENABLED", None)
-    finally:
-        _db.close()
-    if _watcher_enabled:
+    # or crashed workers.  Runs in a background thread so the app becomes
+    # available immediately.  The watcher is started inside the same
+    # thread after reconciliation completes, preserving the ordering
+    # invariant (reconcile before new ingestion begins).
+    def _reconcile_then_start_watcher():
         try:
-            _services["watcher"] = DataStoreWatcher()
-            _services["watcher"].start()
-            watcher_service = _services["watcher"]
+            from app.services.cleanup import run_reconciliation
+            run_reconciliation()
         except Exception as e:
-            logging.getLogger(__name__).error("Failed to start DataStoreWatcher: %s", e)
+            logging.getLogger(__name__).warning("Startup reconciliation failed: %s", e)
+        # Start the DataStore watcher after reconciliation completes
+        global watcher_service
+        from app.services.settings_service import get_setting
+        _db = SessionLocal()
+        try:
+            _watcher_enabled = get_setting(_db, "WATCHER_ENABLED", None)
+        finally:
+            _db.close()
+        if _watcher_enabled:
+            try:
+                _services["watcher"] = DataStoreWatcher()
+                _services["watcher"].start()
+                watcher_service = _services["watcher"]
+            except Exception as e:
+                logging.getLogger(__name__).error("Failed to start DataStoreWatcher: %s", e)
+
+    import threading as _threading
+    _threading.Thread(
+        target=_reconcile_then_start_watcher,
+        name="startup-reconcile",
+        daemon=True,
+    ).start()
 
     # Reset any tasks left in "processing" state from a previous worker crash.
     # KB tasks with a valid document are reset to "pending" so the user can

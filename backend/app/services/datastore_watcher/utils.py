@@ -14,9 +14,24 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # Fallback locks for SQLite (which doesn't support GET_LOCK).
-# Keyed by (datastore_id, file_path) — cleaned up after use.
+# Keyed by (datastore_id, file_path) — cleaned up after release to
+# prevent unbounded growth over long-running sessions.
 _file_locks: dict[tuple[int, str], threading.Lock] = {}
 _file_locks_guard = threading.Lock()
+_FILE_LOCKS_MAX = 5000
+
+
+def _cleanup_file_locks() -> None:
+    """Remove unlocked entries to prevent unbounded dict growth."""
+    with _file_locks_guard:
+        if len(_file_locks) <= _FILE_LOCKS_MAX:
+            return
+        stale = [
+            key for key, lock in _file_locks.items()
+            if not lock.locked()
+        ]
+        for key in stale:
+            _file_locks.pop(key, None)
 
 
 def acquire_file_lock(db, datastore_id: int, file_path: str) -> bool:
@@ -41,7 +56,13 @@ def acquire_file_lock(db, datastore_id: int, file_path: str) -> bool:
             if lock is None:
                 lock = threading.Lock()
                 _file_locks[key] = lock
-        return lock.acquire(blocking=False)
+            elif not lock.locked():
+                # Reuse an existing unlocked entry
+                pass
+        acquired = lock.acquire(blocking=False)
+        if not acquired:
+            _cleanup_file_locks()
+        return acquired
 
 
 def release_file_lock(db, datastore_id: int, file_path: str) -> None:
@@ -60,6 +81,9 @@ def release_file_lock(db, datastore_id: int, file_path: str) -> None:
                     lock.release()
                 except RuntimeError:
                     pass  # not held by this thread
+            # Remove the entry if it's no longer held
+            if lock is not None and not lock.locked():
+                _file_locks.pop(key, None)
 
 
 

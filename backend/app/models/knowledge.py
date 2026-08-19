@@ -49,7 +49,7 @@ class Document(Base, TimestampMixin):
     __tablename__ = "documents"
 
     id = Column(Integer, primary_key=True, index=True)
-    file_path = Column(String(255), nullable=False)  # Path in local storage
+    file_path = Column(String(1024), nullable=False)  # Path in local storage
     file_name = Column(String(255), nullable=False)  # Actual file name
     file_size = Column(BigInteger, nullable=False)  # File size in bytes
     content_type = Column(String(100), nullable=False)  # MIME type
@@ -94,10 +94,10 @@ class ProcessingTask(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     knowledge_base_id = Column(Integer, ForeignKey("knowledge_bases.id", ondelete="CASCADE"))
-    data_store_id = Column(Integer, ForeignKey("data_stores.id"), nullable=True)
-    document_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=True)
+    data_store_id = Column(Integer, ForeignKey("data_stores.id"), nullable=True, index=True)
+    document_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=True, index=True)
     document_upload_id = Column(Integer, ForeignKey("document_uploads.id", ondelete="CASCADE"), nullable=True)
-    status = Column(String(50), default="pending")  # pending, processing, completed, failed
+    status = Column(String(50), default="pending", index=True)  # pending, processing, completed, failed
     error_message = Column(Text, nullable=True)
     progress = Column(Integer, default=0, nullable=True)          # 0-100
     progress_message = Column(String(255), nullable=True)         # human-readable stage label
@@ -118,8 +118,8 @@ class DocumentChunk(Base, TimestampMixin):
 
     id = Column(String(64), primary_key=True)  # SHA-256 hash as ID
     kb_id = Column(Integer, ForeignKey("knowledge_bases.id"), nullable=True)
-    data_store_id = Column(Integer, ForeignKey("data_stores.id"), nullable=True)
-    document_id = Column(Integer, ForeignKey("documents.id"), nullable=False)
+    data_store_id = Column(Integer, ForeignKey("data_stores.id"), nullable=True, index=True)
+    document_id = Column(Integer, ForeignKey("documents.id"), nullable=False, index=True)
     file_name = Column(String(255), nullable=False)
     chunk_text = Column(LONGTEXT, nullable=False)   # the actual chunk text — FULLTEXT indexed
     chunk_index = Column(Integer, nullable=True)    # position within the document (0-based)

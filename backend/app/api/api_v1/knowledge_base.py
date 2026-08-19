@@ -785,13 +785,22 @@ async def delete_document(
     cleanup_warnings = []
 
     try:
-        # 1. Collect chunk IDs before deleting them (needed for Qdrant point IDs)
+        # 1. Collect chunk IDs before deleting them (needed for Qdrant point IDs).
+        #    DataStore documents have kb_id=NULL and data_store_id set, so we
+        #    must use the correct scope filter to find their chunks.
+        if document.data_store_id is not None:
+            scope_filter = DocumentChunk.data_store_id == document.data_store_id
+        else:
+            scope_filter = (
+                DocumentChunk.kb_id == kb_id,
+                DocumentChunk.data_store_id.is_(None),
+            )
         chunk_ids = [
             c.id for c in
             db.query(DocumentChunk.id)
             .filter(
                 DocumentChunk.document_id == doc_id,
-                DocumentChunk.kb_id == kb_id
+                *scope_filter if isinstance(scope_filter, tuple) else [scope_filter]
             )
             .all()
         ]
@@ -800,7 +809,10 @@ async def delete_document(
         if chunk_ids:
             try:
                 qdrant = QdrantClient(host=settings.QDRANT_HOST, port=settings.QDRANT_PORT)
-                collection_name = f"kb_{kb_id}"
+                if document.data_store_id is not None:
+                    collection_name = f"ds_{document.data_store_id}"
+                else:
+                    collection_name = f"kb_{kb_id}"
                 # Check if collection exists — it may not if ingestion failed
                 # before the Qdrant upsert step, or if it was never created.
                 existing = {c.name for c in qdrant.get_collections().collections}
@@ -821,7 +833,7 @@ async def delete_document(
         #    since we already fetched the IDs and want the delete to be transactional)
         db.query(DocumentChunk).filter(
             DocumentChunk.document_id == doc_id,
-            DocumentChunk.kb_id == kb_id
+            *scope_filter if isinstance(scope_filter, tuple) else [scope_filter]
         ).delete(synchronize_session=False)
 
         # 4. Delete processing task records for this document
@@ -841,7 +853,12 @@ async def delete_document(
         try:
             from app.services.graph import delete_graph_for_document
             await asyncio.get_event_loop().run_in_executor(
-                None, lambda: delete_graph_for_document(kb_id=kb_id, document_id=doc_id)
+                None,
+                lambda: delete_graph_for_document(
+                    kb_id=kb_id if document.data_store_id is None else None,
+                    document_id=doc_id,
+                    data_store_id=document.data_store_id,
+                ),
             )
             logger.info(f"Deleted Neo4j graph nodes for document {doc_id}")
         except Exception as e:

@@ -98,7 +98,9 @@ def test_list_datastores_empty(client, db):
 
     resp = client.get("/api/admin/datastores", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200
-    assert resp.json() == []
+    body = resp.json()
+    assert body["items"] == []
+    assert body["total"] == 0
 
 
 def test_create_and_get_datastore(client, db):

@@ -249,10 +249,12 @@ export default function DataSourcesPage() {
   async function fetchData() {
     try {
       const [dsData, orgData] = await Promise.all([
-        api.get('/api/admin/datastores') as Promise<DataStore[]>,
+        api.get('/api/admin/datastores?limit=200') as Promise<{ items: DataStore[]; total: number } | DataStore[]>,
         api.get('/api/admin/orgs') as Promise<Org[]>,
       ]);
-      setDatastores(dsData);
+      // Handle both paginated {items: [...]} and legacy [...] responses
+      const dsList = Array.isArray(dsData) ? dsData : dsData.items;
+      setDatastores(dsList);
       setOrgs(orgData);
     } catch (err) {
       toast({
@@ -522,8 +524,12 @@ export default function DataSourcesPage() {
     try {
       await api.post(`/api/admin/datastores/${assigningId}/assign`, {
         org_ids: selectedOrgIds,
+        force_clear: selectedOrgIds.length === 0,
       });
-      toast({ title: 'Assignments updated' });
+      toast({
+        title: 'Assignments updated',
+        description: selectedOrgIds.length === 0 ? 'All organisations removed' : undefined,
+      });
       setAssignOpen(false);
       await fetchData();
     } catch (err) {
