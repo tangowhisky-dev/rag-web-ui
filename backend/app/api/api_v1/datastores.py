@@ -190,6 +190,13 @@ def _get_watcher() -> DataStoreWatcher:
     return watcher_service
 
 
+def _utc_iso(dt) -> Optional[str]:
+    """Serialize a naive-UTC datetime to ISO 8601 with Z suffix."""
+    if dt is None:
+        return None
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _serialize_ds(ds: DataStore) -> dict:
     """Serialize a DataStore to a response dict."""
     return {
@@ -201,7 +208,7 @@ def _serialize_ds(ds: DataStore) -> dict:
         "is_active": ds.is_active,
         "auto_scan_enabled": ds.auto_scan_enabled,
         "auto_scan_interval_minutes": ds.auto_scan_interval_minutes,
-        "last_scan_at": ds.last_scan_at.isoformat() if ds.last_scan_at else None,
+        "last_scan_at": _utc_iso(ds.last_scan_at),
         "last_scan_status": ds.last_scan_status,
         "last_scan_error": ds.last_scan_error,
         "last_scan_total_files": ds.last_scan_total_files or 0,
@@ -211,10 +218,10 @@ def _serialize_ds(ds: DataStore) -> dict:
         "last_scan_skipped": ds.last_scan_skipped or 0,
         "last_scan_errors": ds.last_scan_errors or 0,
         "last_event_processed": getattr(ds, "last_event_processed", 0) or 0,
-        "last_event_at": ds.last_event_at.isoformat() if getattr(ds, "last_event_at", None) else None,
-        "created_at": ds.created_at.isoformat() if ds.created_at else None,
-        "updated_at": ds.updated_at.isoformat() if ds.updated_at else None,
-        "last_recovered_at": ds.last_recovered_at.isoformat() if ds.last_recovered_at else None,
+        "last_event_at": _utc_iso(getattr(ds, "last_event_at", None)),
+        "created_at": _utc_iso(ds.created_at),
+        "updated_at": _utc_iso(ds.updated_at),
+        "last_recovered_at": _utc_iso(ds.last_recovered_at),
     }
 
 

@@ -160,7 +160,7 @@ def get_datastore_scan_progress(
                 skipped_files=ds.last_scan_skipped or 0,
                 error_files=ds.last_scan_errors or 0,
                 status=ds.last_scan_status if ds.last_scan_status != "running" else "idle",
-                last_scan_at=ds.last_scan_at.isoformat() if ds.last_scan_at else None,
+                last_scan_at=ds.last_scan_at.strftime("%Y-%m-%dT%H:%M:%SZ") if ds.last_scan_at else None,
                 error_message=ds.last_scan_error,
             )
 
@@ -175,7 +175,7 @@ def get_datastore_scan_progress(
             skipped_files=scan_info.get("skipped", 0),
             error_files=scan_info.get("error_count", 0),
             status=scan_info.get("status", "idle"),
-            last_scan_at=ds.last_scan_at.isoformat() if ds.last_scan_at else None,
+            last_scan_at=ds.last_scan_at.strftime("%Y-%m-%dT%H:%M:%SZ") if ds.last_scan_at else None,
             error_message=scan_info.get("error_message"),
         )
     except HTTPException:
@@ -190,7 +190,7 @@ def get_datastore_scan_progress(
             skipped_files=ds.last_scan_skipped or 0,
             error_files=ds.last_scan_errors or 0,
             status=ds.last_scan_status if ds.last_scan_status != "running" else "idle",
-            last_scan_at=ds.last_scan_at.isoformat() if ds.last_scan_at else None,
+            last_scan_at=ds.last_scan_at.strftime("%Y-%m-%dT%H:%M:%SZ") if ds.last_scan_at else None,
             error_message=ds.last_scan_error,
         )
 
