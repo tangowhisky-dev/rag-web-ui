@@ -1,7 +1,7 @@
 """
 conftest.py — test database bootstrap
 
-Patches app.db.session with an in-memory SQLite engine *before* any app
+Patches app.db.session with a file-based SQLite engine *before* any app
 module that reads session.py is imported.  This allows all unit tests to
 run without a running MySQL server.
 
@@ -22,11 +22,12 @@ Usage:
 """
 import os
 import sys
+import tempfile
 from types import ModuleType
 
 # Determine which database to use for tests.
 # If DATABASE_USE_MYSQL is set to "true", use the Docker MySQL container.
-# Otherwise, use in-memory SQLite for fast unit tests.
+# Otherwise, use file-based SQLite for fast unit tests.
 _DATABASE_USE_MYSQL = os.environ.get("DATABASE_USE_MYSQL", "").lower() == "true"
 
 if _DATABASE_USE_MYSQL:
@@ -44,8 +45,14 @@ if _DATABASE_USE_MYSQL:
     os.environ["SQLALCHEMY_DATABASE_URI"] = _sqlalchemy_url
     _USE_SQLITE = False
 else:
-    # Use in-memory SQLite for unit tests.
-    _sqlalchemy_url = "sqlite://"
+    # Use a file-based SQLite database for unit tests.
+    # File-based (not in-memory) is required so that NullPool can give
+    # each session its own connection without losing data.  In-memory
+    # SQLite with StaticPool shares one connection across all sessions,
+    # which causes stale identity map entries between tests.
+    _sqlite_dir = tempfile.mkdtemp(prefix="rag_test_")
+    _sqlite_path = os.path.join(_sqlite_dir, "test.db")
+    _sqlalchemy_url = f"sqlite:///{_sqlite_path}"
     os.environ["SQLALCHEMY_DATABASE_URI"] = _sqlalchemy_url
     # Override UPLOAD_DIR so init_storage() doesn't try to create /app/uploads
     # (which is read-only on macOS). Must use direct assignment, not setdefault,
@@ -64,13 +71,17 @@ if _USE_SQLITE:
     # Stub out app.db.session *before* any app.* import.
     from sqlalchemy import create_engine as _create_engine
     from sqlalchemy.orm import sessionmaker as _sessionmaker
-    from sqlalchemy.pool import StaticPool as _StaticPool
+    from sqlalchemy.pool import NullPool as _NullPool
 
-    # Use StaticPool so all connections share the same in-memory SQLite database.
+    # NullPool gives each session its own connection.  When a session closes,
+    # the connection is closed too — no stale state leaks between tests.
+    # This fixes the ObjectDeletedError / StaleDataError that occurred with
+    # StaticPool when reset_db dropped tables while other sessions still
+    # held objects in their identity maps.
     _sqlite_engine = _create_engine(
-        "sqlite://",
+        _sqlalchemy_url,
         connect_args={"check_same_thread": False},
-        poolclass=_StaticPool,
+        poolclass=_NullPool,
     )
     _SqliteSession = _sessionmaker(autocommit=False, autoflush=False, bind=_sqlite_engine)
 

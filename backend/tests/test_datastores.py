@@ -39,10 +39,6 @@ def reset_db():
 @pytest.fixture()
 def db():
     session = TestingSessionLocal()
-    # Expire any stale objects from a previous test's session (StaticPool
-    # shares the underlying connection, so identity map entries can survive
-    # across test boundaries).
-    session.expire_all()
     try:
         yield session
     finally:

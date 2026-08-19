@@ -1,11 +1,24 @@
 """Tests for token-budget helpers."""
 
+import pytest
+
+from app.services.agentic_rag import token_budget as _tb
 from app.services.agentic_rag.token_budget import (
     count_tokens,
     estimate_tokens,
     record_usage,
     ContextBudget,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_calibration():
+    """Reset calibration globals before each test so tests are independent."""
+    _tb._calibration_ratio = _tb.CHARS_PER_TOKEN
+    _tb._calibrated = False
+    yield
+    _tb._calibration_ratio = _tb.CHARS_PER_TOKEN
+    _tb._calibrated = False
 
 
 class TestEstimateTokens:
