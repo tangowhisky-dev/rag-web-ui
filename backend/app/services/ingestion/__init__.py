@@ -5,6 +5,7 @@ from .document_processor import (
     SUPPORTED_EXTENSIONS,
     CONTENT_TYPE_MAP,
     _chunk_id_to_point_id,
+    GraphBuildRequest,
 )
 from .document_converter import (
     MAX_FILE_SIZE,
@@ -18,7 +19,7 @@ from .document_qdrant import (
     UploadResult,
 )
 from .markdown_cleaner import clean_markdown
-from .ingestion_dispatcher import run_ingestion_in_thread
+from .ingestion_dispatcher import run_ingestion_in_thread, run_graph_build_in_thread
 
 __all__ = [
     "process_document_background",
@@ -27,6 +28,7 @@ __all__ = [
     "SUPPORTED_EXTENSIONS",
     "CONTENT_TYPE_MAP",
     "_chunk_id_to_point_id",
+    "GraphBuildRequest",
     "MAX_FILE_SIZE",
     "SE",
     "_convert_to_markdown",
@@ -35,4 +37,5 @@ __all__ = [
     "UploadResult",
     "clean_markdown",
     "run_ingestion_in_thread",
+    "run_graph_build_in_thread",
 ]

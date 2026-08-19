@@ -682,7 +682,11 @@ class DataStoreWatcher:
                                 scan_info["error_count"] = summary["errors"]
                                 break
 
-            # Wait for all ingestion tasks to complete before marking scan done
+            # Wait for all ingestion tasks to complete before marking scan done.
+            # Each task covers: parse → embed → Qdrant upsert.  Graph build runs
+            # in a separate daemon thread and does not block the scan.  10 minutes
+            # per file covers large PDFs with OCR; a timeout is a real hang (API
+            # down, DB locked), not a slow graph build.
             if ingestion_futures:
                 logger.info(
                     "[WATCHER] waiting_for_ingestion scan_id=%d datastore_id=%d tasks=%d",
@@ -690,7 +694,7 @@ class DataStoreWatcher:
                 )
                 for future in ingestion_futures:
                     try:
-                        future.result(timeout=3600)  # up to 1 hour per task
+                        future.result(timeout=600)  # 10 minutes per task
                     except Exception as e:
                         logger.error(
                             "[WATCHER] ingestion_task_failed scan_id=%d: %s",

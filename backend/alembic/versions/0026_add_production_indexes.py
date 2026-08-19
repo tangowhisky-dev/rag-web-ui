@@ -31,36 +31,93 @@ depends_on = None
 
 
 def upgrade() -> None:
+    conn = op.get_bind()
+
     # -- Column type widening --
+    # data_stores.folder_path has a UNIQUE constraint.  With utf8mb4 encoding,
+    # VARCHAR(1024) = 4096 bytes, exceeding MySQL's 3072-byte index key limit.
+    # Drop the existing unique index, widen the column, then recreate the
+    # unique index with a 768-char prefix (768 × 4 = 3072 bytes, the max).
+    # Use raw SQL for index inspection/dropping because the index name varies
+    # (SQLAlchemy auto-generates names like ix_data_stores_folder_path).
+    result = conn.execute(sa.text(
+        "SELECT INDEX_NAME FROM information_schema.STATISTICS "
+        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'data_stores' "
+        "AND COLUMN_NAME = 'folder_path'"
+    ))
+    for row in result:
+        idx_name = row[0]
+        conn.execute(sa.text(f"DROP INDEX `{idx_name}` ON data_stores"))
+
     op.alter_column(
         'data_stores', 'folder_path',
         existing_type=sa.String(512),
         type_=sa.String(1024),
         existing_nullable=False,
     )
+    op.create_index(
+        'ix_data_stores_folder_path',
+        'data_stores',
+        ['folder_path'],
+        unique=True,
+        mysql_length=767,
+    )
+
+    # documents.file_path has a composite unique constraint
+    # (file_path, data_store_id).  With utf8mb4, VARCHAR(1024) = 4096 bytes,
+    # plus the INT data_store_id = 4100 bytes, exceeding the 3072-byte limit.
+    # Drop the constraint, widen the column, recreate with a 768-char prefix
+    # on file_path.
+    result = conn.execute(sa.text(
+        "SELECT INDEX_NAME FROM information_schema.STATISTICS "
+        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'documents' "
+        "AND COLUMN_NAME = 'file_path'"
+    ))
+    for row in result:
+        idx_name = row[0]
+        conn.execute(sa.text(f"DROP INDEX `{idx_name}` ON documents"))
+
     op.alter_column(
         'documents', 'file_path',
         existing_type=sa.String(255),
         type_=sa.String(1024),
         existing_nullable=False,
     )
-
-    # -- New indexes --
-    op.create_index('ix_processing_tasks_status', 'processing_tasks', ['status'])
-    op.create_index('ix_processing_tasks_document_id', 'processing_tasks', ['document_id'])
-    op.create_index('ix_processing_tasks_data_store_id', 'processing_tasks', ['data_store_id'])
-    op.create_index('ix_document_chunks_data_store_id', 'document_chunks', ['data_store_id'])
-    op.create_index('ix_document_chunks_document_id', 'document_chunks', ['document_id'])
-    op.create_index('ix_data_stores_is_active', 'data_stores', ['is_active'])
+    # Recreate composite unique constraint with prefix on file_path.
+    # mysql_length accepts a dict mapping column names to prefix lengths.
     op.create_index(
-        'ix_manifest_datastore_file_hash',
-        'data_store_file_manifest',
-        ['datastore_id', 'file_hash'],
+        'uq_document_file_path_datastore',
+        'documents',
+        ['file_path', 'data_store_id'],
+        unique=True,
+        mysql_length={'file_path': 767},
     )
+
+    # -- New indexes (idempotent — skip if already exists) --
+    def _index_exists(table: str, index_name: str) -> bool:
+        result = conn.execute(sa.text(
+            "SELECT COUNT(*) FROM information_schema.STATISTICS "
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table "
+            "AND INDEX_NAME = :index_name"
+        ), {"table": table, "index_name": index_name})
+        return result.scalar() > 0
+
+    indexes_to_create = [
+        ('ix_processing_tasks_status', 'processing_tasks', ['status']),
+        ('ix_processing_tasks_document_id', 'processing_tasks', ['document_id']),
+        ('ix_processing_tasks_data_store_id', 'processing_tasks', ['data_store_id']),
+        ('ix_document_chunks_data_store_id', 'document_chunks', ['data_store_id']),
+        ('ix_document_chunks_document_id', 'document_chunks', ['document_id']),
+        ('ix_data_stores_is_active', 'data_stores', ['is_active']),
+        ('ix_manifest_datastore_file_hash', 'data_store_file_manifests', ['datastore_id', 'file_hash']),
+    ]
+    for idx_name, table, cols in indexes_to_create:
+        if not _index_exists(table, idx_name):
+            op.create_index(idx_name, table, cols)
 
 
 def downgrade() -> None:
-    op.drop_index('ix_manifest_datastore_file_hash', table_name='data_store_file_manifest')
+    op.drop_index('ix_manifest_datastore_file_hash', table_name='data_store_file_manifests')
     op.drop_index('ix_data_stores_is_active', table_name='data_stores')
     op.drop_index('ix_document_chunks_document_id', table_name='document_chunks')
     op.drop_index('ix_document_chunks_data_store_id', table_name='document_chunks')
@@ -68,15 +125,25 @@ def downgrade() -> None:
     op.drop_index('ix_processing_tasks_document_id', table_name='processing_tasks')
     op.drop_index('ix_processing_tasks_status', table_name='processing_tasks')
 
+    # Restore documents.file_path to 255 and recreate original unique constraint
+    op.drop_index('uq_document_file_path_datastore', table_name='documents')
     op.alter_column(
         'documents', 'file_path',
         existing_type=sa.String(1024),
         type_=sa.String(255),
         existing_nullable=False,
     )
+    op.create_unique_constraint(
+        'uq_document_file_path_datastore', 'documents',
+        ['file_path', 'data_store_id'],
+    )
+
+    # Restore data_stores.folder_path to 512 and recreate original unique constraint
+    op.drop_index('ix_data_stores_folder_path', table_name='data_stores')
     op.alter_column(
         'data_stores', 'folder_path',
         existing_type=sa.String(1024),
         type_=sa.String(512),
         existing_nullable=False,
     )
+    op.create_unique_constraint('folder_path', 'data_stores', ['folder_path'])

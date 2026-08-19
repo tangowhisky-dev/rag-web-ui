@@ -634,7 +634,7 @@ async def add_processing_tasks_to_queue(task_data, kb_id, user_id):
     """Helper function to add document processing tasks to the queue without blocking the main response."""
     for data in task_data:
         asyncio.create_task(
-            process_document_background(
+            _process_and_graph(
                 data["temp_path"],
                 data["file_name"],
                 kb_id,
@@ -645,6 +645,32 @@ async def add_processing_tasks_to_queue(task_data, kb_id, user_id):
             )
         )
     logger.info(f"Added {len(task_data)} document processing tasks to queue")
+
+
+async def _process_and_graph(
+    temp_path: str,
+    file_name: str,
+    kb_id: int,
+    task_id: int,
+    db_session,
+    user_id: int,
+    enable_ocr: Optional[bool] = None,
+    document_id: Optional[int] = None,
+) -> None:
+    """Run ingestion, then fire graph build as a background task if needed."""
+    from app.services.ingestion.ingestion_dispatcher import _start_graph_build_thread
+    graph_req = await process_document_background(
+        temp_path,
+        file_name,
+        kb_id,
+        task_id,
+        db_session,
+        user_id,
+        enable_ocr=enable_ocr,
+        document_id=document_id,
+    )
+    if graph_req is not None:
+        _start_graph_build_thread(graph_req)
 
 @router.post("/cleanup")
 async def cleanup_temp_files(
@@ -951,14 +977,13 @@ async def retry_document_ingestion(
 
     # Re-queue the background ingestion
     asyncio.create_task(
-        process_document_background(
+        _process_and_graph(
             document.file_path,
             document.file_name,
             kb_id,
             task.id,
             None,
             current_user.id,
-            document_id=document.id,
             enable_ocr=enable_ocr,
         )
     )

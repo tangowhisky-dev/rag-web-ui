@@ -10,6 +10,7 @@ import hashlib
 import logging
 import os
 import traceback
+from dataclasses import dataclass
 from typing import Optional, List, Dict, Set, Tuple
 
 from fastapi import UploadFile
@@ -44,6 +45,23 @@ from app.services.infrastructure import get_qdrant_client
 from app.models.knowledge import ProcessingTask, Document, DocumentChunk, DocumentUpload
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class GraphBuildRequest:
+    """Data needed to build a Neo4j knowledge graph for a document.
+
+    Returned by ``process_document_background`` so the caller can fire
+    the graph build as a separate background task, decoupled from the
+    ingestion pipeline (which completes at Qdrant upsert).
+    """
+    document_id: int
+    file_name: str
+    chunks: list[str]
+    chunk_ids: list[str]
+    kb_id: Optional[int]
+    data_store_id: Optional[int]
+    task_id: Optional[int]
 
 
 async def upload_document(file: UploadFile, kb_id: int, user_id: int) -> UploadResult:
@@ -161,13 +179,18 @@ async def process_document_background(
     file_hash: Optional[str] = None,  # Pre-computed hash
     file_size: Optional[int] = None,  # Pre-computed size
     content_type: Optional[str] = None,  # Pre-computed content type
-) -> None:
+) -> Optional[GraphBuildRequest]:
     """Process document in background.
 
     enable_ocr: None = global setting, True = force on, False = force off.
     document_id: If provided, update existing document instead of creating new one.
     data_store_id: Link document to a datastore.
     file_path: Original file path (for in-place processing, not copying).
+
+    Returns a GraphBuildRequest if graph extraction is enabled and the
+    document was successfully ingested, so the caller can fire the graph
+    build as a separate background task. Returns None if graph is disabled
+    or ingestion failed.
     """
     logger = logging.getLogger(__name__)
     if db is None:
@@ -473,76 +496,23 @@ async def process_document_background(
             db.commit()
             logger.info("[PROGRESS_TIMEOUT] task_id=%s completed_ok=true", task_id)
             logger.info(f"Task {task_id}: Processing completed successfully")
-    
-            # ── Step 9: Build Neo4j knowledge graph (non-fatal, awaited) ──
-            # Await the graph build directly so the event loop stays alive until
-            # it completes.  This prevents "Task was destroyed but it is pending"
-            # when the loop would otherwise close while the graph task is running.
+
+            # ── Step 9: Return graph build request (detached) ───────────────
+            # The caller fires the graph build as a separate background task
+            # so the ingestion future resolves at Qdrant upsert.  Graph build
+            # tracking is via ProcessingTask.graph_status (null/pending/
+            # completed/failed) and is retried by the recovery service.
             if get_setting(db, "GRAPHRAG_ENABLED", None):
-                _doc_id = document.id   # capture plain int before session closes
-                _chunks = [p[1] for p in qdrant_payloads]
-                _chunk_ids = [p[0] for p in qdrant_payloads]
-                _task_id = task_id
-    
-                async def _build_graph() -> None:
-                    # Mark graph extraction as in-progress in the DB
-                    from app.db.session import SessionLocal as _SessionLocal
-                    from app.models.knowledge import ProcessingTask as _PT
-                    _db = _SessionLocal()
-                    try:
-                        _t = _db.query(_PT).filter(_PT.id == _task_id).first()
-                        if _t:
-                            _t.graph_status = "pending"
-                            _db.commit()
-                    finally:
-                        _db.close()
-    
-                    try:
-                        from app.services.graph import build_graph_for_document
-                        await build_graph_for_document(
-                            kb_id=kb_id,
-                            document_id=_doc_id,
-                            file_name=file_name,
-                            chunks=_chunks,
-                            chunk_ids=_chunk_ids,
-                            data_store_id=data_store_id,
-                            pt=pt,
-                            task_id=_task_id,
-                        )
-                        _db2 = _SessionLocal()
-                        try:
-                            _t = _db2.query(_PT).filter(_PT.id == _task_id).first()
-                            if _t:
-                                _t.graph_status = "completed"
-                                _t.graph_error = None
-                                _db2.commit()
-                        finally:
-                            _db2.close()
-                    except Exception as _e:
-                        logger.warning(
-                            f"Task {task_id}: Neo4j graph build failed (non-fatal): {_e}",
-                            exc_info=True,
-                        )
-                        _db3 = _SessionLocal()
-                        try:
-                            _t = _db3.query(_PT).filter(_PT.id == _task_id).first()
-                            if _t:
-                                _t.graph_status = "failed"
-                                _t.graph_error = str(_e)[:1000]
-                                _db3.commit()
-                        finally:
-                            _db3.close()
-    
-                try:
-                    await _build_graph()
-                    logger.info(f"Task {task_id}: Knowledge graph built in Neo4j")
-                except asyncio.CancelledError:
-                    logger.warning(f"Task {task_id}: Graph build cancelled")
-                except Exception as _e:
-                    logger.warning(
-                        f"Task {task_id}: Graph build failed (non-fatal): {_e}",
-                        exc_info=True,
-                    )
+                return GraphBuildRequest(
+                    document_id=document.id,
+                    file_name=file_name,
+                    chunks=[p[1] for p in qdrant_payloads],
+                    chunk_ids=[p[0] for p in qdrant_payloads],
+                    kb_id=kb_id,
+                    data_store_id=data_store_id,
+                    task_id=task_id,
+                )
+            return None
     
     except Exception as e:
         logger.error(f"Task {task_id}: Error processing document: {str(e)}")
@@ -605,6 +575,8 @@ async def process_document_background(
                     logger.info(f"Task {task_id}: DocumentUpload record cleaned up")
             except Exception:
                 db.rollback()
+
+        return None  # ingestion failed — no graph build request
 
     finally:
         if progress_db is not None:

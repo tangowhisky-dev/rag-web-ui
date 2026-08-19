@@ -295,19 +295,18 @@ def delete_datastore(
         ).delete(synchronize_session=False)
     db.commit()
 
-    # Capture datastore info before expunging (the ORM instance will be
-    # detached from the session after expunge, so attribute access will fail).
+    # Capture datastore info before the session state becomes stale.
     ds_id_log = ds.id
     ds_name_log = ds.name
 
-    # Detach the datastore ORM instance so SQLAlchemy doesn't try to
-    # cascade through stale relationship state (the child rows we just
-    # bulk-deleted).  Re-fetch a fresh instance for the final delete.
+    # Bulk-deleting child rows leaves the ORM's relationship state stale.
+    # Use a raw SQL DELETE for the datastore row itself to avoid triggering
+    # ORM cascades on stale state, then expunge the ORM instance so the
+    # session doesn't try to track or refresh it.
+    from sqlalchemy import text as _text
+    db.execute(_text("DELETE FROM data_stores WHERE id = :id"), {"id": datastore_id})
+    db.commit()
     db.expunge(ds)
-    ds_fresh = db.query(DataStore).filter(DataStore.id == datastore_id).first()
-    if ds_fresh:
-        db.delete(ds_fresh)
-        db.commit()
 
     # ── 2. Qdrant cleanup ────────────────────────────────────────────────
     if doc_ids:

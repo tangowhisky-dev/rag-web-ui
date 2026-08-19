@@ -213,6 +213,18 @@ class StartupRecoveryService:
             finally:
                 db2.close()
 
+            # Retry graph builds that were left pending or failed from a
+            # previous run.  This runs after discovery so new/modified file
+            # ingestion is queued first.  Graph retry is best-effort —
+            # failures are logged but don't fail the recovery.
+            try:
+                self._retry_pending_graph_builds(datastore_id)
+            except Exception as e:
+                logger.warning(
+                    "[RECOVERY] graph_retry_failed datastore_id=%s: %s",
+                    datastore_id, e,
+                )
+
         except Exception as e:
             logger.error("[RECOVERY] recovery_error datastore_id=%s scan_id=%s: %s", datastore_id, scan_id, e, exc_info=True)
             self._active_scans[scan_id]["status"] = "error"
@@ -524,6 +536,85 @@ class StartupRecoveryService:
         Kept for API symmetry with ``process_new_file``.
         """
         self._handle_deletion_records(file_path, datastore_id)
+
+    # ------------------------------------------------------------------
+    # Graph build retry
+    # ------------------------------------------------------------------
+
+    def _retry_pending_graph_builds(self, datastore_id: int) -> None:
+        """Find tasks with completed ingestion but pending/failed graph build
+        and re-run the graph build in background threads.
+
+        This handles the case where a graph build was interrupted (app crash,
+        LLM API down) after the document was successfully ingested to Qdrant.
+        """
+        db: Session = SessionLocal()
+        try:
+            tasks = (
+                db.query(ProcessingTask)
+                .filter(
+                    ProcessingTask.data_store_id == datastore_id,
+                    ProcessingTask.status == "completed",
+                    ProcessingTask.graph_status.in_(["pending", "failed"]),
+                )
+                .all()
+            )
+        finally:
+            db.close()
+
+        if not tasks:
+            return
+
+        logger.info(
+            "[RECOVERY] graph_retry_start datastore_id=%s count=%d",
+            datastore_id, len(tasks),
+        )
+
+        from app.services.ingestion.ingestion_dispatcher import (
+            _start_graph_build_thread,
+        )
+        from app.services.ingestion.document_processor import GraphBuildRequest
+
+        for task in tasks:
+            # Fetch chunks for this document to rebuild the graph
+            chunk_db: Session = SessionLocal()
+            try:
+                doc = chunk_db.query(Document).filter(
+                    Document.id == task.document_id
+                ).first()
+                if not doc:
+                    logger.warning(
+                        "[RECOVERY] graph_retry_skip task_id=%s — document %s not found",
+                        task.id, task.document_id,
+                    )
+                    continue
+
+                chunks = chunk_db.query(DocumentChunk).filter(
+                    DocumentChunk.document_id == doc.id
+                ).order_by(DocumentChunk.chunk_index).all()
+                if not chunks:
+                    logger.warning(
+                        "[RECOVERY] graph_retry_skip task_id=%s — no chunks for doc %s",
+                        task.id, doc.id,
+                    )
+                    continue
+
+                req = GraphBuildRequest(
+                    document_id=doc.id,
+                    file_name=doc.file_name,
+                    chunks=[c.chunk_text for c in chunks],
+                    chunk_ids=[c.id for c in chunks],
+                    kb_id=None,
+                    data_store_id=datastore_id,
+                    task_id=task.id,
+                )
+                _start_graph_build_thread(req)
+                logger.info(
+                    "[RECOVERY] graph_retry_queued task_id=%s doc_id=%s",
+                    task.id, doc.id,
+                )
+            finally:
+                chunk_db.close()
 
 
 # ------------------------------------------------------------------
