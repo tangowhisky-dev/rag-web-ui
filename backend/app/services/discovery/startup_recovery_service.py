@@ -565,9 +565,32 @@ class StartupRecoveryService:
         if not tasks:
             return
 
+        # Limit retries to 3 per task to avoid infinite retry loops on
+        # permanently failing graph builds (e.g. LLM API down, bad config).
+        # The retry count is encoded as a prefix in graph_error: "[retry:N] ...".
+        MAX_GRAPH_RETRIES = 3
+        retryable = []
+        for t in tasks:
+            retries = 0
+            if t.graph_error and t.graph_error.startswith("[retry:"):
+                try:
+                    retries = int(t.graph_error.split("]")[0].split(":")[1])
+                except (ValueError, IndexError):
+                    pass
+            if retries < MAX_GRAPH_RETRIES:
+                retryable.append(t)
+            else:
+                logger.warning(
+                    "[RECOVERY] graph_retry_skip task_id=%s — exceeded max retries (%d)",
+                    t.id, MAX_GRAPH_RETRIES,
+                )
+
+        if not retryable:
+            return
+
         logger.info(
-            "[RECOVERY] graph_retry_start datastore_id=%s count=%d",
-            datastore_id, len(tasks),
+            "[RECOVERY] graph_retry_start datastore_id=%s count=%d (skipped=%d)",
+            datastore_id, len(retryable), len(tasks) - len(retryable),
         )
 
         from app.services.ingestion.ingestion_dispatcher import (
@@ -575,7 +598,7 @@ class StartupRecoveryService:
         )
         from app.services.ingestion.document_processor import GraphBuildRequest
 
-        for task in tasks:
+        for task in retryable:
             # Fetch chunks for this document to rebuild the graph
             chunk_db: Session = SessionLocal()
             try:

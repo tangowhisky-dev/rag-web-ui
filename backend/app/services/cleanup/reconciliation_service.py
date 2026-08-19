@@ -17,7 +17,6 @@ others.  Each pass logs a summary of what was cleaned.
 from __future__ import annotations
 
 import logging
-import traceback
 from typing import List
 
 from sqlalchemy.orm import Session
@@ -156,7 +155,7 @@ def _reconcile_qdrant(summary: dict, active_kb_ids: List[int], active_ds_ids: Li
     logger.info("[RECONCILE] Qdrant: active_kb_names=%s stale_kb_collections=%s", active_kb_names, stale_kb_collections)
     for cname in stale_kb_collections:
         try:
-            logger.warning("[RECONCILE] Qdrant: ABOUT TO DELETE collection %s — caller traceback:\n%s", cname, "".join(traceback.format_stack()))
+            logger.info("[RECONCILE] Qdrant: dropping stale collection %s", cname)
             qdrant.delete_collection(cname)
             logger.info("[RECONCILE] Qdrant: dropped stale collection %s", cname)
         except Exception as e:
@@ -169,7 +168,7 @@ def _reconcile_qdrant(summary: dict, active_kb_ids: List[int], active_ds_ids: Li
     logger.info("[RECONCILE] Qdrant: active_ds_names=%s stale_ds_collections=%s", active_ds_names, stale_ds_collections)
     for cname in stale_ds_collections:
         try:
-            logger.warning("[RECONCILE] Qdrant: ABOUT TO DELETE collection %s — caller traceback:\n%s", cname, "".join(traceback.format_stack()))
+            logger.info("[RECONCILE] Qdrant: dropping stale collection %s", cname)
             qdrant.delete_collection(cname)
             logger.info("[RECONCILE] Qdrant: dropped stale collection %s", cname)
         except Exception as e:
@@ -319,16 +318,18 @@ def _reconcile_neo4j(summary: dict, active_kb_ids: List[int], active_ds_ids: Lis
                         if n == 0:
                             break
 
-                # Sweep orphaned entities
+                # Sweep orphaned entities scoped to this datastore
                 with driver.session() as session:
                     rec = session.run(
                         """
                         MATCH (e)
                         WHERE (e:__KGBuilder__ OR e:Entity OR e:__Entity__)
+                          AND e.data_store_id = $ds_id
                           AND NOT EXISTS { MATCH (e)-[:FROM_CHUNK]->() }
                         DETACH DELETE e
                         RETURN count(e) AS n
-                        """
+                        """,
+                        ds_id=stale_ds_id,
                     ).single()
                     if rec and rec["n"]:
                         logger.info(

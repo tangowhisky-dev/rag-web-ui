@@ -695,6 +695,13 @@ class DataStoreWatcher:
                 for future in ingestion_futures:
                     try:
                         future.result(timeout=600)  # 10 minutes per task
+                    except TimeoutError:
+                        logger.error(
+                            "[WATCHER] ingestion_task_timeout scan_id=%d — cancelling future",
+                            scan_id,
+                        )
+                        future.cancel()
+                        summary["errors"] += 1
                     except Exception as e:
                         logger.error(
                             "[WATCHER] ingestion_task_failed scan_id=%d: %s",

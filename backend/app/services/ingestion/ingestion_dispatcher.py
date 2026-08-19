@@ -25,6 +25,13 @@ from app.services.ingestion.document_processor import (
 
 logger = logging.getLogger(__name__)
 
+# Track in-flight graph builds to prevent duplicate workers for the same task.
+# Guarded by _active_graph_lock.  A task_id is added when a graph build starts
+# and removed when it finishes (success or failure).  If a second caller tries
+# to start a graph build for a task that's already in-flight, it's skipped.
+_active_graph_builds: set[int] = set()
+_active_graph_lock = threading.Lock()
+
 
 def run_ingestion_in_thread(
     file_path: str,
@@ -104,50 +111,65 @@ def run_graph_build_in_thread(req: GraphBuildRequest) -> None:
 
     Updates ProcessingTask.graph_status to pending → completed/failed.
     Calls delete_graph_for_document first to ensure idempotency on retry.
+    Skips if a graph build for the same task is already in-flight.
     """
-    _set_graph_status(req.task_id, "pending")
+    # Deduplication guard: skip if another thread is already building this graph.
+    with _active_graph_lock:
+        if req.task_id in _active_graph_builds:
+            logger.info(
+                "graph_build_skipped task_id=%s — already in-flight",
+                req.task_id,
+            )
+            return
+        _active_graph_builds.add(req.task_id)
 
-    loop = asyncio.new_event_loop()
     try:
-        asyncio.set_event_loop(loop)
+        _set_graph_status(req.task_id, "pending")
 
-        async def _do() -> None:
-            from app.services.graph import build_graph_for_document
-            from app.services.graph.graph_service import delete_graph_for_document
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
 
-            # Delete existing graph nodes for this document first (idempotent
-            # retry — a previous attempt may have written partial data).
-            delete_graph_for_document(
-                kb_id=req.kb_id,
-                document_id=req.document_id,
-                data_store_id=req.data_store_id,
+            async def _do() -> None:
+                from app.services.graph import build_graph_for_document
+                from app.services.graph.graph_service import delete_graph_for_document
+
+                # Delete existing graph nodes for this document first (idempotent
+                # retry — a previous attempt may have written partial data).
+                delete_graph_for_document(
+                    kb_id=req.kb_id,
+                    document_id=req.document_id,
+                    data_store_id=req.data_store_id,
+                )
+
+                await build_graph_for_document(
+                    kb_id=req.kb_id,
+                    document_id=req.document_id,
+                    file_name=req.file_name,
+                    chunks=req.chunks,
+                    chunk_ids=req.chunk_ids,
+                    data_store_id=req.data_store_id,
+                    task_id=req.task_id,
+                )
+
+            loop.run_until_complete(_do())
+            _set_graph_status(req.task_id, "completed", error=None)
+            logger.info(
+                "graph_build_completed task_id=%s document_id=%s",
+                req.task_id, req.document_id,
             )
-
-            await build_graph_for_document(
-                kb_id=req.kb_id,
-                document_id=req.document_id,
-                file_name=req.file_name,
-                chunks=req.chunks,
-                chunk_ids=req.chunk_ids,
-                data_store_id=req.data_store_id,
-                task_id=req.task_id,
+        except Exception as e:
+            logger.warning(
+                "graph_build_failed task_id=%s document_id=%s error=%s",
+                req.task_id, req.document_id, e,
+                exc_info=True,
             )
-
-        loop.run_until_complete(_do())
-        _set_graph_status(req.task_id, "completed", error=None)
-        logger.info(
-            "graph_build_completed task_id=%s document_id=%s",
-            req.task_id, req.document_id,
-        )
-    except Exception as e:
-        logger.warning(
-            "graph_build_failed task_id=%s document_id=%s error=%s",
-            req.task_id, req.document_id, e,
-            exc_info=True,
-        )
-        _set_graph_status(req.task_id, "failed", error=str(e)[:1000])
+            _set_graph_status(req.task_id, "failed", error=str(e)[:1000])
+        finally:
+            loop.close()
     finally:
-        loop.close()
+        with _active_graph_lock:
+            _active_graph_builds.discard(req.task_id)
 
 
 def _start_graph_build_thread(req: GraphBuildRequest) -> None:
@@ -164,7 +186,11 @@ def _start_graph_build_thread(req: GraphBuildRequest) -> None:
 def _set_graph_status(
     task_id: Optional[int], status: str, error: Optional[str] = None,
 ) -> None:
-    """Update ProcessingTask.graph_status in a fresh session (best-effort)."""
+    """Update ProcessingTask.graph_status in a fresh session (best-effort).
+
+    On failure, encodes the retry count as a ``[retry:N]`` prefix in
+    graph_error so the recovery service can limit retry attempts.
+    """
     if task_id is None:
         return
     try:
@@ -175,7 +201,17 @@ def _set_graph_status(
             ).first()
             if task:
                 task.graph_status = status
-                task.graph_error = error
+                if status == "failed" and error:
+                    # Extract current retry count from existing error prefix.
+                    retries = 0
+                    if task.graph_error and task.graph_error.startswith("[retry:"):
+                        try:
+                            retries = int(task.graph_error.split("]")[0].split(":")[1])
+                        except (ValueError, IndexError):
+                            pass
+                    task.graph_error = f"[retry:{retries + 1}] {error[:900]}"
+                else:
+                    task.graph_error = error
                 db.commit()
         finally:
             db.close()

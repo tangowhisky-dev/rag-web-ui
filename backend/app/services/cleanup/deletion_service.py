@@ -33,8 +33,9 @@ logger = logging.getLogger(__name__)
 
 
 def _get_qdrant() -> QdrantClient:
-    """Lazy singleton for Qdrant client."""
-    return QdrantClient(host=settings.QDRANT_HOST, port=settings.QDRANT_PORT)
+    """Return the shared Qdrant client singleton from infrastructure."""
+    from app.services.infrastructure import get_qdrant_client
+    return get_qdrant_client()
 
 
 # ── Filesystem cleanup ────────────────────────────────────────────────────────

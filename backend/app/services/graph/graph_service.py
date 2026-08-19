@@ -61,6 +61,7 @@ Deletion
 
 import asyncio
 import logging
+import threading
 import uuid
 from typing import Optional
 from sqlalchemy.orm import Session
@@ -80,12 +81,16 @@ _neo4j_driver: Optional[neo4j.Driver] = None
 
 # In-memory graph extraction progress: task_id → (completed_batches, total_batches)
 # Ephemeral by design — lost on restart, but so is the interrupted extraction.
+# Thread-safe via _graph_progress_lock (concurrent graph builds from recovery
+# and live ingestion can update this dict simultaneously).
 _graph_batch_progress: dict[int, tuple[int, int]] = {}
+_graph_progress_lock = threading.Lock()
 
 
 def get_graph_batch_progress(task_id: int) -> tuple[int, int] | None:
     """Return (completed_batches, total_batches) for an in-progress graph extraction."""
-    return _graph_batch_progress.get(task_id)
+    with _graph_progress_lock:
+        return _graph_batch_progress.get(task_id)
 
 def _get_driver() -> neo4j.Driver:
     global _neo4j_driver
@@ -368,7 +373,8 @@ async def _extract_with_llm(
     total_batches = len(batches)
     completed_batches = 0
     if task_id is not None:
-        _graph_batch_progress[task_id] = (0, total_batches)
+        with _graph_progress_lock:
+            _graph_batch_progress[task_id] = (0, total_batches)
 
     async def _process_batch(
         batch_idx: int, combined_text: str, batch_point_ids: list[str]
@@ -474,7 +480,8 @@ async def _extract_with_llm(
                     if task_id is not None:
                         nonlocal completed_batches
                         completed_batches += 1
-                        _graph_batch_progress[task_id] = (completed_batches, total_batches)
+                        with _graph_progress_lock:
+                            _graph_batch_progress[task_id] = (completed_batches, total_batches)
                     return linked, 0
 
                 except Exception as exc:
@@ -499,7 +506,8 @@ async def _extract_with_llm(
 
     # Clean up in-memory progress tracking
     if task_id is not None:
-        _graph_batch_progress.pop(task_id, None)
+        with _graph_progress_lock:
+            _graph_batch_progress.pop(task_id, None)
 
     # Final accurate count from Neo4j.
     def _count_nodes_rels():
