@@ -270,26 +270,30 @@ def list_datastores(
         )
     total = query.count()
     datastores = query.order_by(DataStore.id).offset(skip).limit(limit).all()
+
+    # Batch-fetch org assignments for all datastores in one query (avoids N+1)
+    ds_ids = [ds.id for ds in datastores]
+    all_links = (
+        db.query(OrganizationDataStore)
+        .join(Organisation)
+        .filter(
+            OrganizationDataStore.data_store_id.in_(ds_ids),
+            OrganizationDataStore.is_active == True,
+        )
+        .all()
+        if ds_ids
+        else []
+    )
+    orgs_by_ds: dict[int, list[dict]] = {}
+    for link in all_links:
+        orgs_by_ds.setdefault(link.data_store_id, []).append(
+            {"id": link.organisation.id, "name": link.organisation.name}
+        )
+
     result = []
     for ds in datastores:
         resp = _serialize_ds(ds)
-        # Get assigned orgs
-        links = (
-            db.query(OrganizationDataStore)
-            .join(Organisation)
-            .filter(
-                OrganizationDataStore.data_store_id == ds.id,
-                OrganizationDataStore.is_active == True,
-            )
-            .all()
-        )
-        resp["assigned_orgs"] = [
-            {
-                "id": link.organisation.id,
-                "name": link.organisation.name,
-            }
-            for link in links
-        ]
+        resp["assigned_orgs"] = orgs_by_ds.get(ds.id, [])
         # Include real-time scan progress if a scan is running
         try:
             watcher = _get_watcher()

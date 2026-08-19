@@ -221,7 +221,11 @@ class DataStoreWatcher:
         logger.info("[WATCHER] service stopped")
 
     def _health_check_loop(self) -> None:
-        """Monitor the observer thread and restart it if it dies."""
+        """Monitor the observer thread and restart it if it dies.
+
+        Also runs periodic cleanup of stale completed scans from
+        _active_scans to prevent unbounded memory growth.
+        """
         import time as _time
         while True:
             _time.sleep(30)
@@ -229,6 +233,10 @@ class DataStoreWatcher:
                 if not self._running:
                     return
                 observer = self._observer
+
+            # Clean up stale completed scans (5-minute TTL)
+            self._cleanup_stale_scans()
+
             if observer is None:
                 continue
             # watchdog observers set ._stopped_event when they finish
@@ -518,7 +526,8 @@ class DataStoreWatcher:
         finally:
             db.close()
 
-        self._cleanup_stale_scans()
+        # Unreachable — return above exits before this line.
+        # _cleanup_stale_scans is now called from the health-check loop.
 
     def _is_scan_cancelled(self, datastore_id: int) -> bool:
         """Check if a scan is cancelled (should stop processing)."""

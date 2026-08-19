@@ -21,6 +21,7 @@ from app.models.knowledge import (
     Document,
     DocumentChunk,
     KnowledgeBase,
+    ProcessingTask,
 )
 from app.services.ingestion import _chunk_id_to_point_id
 from app.services.graph import (
@@ -264,6 +265,9 @@ def delete_datastore(
 
     datastore_docs = [d for d in datastore_docs if d.data_store_id is not None]
 
+    # Get all document IDs for this datastore (needed for Qdrant/Neo4j cleanup)
+    doc_ids = [d.id for d in datastore_docs]
+
     # ── 1. DB cleanup ────────────────────────────────────────────────────
     # Delete DB records first. If this commit fails, vector/graph data is
     # still intact and the user can retry. If it succeeds but Qdrant/Neo4j
@@ -277,19 +281,40 @@ def delete_datastore(
         OrganizationDataStore.data_store_id == datastore_id
     ).delete(synchronize_session=False)
 
-    for doc in datastore_docs:
-        db.delete(doc)
+    # Bulk-delete child rows first (works on both MySQL and SQLite where
+    # FK CASCADE may not be enforced), then bulk-delete documents.
+    if doc_ids:
+        db.query(DocumentChunk).filter(
+            DocumentChunk.document_id.in_(doc_ids)
+        ).delete(synchronize_session=False)
+        db.query(ProcessingTask).filter(
+            ProcessingTask.document_id.in_(doc_ids)
+        ).delete(synchronize_session=False)
+        db.query(Document).filter(
+            Document.data_store_id == datastore_id
+        ).delete(synchronize_session=False)
     db.commit()
 
-    db.delete(ds)
-    db.commit()
+    # Capture datastore info before expunging (the ORM instance will be
+    # detached from the session after expunge, so attribute access will fail).
+    ds_id_log = ds.id
+    ds_name_log = ds.name
+
+    # Detach the datastore ORM instance so SQLAlchemy doesn't try to
+    # cascade through stale relationship state (the child rows we just
+    # bulk-deleted).  Re-fetch a fresh instance for the final delete.
+    db.expunge(ds)
+    ds_fresh = db.query(DataStore).filter(DataStore.id == datastore_id).first()
+    if ds_fresh:
+        db.delete(ds_fresh)
+        db.commit()
 
     # ── 2. Qdrant cleanup ────────────────────────────────────────────────
-    if datastore_docs:
+    if doc_ids:
         _delete_qdrant_for_ds(db, datastore_id)
 
     # ── 3. Neo4j cleanup ─────────────────────────────────────────────────
     _delete_neo4j_for_ds(datastore_id)
-    logger.info("Datastore deleted id=%d name=%s", ds.id, ds.name)
+    logger.info("Datastore deleted id=%d name=%s", ds_id_log, ds_name_log)
 
     return {"message": "Datastore and all associated data deleted successfully"}, 204
