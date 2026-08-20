@@ -257,8 +257,56 @@ class DataStoreWatcher:
                 with self._lock:
                     self._observer = new_observer
                 logger.info("[WATCHER] observer restarted successfully")
+
+                # Trigger a scan for all active datastores to catch any
+                # file changes that happened while the observer was dead.
+                # The discovery engine's manifest comparison skips unchanged
+                # files, so this is cheap when nothing changed.
+                self._trigger_post_restart_scan()
             except Exception as e:
                 logger.error("[WATCHER] observer restart failed: %s — will retry in 30s", e)
+
+    def _trigger_post_restart_scan(self) -> None:
+        """Scan all active datastores after observer restart.
+
+        Files changed while the observer was dead (up to 30s) are missed
+        by the event system.  A discovery scan catches them by comparing
+        the filesystem against the manifest.  Runs in a daemon thread so
+        it doesn't block the health-check loop.
+        """
+        import threading as _threading
+
+        def _scan_all() -> None:
+            db: Session = SessionLocal()
+            try:
+                ds_ids = [
+                    row[0]
+                    for row in db.query(DataStore.id)
+                    .filter(DataStore.is_active == True)
+                    .all()
+                ]
+            finally:
+                db.close()
+
+            if not ds_ids:
+                return
+
+            logger.info(
+                "[WATCHER] post_restart_scan_start datastore_ids=%s",
+                ds_ids,
+            )
+            for ds_id in ds_ids:
+                try:
+                    self.scan_single_datastore(ds_id)
+                except Exception as e:
+                    logger.warning(
+                        "[WATCHER] post_restart_scan_failed datastore_id=%d: %s",
+                        ds_id, e,
+                    )
+            logger.info("[WATCHER] post_restart_scan_complete")
+
+        t = _threading.Thread(target=_scan_all, name="post-restart-scan", daemon=True)
+        t.start()
 
     @property
     def is_running(self) -> bool:
@@ -645,7 +693,10 @@ class DataStoreWatcher:
 
                 fpath = fmeta["file_path"]
                 try:
-                    future = self._handle_file_in_scan(fpath, datastore_id, scan_id)
+                    future = self._handle_file_in_scan(
+                        fpath, datastore_id, scan_id,
+                        file_hash=fmeta.get("file_hash"),
+                    )
                     if future is not None:
                         ingestion_futures.append(future)
 
@@ -741,11 +792,18 @@ class DataStoreWatcher:
         event_path: str,
         datastore_id: int,
         scan_id: int,
+        file_hash: Optional[str] = None,
     ) -> Optional[Future]:
         """Handle a file during scan. Creates or updates Document records and triggers ingestion.
 
         Returns the ingestion Future so the caller can wait for completion.
         DataStore files are processed independently — no KB knowledge needed.
+
+        Args:
+            file_hash: SHA-256 from the discovery engine.  If provided,
+                skips re-hashing the file (the discovery engine already
+                computed it moments ago).  Falls back to hashing if None
+                (e.g. event-driven path where discovery didn't run).
         """
         db: Session = SessionLocal()
         # Acquire per-file advisory lock to prevent race with event-driven processing
@@ -755,10 +813,13 @@ class DataStoreWatcher:
             db.close()
             return
         try:
-            # Compute hash (delegate to handler which has the method)
-            file_hash = self._handler._compute_hash(event_path)
+            # Use the hash from discovery if available; otherwise compute it.
+            # Discovery hashed the file moments ago during the walk phase,
+            # so re-hashing would waste I/O on large files.
             if not file_hash:
-                return
+                file_hash = self._handler._compute_hash(event_path)
+                if not file_hash:
+                    return
 
             # Check if document already exists for this file path
             existing = (
