@@ -115,7 +115,8 @@ _APP_ONLY = [
                description="One watcher process watches all DataStore folders."),
     SettingDef("WATCH_POLL_INTERVAL", "System", "Watcher poll interval (s)",
                "int", 2, scope="app", reload="restart", min_value=1,
-               description="PollingObserver timeout in seconds."),
+               description="PollingObserver timeout. For CIFS/SMB mounts, "
+                           "use 30-60s to reduce network stat traffic."),
     SettingDef("TOOL_CALL_MODE", "System", "Tool call protocol",
                "str", "auto", scope="app", reload="next_request",
                choices=("native", "json_text", "auto"),

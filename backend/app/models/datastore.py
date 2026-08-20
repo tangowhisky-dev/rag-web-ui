@@ -123,8 +123,11 @@ class DataStoreFileManifest(Base):
 
     Provides the source of truth for discovery — each row records the
     datastore, the file's path relative to the datastore root, its SHA-256
-    hash, and its file size.  The unique constraint on (datastore_id,
-    file_path) ensures no duplicate entries per datastore.
+    hash, file size, and last-known mtime (nanosecond precision).  The
+    unique constraint on (datastore_id, file_path) ensures no duplicate
+    entries per datastore.  The mtime enables stat-first incremental
+    scanning: if (mtime, size) match, the file is unchanged and hashing
+    is skipped.
     """
 
     __tablename__ = "data_store_file_manifests"
@@ -134,6 +137,7 @@ class DataStoreFileManifest(Base):
     file_path = Column(String(1024), nullable=False)
     file_hash = Column(String(64), nullable=False)  # SHA-256 hex digest
     file_size = Column(BigInteger, nullable=False)
+    file_mtime = Column(BigInteger, nullable=True)  # st_mtime_ns from os.stat()
     discovered_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at = Column(
         DateTime,

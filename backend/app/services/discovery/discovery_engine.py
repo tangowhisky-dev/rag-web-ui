@@ -118,7 +118,7 @@ def hash_and_collect(file_path: str, config: DiscoveryConfig) -> dict[str, Any] 
     """Hash a single file and return metadata, or ``None`` if skipped.
 
     Returns a dict with keys:
-        ``file_path``, ``file_hash``, ``file_size``
+        ``file_path``, ``file_hash``, ``file_size``, ``file_mtime``
 
     Returns ``None`` when the file is skipped by pattern or hidden filters.
     """
@@ -130,15 +130,16 @@ def hash_and_collect(file_path: str, config: DiscoveryConfig) -> dict[str, Any] 
         return None
 
     try:
-        file_size = os.path.getsize(file_path)
+        st = os.stat(file_path)
     except OSError:
-        logger.warning("[DISCOVERY] failed_to_get_size path=%s", file_path)
+        logger.warning("[DISCOVERY] failed_to_stat path=%s", file_path)
         return None
 
     return {
         "file_path": file_path,
         "file_hash": file_hash,
-        "file_size": file_size,
+        "file_size": st.st_size,
+        "file_mtime": st.st_mtime_ns,
     }
 
 
@@ -153,6 +154,35 @@ def _hash_worker(args: tuple[str, "DiscoveryConfig"]) -> dict[str, Any] | None:
     """
     file_path, config = args
     return hash_and_collect(file_path, config)
+
+
+def stat_and_collect(file_path: str, config: DiscoveryConfig) -> dict[str, Any] | None:
+    """Stat a single file and return metadata without hashing.
+
+    Returns a dict with keys:
+        ``file_path``, ``file_size``, ``file_mtime``
+
+    Returns ``None`` when the file is skipped by pattern/hidden filters
+    or is inaccessible.
+    """
+    if not _matches_pattern(file_path, config.scan_pattern, config.skip_hidden):
+        return None
+    try:
+        st = os.stat(file_path)
+    except OSError:
+        logger.warning("[DISCOVERY] failed_to_stat path=%s", file_path)
+        return None
+    return {
+        "file_path": file_path,
+        "file_size": st.st_size,
+        "file_mtime": st.st_mtime_ns,
+    }
+
+
+def _stat_worker(args: tuple[str, "DiscoveryConfig"]) -> dict[str, Any] | None:
+    """Worker function for stat-only concurrent collection."""
+    file_path, config = args
+    return stat_and_collect(file_path, config)
 
 
 # ── DataStore discovery ──────────────────────────────────────────────────────
@@ -268,6 +298,7 @@ def _upsert_manifest(
         if existing:
             existing.file_hash = entry["file_hash"]
             existing.file_size = entry["file_size"]
+            existing.file_mtime = entry.get("file_mtime")
 
     # Add new entries
     for entry in new_files:
@@ -277,6 +308,7 @@ def _upsert_manifest(
                 file_path=entry["file_path"],
                 file_hash=entry["file_hash"],
                 file_size=entry["file_size"],
+                file_mtime=entry.get("file_mtime"),
                 discovered_at=now,
                 updated_at=now,
             )
@@ -288,12 +320,31 @@ def _upsert_manifest(
         db.commit()
 
 
-def discover_datastore(datastore_id: int) -> DiscoveryResult:
-    """Walk a datastore's folder, hash files, and compare against the manifest.
+def discover_datastore(
+    datastore_id: int,
+    force_full_hash: bool = False,
+) -> DiscoveryResult:
+    """Walk a datastore's folder, stat files, and compare against the manifest.
+
+    Uses a two-phase stat-first approach for incremental scanning:
+
+    Phase 1 — stat every file concurrently (cheap: one syscall per file,
+    no content read).  Compare (mtime, size) against the manifest.
+    Files where both match are **unchanged** — reuse the manifest hash
+    and skip hashing entirely.
+
+    Phase 2 — hash only the candidates (new files + files where mtime or
+    size changed).  This is the expensive part (full file read), but it
+    only runs for files that actually changed.
+
+    When *force_full_hash* is ``True``, skip the stat comparison and hash
+    every file.  Use this for periodic safety-net scans to catch the edge
+    case where content changed but mtime/size didn't (rare, but possible
+    with some file sync tools that preserve mtime).
 
     Returns a :class:`DiscoveryResult` classifying files as *new*,
-    *modified*, or *deleted*.  New and updated entries are persisted
-    back to the ``data_store_file_manifests`` table via batch upsert.
+    *modified*, or *deleted*.  New and updated entries (including
+    ``file_mtime``) are persisted back to the manifest table.
 
     Creates its own session — safe to call from multiple threads concurrently.
     """
@@ -343,9 +394,10 @@ def discover_datastore(datastore_id: int) -> DiscoveryResult:
         }
 
         logger.info(
-            "[DISCOVERY] scanning_start datastore_id=%d folder=%s",
+            "[DISCOVERY] scanning_start datastore_id=%d folder=%s force_full_hash=%s",
             datastore_id,
             ds.folder_path,
+            force_full_hash,
         )
 
         # Walk the folder.
@@ -356,36 +408,126 @@ def discover_datastore(datastore_id: int) -> DiscoveryResult:
             len(file_paths),
         )
 
-        # Hash concurrently.
         config = DiscoveryConfig()
         skipped = 0
         collected: list[dict[str, Any]] = []
 
-        with ThreadPoolExecutor(max_workers=config.max_workers) as executor:
-            futures = {
-                executor.submit(_hash_worker, (fp, config)): fp for fp in file_paths
-            }
-            for future in as_completed(futures):
-                fp = futures[future]
-                try:
-                    result = future.result()
-                except Exception:
-                    logger.exception(
-                        "[DISCOVERY] worker_exception path=%s", fp
-                    )
-                    skipped += 1
-                    continue
-                if result is None:
-                    skipped += 1
-                else:
-                    collected.append(result)
+        if force_full_hash:
+            # Hash every file — safety-net path.
+            with ThreadPoolExecutor(max_workers=config.max_workers) as executor:
+                futures = {
+                    executor.submit(_hash_worker, (fp, config)): fp
+                    for fp in file_paths
+                }
+                for future in as_completed(futures):
+                    fp = futures[future]
+                    try:
+                        result = future.result()
+                    except Exception:
+                        logger.exception(
+                            "[DISCOVERY] worker_exception path=%s", fp
+                        )
+                        skipped += 1
+                        continue
+                    if result is None:
+                        skipped += 1
+                    else:
+                        collected.append(result)
 
-        logger.info(
-            "[DISCOVERY] hashing_done datastore_id=%d collected=%d skipped=%d",
-            datastore_id,
-            len(collected),
-            skipped,
-        )
+            logger.info(
+                "[DISCOVERY] hashing_done datastore_id=%d collected=%d skipped=%d (force_full_hash=True)",
+                datastore_id,
+                len(collected),
+                skipped,
+            )
+        else:
+            # ── Phase 1: stat all files concurrently ───────────────────
+            stat_results: dict[str, dict[str, Any]] = {}
+            with ThreadPoolExecutor(max_workers=config.max_workers) as executor:
+                futures = {
+                    executor.submit(_stat_worker, (fp, config)): fp
+                    for fp in file_paths
+                }
+                for future in as_completed(futures):
+                    fp = futures[future]
+                    try:
+                        result = future.result()
+                    except Exception:
+                        logger.exception(
+                            "[DISCOVERY] stat_worker_exception path=%s", fp
+                        )
+                        skipped += 1
+                        continue
+                    if result is None:
+                        skipped += 1
+                    else:
+                        stat_results[result["file_path"]] = result
+
+            # ── Compare stats against manifest ──────────────────────────
+            # Files where (mtime, size) match the manifest are unchanged.
+            # Reuse the manifest hash and skip hashing.
+            unchanged: list[dict[str, Any]] = []
+            candidates: list[str] = []  # file_paths that need hashing
+
+            for fp, stat_meta in stat_results.items():
+                existing = manifest_map.get(fp)
+                if (
+                    existing is not None
+                    and existing.file_mtime is not None
+                    and existing.file_mtime == stat_meta["file_mtime"]
+                    and existing.file_size == stat_meta["file_size"]
+                ):
+                    # Unchanged — reuse manifest hash.
+                    unchanged.append({
+                        "file_path": fp,
+                        "file_hash": existing.file_hash,
+                        "file_size": stat_meta["file_size"],
+                        "file_mtime": stat_meta["file_mtime"],
+                    })
+                else:
+                    # New or modified — needs hashing.
+                    candidates.append(fp)
+
+            logger.info(
+                "[DISCOVERY] stat_done datastore_id=%d total=%d unchanged=%d candidates=%d skipped=%d",
+                datastore_id,
+                len(stat_results),
+                len(unchanged),
+                len(candidates),
+                skipped,
+            )
+
+            # ── Phase 2: hash only candidates ──────────────────────────
+            hashed: list[dict[str, Any]] = []
+            if candidates:
+                with ThreadPoolExecutor(max_workers=config.max_workers) as executor:
+                    futures = {
+                        executor.submit(_hash_worker, (fp, config)): fp
+                        for fp in candidates
+                    }
+                    for future in as_completed(futures):
+                        fp = futures[future]
+                        try:
+                            result = future.result()
+                        except Exception:
+                            logger.exception(
+                                "[DISCOVERY] worker_exception path=%s", fp
+                            )
+                            skipped += 1
+                            continue
+                        if result is None:
+                            skipped += 1
+                        else:
+                            hashed.append(result)
+
+                logger.info(
+                    "[DISCOVERY] hashing_done datastore_id=%d hashed=%d skipped=%d",
+                    datastore_id,
+                    len(hashed),
+                    skipped - (len(stat_results) - len(unchanged) - len(candidates)),
+                )
+
+            collected = unchanged + hashed
 
         # Classify.
         new_files, modified_files, deleted_files = _classify_files(

@@ -620,11 +620,18 @@ class DataStoreWatcher:
     # Scan endpoints
     # ------------------------------------------------------------------
 
-    def scan_single_datastore(self, datastore_id: int) -> Dict[str, Any]:
+    def scan_single_datastore(
+        self,
+        datastore_id: int,
+        force_full_hash: bool = False,
+    ) -> Dict[str, Any]:
         """Manually scan a specific datastore for new/modified files.
 
         Args:
             datastore_id: ID of the datastore to scan
+            force_full_hash: When True, hash every file instead of using
+                stat-first incremental comparison.  Use for periodic
+                safety-net scans.
 
         Returns a summary dict with counts of scanned, new, and skipped files.
         """
@@ -651,7 +658,7 @@ class DataStoreWatcher:
 
             # Use the discovery engine for accurate new/modified/deleted classification
             try:
-                result = discover_datastore(datastore_id)
+                result = discover_datastore(datastore_id, force_full_hash=force_full_hash)
             except Exception as e:
                 logger.error(
                     "[WATCHER] discovery_failed datastore_id=%d: %s", datastore_id, e,

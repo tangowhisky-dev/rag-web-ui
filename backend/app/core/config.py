@@ -52,8 +52,13 @@ class Settings(BaseSettings):
     # Watcher — legacy fallback directory (per-org watch config is in Organisation model)
     WATCH_DIR: str = os.getenv("WATCH_DIR", "/app/uploads")
     # Use inotify (Linux native) instead of polling observer.
-    # inotify provides near-instant event delivery on ext4/xfs with Docker bind-mounts.
-    # Falls back to PollingObserver on macOS, Windows, or when inotify is unavailable.
+    # inotify provides near-instant event delivery on local filesystems
+    # (ext4/xfs/btrfs with Docker bind-mounts).
+    # Does NOT work on CIFS/SMB/NFS mounts — the kernel does not generate
+    # inotify events for remote filesystem changes. On CIFS mounts, set
+    # to False and rely on PollingObserver + stat-first incremental scans.
+    # Falls back to PollingObserver on macOS, Windows, or when inotify
+    # is unavailable.
     WATCHER_USE_INOTIFY: bool = os.getenv("WATCHER_USE_INOTIFY", "true").lower() == "true"
 
     # Embedded models (not user-changeable at runtime — loaded once into process singletons)

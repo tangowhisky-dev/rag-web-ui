@@ -438,6 +438,7 @@ def stop_datastore_scan(
 @router.post("/datastores/{datastore_id}/scan", status_code=202)
 async def trigger_datastore_scan(
     datastore_id: int,
+    force_full_hash: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_super_admin),
 ):
@@ -447,6 +448,11 @@ async def trigger_datastore_scan(
     via the SSE endpoint (scan-progress-stream) or the polling endpoint
     (scan-progress). The scan runs in the background and updates the
     datastore status when complete.
+
+    Query params:
+        force_full_hash: When true, hash every file instead of using
+            stat-first incremental comparison. Use for periodic
+            safety-net scans.
     """
     ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
     if ds is None:
@@ -554,7 +560,9 @@ async def trigger_datastore_scan(
                 ds_local.last_scan_error = None
                 db_session.commit()
 
-            result = watcher_local.scan_single_datastore(datastore_id)
+            result = watcher_local.scan_single_datastore(
+                datastore_id, force_full_hash=force_full_hash,
+            )
 
             # Update datastore status with scan results
             ds_local.last_scan_at = datetime.now(timezone.utc)
