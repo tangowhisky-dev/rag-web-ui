@@ -42,12 +42,13 @@ def test_strip_reasoning_tags_partial_block():
 
 @pytest.mark.asyncio
 async def test_progress_timeout_fires_on_inactivity():
-    from app.services.infrastructure.progress_timeout import ProgressTimeout
+    from app.services.infrastructure.progress_timeout import ProgressTimeout, ProgressTimeoutError
 
     callback = MagicMock()
-    async with ProgressTimeout(silence_seconds=1, on_timeout=callback) as pt:
-        await asyncio.sleep(1.5)
-        assert pt._watcher is not None
+    with pytest.raises(ProgressTimeoutError):
+        async with ProgressTimeout(silence_seconds=1, on_timeout=callback) as pt:
+            await asyncio.sleep(1.5)
+            assert pt._watcher is not None
     assert callback.called
 
 

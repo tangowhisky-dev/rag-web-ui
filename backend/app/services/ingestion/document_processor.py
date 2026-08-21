@@ -246,14 +246,32 @@ async def process_document_background(
         db.commit()
 
         from app.services.settings_service import get_setting
-        silence_s = get_setting(db, "PROCESSING_TIMEOUT_SILENCE_S", None)
+        silence_s = get_setting(db, "PROCESSING_TIMEOUT_SILENCE_S", None) or 600
 
         def _on_timeout() -> None:
             logger.warning(
                 "[PROGRESS_TIMEOUT] task_id=%s silence_s=%s — "
-                "task may still be processing (graph build is non-fatal)",
-                task_id, silence_s,
+                "cancelling ingestion (no progress for %ss)",
+                task_id, silence_s, silence_s,
             )
+            # Mark the task as failed in a separate session so the user
+            # can retry immediately without waiting for an app restart.
+            try:
+                fail_db = SessionLocal()
+                try:
+                    ptask = fail_db.query(ProcessingTask).filter(
+                        ProcessingTask.id == task_id
+                    ).first()
+                    if ptask:
+                        ptask.status = "failed"
+                        ptask.error_message = (
+                            f"Processing timed out — no progress for {silence_s}s"
+                        )
+                        fail_db.commit()
+                finally:
+                    fail_db.close()
+            except Exception:
+                pass
 
         async with ProgressTimeout(silence_s, _on_timeout) as pt:
 

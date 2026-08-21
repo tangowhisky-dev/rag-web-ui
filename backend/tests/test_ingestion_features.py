@@ -400,10 +400,12 @@ from app.services.infrastructure.progress_timeout import ProgressTimeout
 
 @pytest.mark.asyncio
 async def test_progress_timeout_fires():
-    """Timeout callback fires when no ping arrives within the silence window."""
+    """Timeout callback fires and raises ProgressTimeoutError when no ping arrives."""
+    from app.services.infrastructure.progress_timeout import ProgressTimeoutError
     fired = []
-    async with ProgressTimeout(silence_seconds=1, on_timeout=lambda: fired.append(True)) as pt:
-        await _asyncio.sleep(2)  # exceed 1-second silence — do NOT call pt.ping()
+    with pytest.raises(ProgressTimeoutError):
+        async with ProgressTimeout(silence_seconds=1, on_timeout=lambda: fired.append(True)) as pt:
+            await _asyncio.sleep(2)  # exceed 1-second silence — do NOT call pt.ping()
     assert fired, "on_timeout should have been called"
 
 
