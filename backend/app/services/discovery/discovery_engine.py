@@ -235,7 +235,7 @@ class DiscoveryResult:
 def _walk_files(folder_path: str) -> list[str]:
     """Walk *folder_path* and return absolute file paths (no symlinks)."""
     paths: list[str] = []
-    for dirpath, _dirnames, filenames in os.walk(folder_path):
+    for dirpath, _dirnames, filenames in os.walk(folder_path, followlinks=False):
         for fname in filenames:
             paths.append(os.path.join(dirpath, fname))
     return paths

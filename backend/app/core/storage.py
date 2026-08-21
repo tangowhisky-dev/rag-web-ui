@@ -1,7 +1,9 @@
+import hashlib
 import logging
 import os
 import shutil
 from pathlib import Path
+from typing import AsyncIterator
 
 from app.core.config import settings
 
@@ -29,6 +31,29 @@ def save_file(object_path: str, content: bytes) -> None:
     abs_path.parent.mkdir(parents=True, exist_ok=True)
     abs_path.write_bytes(content)
     logger.info(f"Saved file: {abs_path}")
+
+
+async def save_file_stream(
+    object_path: str,
+    source: AsyncIterator[bytes],
+    chunk_size: int = 1024 * 1024,
+) -> tuple[str, int]:
+    """Stream *source* to disk, computing SHA-256 and counting bytes.
+
+    Avoids loading the entire file into memory.  Returns
+    ``(sha256_hexdigest, total_bytes)``.
+    """
+    abs_path = _base() / object_path
+    abs_path.parent.mkdir(parents=True, exist_ok=True)
+    h = hashlib.sha256()
+    total = 0
+    with open(abs_path, "wb") as f:
+        async for chunk in source:
+            f.write(chunk)
+            h.update(chunk)
+            total += len(chunk)
+    logger.info(f"Saved file (streamed): {abs_path} ({total} bytes)")
+    return h.hexdigest(), total
 
 
 def move_file(src_path: str, dst_path: str) -> None:

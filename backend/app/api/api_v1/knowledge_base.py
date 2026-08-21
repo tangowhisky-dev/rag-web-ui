@@ -44,7 +44,7 @@ from app.services.ingestion import (
 )
 from app.services.ingestion import SUPPORTED_EXTENSIONS
 from app.core.config import settings
-from app.core.storage import save_file, delete_file
+from app.core.storage import save_file, save_file_stream, delete_file
 
 
 def _kb_owner_filter(current_user):
@@ -52,6 +52,15 @@ def _kb_owner_filter(current_user):
     Users can only access KBs they personally own (user_id).
     """
     return KnowledgeBase.user_id == current_user.id
+
+
+async def _file_chunks(file: UploadFile, chunk_size: int = 1024 * 1024):
+    """Yield chunks from an UploadFile without loading it all into memory."""
+    while True:
+        chunk = await file.read(chunk_size)
+        if not chunk:
+            break
+        yield chunk
 
 
 router = APIRouter()
@@ -405,20 +414,25 @@ async def upload_kb_documents(
                 detail=f"Unsupported file type '{ext}'. Supported: {', '.join(sorted(SUPPORTED_EXTENSIONS))}"
             )
 
-        # 1. 计算文件 hash
-        file_content = await file.read()
+        # 1. Stream file to disk, computing hash and size as we go.
+        #    This avoids loading the entire file into memory.
+        temp_path = f"user_{current_user.id}/kb_{kb_id}/temp/{file.filename}"
+        try:
+            file_hash, file_size = await save_file_stream(temp_path, _file_chunks(file))
+        except Exception as e:
+            logger.error(f"Failed to save file to storage: {str(e)}")
+            raise HTTPException(status_code=500, detail="Failed to upload file")
 
-        file_hash = hashlib.sha256(file_content).hexdigest()
-        
         # 2. 检查是否存在完全相同的文件（名称和hash都相同）
         existing_document = db.query(Document).filter(
             Document.file_name == file.filename,
             Document.file_hash == file_hash,
             Document.knowledge_base_id == kb_id
         ).first()
-        
+
         if existing_document:
-            # 完全相同的文件，直接返回
+            # 完全相同的文件，直接返回 — clean up the temp file we just wrote.
+            delete_file(temp_path)
             results.append({
                 "document_id": existing_document.id,
                 "file_name": existing_document.file_name,
@@ -427,21 +441,13 @@ async def upload_kb_documents(
                 "skip_processing": True
             })
             continue
-        
-        # 3. Save to temp directory
-        temp_path = f"user_{current_user.id}/kb_{kb_id}/temp/{file.filename}"
-        try:
-            save_file(temp_path, file_content)
-        except Exception as e:
-            logger.error(f"Failed to save file to storage: {str(e)}")
-            raise HTTPException(status_code=500, detail="Failed to upload file")
-        
-        # 4. 创建上传记录
+
+        # 3. 创建上传记录
         upload = DocumentUpload(
             knowledge_base_id=kb_id,
             file_name=file.filename,
             file_hash=file_hash,
-            file_size=len(file_content),
+            file_size=file_size,
             content_type=file.content_type,
             temp_path=temp_path
         )

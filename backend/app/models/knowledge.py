@@ -94,7 +94,7 @@ class ProcessingTask(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     knowledge_base_id = Column(Integer, ForeignKey("knowledge_bases.id", ondelete="CASCADE"))
-    data_store_id = Column(Integer, ForeignKey("data_stores.id"), nullable=True, index=True)
+    data_store_id = Column(Integer, ForeignKey("data_stores.id", ondelete="CASCADE"), nullable=True, index=True)
     document_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=True, index=True)
     document_upload_id = Column(Integer, ForeignKey("document_uploads.id", ondelete="CASCADE"), nullable=True)
     status = Column(String(50), default="pending", index=True)  # pending, processing, completed, failed
@@ -118,7 +118,7 @@ class DocumentChunk(Base, TimestampMixin):
 
     id = Column(String(64), primary_key=True)  # SHA-256 hash as ID
     kb_id = Column(Integer, ForeignKey("knowledge_bases.id"), nullable=True)
-    data_store_id = Column(Integer, ForeignKey("data_stores.id"), nullable=True, index=True)
+    data_store_id = Column(Integer, ForeignKey("data_stores.id", ondelete="CASCADE"), nullable=True, index=True)
     document_id = Column(Integer, ForeignKey("documents.id"), nullable=False, index=True)
     file_name = Column(String(255), nullable=False)
     chunk_text = Column(LONGTEXT, nullable=False)   # the actual chunk text — FULLTEXT indexed

@@ -127,6 +127,13 @@ logging.getLogger("neo4j_graphrag").setLevel(logging.WARNING)
 
 async def lifespan(app: FastAPI):
     """Startup and shutdown lifecycle for the application."""
+    # Validate SECRET_KEY — reject the insecure default placeholder.
+    if settings.SECRET_KEY == "your-secret-key-here":
+        raise RuntimeError(
+            "SECRET_KEY is set to the insecure default 'your-secret-key-here'. "
+            "Set the SECRET_KEY environment variable to a strong random value."
+        )
+
     # Seed root organisation and superadmin (runs before other startup tasks)
     _seed_root_org_and_superadmin()
 

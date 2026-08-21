@@ -103,7 +103,17 @@ def run_ingestion_in_thread(
     # pipeline so scans complete at Qdrant upsert.  Graph status is tracked
     # via ProcessingTask.graph_status and retried by the recovery service.
     if graph_request is not None:
-        _start_graph_build_thread(graph_request)
+        # Defensive check: verify the task is actually completed before
+        # starting graph build.  This catches edge cases where the task
+        # was marked failed by a timeout or concurrent operation.
+        task_status = _get_task_status(task_id)
+        if task_status == "completed":
+            _start_graph_build_thread(graph_request)
+        else:
+            logger.warning(
+                "graph_build_skipped task_id=%s status=%s (not completed)",
+                task_id, task_status,
+            )
 
 
 def run_graph_build_in_thread(req: GraphBuildRequest) -> None:
@@ -241,3 +251,18 @@ def _mark_task_status(
             db.close()
     except Exception:
         pass
+
+
+def _get_task_status(task_id: int) -> str | None:
+    """Read the current ProcessingTask status (best-effort)."""
+    try:
+        db: Session = SessionLocal()
+        try:
+            task = db.query(ProcessingTask).filter(
+                ProcessingTask.id == task_id
+            ).first()
+            return task.status if task else None
+        finally:
+            db.close()
+    except Exception:
+        return None

@@ -1,8 +1,10 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from app.api.api_v1 import auth, knowledge_base, chat, query, chat_files, folders, admin
 from app.api.api_v1 import datastores, datastore_scan, datastore_recovery
 from app.api.api_v1 import settings as settings_router
 from app.core.config import settings
+from app.core.security import get_current_user
+from app.models.user import User
 
 api_router = APIRouter()
 
@@ -22,7 +24,7 @@ api_router.include_router(datastore_scan.router, prefix="/admin", tags=["datasto
 
 
 @api_router.get("/config", tags=["config"])
-def get_client_config():
+def get_client_config(current_user: User = Depends(get_current_user)):
     """Expose non-sensitive runtime configuration to the frontend."""
     from app.db.session import SessionLocal
     from app.services.settings_service import get_setting

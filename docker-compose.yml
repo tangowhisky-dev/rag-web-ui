@@ -60,10 +60,10 @@ services:
       --innodb_ft_enable_stopword=0
       --default-time-zone=+00:00
     environment:
-      - MYSQL_ROOT_PASSWORD=***
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD is required}
       - MYSQL_DATABASE=ragwebui
       - MYSQL_USER=ragwebui
-      - MYSQL_PASSWORD=***
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
       - TZ=UTC
     ports:
       - "3306:3306"

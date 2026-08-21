@@ -49,7 +49,9 @@ def content_hash(text: str) -> str:
 def get_qdrant_client() -> QdrantClient:
     global _qdrant_client
     if _qdrant_client is None:
-        _qdrant_client = QdrantClient(host=settings.QDRANT_HOST, port=settings.QDRANT_PORT)
+        with _singleton_lock:
+            if _qdrant_client is None:
+                _qdrant_client = QdrantClient(host=settings.QDRANT_HOST, port=settings.QDRANT_PORT)
     return _qdrant_client
 
 

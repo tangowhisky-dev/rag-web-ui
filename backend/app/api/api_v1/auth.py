@@ -209,6 +209,7 @@ def login_access_token(
         httponly=True,
         max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         samesite="lax",
+        secure=settings.COOKIE_SECURE,
         path="/",
     )
     logger.info("[AUTH] token_issued username=%s role=%s org_id=%s", user.username, user.role.value, user.org_id)
@@ -268,5 +269,5 @@ def preflight(
 @router.post("/logout", status_code=200)
 def logout(response: Response) -> Any:
     """Clear the HttpOnly auth cookie."""
-    response.delete_cookie(key="token", path="/")
+    response.delete_cookie(key="token", path="/", secure=settings.COOKIE_SECURE)
     return {"message": "Logged out"}

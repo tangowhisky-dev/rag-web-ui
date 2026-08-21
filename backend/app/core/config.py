@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     SECRET_KEY: str = os.getenv("SECRET_KEY", "your-secret-key-here")
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "360"))
+    # Set to true when serving over HTTPS so the auth cookie gets the Secure flag.
+    COOKIE_SECURE: bool = os.getenv("COOKIE_SECURE", "false").lower() == "true"
 
     # Comma-separated list of trusted proxy IP addresses. The wildcard '*' trusts
     # all proxies. Only used for extracting the real client IP from X-Forwarded-*
