@@ -25,6 +25,20 @@ module.exports = {
     config.externals.push({
       "onnxruntime-node": "commonjs onnxruntime-node",
     });
+
+    // onnxruntime-web ships pre-bundled .mjs files that use `import.meta.url`
+    // to locate their WASM assets at runtime. Terser (used by Next.js
+    // production builds) fails to parse `import.meta` unless the file is
+    // explicitly treated as an ES module. Without this rule, `next build`
+    // fails with: "'import.meta' cannot be used outside of module code".
+    config.module = config.module || {};
+    config.module.rules = config.module.rules || [];
+    config.module.rules.push({
+      test: /\.mjs$/,
+      include: /onnxruntime-web/,
+      type: "javascript/esm",
+    });
+
     return config;
   },
   async rewrites() {
