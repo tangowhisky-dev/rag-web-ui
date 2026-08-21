@@ -975,60 +975,28 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
                     .first()
                 )
                 if doc:
-                    # Delete Qdrant vectors first (before DB, so DB rollback doesn't orphan vectors)
-                    try:
-                        chunk_ids = [
-                            cid[0] for cid in db.query(DocumentChunk.id).filter(
-                                DocumentChunk.document_id == doc.id
-                            ).all()
-                        ]
-                        if chunk_ids:
-                            point_ids = [_chunk_id_to_point_id(cid) for cid in chunk_ids]
-                            get_qdrant_client().delete(
-                                collection_name=f"ds_{datastore_id}",
-                                points_selector=PointIdsList(points=point_ids),
-                            )
-                    except UnexpectedResponse as e:
-                        # 404 means the vectors were already deleted — safe to ignore
-                        if "404" in str(e):
-                            logger.info(
-                                "[WATCHER] Qdrant vectors already gone for document_id=%s",
-                                doc.id,
-                            )
-                        else:
-                            logger.warning(
-                                "[WATCHER] Qdrant delete failed for document_id=%s: %s",
-                                doc.id, e,
-                            )
-                    except Exception as e:
-                        logger.warning(
-                            "[WATCHER] Qdrant delete failed for document_id=%s: %s",
-                            doc.id, e,
-                        )
+                    # Capture IDs before DB deletion — needed for Qdrant/Neo4j
+                    # cleanup after the DB commit.
+                    doc_id = doc.id
+                    chunk_ids = [
+                        cid[0] for cid in db.query(DocumentChunk.id).filter(
+                            DocumentChunk.document_id == doc.id
+                        ).all()
+                    ]
 
+                    # DB cleanup first. If this commit fails, vector/graph data
+                    # is still intact and the next scan retries. If it succeeds
+                    # but Qdrant/Neo4j cleanup fails below, orphaned data is
+                    # invisible (document gone from DB) and reconciliation
+                    # cleans it up on next startup.
                     db.query(DocumentChunk).filter(DocumentChunk.document_id == doc.id).delete()
                     db.query(ProcessingTask).filter(ProcessingTask.document_id == doc.id).delete()
-
-                    # Clean up Neo4j graph nodes for this document
-                    try:
-                        from app.services.graph import delete_graph_for_document
-                        delete_graph_for_document(kb_id=None, document_id=doc.id, data_store_id=datastore_id)
-                        logger.info(
-                            "[WATCHER] Neo4j cleanup done for document_id=%s",
-                            doc.id,
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            "[WATCHER] Neo4j cleanup failed for document_id=%s: %s",
-                            doc.id, e,
-                        )
-
                     db.delete(doc)
                     logger.info(
                         "[WATCHER] document_deleted path=%s datastore_id=%s doc_id=%s",
                         event_path,
                         datastore_id,
-                        doc.id,
+                        doc_id,
                     )
 
                 # Remove manifest entry for the deleted file (or if it was never ingested)
@@ -1038,6 +1006,47 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
                 ).delete(synchronize_session=False)
 
                 db.commit()
+
+                # Qdrant cleanup (after DB commit, using captured IDs)
+                if doc and chunk_ids:
+                    try:
+                        point_ids = [_chunk_id_to_point_id(cid) for cid in chunk_ids]
+                        get_qdrant_client().delete(
+                            collection_name=f"ds_{datastore_id}",
+                            points_selector=PointIdsList(points=point_ids),
+                        )
+                    except UnexpectedResponse as e:
+                        if "404" in str(e):
+                            logger.info(
+                                "[WATCHER] Qdrant vectors already gone for document_id=%s",
+                                doc_id,
+                            )
+                        else:
+                            logger.warning(
+                                "[WATCHER] Qdrant delete failed for document_id=%s: %s",
+                                doc_id, e,
+                            )
+                    except Exception as e:
+                        logger.warning(
+                            "[WATCHER] Qdrant delete failed for document_id=%s: %s",
+                            doc_id, e,
+                        )
+
+                # Neo4j cleanup (after DB commit, using captured doc_id)
+                if doc:
+                    try:
+                        from app.services.graph import delete_graph_for_document
+                        delete_graph_for_document(kb_id=None, document_id=doc_id, data_store_id=datastore_id)
+                        logger.info(
+                            "[WATCHER] Neo4j cleanup done for document_id=%s",
+                            doc_id,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "[WATCHER] Neo4j cleanup failed for document_id=%s: %s",
+                            doc_id, e,
+                        )
+
                 return
 
             # KB deletion: query by org_id from handler mapping
@@ -1050,6 +1059,9 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
                 )
                 kb_list = [kb[0] for kb in kb_list]
 
+                # Capture (kb_id, doc_id, chunk_ids) for all affected docs
+                # before DB deletion — needed for Qdrant/Neo4j cleanup after.
+                cleanup_targets = []
                 for kb_id in kb_list:
                     doc = (
                         db.query(Document)
@@ -1061,53 +1073,15 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
                     )
 
                     if doc:
-                        # Delete Qdrant vectors first
-                        try:
-                            chunk_ids = [
-                                cid[0] for cid in db.query(DocumentChunk.id).filter(
-                                    DocumentChunk.document_id == doc.id
-                                ).all()
-                            ]
-                            if chunk_ids:
-                                point_ids = [_chunk_id_to_point_id(cid) for cid in chunk_ids]
-                                get_qdrant_client().delete(
-                                    collection_name=f"kb_{kb_id}",
-                                    points_selector=PointIdsList(points=point_ids),
-                                )
-                        except UnexpectedResponse as e:
-                            if "404" in str(e):
-                                logger.info(
-                                    "[WATCHER] Qdrant vectors already gone for document_id=%s",
-                                    doc.id,
-                                )
-                            else:
-                                logger.warning(
-                                    "[WATCHER] Qdrant delete failed for document_id=%s: %s",
-                                    doc.id, e,
-                                )
-                        except Exception as e:
-                            logger.warning(
-                                "[WATCHER] Qdrant delete failed for document_id=%s: %s",
-                                doc.id, e,
-                            )
+                        chunk_ids = [
+                            cid[0] for cid in db.query(DocumentChunk.id).filter(
+                                DocumentChunk.document_id == doc.id
+                            ).all()
+                        ]
+                        cleanup_targets.append((kb_id, doc.id, chunk_ids))
 
                         db.query(DocumentChunk).filter(DocumentChunk.document_id == doc.id).delete()
                         db.query(ProcessingTask).filter(ProcessingTask.document_id == doc.id).delete()
-
-                        # Clean up Neo4j graph nodes for this document
-                        try:
-                            from app.services.graph import delete_graph_for_document
-                            delete_graph_for_document(kb_id=kb_id, document_id=doc.id)
-                            logger.info(
-                                "[WATCHER] Neo4j cleanup done for kb_id=%s doc_id=%s",
-                                kb_id, doc.id,
-                            )
-                        except Exception as e:
-                            logger.warning(
-                                "[WATCHER] Neo4j cleanup failed for kb_id=%s doc_id=%s: %s",
-                                kb_id, doc.id, e,
-                            )
-
                         db.delete(doc)
                         logger.info(
                             "[WATCHER] document_deleted path=%s kb_id=%s doc_id=%s",
@@ -1116,7 +1090,46 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
                             doc.id,
                         )
 
-            db.commit()
+                db.commit()
+
+                # Qdrant + Neo4j cleanup after DB commit, using captured IDs
+                for kb_id, doc_id, chunk_ids in cleanup_targets:
+                    if chunk_ids:
+                        try:
+                            point_ids = [_chunk_id_to_point_id(cid) for cid in chunk_ids]
+                            get_qdrant_client().delete(
+                                collection_name=f"kb_{kb_id}",
+                                points_selector=PointIdsList(points=point_ids),
+                            )
+                        except UnexpectedResponse as e:
+                            if "404" in str(e):
+                                logger.info(
+                                    "[WATCHER] Qdrant vectors already gone for document_id=%s",
+                                    doc_id,
+                                )
+                            else:
+                                logger.warning(
+                                    "[WATCHER] Qdrant delete failed for document_id=%s: %s",
+                                    doc_id, e,
+                                )
+                        except Exception as e:
+                            logger.warning(
+                                "[WATCHER] Qdrant delete failed for document_id=%s: %s",
+                                doc_id, e,
+                            )
+
+                    try:
+                        from app.services.graph import delete_graph_for_document
+                        delete_graph_for_document(kb_id=kb_id, document_id=doc_id)
+                        logger.info(
+                            "[WATCHER] Neo4j cleanup done for kb_id=%s doc_id=%s",
+                            kb_id, doc_id,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "[WATCHER] Neo4j cleanup failed for kb_id=%s doc_id=%s: %s",
+                            kb_id, doc_id, e,
+                        )
         finally:
             db.close()
 

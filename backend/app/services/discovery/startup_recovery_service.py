@@ -471,42 +471,24 @@ class StartupRecoveryService:
                 )
                 return
 
-            # Delete Qdrant vectors first (before DB, so DB rollback doesn't orphan vectors)
-            try:
-                from qdrant_client import models
-                from app.services.ingestion import _chunk_id_to_point_id  # noqa: T100
-                from app.services.infrastructure import get_qdrant_client  # noqa: T100
+            # Capture IDs before DB deletion — needed for Qdrant/Neo4j
+            # cleanup after the DB commit.
+            doc_id = doc.id
+            chunk_ids = [
+                cid[0] for cid in db.query(DocumentChunk.id)
+                .filter(DocumentChunk.document_id == doc.id)
+                .all()
+            ]
 
-                chunk_ids = [
-                    cid[0] for cid in db.query(DocumentChunk.id)
-                    .filter(DocumentChunk.document_id == doc.id)
-                    .all()
-                ]
-                if chunk_ids:
-                    point_ids = [_chunk_id_to_point_id(cid) for cid in chunk_ids]
-                    get_qdrant_client().delete(
-                        collection_name=f"ds_{datastore_id}",
-                        points_selector=models.PointIdsList(points=point_ids),
-                    )
-                logger.info("[RECOVERY] deletion_done datastore_id=%s doc_id=%s reason=qdrant_vectors_deleted", datastore_id, doc.id)
-            except Exception as e:
-                logger.warning("[RECOVERY] Qdrant delete failed for doc_id=%s: %s", doc.id, e)
-
-            # Delete DB records
+            # DB cleanup first. If this commit fails, vector/graph data is
+            # still intact and the next scan retries. If it succeeds but
+            # Qdrant/Neo4j cleanup fails below, orphaned data is invisible
+            # (document gone from DB) and reconciliation cleans it up on
+            # next startup.
             db.query(DocumentChunk).filter(DocumentChunk.document_id == doc.id).delete(synchronize_session=False)
             db.query(ProcessingTask).filter(ProcessingTask.document_id == doc.id).delete(synchronize_session=False)
-
-            # Clean up Neo4j graph nodes for this document
-            try:
-                from app.services.graph import delete_graph_for_document  # noqa: T100
-                delete_graph_for_document(kb_id=None, document_id=doc.id, data_store_id=datastore_id)
-                logger.info("[RECOVERY] deletion_done datastore_id=%s doc_id=%s reason=neo4j_cleanup", datastore_id, doc.id)
-            except Exception as e:
-                logger.warning("[RECOVERY] Neo4j cleanup failed for doc_id=%s: %s", doc.id, e)
-
-            # Delete the Document record
             db.query(Document).filter(Document.id == doc.id).delete(synchronize_session=False)
-            logger.info("[RECOVERY] document_deleted datastore_id=%s doc_id=%s file_path=%s", datastore_id, doc.id, file_path)
+            logger.info("[RECOVERY] document_deleted datastore_id=%s doc_id=%s file_path=%s", datastore_id, doc_id, file_path)
 
             # Delete DataStoreFileManifest entry
             manifest = (
@@ -519,6 +501,30 @@ class StartupRecoveryService:
                 logger.info("[RECOVERY] manifest_deleted datastore_id=%s file_path=%s", datastore_id, file_path)
 
             db.commit()
+
+            # Qdrant cleanup (after DB commit, using captured IDs)
+            try:
+                from qdrant_client import models
+                from app.services.ingestion import _chunk_id_to_point_id  # noqa: T100
+                from app.services.infrastructure import get_qdrant_client  # noqa: T100
+
+                if chunk_ids:
+                    point_ids = [_chunk_id_to_point_id(cid) for cid in chunk_ids]
+                    get_qdrant_client().delete(
+                        collection_name=f"ds_{datastore_id}",
+                        points_selector=models.PointIdsList(points=point_ids),
+                    )
+                logger.info("[RECOVERY] deletion_done datastore_id=%s doc_id=%s reason=qdrant_vectors_deleted", datastore_id, doc_id)
+            except Exception as e:
+                logger.warning("[RECOVERY] Qdrant delete failed for doc_id=%s: %s", doc_id, e)
+
+            # Neo4j cleanup (after DB commit, using captured doc_id)
+            try:
+                from app.services.graph import delete_graph_for_document  # noqa: T100
+                delete_graph_for_document(kb_id=None, document_id=doc_id, data_store_id=datastore_id)
+                logger.info("[RECOVERY] deletion_done datastore_id=%s doc_id=%s reason=neo4j_cleanup", datastore_id, doc_id)
+            except Exception as e:
+                logger.warning("[RECOVERY] Neo4j cleanup failed for doc_id=%s: %s", doc_id, e)
 
         except Exception as e:
             logger.warning("[RECOVERY] Deletion failed for datastore_id=%s file_path=%s: %s", datastore_id, file_path, e, exc_info=True)
