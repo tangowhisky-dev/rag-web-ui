@@ -112,17 +112,28 @@ def get_knowledge_bases(
         .limit(limit)
         .all()
     )
-    
+
+    # Batch-fetch all linked datastores in one query instead of one per KB.
+    all_ds_ids = set()
+    for kb in knowledge_bases:
+        all_ds_ids.update(link.data_store_id for link in kb.data_sources)
+
+    all_datastores: dict[int, DataStore] = {}
+    if all_ds_ids:
+        all_datastores = {
+            ds.id: ds for ds in db.query(DataStore).filter(
+                DataStore.id.in_(all_ds_ids),
+                DataStore.is_active == True,
+            ).all()
+        }
+
     # Add data_sources to each response (only explicitly linked ones)
     result = []
     for kb in knowledge_bases:
         linked_ds_ids = [link.data_store_id for link in kb.data_sources]
-        linked_datastores = db.query(DataStore).filter(
-            DataStore.id.in_(linked_ds_ids),
-            DataStore.is_active == True
-        ).all()
+        linked_datastores = [all_datastores[did] for did in linked_ds_ids if did in all_datastores]
         data_sources = [DataStoreInfo(id=ds.id, name=ds.name, folder_path=ds.folder_path) for ds in linked_datastores]
-        
+
         kb_dict = {
             "id": kb.id,
             "name": kb.name,
@@ -135,7 +146,7 @@ def get_knowledge_bases(
             "data_source_count": len(linked_datastores),
         }
         result.append(KnowledgeBaseResponse(**kb_dict))
-    
+
     return result
 
 
@@ -181,17 +192,26 @@ def list_available_datastores(
         .all()
     )
 
+    # Batch-fetch all org links for these datastores in one query with
+    # eager-loaded organisations (avoids N+1 per datastore + lazy loads).
+    all_ds_ids = [ds.id for ds in datastores]
+    all_links = (
+        db.query(OrganizationDataStore)
+        .options(selectinload(OrganizationDataStore.organisation))
+        .filter(
+            OrganizationDataStore.data_store_id.in_(all_ds_ids),
+            OrganizationDataStore.is_active == True,
+        )
+        .all()
+    ) if all_ds_ids else []
+
+    links_by_ds: dict[int, list[OrganizationDataStore]] = {}
+    for link in all_links:
+        links_by_ds.setdefault(link.data_store_id, []).append(link)
+
     result = []
     for ds in datastores:
-        links = (
-            db.query(OrganizationDataStore)
-            .join(Organisation)
-            .filter(
-                OrganizationDataStore.data_store_id == ds.id,
-                OrganizationDataStore.is_active == True,
-            )
-            .all()
-        )
+        links = links_by_ds.get(ds.id, [])
         result.append({
             "id": ds.id,
             "name": ds.name,
