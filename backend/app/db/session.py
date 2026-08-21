@@ -8,6 +8,7 @@ engine = create_engine(
     max_overflow=20,
     pool_pre_ping=True,    # re-validate connections before use; prevents stale-connection errors
     pool_recycle=3600,     # recycle connections every hour so MySQL doesn't close them first
+    isolation_level="READ COMMITTED",  # avoid gap locks from long-running background tasks
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
