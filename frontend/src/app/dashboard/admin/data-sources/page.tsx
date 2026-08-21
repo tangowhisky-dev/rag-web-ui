@@ -132,7 +132,7 @@ export default function DataSourcesPage() {
   const [recoveryProgress, setRecoveryProgress] = useState<Record<number, RecoveryProgress | undefined>>({});
   const [recoveryStatuses, setRecoveryStatuses] = useState<Record<number, RecoveryStatus>>({});
   const pollingRef = useRef<NodeJS.Timeout | null>(null);
-  const scanPollRef = useRef<{ active: boolean; dsId: number | null }>({ active: false, dsId: null });
+  const scanEventSourceRef = useRef<EventSource | null>(null);
 
   // Default form values — source of truth for the create/edit dialog
   const formDefaults = {
@@ -190,6 +190,10 @@ export default function DataSourcesPage() {
     return () => {
       if (pollingRef.current) {
         clearInterval(pollingRef.current);
+      }
+      if (scanEventSourceRef.current) {
+        scanEventSourceRef.current.close();
+        scanEventSourceRef.current = null;
       }
     };
   }, [triggering, datastores]);
@@ -336,36 +340,40 @@ export default function DataSourcesPage() {
   async function handleTriggerScan(dsId: number) {
     setTriggering((prev) => new Set(prev).add(dsId));
     setScanProgress((prev) => ({ ...prev, [dsId]: { total_files: 0, processed_files: 0, status: 'running' } }));
-    scanPollRef.current = { active: true, dsId };
+
+    // Close any existing SSE connection before opening a new one.
+    if (scanEventSourceRef.current) {
+      scanEventSourceRef.current.close();
+      scanEventSourceRef.current = null;
+    }
 
     try {
       // Start the scan
       await api.post(`/api/admin/datastores/${dsId}/scan`);
 
-      // Poll for scan progress using setTimeout recursion (M10: was a while
-      // loop that continued after component unmount).
-      const pollInterval = 500;
-      const timeout = 120_000; // 2 minutes max
-      const startTime = Date.now();
+      // Subscribe to SSE stream for real-time progress updates.
+      const es = new EventSource(`/api/admin/datastores/${dsId}/scan-progress-stream`);
+      scanEventSourceRef.current = es;
 
-      const pollScan = async () => {
-        if (!scanPollRef.current.active || scanPollRef.current.dsId !== dsId || Date.now() - startTime >= timeout) {
-          // Timeout or cancelled — clean up and refresh
-          if (Date.now() - startTime >= timeout) {
-            setScanProgress((prev) => ({ ...prev, [dsId]: undefined }));
-            await fetchData();
-          }
-          scanPollRef.current = { active: false, dsId: null };
-          setTriggering((prev) => {
-            const next = new Set(prev);
-            next.delete(dsId);
-            return next;
-          });
-          return;
+      const cleanup = () => {
+        es.close();
+        if (scanEventSourceRef.current === es) {
+          scanEventSourceRef.current = null;
         }
+        setTriggering((prev) => {
+          const next = new Set(prev);
+          next.delete(dsId);
+          return next;
+        });
+      };
 
+      es.onmessage = (event) => {
         try {
-          const data = await api.get(`/api/admin/datastores/${dsId}/scan-progress`) as ScanProgress;
+          const data = JSON.parse(event.data) as ScanProgress;
+
+          // "waiting" status is a keep-alive from the backend while the
+          // scan registers — don't update UI for it.
+          if (data.status === 'waiting') return;
 
           setScanProgress((prev) => ({
             ...prev,
@@ -391,56 +399,35 @@ export default function DataSourcesPage() {
             if (data.error_files && data.error_files > 0) {
               parts.push(`Errors: ${data.error_files}`);
             }
-            toast({
-              title: 'Scan completed',
-              description: parts.join(' | '),
-            });
+            toast({ title: 'Scan completed', description: parts.join(' | ') });
             setScanProgress((prev) => ({ ...prev, [dsId]: undefined }));
-            await fetchData();
-            scanPollRef.current = { active: false, dsId: null };
-            setTriggering((prev) => {
-              const next = new Set(prev);
-              next.delete(dsId);
-              return next;
-            });
-            return;
+            cleanup();
+            fetchData();
           } else if (data.status === 'error') {
             const errorMsg = data.error_message || `Errors: ${data.error_files || 1}`;
-            toast({
-              title: 'Scan failed',
-              description: errorMsg,
-              variant: 'destructive',
-            });
+            toast({ title: 'Scan failed', description: errorMsg, variant: 'destructive' });
             setScanProgress((prev) => ({ ...prev, [dsId]: undefined }));
-            await fetchData();
-            scanPollRef.current = { active: false, dsId: null };
-            setTriggering((prev) => {
-              const next = new Set(prev);
-              next.delete(dsId);
-              return next;
-            });
-            return;
+            cleanup();
+            fetchData();
           } else if (data.status === 'cancelled') {
             setScanProgress((prev) => ({ ...prev, [dsId]: undefined }));
-            await fetchData();
-            scanPollRef.current = { active: false, dsId: null };
-            setTriggering((prev) => {
-              const next = new Set(prev);
-              next.delete(dsId);
-              return next;
-            });
-            return;
+            cleanup();
+            fetchData();
           }
-
-          // Continue polling
-          setTimeout(pollScan, pollInterval);
         } catch {
-          // Non-fatal — retry
-          setTimeout(pollScan, pollInterval);
+          // Ignore malformed events
         }
       };
 
-      setTimeout(pollScan, pollInterval);
+      es.onerror = () => {
+        // EventSource auto-reconnects, but if the scan is done the server
+        // closes the stream.  Clean up and refresh to get final state.
+        if (es.readyState === EventSource.CLOSED) {
+          setScanProgress((prev) => ({ ...prev, [dsId]: undefined }));
+          cleanup();
+          fetchData();
+        }
+      };
     } catch (err) {
       toast({
         title: 'Error',
@@ -448,7 +435,6 @@ export default function DataSourcesPage() {
         variant: 'destructive',
       });
       setScanProgress((prev) => ({ ...prev, [dsId]: undefined }));
-      scanPollRef.current = { active: false, dsId: null };
       setTriggering((prev) => {
         const next = new Set(prev);
         next.delete(dsId);
@@ -492,8 +478,11 @@ export default function DataSourcesPage() {
         title: 'Scan stopped',
         description: resp.message,
       });
-      // Interrupt the polling loop and clear progress state
-      scanPollRef.current = { active: false, dsId: null };
+      // Close the SSE stream and clear progress state
+      if (scanEventSourceRef.current) {
+        scanEventSourceRef.current.close();
+        scanEventSourceRef.current = null;
+      }
       setScanProgress((prev) => ({ ...prev, [dsId]: undefined }));
       await fetchData();
     } catch (err) {
