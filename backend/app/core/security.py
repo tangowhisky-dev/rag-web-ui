@@ -3,7 +3,7 @@ from typing import List, Optional
 from jose import JWTError, jwt
 import bcrypt
 from app.core.config import settings
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 from app.db.session import get_db
@@ -78,6 +78,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
 
 def get_current_user(
     request: Request,
+    response: Response,
     db: Session = Depends(get_db),
     token: Optional[str] = Depends(oauth2_scheme)
 ) -> User:
@@ -108,6 +109,35 @@ def get_current_user(
             detail="Inactive user",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+    # Sliding renewal: if the token has less than 50% of its lifetime
+    # remaining, mint a new one and set it in the response cookie. This
+    # keeps active users logged in without a refresh token. The heartbeat
+    # endpoint is excluded — it does its own conditional renewal based on
+    # whether background work is running.
+    if not request.url.path.endswith("/heartbeat"):
+        exp = payload.get("exp")
+        if exp is not None:
+            remaining = int(exp) - int(datetime.now(timezone.utc).timestamp())
+            if remaining < settings.ACCESS_TOKEN_EXPIRE_MINUTES * 30:  # < 50%
+                new_token = create_access_token(
+                    data={
+                        "sub": user.username,
+                        "role": user.role.value,
+                        "org_id": user.org_id,
+                        "token_version": user.token_version,
+                    }
+                )
+                response.set_cookie(
+                    key="token",
+                    value=new_token,
+                    httponly=True,
+                    max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+                    samesite="lax",
+                    secure=settings.COOKIE_SECURE,
+                    path="/",
+                )
+
     return user
 
 

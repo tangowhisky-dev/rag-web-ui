@@ -9,3 +9,6 @@ class TokenPayload(BaseModel):
     sub: Optional[int] = None
     role: Optional[str] = None
     org_id: Optional[int] = None
+
+class HeartbeatResponse(BaseModel):
+    has_active_work: bool
