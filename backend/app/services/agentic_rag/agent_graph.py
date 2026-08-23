@@ -167,6 +167,7 @@ from app.core.settings_registry import get_def
 from app.services.agentic_rag.nodes import (
     _agent_step,
     answer_evaluation_node,
+    expand_query_node,
     history_to_text,
     rewrite_query_node,
     select_recent_history,
@@ -1315,7 +1316,7 @@ async def finalize_node(state: AgentState, ctx: ToolContext) -> dict:
         if precomputed:
             final = precomputed
         else:
-            context_text = format_context_string(docs, state.get("file_markdown"))
+            context_text = format_context_string(docs, state.get("file_markdown"), db=ctx.db, org_id=ctx.org_id)
             # Non-retrieval tool results (code_execute, chart_generate, etc.)
             # are not in retrieved_docs; surface them separately. Retrieval
             # results are already in context_text — don't duplicate.
@@ -1374,7 +1375,7 @@ async def finalize_node(state: AgentState, ctx: ToolContext) -> dict:
                 state = {**state, **compaction_local}
                 observations = state.get("observations", [])
                 docs = state.get("retrieved_docs", docs)
-                context_text = format_context_string(docs, state.get("file_markdown"))
+                context_text = format_context_string(docs, state.get("file_markdown"), db=ctx.db, org_id=ctx.org_id)
                 non_rag_text = _non_retrieval_observations_text(observations)
                 recent = select_recent_history(state.get("messages", []), max_pairs=get_setting(ctx.db, "AGENT_HISTORY_PAIRS", ctx.org_id))
                 history_text = history_to_text(recent)
@@ -1781,6 +1782,7 @@ def build_agent_graph(ctx: ToolContext):
                                             query_model=query_cfg["model_name"],
                                             db=ctx.db,
                                             org_id=ctx.org_id))
+    graph.add_node("expand_query", partial(expand_query_node, db=ctx.db, org_id=ctx.org_id))
     graph.add_node("plan", partial(plan_node, ctx=ctx))
     graph.add_node("clarify_interrupt", clarify_interrupt_node)
     graph.add_node("think", partial(think_node, ctx=ctx))
@@ -1793,7 +1795,8 @@ def build_agent_graph(ctx: ToolContext):
 
     graph.set_entry_point("load_context")
     graph.add_edge("load_context", "rewrite_query")
-    graph.add_edge("rewrite_query", "plan")
+    graph.add_edge("rewrite_query", "expand_query")
+    graph.add_edge("expand_query", "plan")
     graph.add_conditional_edges("plan", route_plan)
     # Back through query resolution, not straight to plan: the clarification
     # answer has to reach the retrieval query, which was computed from the

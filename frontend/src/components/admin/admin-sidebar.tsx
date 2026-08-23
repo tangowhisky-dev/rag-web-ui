@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { useSidebarCollapse } from "@/lib/hooks";
 import {
   PanelLeftClose, PanelLeftOpen,
-  Building2, Users, Database, Settings,
+  Building2, Users, Database, Settings, BookText,
 } from 'lucide-react';
 
 interface AdminSidebarProps {
@@ -18,6 +18,7 @@ const NAV_ITEMS = [
   { label: 'Orgs', href: '/dashboard/admin/orgs', icon: Building2 },
   { label: 'Users', href: '/dashboard/admin/users', icon: Users },
   { label: 'Data Stores', href: '/dashboard/admin/data-sources', icon: Database },
+  { label: 'Abbreviations', href: '/dashboard/admin/abbreviations', icon: BookText },
 ];
 
 const SUPER_ADMIN_ITEMS = [

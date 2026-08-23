@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends
 from app.api.api_v1 import auth, knowledge_base, chat, query, chat_files, folders, admin
 from app.api.api_v1 import datastores, datastore_scan, datastore_recovery
 from app.api.api_v1 import settings as settings_router
+from app.api.api_v1 import abbreviations as abbreviations_router
 from app.core.config import settings
 from app.core.security import get_current_user
 from app.models.user import User
@@ -18,6 +19,7 @@ api_router.include_router(admin.org_router, prefix="/admin", tags=["admin"])
 api_router.include_router(admin.user_router, prefix="/admin", tags=["admin"])
 api_router.include_router(settings_router.app_router, prefix="/admin", tags=["settings"])
 api_router.include_router(settings_router.org_router, prefix="/admin", tags=["settings"])
+api_router.include_router(abbreviations_router.router, prefix="/admin", tags=["abbreviations"])
 api_router.include_router(datastore_recovery.router, prefix="/admin", tags=["datastores"])
 api_router.include_router(datastores.router, prefix="/admin", tags=["datastores"])
 api_router.include_router(datastore_scan.router, prefix="/admin", tags=["datastores"])

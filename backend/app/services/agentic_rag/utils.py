@@ -31,11 +31,20 @@ def strip_reasoning_tags(text: str) -> str:
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
 
-def format_context_string(docs: list[dict], file_markdown: str | None = None) -> str:
+def format_context_string(
+    docs: list[dict],
+    file_markdown: str | None = None,
+    db: Any = None,
+    org_id: Any = None,
+) -> str:
     """Format a list of serialized documents into a context string for the LLM.
 
     Each doc becomes ``[KB-N] (source)\\ncontent``.  If *file_markdown* is
     provided it is appended after a ``[File Content]`` header.
+
+    Uses ``original_text`` from doc metadata when available (for clean prose
+    in generation). Appends a scoped abbreviation glossary when abbreviation
+    expansion is enabled.
 
     Contiguous chunks from the same document have their overlap pruned
     so the LLM doesn't see duplicated text (300 chars per adjacent pair
@@ -47,12 +56,32 @@ def format_context_string(docs: list[dict], file_markdown: str | None = None) ->
     pruned_docs = _prune_contiguous_overlaps(docs) if docs else docs
     parts: list[str] = []
     for i, doc in enumerate(pruned_docs, 1):
-        content = doc.get("page_content", "").strip()
-        source = doc.get("metadata", {}).get("source", "")
+        # Use original_text from metadata if available (clean prose for generation)
+        metadata = doc.get("metadata", {})
+        content = metadata.get("original_text", doc.get("page_content", "")).strip()
+        source = metadata.get("source", "")
         header = f"[KB-{i}]" + (f" ({source})" if source else "")
         parts.append(f"{header}\n{content}")
     if file_markdown:
         parts.append(f"[File Content]\n{file_markdown}")
+
+    # Append scoped abbreviation glossary
+    if db is not None:
+        try:
+            from app.services.abbreviation_service import build_lookup, build_glossary_from_texts
+            abbr_lookup = build_lookup(db, org_id)
+            if abbr_lookup and not abbr_lookup.is_empty:
+                # Collect original texts to scan for abbreviations
+                texts = []
+                for doc in (pruned_docs or []):
+                    md = doc.get("metadata", {})
+                    texts.append(md.get("original_text", doc.get("page_content", "")))
+                glossary = build_glossary_from_texts(texts, abbr_lookup)
+                if glossary:
+                    parts.append(f"[Abbreviation Glossary]\n{glossary}")
+        except Exception:
+            pass
+
     return "\n\n---\n\n".join(parts)
 
 

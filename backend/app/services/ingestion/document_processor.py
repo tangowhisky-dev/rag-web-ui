@@ -43,7 +43,8 @@ from app.services.ingestion.document_qdrant import (
 )
 from app.services.infrastructure import get_qdrant_client
 
-from app.models.knowledge import ProcessingTask, Document, DocumentChunk, DocumentUpload
+from app.models.knowledge import ProcessingTask, Document, DocumentChunk, DocumentUpload, KnowledgeBase
+from app.models.datastore import DataStore
 
 logger = logging.getLogger(__name__)
 
@@ -463,32 +464,49 @@ async def process_document_background(
     
             def _build_chunk_records():
                 """CPU-bound: hashing + object construction. Returns payloads only — no db.add here."""
+                from app.services.abbreviation_service import build_lookup, expand_suffix
+
+                # Resolve org_id for abbreviation lookup
+                org_id_for_abbr = None
+                if kb_id:
+                    kb = db.query(KnowledgeBase).filter(KnowledgeBase.id == kb_id).first()
+                    org_id_for_abbr = kb.org_id if kb else None
+                elif data_store_id:
+                    ds = db.query(DataStore).filter(DataStore.id == data_store_id).first()
+                    org_id_for_abbr = ds.org_id if ds else None
+
+                abbr_lookup = build_lookup(db, org_id_for_abbr)
+
                 payloads = []
                 db_chunks = []
                 for i, chunk in enumerate(chunks):
                     scope_prefix = f"ds:{data_store_id}" if data_store_id else f"kb:{kb_id}"
+                    original_text = chunk.page_content
+                    expanded_text = expand_suffix(original_text, abbr_lookup) if not abbr_lookup.is_empty else original_text
                     chunk_id = hashlib.sha256(
-                        f"{scope_prefix}:{file_name}:{i}:{chunk.page_content}".encode()
+                        f"{scope_prefix}:{file_name}:{i}:{original_text}".encode()
                     ).hexdigest()
                     chunk.metadata["source"] = file_name
                     source_metadata = {
                         k: v for k, v in chunk.metadata.items()
                         if k not in ("kb_id", "document_id", "chunk_id", "file_name")
                     }
+                    if not abbr_lookup.is_empty and expanded_text != original_text:
+                        source_metadata["original_text"] = original_text
                     db_chunks.append(DocumentChunk(
                         id=chunk_id,
                         document_id=document.id,
                         kb_id=kb_id if kb_id else None,
                         data_store_id=data_store_id if data_store_id else None,
                         file_name=file_name,
-                        chunk_text=chunk.page_content,
+                        chunk_text=expanded_text,
                         chunk_index=i,
                         chunk_metadata=source_metadata,
                         hash=hashlib.sha256(
-                            (chunk.page_content + str(chunk.metadata)).encode()
+                            (original_text + str(chunk.metadata)).encode()
                         ).hexdigest(),
                     ))
-                    payloads.append((chunk_id, chunk.page_content, source_metadata, i))
+                    payloads.append((chunk_id, expanded_text, source_metadata, i))
                 return payloads, db_chunks
     
             qdrant_payloads, db_chunks = await loop.run_in_executor(None, _build_chunk_records)

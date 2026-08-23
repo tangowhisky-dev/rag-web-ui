@@ -46,6 +46,7 @@ class AgentState(MessagesState):
     # standalone retrieval string and is used only by retrieval/reranking.
     original_query: Annotated[str, _last_value] = ""
     rewritten_query: Annotated[str, _last_value] = ""
+    expanded_query: Annotated[str, _last_value] = ""
     # Where each reference in rewritten_query was resolved from, or the
     # reason resolution was skipped/rejected.
     resolution_provenance: Annotated[Optional[dict], _last_value] = None

@@ -268,6 +268,9 @@ _ORG_OVERRIDABLE = [
                "bool", True, scope="org", reload="next_request"),
     SettingDef("PROCESSING_TIMEOUT_SILENCE_S", "Quality", "Processing silence timeout (s)",
                "int", 300, scope="app", reload="next_request", min_value=10),
+    SettingDef("ABBREVIATION_EXPANSION_ENABLED", "Retrieval", "Abbreviation expansion",
+               "bool", True, scope="org", reload="next_request", requires_reindex=True,
+               description="Enable suffix expansion of abbreviations during ingestion and query. Requires re-ingestion of existing documents when toggled."),
 ]
 
 

@@ -241,6 +241,38 @@ async def rewrite_query_node(
 
 
 # ---------------------------------------------------------------------------
+# Node: abbreviation expansion (runs after rewrite, before retrieval)
+# ---------------------------------------------------------------------------
+
+def expand_query_node(
+    state: AgentState,
+    db: Any = None,
+    org_id: Any = None,
+) -> dict:
+    """Expand the rewritten query with abbreviation suffix expansion.
+
+    The expanded query is used for dense/sparse/exact retrieval.
+    The original/rewritten query is preserved for the reranker.
+    """
+    from app.services.abbreviation_service import build_lookup, expand_query_suffix
+
+    rewritten = state.get("rewritten_query", state.get("original_query", ""))
+    org_id = org_id if org_id is not None else state.get("org_id")
+
+    try:
+        abbr_lookup = build_lookup(db, org_id) if db else None
+        if abbr_lookup and not abbr_lookup.is_empty:
+            expanded = expand_query_suffix(rewritten, abbr_lookup)
+        else:
+            expanded = rewritten
+    except Exception as exc:
+        logger.warning("[ABBREV_EXPAND] failed: %s", exc)
+        expanded = rewritten
+
+    return {"expanded_query": expanded}
+
+
+# ---------------------------------------------------------------------------
 # Node: neo4j_expansion (always runs after merge)
 # ---------------------------------------------------------------------------
 
@@ -440,7 +472,7 @@ async def dense_retrieval_node(
         org_id = org_id if org_id is not None else state.get("org_id")
         file_markdown = file_markdown or state.get("file_markdown")
 
-        query = state.get("rewritten_query", state.get("original_query", ""))
+        query = state.get("expanded_query", state.get("rewritten_query", state.get("original_query", "")))
         datastore_ids = get_effective_datastore_ids(kb_ids, org_id, db) if db else []
 
         writer = _safe_writer()
@@ -485,7 +517,7 @@ async def sparse_retrieval_node(
         org_id = org_id if org_id is not None else state.get("org_id")
         file_markdown = file_markdown or state.get("file_markdown")
 
-        query = state.get("rewritten_query", state.get("original_query", ""))
+        query = state.get("expanded_query", state.get("rewritten_query", state.get("original_query", "")))
         datastore_ids = get_effective_datastore_ids(kb_ids, org_id, db) if db else []
 
         writer = _safe_writer()
@@ -530,7 +562,7 @@ async def exact_retrieval_node(
         org_id = org_id if org_id is not None else state.get("org_id")
         file_markdown = file_markdown or state.get("file_markdown")
 
-        query = state.get("rewritten_query", state.get("original_query", ""))
+        query = state.get("expanded_query", state.get("rewritten_query", state.get("original_query", "")))
         datastore_ids = get_effective_datastore_ids(kb_ids, org_id, db) if db else []
 
         writer = _safe_writer()
