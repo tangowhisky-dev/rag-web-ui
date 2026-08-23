@@ -237,6 +237,127 @@ disambiguate multi-meaning abbreviations without understanding context**. The
 CSV lists "Daily Allowance" before "Deputy Assistant" for DA, so the replacer
 picks the first form, which is wrong.
 
+### LLM-Based Replacement with Glossary Context (gemma-4-12b)
+
+A separate test (`backend/tests/test_llm_replace.py`) evaluated whether an LLM
+can correctly disambiguate abbreviations when given a glossary of all possible
+meanings plus the surrounding context. This addresses the core weakness of
+deterministic replacement.
+
+**Method**: For each chunk/query, find abbreviations deterministically, build a
+glossary listing ALL possible meanings, send text + glossary to gemma-4-12b,
+ask it to replace each abbreviation with the correct form based on context.
+
+#### LLM Replacement Quality on Chunks
+
+| Chunk | Det Replace | LLM Replace | LLM Correct? |
+|-------|------------|-------------|--------------|
+| 0 | "Battalions Transport Officer..." (TO wrongly replaced) | "Commanding Officer ordered Battalions to Withdraw" | YES |
+| 1 | "Brigade Aviation Command" (comd wrong) | "Brigade Commander" | YES |
+| 2 | "drop Transport Officer" (to wrongly replaced) | "drop to 15 degrees" | YES |
+| 3 | "Daily Allowance Defence Attache Deputy Assistant..." (all dumped) | "Defence Attache approved" | **NO** |
+| 4 | "battalions Transport Officer" (to wrongly replaced) | "battalions to withdraw" | YES |
+
+LLM replacement: 4/5 correct. It correctly handles prepositions ("to" left
+alone) and picks right forms for most abbreviations. But it got DA wrong —
+"Defence Attache" instead of "Deputy Assistant" in context of "approved the
+medical resupply". The 12b model lacks sufficient military domain knowledge.
+
+#### LLM Query Replacement Quality
+
+| Query | LLM Replace | Correct? |
+|-------|-------------|----------|
+| `bns wdr from position` | `Battalions Withdraw from position` | YES |
+| `CO ordered bns to wdr` | `Commanding Officer ordered Battalions to Withdraw` | YES |
+
+Both query replacements are correct.
+
+#### Dense Retrieval: LLM Replace vs Suffix
+
+| Query | ing=original | ing=suffix | ing=llm_replace |
+|-------|-------------|------------|-----------------|
+| `battalions withdrew` (Q0) | c4:0.660 c0:0.520 | c4:0.637 c0:0.577 | c0:0.690 c4:0.660 |
+| `bns wdr` (Q1) | c0:0.491 | c0:0.456 | c0:0.337 |
+| `CO ordered bns to wdr` (Q2) | c0:0.681 | c0:0.610 | c0:0.466 |
+| `brigade HQ op obj` (Q3) | c1:0.590 | c1:0.624 | **c1:0.735** |
+
+LLM replacement gives the highest dense similarity for full-form queries (Q0,
+Q3) because the text is clean, readable prose with correct full forms. But it
+HURTS abbreviation queries (Q1, Q2) because the original abbreviation tokens
+are gone — "bns" no longer exists in the LLM-replaced chunk.
+
+#### Reranker: LLM Replace vs Suffix
+
+| Combo | Hit Rate | Key Issue |
+|-------|----------|-----------|
+| `orig_q + orig_c` | 83% | Fails on Q3 (no expansion) |
+| `orig_q + suffix_c` | 100% | Safe, both forms in chunk |
+| `orig_q + llm_rep_c` | 100% | But Q1 score: c4(-8.033), Q2: c0(-9.802) — negative! |
+| `llm_q + orig_c` | 100% | Q1: c4(8.000), Q2: c4(9.390) — excellent |
+| `llm_q + llm_rep_c` | 100% | Q1: c4(8.000), Q2: c4(9.390) — excellent |
+
+`orig_q + llm_rep_c` technically hits 100% but with catastrophic scores for
+abbreviation queries — the reranker scores -8 to -10 because the abbreviation
+tokens in the query don't exist in the LLM-replaced chunk. This would fail
+under any reasonable score threshold.
+
+`llm_q + llm_rep_c` works well because both sides use full forms, but it
+requires an LLM call at query time (latency + cost).
+
+#### Generation: LLM Replace vs Suffix vs Glossary
+
+**DA disambiguation test** (query: "who approved the medical resupply?"):
+
+| Context | Answer | Correct? |
+|---------|--------|----------|
+| original | `The DA approved the medical resupply.` | Yes (but doesn't expand DA) |
+| glossary | `The DA approved the medical resupply.` | Yes (but doesn't expand DA) |
+| **llm_replace** | `The Defence Attache approved the medical resupply.` | **WRONG** |
+| **llm_replace+glossary** | `The Defence Attache.` | **WRONG** |
+
+The LLM-replaced context bakes in the wrong meaning ("Defence Attache"). Even
+with the glossary appended, the generation LLM trusts the pre-replaced text
+over the glossary. This is the fundamental risk of replacement: **a wrong
+replacement propagates through the entire pipeline**.
+
+#### Full Pipeline Comparison
+
+| Pipeline | Hit | Correct | Answer |
+|----------|-----|---------|--------|
+| suffix: ing=suffix q=suffix rr=orig+suffix gen=glossary | Yes | Yes | "commanding officer ordered... to withdraw" |
+| llm: ing=llm_rep q=orig rr=orig+llm_rep gen=llm_rep | Yes | Yes | "commanding officer ordered battalions to withdraw" |
+| llm: ing=llm_rep q=llm_q rr=llm_q+llm_rep gen=llm_rep | Yes | Yes | "commanding officer ordered... to withdraw" |
+| hybrid: ing=suffix q=suffix rr=orig+llm_rep gen=glossary | Yes | Yes | "commanding officer ordered... to withdraw" |
+
+All pipelines hit and produce correct answers for the simple test query. The
+DA disambiguation failure would surface with a query targeting chunk 3.
+
+### LLM Replace vs Suffix: Summary
+
+| Aspect | Suffix | LLM Replace (gemma-4-12b) |
+|--------|--------|--------------------------|
+| Preposition handling | Appends forms, keeps "to" | Correctly leaves "to" alone |
+| Multi-meaning disambiguation | Appends all forms, models disambiguate | Picks one form, may be wrong (DA→Defence Attache) |
+| Abbreviation query matching | Works (both forms present) | Broken (abbreviation removed, reranker scores -8 to -10) |
+| Full-form query matching | Works | Works, higher similarity scores |
+| Dense similarity (full-form queries) | Moderate | Higher (clean prose) |
+| Reranker (orig_q + chunk) | 100%, positive scores | 100% but negative scores for abbr queries |
+| Reranker (llm_q + llm_chunk) | N/A | 100%, high scores (but needs LLM at query time) |
+| Generation quality | Clean original + glossary | May introduce wrong meanings that override glossary |
+| Latency | Zero (deterministic) | ~1-3s per chunk (LLM call) |
+| Cost | Free | LLM API calls per chunk at ingestion + per query |
+
+**Conclusion**: LLM replacement is better at producing readable text and not
+replacing prepositions, but it is worse at handling multi-meaning abbreviations
+because it commits to one interpretation that may be wrong. A wrong replacement
+propagates through the entire pipeline and cannot be corrected downstream.
+
+Suffix expansion remains safer because it preserves all possibilities and lets
+downstream models (dense, SPLADE, cross-encoder, generation LLM) disambiguate
+based on context. The generation LLM with a glossary can pick the correct
+meaning from the original text + glossary, which is more reliable than trusting
+a pre-replacement that might have picked wrong.
+
 ### Full Pipeline Results
 
 All 8 tested pipeline combinations achieved 100% hit rate and 100% answer
