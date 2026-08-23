@@ -139,6 +139,23 @@ SECRET_KEY=your-actual-random-secret-here
 
 The middleware checks for a `token` cookie (not localStorage). If you previously logged in before the middleware was added, clear cookies for `localhost:3000` and log in again.
 
+### Frontend Dev Container: Stale `node_modules` After Dependency Changes
+
+The dev compose file uses a **named volume** (`node_modules:/app/node_modules`) to keep container-native (Linux) dependencies isolated from the host's (macOS) `node_modules`. This volume is populated from the image's `/app/node_modules` **only once** — the first time the volume is created. Docker never refreshes a non-empty named volume from subsequent image rebuilds.
+
+If you add, remove, or upgrade frontend dependencies (changes to `package.json` or `pnpm-lock.yaml`) and rebuild the frontend image, the named volume will still contain the **old** `node_modules`. The frontend dev container will crash or fail to resolve new packages.
+
+**Fix — delete the stale volume and recreate:**
+```bash
+docker compose -f docker-compose.dev.yml down
+docker volume rm rag-web-ui_node_modules
+docker compose -f docker-compose.dev.yml up -d --build frontend
+```
+
+Docker recreates the volume from the fresh image on next `up`. This requires network access only during `docker build` (pnpm install in the Dockerfile), not at runtime — so it works in offline environments once the image is built.
+
+> **Do not** switch to anonymous volumes (`/app/node_modules` without a name) to "auto-refresh" — `docker compose down` does not remove anonymous volumes by default, and they accumulate as orphaned volumes consuming disk space (each ~300 MB). Use the named volume and delete it manually when deps change.
+
 ## Container Issues
 
 ### Port Conflicts
