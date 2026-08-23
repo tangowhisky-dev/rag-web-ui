@@ -129,12 +129,12 @@ graph LR
     G1 --> E
 
     E --> I[Hybrid Retrieval]
-    I --> I1[Dense Search Qdrant]
-    I --> I2[Sparse Search SPLADE]
+    I --> I1[Dense Search Qdrant + MMR]
+    I --> I2[Sparse Search SPLADE + MMR]
     I --> I3[Exact Search MySQL]
     I --> I4[Graph Search Neo4j]
 
-    I1 --> J[RRF Fusion]
+    I1 --> J[Merge + Recency Dedup + Semantic Dedup]
     I2 --> J
     I3 --> J
     I4 --> J
@@ -320,11 +320,12 @@ Query
       └─→ Multi-hop queries
       └─→ Top-k results
 
-RRF Fusion (Reciprocal Rank Fusion)
+Merge + Recency Dedup + Semantic Dedup
   │
-  ├─→ Combine rankings from all legs
-  ├─→ Apply configurable weights
-  └─→ Produce unified ranking
+  ├─→ Combine results from all legs
+  ├─→ Exact content_hash dedup (keep latest by modified_at)
+  ├─→ Semantic dedup (>95% cosine, keep latest by modified_at)
+  └─→ Produce unified candidate pool
 
 Cross-Encoder Reranking
   │
@@ -369,7 +370,7 @@ Cross-Encoder Reranking
 
 1. **Multi-Tenancy**: Hierarchical organization structure with path-based tree traversal
 2. **Agentic RAG**: LangGraph-based multi-agent pipeline with parallel subtask execution
-3. **Hybrid Retrieval**: 3-leg search (dense + sparse + exact) with RRF fusion
+3. **Hybrid Retrieval**: 3-leg search (dense + sparse + exact) with native Qdrant MMR diversity and recency-aware dedup (exact + semantic)
 4. **GraphRAG**: Entity/relationship extraction with graph-enhanced retrieval
 5. **Streaming**: Server-Sent Events for real-time agent progress updates
 6. **Auto-Ingestion**: File system watcher with background processing

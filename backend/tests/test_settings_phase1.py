@@ -204,7 +204,7 @@ def test_validate_int_min_max():
 
 
 def test_validate_float():
-    assert validate_value("HYBRID_DENSE_WEIGHT", "0.7") == 0.7
+    assert validate_value("DENSE_MIN_SCORE", "0.7") == 0.7
 
 
 def test_validate_bool_from_string():

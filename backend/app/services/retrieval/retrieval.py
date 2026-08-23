@@ -1,46 +1,31 @@
 """
-3-leg hybrid retrieval fused with Reciprocal Rank Fusion (RRF), with optional
-Neo4j graph enrichment after merge:
+3-leg hybrid retrieval with per-leg candidate APIs:
 
   Leg 1 — Dense   : Qdrant cosine-similarity search on Qwen3 embeddings
   Leg 2 — Sparse  : Qdrant learned sparse-vector search (SPLADE via FastEmbed)
   Leg 3 — Exact   : MySQL InnoDB FULLTEXT search (BM25/TF-IDF, server-side)
 
-  Graph enrichment (post-merge, not a scored leg):
-    When RETRIEVAL_GRAPH_ENABLED=true, after RRF merge the top-K docs are
-    enriched with entity/relationship triples from Neo4j. Neo4j is
-    queried by (document_id, chunk_index) from each doc's Qdrant payload — the
-    cross-reference link established at ingest. Enriched docs then go to the
-    reranker so it sees the expanded context.
+Each leg is called independently by the agentic RAG pipeline via the
+single-leg public APIs (dense_search_docs, sparse_search_docs,
+exact_search_docs).  The caller merges and reranks the results.
 
 Configuration (.env / settings):
-  HYBRID_DENSE_WEIGHT          — RRF weight for the dense leg          (default 0.5)
-  HYBRID_SPARSE_WEIGHT  — RRF weight for the Qdrant sparse leg  (default 0.3)
-  HYBRID_EXACT_WEIGHT          — RRF weight for the MySQL exact leg     (default 0.2)
   RETRIEVAL_TOP_K              — number of documents returned           (default 10)
   RETRIEVAL_DENSE_ENABLED      — enable/disable dense leg               (default true)
   RETRIEVAL_SPARSE_ENABLED — enable/disable sparse leg           (default true)
   RETRIEVAL_EXACT_ENABLED      — enable/disable exact leg               (default true)
   RETRIEVAL_GRAPH_ENABLED      — enable/disable graph enrichment        (default true)
-
-Absent-leg design
------------------
-A document absent from a leg (no hit, score=0, or leg disabled) contributes
-0 to its RRF score from that leg.  It can still surface via the other legs —
-this is the correct behaviour: a paraphrase match with no exact keyword
-overlap should be returned by the dense/sparse legs, not suppressed.
 """
 
 import json
-import asyncio
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Dict, Optional
 
 from langchain_core.documents import Document as LangchainDocument
 from openai import OpenAI as SyncOpenAI
 from qdrant_client import QdrantClient
-from qdrant_client.models import SparseVector
+from qdrant_client.models import SparseVector, NearestQuery, Mmr
 from fastembed import SparseTextEmbedding
 from sqlalchemy import text, bindparam
 from sqlalchemy.orm import Session
@@ -110,10 +95,6 @@ def get_effective_datastore_ids(
     return datastore_ids
 
 
-# RRF smoothing constant — standard value from the original paper (k=60).
-_RRF_K = 60
-
-
 # ── Data model ────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -123,21 +104,6 @@ class _Candidate:
     dense_rank: int = -1           # -1 = absent from this leg
     sparse_rank: int = -1
     exact_rank: int = -1
-
-    def rrf_score(
-        self,
-        dense_weight: float = 0.5,
-        sparse_weight: float = 0.3,
-        exact_weight: float = 0.2,
-    ) -> float:
-        score = 0.0
-        if self.dense_rank >= 0:
-            score += dense_weight / (_RRF_K + self.dense_rank)
-        if self.sparse_rank >= 0:
-            score += sparse_weight / (_RRF_K + self.sparse_rank)
-        if self.exact_rank >= 0:
-            score += exact_weight / (_RRF_K + self.exact_rank)
-        return score
 
 
 
@@ -154,12 +120,13 @@ def _qdrant_payload_to_doc(payload: dict) -> LangchainDocument:
 @with_retry_sync(max_attempts=3)
 def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: Session, candidates: int, org_id: Optional[int] = None, min_score: Optional[float] = None) -> Dict[str, _Candidate]:
     """Qdrant cosine-similarity search using the dense (OpenAI) embedding.
-    
+
     Searches both KB collections (kb_{kb_id}) and DataStore collections (ds_{datastore_id}).
+    Uses native Qdrant MMR when QDRANT_MMR_DIVERSITY > 0 to diversify results.
+    Returns dense vectors in metadata for downstream semantic dedup.
     ``min_score`` overrides settings.DENSE_MIN_SCORE for this call (used by the
     graduated relaxation ladder in rag_retrieve).
     """
-    # DENSE_EMBEDDINGS_MODEL is super_admin-only (app scope).
     from app.services.settings_service import get_setting
     embed_model = get_setting(db, "DENSE_EMBEDDINGS_MODEL", None)
     logger.info("[DENSE] embedding request | model=%s | query=%r", embed_model, query[:120])
@@ -171,11 +138,49 @@ def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
     logger.info("[DENSE] embedding response | dim=%d | first5=%s",
                 len(query_vector), [round(v, 4) for v in query_vector[:5]])
 
+    # Build MMR-wrapped query if diversity > 0.
+    # QDRANT_MMR_DIVERSITY=0.0 means pure relevance (no MMR).
+    diversity = get_setting(db, "QDRANT_MMR_DIVERSITY", org_id)
+    if diversity > 0.0:
+        query_obj = NearestQuery(nearest=query_vector, mmr=Mmr(diversity=diversity))
+        logger.info("[DENSE] using native MMR | diversity=%.2f", diversity)
+    else:
+        query_obj = query_vector
+
     result: Dict[str, _Candidate] = {}
     rank = 0
     min_score = get_setting(db, "DENSE_MIN_SCORE", org_id) if min_score is None else min_score
     if min_score > 0.0:
         logger.info("[DENSE] applying min_cosine=%.2f", min_score)
+
+    def _process_hits(hits, collection_name: str):
+        nonlocal rank
+        filtered = 0
+        for hit in hits:
+            score = getattr(hit, 'score', -1)
+            if min_score > 0.0 and score < min_score:
+                filtered += 1
+                continue
+            pid = str(hit.id)
+            if pid in result:
+                continue
+            doc = _qdrant_payload_to_doc(hit.payload or {})
+            # Store dense vector for downstream semantic dedup.
+            vec = hit.vector
+            if isinstance(vec, dict):
+                vec = vec.get("dense")
+            if vec:
+                doc.metadata["_dense_vector"] = vec
+            h = content_hash(doc.page_content)
+            result[pid] = _Candidate(
+                doc=doc,
+                content_hash=h,
+                dense_rank=rank,
+            )
+            logger.debug("[DENSE]   rank=%d score=%.4f text=%r", rank, score, doc.page_content[:80])
+            rank += 1
+        if filtered:
+            logger.info("[DENSE] %s | filtered_by_score=%d", collection_name, filtered)
 
     # Search KB collections
     for kb_id in kb_ids:
@@ -183,66 +188,36 @@ def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
         try:
             hits = get_qdrant_client().query_points(
                 collection_name=f"kb_{kb_id}",
-                query=query_vector,
+                query=query_obj,
                 using="dense",
                 limit=candidates,
                 with_payload=True,
+                with_vectors=True,
             ).points
         except Exception as e:
             logger.warning("dense_search: Qdrant query failed for kb_%d: %s", kb_id, e)
             continue
         logger.info("[DENSE] qdrant response | kb_%d | hits=%d", kb_id, len(hits))
-        filtered = 0
-        for hit in hits:
-            score = getattr(hit, 'score', -1)
-            if min_score > 0.0 and score < min_score:
-                filtered += 1
-                continue
-            text = (hit.payload or {}).get("chunk_text", "")
-            h = content_hash(text)
-            if h not in result:
-                result[h] = _Candidate(
-                    doc=_qdrant_payload_to_doc(hit.payload or {}),
-                    content_hash=h,
-                    dense_rank=rank,
-                )
-                logger.debug("[DENSE]   rank=%d score=%.4f text=%r", rank, score, text[:80])
-                rank += 1
-        if filtered:
-            logger.info("[DENSE] kb_%d | returned=%d | filtered_by_score=%d", kb_id, len(result), filtered)
-    
+        _process_hits(hits, f"kb_{kb_id}")
+
     # Search DataStore collections
     for ds_id in datastore_ids:
         logger.info("[DENSE] qdrant query | collection=ds_%d | using=dense | limit=%d", ds_id, candidates)
         try:
             hits = get_qdrant_client().query_points(
                 collection_name=f"ds_{ds_id}",
-                query=query_vector,
+                query=query_obj,
                 using="dense",
                 limit=candidates,
                 with_payload=True,
+                with_vectors=True,
             ).points
         except Exception as e:
             logger.warning("dense_search: Qdrant query failed for ds_%d: %s", ds_id, e)
             continue
-        filtered = 0
-        for hit in hits:
-            score = getattr(hit, 'score', -1)
-            if min_score > 0.0 and score < min_score:
-                filtered += 1
-                continue
-            text = (hit.payload or {}).get("chunk_text", "")
-            h = content_hash(text)
-            if h not in result:
-                result[h] = _Candidate(
-                    doc=_qdrant_payload_to_doc(hit.payload or {}),
-                    content_hash=h,
-                    dense_rank=rank,
-                )
-                logger.debug("[DENSE]   rank=%d score=%.4f text=%r", rank, score, text[:80])
-                rank += 1
-        if filtered:
-            logger.info("[DENSE] ds_%d | returned=%d | filtered_by_score=%d", ds_id, len(result), filtered)
+        logger.info("[DENSE] qdrant response | ds_%d | hits=%d", ds_id, len(hits))
+        _process_hits(hits, f"ds_{ds_id}")
+
     logger.info("[DENSE] unique candidates=%d", len(result))
     return result
 
@@ -250,8 +225,10 @@ def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
 @with_retry_sync(max_attempts=3)
 def _sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: Session, candidates: int, org_id: Optional[int] = None, min_score: Optional[float] = None) -> Dict[str, _Candidate]:
     """Qdrant learned-sparse search (SPLADE via FastEmbed).
-    
+
     Searches both KB collections (kb_{kb_id}) and DataStore collections (ds_{datastore_id}).
+    Uses native Qdrant MMR when QDRANT_MMR_DIVERSITY > 0 to diversify results.
+    Returns dense vectors in metadata for downstream semantic dedup.
     ``min_score`` overrides settings.SPARSE_MIN_SCORE for this call (used by the
     graduated relaxation ladder in rag_retrieve).
     """
@@ -266,77 +243,86 @@ def _sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: 
                 sparse_emb.indices[:5].tolist(),
                 [round(v, 4) for v in sparse_emb.values[:5].tolist()])
 
+    # Build MMR-wrapped query if diversity > 0.
+    # QDRANT_MMR_DIVERSITY=0.0 means pure relevance (no MMR).
+    diversity = get_setting(db, "QDRANT_MMR_DIVERSITY", org_id)
+    if diversity > 0.0:
+        query_obj = NearestQuery(nearest=query_sparse, mmr=Mmr(diversity=diversity))
+        logger.info("[SPARSE] using native MMR | diversity=%.2f", diversity)
+    else:
+        query_obj = query_sparse
+
     result: Dict[str, _Candidate] = {}
     rank = 0
     min_score = get_setting(db, "SPARSE_MIN_SCORE", org_id) if min_score is None else min_score
     if min_score > -float("inf"):
         logger.info("[SPARSE] applying min_score=%.2f", min_score)
+
+    def _process_hits(hits, collection_name: str):
+        nonlocal rank
+        filtered = 0
+        for hit in hits:
+            score = getattr(hit, 'score', -1)
+            if min_score > -float("inf") and score < min_score:
+                filtered += 1
+                continue
+            pid = str(hit.id)
+            if pid in result:
+                continue
+            doc = _qdrant_payload_to_doc(hit.payload or {})
+            # Store dense vector for downstream semantic dedup.
+            # Qdrant returns all named vectors when with_vectors=True.
+            vec = hit.vector
+            if isinstance(vec, dict):
+                vec = vec.get("dense")
+            if vec:
+                doc.metadata["_dense_vector"] = vec
+            h = content_hash(doc.page_content)
+            result[pid] = _Candidate(
+                doc=doc,
+                content_hash=h,
+                sparse_rank=rank,
+            )
+            logger.debug("[SPARSE]   rank=%d score=%.4f text=%r", rank, score, doc.page_content[:80])
+            rank += 1
+        if filtered:
+            logger.info("[SPARSE] %s | filtered_by_score=%d", collection_name, filtered)
+
     # Search KB collections
     for kb_id in kb_ids:
         logger.info("[SPARSE] qdrant query | collection=kb_%d | using=sparse | limit=%d", kb_id, candidates)
         try:
             hits = get_qdrant_client().query_points(
                 collection_name=f"kb_{kb_id}",
-                query=query_sparse,
+                query=query_obj,
                 using="sparse",
                 limit=candidates,
                 with_payload=True,
+                with_vectors=True,
             ).points
         except Exception as e:
             logger.warning("sparse_search: Qdrant query failed for kb_%d: %s", kb_id, e)
             continue
-        filtered = 0
-        for hit in hits:
-            score = getattr(hit, 'score', -1)
-            if min_score > -float("inf") and score < min_score:
-                filtered += 1
-                continue
-            text = (hit.payload or {}).get("chunk_text", "")
-            h = content_hash(text)
-            if h not in result:
-                result[h] = _Candidate(
-                    doc=_qdrant_payload_to_doc(hit.payload or {}),
-                    content_hash=h,
-                    sparse_rank=rank,
-                )
-                logger.debug("[SPARSE]   rank=%d score=%.4f text=%r", rank, score, text[:80])
-                rank += 1
-        if filtered:
-            logger.info("[SPARSE] kb_%d | returned=%d | filtered_by_score=%d", kb_id, len(result), filtered)
-    
+        _process_hits(hits, f"kb_{kb_id}")
+
     # Search DataStore collections
     for ds_id in datastore_ids:
         logger.info("[SPARSE] qdrant query | collection=ds_%d | using=sparse | limit=%d", ds_id, candidates)
         try:
             hits = get_qdrant_client().query_points(
                 collection_name=f"ds_{ds_id}",
-                query=query_sparse,
+                query=query_obj,
                 using="sparse",
                 limit=candidates,
                 with_payload=True,
+                with_vectors=True,
             ).points
         except Exception as e:
             logger.warning("sparse_search: Qdrant query failed for ds_%d: %s", ds_id, e)
             continue
         logger.info("[SPARSE] qdrant response | ds_%d | hits=%d", ds_id, len(hits))
-        filtered = 0
-        for hit in hits:
-            score = getattr(hit, 'score', -1)
-            if min_score > -float("inf") and score < min_score:
-                filtered += 1
-                continue
-            text = (hit.payload or {}).get("chunk_text", "")
-            h = content_hash(text)
-            if h not in result:
-                result[h] = _Candidate(
-                    doc=_qdrant_payload_to_doc(hit.payload or {}),
-                    content_hash=h,
-                    sparse_rank=rank,
-                )
-                logger.debug("[SPARSE]   rank=%d score=%.4f text=%r", rank, score, text[:80])
-                rank += 1
-        if filtered:
-            logger.info("[SPARSE] ds_%d | returned=%d | filtered_by_score=%d", ds_id, len(result), filtered)
+        _process_hits(hits, f"ds_{ds_id}")
+
     logger.info("[SPARSE] unique candidates=%d", len(result))
     return result
 
@@ -361,28 +347,32 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
     if not query.strip():
         return {}
 
-    # Query KB documents (direct uploads)
+    # Query KB documents (direct uploads) — JOIN documents for modified_at
     kb_sql = text(
         """
-        SELECT chunk_text, chunk_metadata, kb_id, document_id, chunk_index,
-               MATCH(chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE) AS fts_score
-        FROM   document_chunks
-        WHERE  kb_id IN :kb_ids
-          AND  data_store_id IS NULL
-          AND  MATCH(chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE) > 0
+        SELECT dc.chunk_text, dc.chunk_metadata, dc.kb_id, dc.document_id, dc.chunk_index,
+               COALESCE(d.modified_at, d.created_at) AS modified_at,
+               MATCH(dc.chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE) AS fts_score
+        FROM   document_chunks dc
+        JOIN   documents d ON dc.document_id = d.id
+        WHERE  dc.kb_id IN :kb_ids
+          AND  dc.data_store_id IS NULL
+          AND  MATCH(dc.chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE) > 0
         ORDER  BY fts_score DESC
         LIMIT  :candidates
         """
     ).bindparams(bindparam("kb_ids", expanding=True))
 
-    # Query DataStore documents
+    # Query DataStore documents — JOIN documents for modified_at
     ds_sql = text(
         """
-        SELECT chunk_text, chunk_metadata, kb_id, document_id, chunk_index,
-               MATCH(chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE) AS fts_score
-        FROM   document_chunks
-        WHERE  data_store_id IN :ds_ids
-          AND  MATCH(chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE) > 0
+        SELECT dc.chunk_text, dc.chunk_metadata, dc.kb_id, dc.document_id, dc.chunk_index,
+               COALESCE(d.modified_at, d.created_at) AS modified_at,
+               MATCH(dc.chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE) AS fts_score
+        FROM   document_chunks dc
+        JOIN   documents d ON dc.document_id = d.id
+        WHERE  dc.data_store_id IN :ds_ids
+          AND  MATCH(dc.chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE) > 0
         ORDER  BY fts_score DESC
         LIMIT  :candidates
         """
@@ -459,6 +449,9 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
                 meta["document_id"] = row.document_id
             if "chunk_index" not in meta and hasattr(row, "chunk_index"):
                 meta["chunk_index"] = row.chunk_index
+            # Store modified_at from the JOIN for recency-aware dedup.
+            if hasattr(row, "modified_at") and row.modified_at:
+                meta["_modified_at"] = row.modified_at.isoformat() if hasattr(row.modified_at, "isoformat") else str(row.modified_at)
             result[h] = _Candidate(
                 doc=LangchainDocument(
                     page_content=chunk_text,
@@ -472,112 +465,89 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
     return result
 
 
-# ── RRF merge ─────────────────────────────────────────────────────────────────
+# ── Recency-aware dedup helpers (shared by leg nodes and merge_node) ──────────
 
-def _rrf_merge_candidates(
-    dense: Dict[str, "_Candidate"],
-    sparse: Dict[str, "_Candidate"],
-    exact: Dict[str, "_Candidate"],
-    top_k: int,
-    dense_weight: float = 0.5,
-    sparse_weight: float = 0.3,
-    exact_weight: float = 0.2,
-) -> list["_Candidate"]:
-    merged: Dict[str, _Candidate] = {**dense}
+def _get_modified_at(doc: dict) -> str:
+    """Extract _modified_at from a serialized doc's metadata as a sortable string.
 
-    for h, c in sparse.items():
-        if h in merged:
-            merged[h].sparse_rank = c.sparse_rank
-        else:
-            merged[h] = c
-
-    for h, c in exact.items():
-        if h in merged:
-            merged[h].exact_rank = c.exact_rank
-        else:
-            merged[h] = c
-
-    ranked = sorted(
-        merged.values(),
-        key=lambda c: c.rrf_score(dense_weight, sparse_weight, exact_weight),
-        reverse=True,
-    )
-
-    logger.info("[RRF] total unique candidates=%d | returning top_k=%d | weights=%.2f/%.2f/%.2f",
-                len(ranked), top_k, dense_weight, sparse_weight, exact_weight)
-    for i, c in enumerate(ranked[:top_k]):
-        logger.info(
-            "  rrf[%d] score=%.5f dense_rank=%s sparse_rank=%s exact_rank=%s text=%r",
-            i, c.rrf_score(dense_weight, sparse_weight, exact_weight),
-            c.dense_rank if c.dense_rank >= 0 else "-",
-            c.sparse_rank if c.sparse_rank >= 0 else "-",
-            c.exact_rank if c.exact_rank >= 0 else "-",
-            c.doc.page_content[:80],
-        )
-    return ranked[:top_k]
-
-
-# ── Public API ────────────────────────────────────────────────────────────────
-
-def _run_leg(name: str, fn, *args) -> tuple[dict, str | None]:
-    """Run a single retrieval leg, catching any exception.    # The decorated leg function already retries internally; this wrapper
-    # catches the final failure so other legs can still run.    Returns (results_dict, error_message_or_None)."""
-    try:
-        return fn(*args), None
-    except Exception as exc:
-        logger.error("[LEG:%s] failed after retries: %s", name, exc)
-        return {}, str(exc)
-
-
-async def hybrid_search(
-    query: str,
-    kb_ids: List[int],
-    db: Session,
-    datastore_ids: Optional[List[int]] = None,
-    org_id: Optional[int] = None,
-) -> List[LangchainDocument]:
-    """Run enabled retrieval legs in parallel (sync calls) and merge via RRF.
-
-    Searches both KB collections and DataStore collections.
-    All globally enabled retrieval sources are used; chat-level toggles were removed.
-
-    When org_id is provided, org-overridable settings are resolved via the
-    settings service (3-tier precedence: org → app → .env).
+    Falls back to empty string (sorts oldest) if missing.
     """
-    from app.services.settings_service import get_setting
+    return doc.get("metadata", {}).get("_modified_at", "")
 
-    top_k = get_setting(db, "RETRIEVAL_TOP_K", org_id)
-    pool = top_k * 4
-    datastore_ids = datastore_ids or []
 
-    enabled = {
-        "dense": get_setting(db, "RETRIEVAL_DENSE_ENABLED", org_id),
-        "sparse": get_setting(db, "RETRIEVAL_SPARSE_ENABLED", org_id),
-        "exact": get_setting(db, "RETRIEVAL_EXACT_ENABLED", org_id),
-        "graph": get_setting(db, "RETRIEVAL_GRAPH_ENABLED", org_id),
-    }
-    logger.info(
-        "hybrid_search | kb_ids=%s | ds_ids=%s | top_k=%d | legs=%s",
-        kb_ids, datastore_ids, top_k,
-        [k for k, v in enabled.items() if v],
-    )
+def dedup_by_content_hash(docs: list[dict]) -> list[dict]:
+    """Recency-aware exact dedup by content_hash.
 
-    dense        = _dense_search(query, kb_ids, datastore_ids, db, pool, org_id)           if enabled["dense"]          else {}
-    sparse = _sparse_search(query, kb_ids, datastore_ids, db, pool, org_id)  if enabled["sparse"]  else {}
-    exact        = _exact_search(query, kb_ids, datastore_ids, db, pool, org_id)       if enabled["exact"]          else {}
+    When two docs share the same content_hash, keeps the one from the document
+    with the latest _modified_at. Used by both retrieval leg nodes (per-leg
+    dedup) and merge_node (cross-leg dedup).
+    """
+    by_hash: dict[str, dict] = {}
+    for doc in docs:
+        meta = doc.get("metadata", {})
+        h = meta.get("content_hash") or content_hash(doc.get("page_content", ""))
+        if h not in by_hash:
+            by_hash[h] = doc
+        else:
+            # Keep the one with the latest _modified_at
+            if _get_modified_at(doc) > _get_modified_at(by_hash[h]):
+                by_hash[h] = doc
+    return list(by_hash.values())
 
-    docs = [c.doc for c in _rrf_merge_candidates(dense, sparse, exact, top_k)]
 
-    if enabled["graph"] and docs:
-        try:
-            from app.services.graph import enrich_docs_with_graph
-            loop = asyncio.get_running_loop()
-            docs = await loop.run_in_executor(None, lambda: enrich_docs_with_graph(docs))
-        except Exception as e:
-            logger.warning("hybrid_search: graph enrichment failed (non-fatal): %s", e)
+def semantic_dedup(docs: list[dict], threshold: float) -> list[dict]:
+    """Semantic near-duplicate removal using dense cosine similarity.
 
-    logger.info("hybrid_search returned %d documents", len(docs))
-    return docs
+    Greedy newest-first: for each chunk, if its dense vector is >threshold
+    similar to an already-kept chunk from a *different* document, drop it.
+    Chunks from the same document are never deduped against each other
+    (they may be legitimately similar adjacent sections).
+
+    Chunks without _dense_vector pass through untouched.
+    """
+    if threshold >= 1.0 or len(docs) <= 1:
+        return docs
+
+    import numpy as np
+
+    # Sort newest-first by _modified_at
+    sorted_docs = sorted(docs, key=_get_modified_at, reverse=True)
+
+    kept: list[dict] = []
+    for doc in sorted_docs:
+        meta = doc.get("metadata", {})
+        vec = meta.get("_dense_vector")
+        doc_id = meta.get("document_id")
+
+        if vec is None:
+            kept.append(doc)
+            continue
+
+        vec_np = np.array(vec, dtype=np.float32)
+        vec_norm = np.linalg.norm(vec_np)
+        if vec_norm == 0:
+            kept.append(doc)
+            continue
+
+        is_dup = False
+        for kept_doc in kept:
+            kept_meta = kept_doc.get("metadata", {})
+            if kept_meta.get("document_id") == doc_id:
+                continue  # same document, different section
+            kept_vec = kept_meta.get("_dense_vector")
+            if kept_vec is None:
+                continue
+            kept_np = np.array(kept_vec, dtype=np.float32)
+            kept_norm = np.linalg.norm(kept_np)
+            if kept_norm == 0:
+                continue
+            sim = float(np.dot(vec_np, kept_np) / (vec_norm * kept_norm))
+            if sim >= threshold:
+                is_dup = True
+                break
+        if not is_dup:
+            kept.append(doc)
+    return kept
 
 
 # ── Single-leg public API (used by agentic RAG nodes) ─────────────────────────

@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
 import { FileIcon, defaultStyles } from "react-file-icon";
-import { ArrowRight, Plus, Settings, Trash2, Search, AlertTriangle } from "lucide-react";
+import { ArrowRight, Plus, Settings, Trash2, AlertTriangle } from "lucide-react";
 import KnowledgeLayout from "@/components/layout/knowledge-layout";
 import { useKnowledgeContext } from "@/contexts/knowledge-context";
 import { ApiError } from "@/lib/api";
@@ -69,12 +69,6 @@ function KnowledgeBaseList() {
                     className="inline-flex items-center justify-center rounded-md bg-secondary w-8 h-8"
                   >
                     <Settings className="h-4 w-4" />
-                  </Link>
-                  <Link
-                    href={`/dashboard/test-retrieval/${kb.id}`}
-                    className="inline-flex items-center justify-center rounded-md bg-secondary w-8 h-8"
-                  >
-                    <Search className="h-4 w-4" />
                   </Link>
                   <button
                     onClick={() => setDeleteTarget(kb.id)}

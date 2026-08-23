@@ -50,7 +50,7 @@ def _patch_pipeline(monkeypatch_target, level_outcomes):
     async def fake_exact(state, db, kb_ids, org_id, file_markdown, min_score=None):
         return {}
 
-    def fake_merge(state, file_markdown):
+    def fake_merge(state, file_markdown, db=None, org_id=None):
         return {}
 
     def fake_rerank(state):

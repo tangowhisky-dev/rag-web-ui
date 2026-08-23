@@ -66,6 +66,14 @@ def test_max_tool_iterations_not_in_config():
     assert not hasattr(s, "MAX_TOOL_ITERATIONS")
 
 
+def test_hybrid_weights_not_in_registry():
+    """HYBRID_DENSE_WEIGHT, HYBRID_SPARSE_WEIGHT, HYBRID_EXACT_WEIGHT were removed (RRF infrastructure deleted)."""
+    from app.core.settings_registry import get_def
+    assert get_def("HYBRID_DENSE_WEIGHT") is None
+    assert get_def("HYBRID_SPARSE_WEIGHT") is None
+    assert get_def("HYBRID_EXACT_WEIGHT") is None
+
+
 # ── 2. Role-specific settings registered ─────────────────────────────────────
 
 @pytest.mark.parametrize("key", [

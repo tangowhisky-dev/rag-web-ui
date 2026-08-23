@@ -1,5 +1,7 @@
 # Settings Migration Plan: .env → Super Admin & Admin UIs
 
+> **Note:** The RRF infrastructure (`hybrid_search`, `_rrf_merge_candidates`, `HYBRID_DENSE_WEIGHT`, `HYBRID_SPARSE_WEIGHT`, `HYBRID_EXACT_WEIGHT`, `RETRIEVAL_MIN_RRF_SCORE`) has been removed. The agentic pipeline now uses single-leg APIs with content_hash dedup merge. References to these in the tables below are historical.
+
 > **Status:** Implementation plan (not yet implemented).
 > **Reconciles:** `docs/admin-ui-settings-migration.md`, `docs/env-to-admin-ui.md`, and
 > `docs/admin-settings-plan-grok.md`, which disagreed on scope. This document is the

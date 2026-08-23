@@ -176,12 +176,15 @@ _ORG_OVERRIDABLE = [
     SettingDef("EXACT_MIN_SCORE", "Retrieval", "Exact min score",
                "float", 0.5, scope="org", reload="next_request", min_value=0.0,
                description="MySQL FTS relevance scale (typically 0-3)."),
-    SettingDef("HYBRID_DENSE_WEIGHT", "Retrieval", "Dense weight",
-               "float", 0.5, scope="org", reload="next_request", min_value=0.0),
-    SettingDef("HYBRID_SPARSE_WEIGHT", "Retrieval", "Sparse weight",
-               "float", 0.3, scope="org", reload="next_request", min_value=0.0),
-    SettingDef("HYBRID_EXACT_WEIGHT", "Retrieval", "Exact weight",
-               "float", 0.2, scope="org", reload="next_request", min_value=0.0),
+    SettingDef("QDRANT_MMR_DIVERSITY", "Retrieval", "Qdrant MMR diversity",
+               "float", 0.3, scope="org", reload="next_request", min_value=0.0, max_value=1.0,
+               description="0.0 = pure relevance (no MMR), 1.0 = pure diversity. "
+                           "Applied to dense and sparse Qdrant legs via native MMR."),
+    SettingDef("DEDUP_SEMANTIC_THRESHOLD", "Retrieval", "Semantic dedup threshold",
+               "float", 0.95, scope="org", reload="next_request", min_value=0.0, max_value=1.0,
+               description="Cosine similarity above which chunks from different documents "
+                           "are considered near-duplicates; the one from the latest "
+                           "modified_at document is kept. 1.0 = disabled."),
     SettingDef("RETRIEVAL_DENSE_ENABLED", "Retrieval", "Enable dense leg",
                "bool", True, scope="org", reload="next_request",
                description="Ingestion always indexes all legs."),

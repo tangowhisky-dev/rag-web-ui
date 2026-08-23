@@ -131,16 +131,9 @@ def chunk_overlap(self) -> int:
 | Dense technical (legal, medical, code) | 1200–1500 | Technical vocabulary tokenizes less efficiently |
 | Mostly short snippets / FAQs | 500–800 | Smaller chunks = tighter retrieval signal |
 
-If you push above ~1800 characters, reduce `HYBRID_QDRANT_SPARSE_WEIGHT` to
-reflect that the sparse leg no longer covers the full chunk:
-
-```env
-CHUNK_SIZE=2500
-OVERLAP_PERCENTAGE=0.20
-HYBRID_DENSE_WEIGHT=0.7
-HYBRID_QDRANT_SPARSE_WEIGHT=0.1
-HYBRID_EXACT_WEIGHT=0.2
-```
+If you push above ~1800 characters, the sparse leg may no longer cover the
+full chunk effectively. Consider disabling the sparse leg for large-chunk
+KBs via `RETRIEVAL_SPARSE_ENABLED=false`.
 
 ---
 

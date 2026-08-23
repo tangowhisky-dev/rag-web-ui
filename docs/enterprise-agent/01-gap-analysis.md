@@ -8,7 +8,7 @@ Evidence-based assessment of the current codebase against the five required capa
 
 ### What works
 
-- **3-leg hybrid retrieval** with RRF fusion: dense (Qdrant cosine), sparse (SPLADE via Qdrant), exact (MySQL FULLTEXT). `backend/app/services/retrieval/retrieval.py:1-844`.
+- **3-leg hybrid retrieval** with native Qdrant MMR diversity and recency-aware dedup (exact content_hash + semantic): dense (Qdrant cosine + MMR), sparse (SPLADE via Qdrant + MMR), exact (MySQL FULLTEXT). `backend/app/services/retrieval/retrieval.py`.
 - **Cross-encoder reranking** with configurable threshold. `backend/app/services/retrieval/reranker.py`.
 - **Neo4j graph expansion** (2-hop traversal) and entity enrichment. `backend/app/services/graph/graph_service.py`; called from `agentic_rag/nodes.py:449-497`.
 - **Confidence scoring** (4-signal: coverage, cross-leg agreement, volume, diversity). `backend/app/services/retrieval/confidence.py`.

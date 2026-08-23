@@ -142,41 +142,15 @@ Poll this after triggering document processing; begin queries only when `ready: 
 
 ---
 
-## How RRF works in the eval context
+## How retrieval merging works in the eval context
 
-Every chunk that appears in any enabled leg's result list gets a score:
+Each leg returns its ranked candidate list independently. The agentic pipeline
+merges results by `content_hash` deduplication — chunks appearing in multiple
+legs are kept once. Per-leg ranks (`_leg_rank`) are preserved in metadata for
+downstream scoring.
 
-```
-rrf_score = Σ  weight_leg / (60 + rank_leg)
-             for each leg where the chunk appeared
-```
-
-`60` is the smoothing constant from the original paper. Weights come from `.env`:
-
-```
-HYBRID_DENSE_WEIGHT          0.5   (dense vectors)
-HYBRID_QDRANT_SPARSE_WEIGHT  0.3   (SPLADE sparse vectors)
-HYBRID_EXACT_WEIGHT          0.2   (MySQL keyword / FTS)
-HYBRID_GRAPH_WEIGHT          0.3   (Neo4j GraphRAG, legacy — not currently used)
-```
-
-A chunk absent from a disabled leg contributes 0 from that leg but can still
-surface via the remaining legs. With only one leg active, RRF degenerates to
-the original ranking of that leg — no fusion happens, which is why single-leg
-runs are useful as clean baselines.
-
-**Example — 2 legs enabled (dense + exact):**
-
-```
-chunk A: dense_rank=0, exact_rank=2
-  score = 0.5/(60+0) + 0.2/(60+2) = 0.00833 + 0.00323 = 0.01156
-
-chunk B: dense_rank=4, exact_rank=0
-  score = 0.5/(60+4) + 0.2/(60+0) = 0.00781 + 0.00333 = 0.01114
-```
-
-Chunk A wins because top-1 dense (weight 0.5) outweighs top-1 exact (weight 0.2).
-Add sparse and the balance shifts again — which is exactly what the harness measures.
+With only one leg active, the merge is a passthrough of that leg's ranking —
+no fusion happens, which is why single-leg runs are useful as clean baselines.
 
 ---
 

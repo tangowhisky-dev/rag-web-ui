@@ -11,6 +11,7 @@ import logging
 import os
 import traceback
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Set, Tuple
 
 from fastapi import UploadFile
@@ -384,12 +385,20 @@ async def process_document_background(
                     document.content_type = doc_content_type
                     document.data_store_id = data_store_id
                     document.knowledge_base_id = kb_id if kb_id else None
+                    try:
+                        document.modified_at = datetime.fromtimestamp(os.stat(doc_file_path).st_mtime, tz=timezone.utc)
+                    except (OSError, TypeError):
+                        document.modified_at = datetime.now(timezone.utc)
                     logger.info(f"Task {task_id}: Updated document ID {document.id}")
                 else:
                     logger.error(f"Task {task_id}: Document {document_id} not found for update")
                     return
             else:
                 # Create new document
+                try:
+                    mtime = datetime.fromtimestamp(os.stat(doc_file_path).st_mtime, tz=timezone.utc)
+                except (OSError, TypeError):
+                    mtime = datetime.now(timezone.utc)
                 document = Document(
                     file_name=file_name,
                     file_path=doc_file_path,
@@ -398,6 +407,7 @@ async def process_document_background(
                     content_type=doc_content_type,
                     knowledge_base_id=kb_id if kb_id else None,
                     data_store_id=data_store_id,
+                    modified_at=mtime,
                 )
                 db.add(document)
                 db.commit()

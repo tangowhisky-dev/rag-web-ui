@@ -25,6 +25,8 @@ from app.services.retrieval import (
     dense_search_docs,
     sparse_search_docs,
     exact_search_docs,
+    dedup_by_content_hash,
+    semantic_dedup,
 )
 from app.services.retrieval.reranker import _get_cross_encoder
 
@@ -373,26 +375,48 @@ def filter_node(state: AgentState, threshold: Optional[float] = None, db: Any = 
 
 
 # ---------------------------------------------------------------------------
-# Helper: merge per-leg docs (deduplicate only, no ranking)
+# Helper: fetch modified_at for documents and attach to serialized docs
 # ---------------------------------------------------------------------------
 
-def _merge_docs(
-    leg_docs: dict[str, list[dict]],
-) -> list[dict]:
-    """Merge docs from multiple retrieval legs into a single deduplicated list."""
-    seen_hashes: set[str] = set()
-    merged: list[dict] = []
+def _enrich_with_modified_at(docs: list[dict], db: Any) -> None:
+    """Fetch COALESCE(modified_at, created_at) for unique document_ids and
+    store as ``_modified_at`` (ISO string) in each doc's metadata.
 
-    for docs in leg_docs.values():
-        for doc in docs:
-            h = doc.get("metadata", {}).get("content_hash") or content_hash(
-                doc.get("page_content", "")
-            )
-            if h not in seen_hashes:
-                seen_hashes.add(h)
-                merged.append(doc)
+    Skips docs that already have ``_modified_at`` (e.g. exact leg gets it
+    from the SQL JOIN). Uses a single indexed query.
+    """
+    from app.models.knowledge import Document
+    from sqlalchemy import func
 
-    return merged
+    needed: set[int] = set()
+    for doc in docs:
+        meta = doc.get("metadata", {})
+        if meta.get("_modified_at"):
+            continue
+        did = meta.get("document_id")
+        if did is not None:
+            needed.add(int(did))
+
+    if not needed:
+        return
+
+    rows = db.query(
+        Document.id,
+        func.coalesce(Document.modified_at, Document.created_at),
+    ).filter(Document.id.in_(needed)).all()
+
+    mtime_map: dict[int, str] = {}
+    for row in rows:
+        if row[1] is not None:
+            mtime_map[row[0]] = row[1].isoformat() if hasattr(row[1], "isoformat") else str(row[1])
+
+    for doc in docs:
+        meta = doc.get("metadata", {})
+        if meta.get("_modified_at"):
+            continue
+        did = meta.get("document_id")
+        if did is not None and int(did) in mtime_map:
+            meta["_modified_at"] = mtime_map[int(did)]
 
 
 
@@ -432,6 +456,8 @@ async def dense_retrieval_node(
             failed = True
 
         serialised = [_serialise_doc(d) for d in docs]
+        _enrich_with_modified_at(serialised, db)
+        serialised = dedup_by_content_hash(serialised)
 
         return {
             "dense_docs": serialised,
@@ -475,6 +501,8 @@ async def sparse_retrieval_node(
             failed = True
 
         serialised = [_serialise_doc(d) for d in docs]
+        _enrich_with_modified_at(serialised, db)
+        serialised = dedup_by_content_hash(serialised)
 
         return {
             "sparse_docs": serialised,
@@ -518,6 +546,8 @@ async def exact_retrieval_node(
             failed = True
 
         serialised = [_serialise_doc(d) for d in docs]
+        # Exact leg already has _modified_at from the SQL JOIN — no fetch needed.
+        serialised = dedup_by_content_hash(serialised)
 
         return {
             "exact_docs": serialised,
@@ -534,18 +564,31 @@ async def exact_retrieval_node(
 def merge_node(
     state: AgentState,
     file_markdown: str | None = None,
+    db: Any = None,
+    org_id: int | None = None,
 ) -> dict:
-    """Merge per-leg retrieval results into a single deduplicated doc list."""
+    """Merge per-leg retrieval results into a single deduplicated doc list.
+
+    Two-stage dedup:
+      1. Exact content_hash dedup (recency-aware: latest modified_at wins).
+      2. Semantic dedup (>threshold cosine similarity, keep latest).
+    """
+    from app.services.settings_service import get_setting
+
     with _agent_step("merge"):
         file_markdown = file_markdown or state.get("file_markdown")
 
-        leg_docs = {
-            "dense": state.get("dense_docs", []),
-            "sparse": state.get("sparse_docs", []),
-            "exact": state.get("exact_docs", []),
-        }
+        all_docs: list[dict] = []
+        for leg in ("dense_docs", "sparse_docs", "exact_docs"):
+            all_docs.extend(state.get(leg, []))
 
-        merged = _merge_docs(leg_docs)
+        # Stage 1: exact content_hash dedup (recency-aware)
+        merged = dedup_by_content_hash(all_docs)
+
+        # Stage 2: semantic dedup (cosine > threshold, keep latest)
+        threshold = get_setting(db, "DEDUP_SEMANTIC_THRESHOLD", org_id) if db else 0.95
+        if threshold < 1.0 and len(merged) > 1:
+            merged = semantic_dedup(merged, threshold)
 
         # Stream the merged candidate docs as they become available.
         if merged:

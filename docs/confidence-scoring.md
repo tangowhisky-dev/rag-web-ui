@@ -44,7 +44,7 @@ Example: dense=ok, sparse=ok, exact=0 results, graph=disabled → A = 2/3 = 0.67
 ### B — Cross-leg agreement  (35 pts, highest weight)
 
 Fraction of the top-k chunks that were independently found by two or more
-retrieval legs before RRF merging.
+retrieval legs before merge.
 
 ```
 B = chunks_found_by_≥2_legs / total_chunks_returned
@@ -55,7 +55,7 @@ both rank highly is very unlikely to be a false positive. A chunk surfaced by on
 one leg may be a weak match.
 
 The implementation tracks which legs contributed to each chunk via
-`metadata["_legs"]`, written by `hybrid_search_with_legs()` before the docs are
+`metadata["_legs"]`, written by the single-leg APIs (`dense_search_docs`, etc.) before the docs are
 returned.
 
 ### C — Volume fill rate  (25 pts)
@@ -102,7 +102,7 @@ the response. Priority order:
 | File | Role |
 |------|------|
 | `backend/app/services/confidence.py` | Core scoring logic (`score_retrieval()`) |
-| `backend/app/services/retrieval.py`  | Annotates each doc with `metadata["_legs"]` inside `hybrid_search_with_legs()` |
+| `backend/app/services/retrieval.py`  | Annotates each doc with `metadata["_legs"]` inside the single-leg APIs |
 | `backend/app/services/chat_service.py` | Calls `score_retrieval()`, emits result in `2:` stream event |
 | `backend/app/api/api_v1/query.py` | Same for the stateless `/query` endpoint |
 | `frontend/src/components/chat/answer.tsx` | `ConfidenceBar` component + `Answer` prop wiring |

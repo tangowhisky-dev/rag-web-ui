@@ -27,7 +27,7 @@ The system uses a single LangGraph-based agentic pipeline that automatically ada
 - Draft-grade-retry loop with widened retrieval and keyword search fallback
 - Confidence scoring and partial-answer transparency
 
-**Retrieval:** 3-leg hybrid search (dense vector via Qdrant, sparse via SPLADE, exact via MySQL FULLTEXT) fused by Reciprocal Rank Fusion (RRF). Optional **GraphRAG** adds entity/relationship extraction into Neo4j for graph-traversal expansion.
+**Retrieval:** 3-leg hybrid search (dense vector via Qdrant, sparse via SPLADE, exact via MySQL FULLTEXT) with native Qdrant MMR diversity and recency-aware dedup (exact + semantic). Optional **GraphRAG** adds entity/relationship extraction into Neo4j for graph-traversal expansion.
 
 **Multi-tenancy:** Admins create organisations, assign users and data sources to orgs, and configure org-specific LLM settings.
 
@@ -113,7 +113,7 @@ All steps are streamed to the UI as collapsible timeline entries in real time.
 
 Beyond the basic retrieval, the pipeline includes:
 
-- **Reinforced scoring** — a chunk retrieved by N sub-queries has its RRF score multiplied by N, making broadly relevant chunks rank higher
+- **Native Qdrant MMR** — both dense and sparse legs use Qdrant's Maximal Marginal Relevance to diversify candidates and reduce near-duplicate clustering
 - **Confidence scoring** — per-query confidence levels (low/medium/high) based on coverage and chunk quality
 - **Query classification** — FACTUAL, ENTITY_CENTRIC, MULTI_PART, or AMBIGUOUS with confidence and latency metrics
 - **Tool trace** — collapsible timeline of tool calls during the pipeline (search, graph traversal, etc.)
@@ -188,12 +188,11 @@ MATCH (c:Chunk)-[:FROM_CHUNK]-(e:__Entity__ {name: "Apple"}) RETURN c, e
 | Variable | Description | Default |
 |---|---|---|
 | `RETRIEVAL_TOP_K` | Chunks returned per query | `10` |
-| `HYBRID_DENSE_WEIGHT` | Weight for dense vector leg | `0.5` |
-| `HYBRID_QDRANT_SPARSE_WEIGHT` | Weight for SPLADE sparse leg | `0.3` |
-| `HYBRID_EXACT_WEIGHT` | Weight for MySQL FULLTEXT leg | `0.2` |
 | `RETRIEVAL_DENSE_ENABLED` | Enable/disable dense leg | `true` |
 | `RETRIEVAL_QDRANT_SPARSE_ENABLED` | Enable/disable sparse leg | `true` |
 | `RETRIEVAL_EXACT_ENABLED` | Enable/disable MySQL FTS leg | `true` |
+| `QDRANT_MMR_DIVERSITY` | Qdrant native MMR diversity (0=pure relevance, 1=pure diversity) | `0.3` |
+| `DEDUP_SEMANTIC_THRESHOLD` | Cosine similarity for semantic dedup (1.0=disabled) | `0.95` |
 | `RERANKER_ENABLED` | Enable cross-encoder reranker | `true` |
 | `RERANKER_MODEL` | HuggingFace cross-encoder model | `Xenova/ms-marco-MiniLM-L-12-v2` |
 | `RERANKER_SCORE_THRESHOLD` | Minimum logit to pass reranker (default retrieval) | `-2.0` |
@@ -450,7 +449,7 @@ Login: System=MySQL, Server=`db`, User=`ragwebui`, Password=`ragwebui`, Database
 - Optional OCR for scanned PDFs and embedded images via `markitdown-ocr` — enabled by `VISION_MODEL`
 - **Agentic pipeline**: query decomposition → parallel sub-query retrieval with reinforced scoring → LLM draft-grade loop → widened retrieval retry → keyword search fallback → partial-answer transparency
 - **Pipeline extras**: confidence scoring, query classification (FACTUAL/ENTITY_CENTRIC/MULTI_PART/AMBIGUOUS), tool trace, synthesis mode
-- **3-leg hybrid retrieval**: dense vector + SPLADE sparse + MySQL FULLTEXT, fused by weighted RRF
+- **3-leg hybrid retrieval**: dense vector + SPLADE sparse + MySQL FULLTEXT, with native Qdrant MMR diversity and recency-aware dedup (exact + semantic)
 - **GraphRAG**: optional entity/relationship extraction into Neo4j with graph-traversal retrieval expansion
 - **Cross-encoder reranking**: retrieved candidates re-ranked by a local cross-encoder before context assembly
 - **Chat file upload**: attach any supported document; content injected directly into pipeline (not indexed); 10 MB size limit + 25% context-window token budget; smart section extraction

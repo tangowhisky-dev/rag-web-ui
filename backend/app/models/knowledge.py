@@ -58,6 +58,7 @@ class Document(Base, TimestampMixin):
     data_store_id = Column(Integer, ForeignKey("data_stores.id", ondelete="CASCADE"), nullable=True, index=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    modified_at = Column(DateTime, nullable=True, index=True)  # Source file mtime; COALESCE(modified_at, created_at) in queries
     
     # Relationships
     knowledge_base = relationship("KnowledgeBase", back_populates="documents") 

@@ -144,7 +144,7 @@ async def _run_retrieval_pass(
         else:
             state.update(r)
 
-    state.update(merge_node(state, file_markdown))
+    state.update(merge_node(state, file_markdown, ctx.db, ctx.org_id))
     state.update(reranking_node(state))
     state.update(filter_node(state, threshold=level["rerank_threshold"]))
     return state

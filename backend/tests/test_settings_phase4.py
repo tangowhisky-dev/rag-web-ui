@@ -2,11 +2,9 @@
 test_settings_phase4.py — Phase 4: retrieval + graph query + ingestion settings.
 
 Tests:
-  1. hybrid_search resolves org-overridable retrieval settings.
-  2. Org override of RETRIEVAL_DENSE_ENABLED disables the dense leg.
-  3. expand_docs_via_graph resolves org-overridable hops/limit/fanout.
-  4. Ingestion settings (CHUNK_SIZE, OVERLAP_PERCENTAGE) are app-only.
-  5. Graph ingestion settings (GRAPHRAG_ENABLED, MAX_CHUNKS, NEO4J_LLM_CONTEXT) are app-only.
+  1. expand_docs_via_graph resolves org-overridable hops/limit/fanout.
+  2. Ingestion settings (CHUNK_SIZE, OVERLAP_PERCENTAGE) are app-only.
+  3. Graph ingestion settings (GRAPHRAG_ENABLED, MAX_CHUNKS, NEO4J_LLM_CONTEXT) are app-only.
 """
 import pytest
 from unittest.mock import patch, MagicMock
@@ -23,7 +21,6 @@ import app.models.setting  # noqa
 from app.services.settings_service import (
     upsert_app_setting, upsert_org_setting, clear_cache, get_setting,
 )
-from app.services.retrieval.retrieval import hybrid_search
 
 
 @pytest.fixture()
@@ -62,79 +59,7 @@ def _create_org(db, name="TestOrg"):
 
 
 # ---------------------------------------------------------------------------
-# 1. hybrid_search resolves org settings
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_hybrid_search_uses_org_top_k(db_session):
-    """hybrid_search resolves org-overridable settings."""
-    org = _create_org(db_session)
-    upsert_org_setting(db_session, org.id, "RETRIEVAL_TOP_K", 5)
-    clear_cache()
-
-    with patch("app.services.retrieval.retrieval._dense_search", return_value={}), \
-         patch("app.services.retrieval.retrieval._sparse_search", return_value={}), \
-         patch("app.services.retrieval.retrieval._exact_search", return_value={}), \
-         patch("app.services.retrieval.retrieval._rrf_merge_candidates", return_value=[]):
-        docs = await hybrid_search(
-            query="test", kb_ids=[], db=db_session, org_id=org.id
-        )
-    assert docs == []
-
-
-# ---------------------------------------------------------------------------
-# 2. Org override disables a leg
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_org_override_disables_dense_leg(db_session):
-    """Org override of RETRIEVAL_DENSE_ENABLED=False disables the dense leg."""
-    org = _create_org(db_session)
-    upsert_org_setting(db_session, org.id, "RETRIEVAL_DENSE_ENABLED", False)
-    clear_cache()
-
-    dense_called = []
-
-    def _mock_dense(*args, **kwargs):
-        dense_called.append(True)
-        return {}
-
-    with patch("app.services.retrieval.retrieval._dense_search", side_effect=_mock_dense), \
-         patch("app.services.retrieval.retrieval._sparse_search", return_value={}), \
-         patch("app.services.retrieval.retrieval._exact_search", return_value={}), \
-         patch("app.services.retrieval.retrieval._rrf_merge_candidates", return_value=[]):
-        await hybrid_search(
-            query="test", kb_ids=[], db=db_session, org_id=org.id
-        )
-
-    assert len(dense_called) == 0, "Dense leg should be disabled by org override"
-
-
-@pytest.mark.asyncio
-async def test_app_level_disables_dense_leg(db_session):
-    """App-level RETRIEVAL_DENSE_ENABLED=False disables the dense leg for all orgs."""
-    upsert_app_setting(db_session, "RETRIEVAL_DENSE_ENABLED", False)
-    clear_cache()
-
-    dense_called = []
-
-    def _mock_dense(*args, **kwargs):
-        dense_called.append(True)
-        return {}
-
-    with patch("app.services.retrieval.retrieval._dense_search", side_effect=_mock_dense), \
-         patch("app.services.retrieval.retrieval._sparse_search", return_value={}), \
-         patch("app.services.retrieval.retrieval._exact_search", return_value={}), \
-         patch("app.services.retrieval.retrieval._rrf_merge_candidates", return_value=[]):
-        await hybrid_search(
-            query="test", kb_ids=[], db=db_session, org_id=None
-        )
-
-    assert len(dense_called) == 0, "Dense leg should be disabled by app setting"
-
-
-# ---------------------------------------------------------------------------
-# 3. expand_docs_via_graph resolves org-overridable settings
+# 1. expand_docs_via_graph resolves org-overridable settings
 # ---------------------------------------------------------------------------
 
 def test_expand_docs_via_graph_accepts_db_and_org_id(db_session):
@@ -151,7 +76,7 @@ def test_expand_docs_via_graph_accepts_db_and_org_id(db_session):
 
 
 # ---------------------------------------------------------------------------
-# 4. Ingestion settings are app-only (cannot be org-overridden)
+# 2. Ingestion settings are app-only (cannot be org-overridden)
 # ---------------------------------------------------------------------------
 
 def test_chunk_size_is_app_only(db_session):
@@ -190,7 +115,7 @@ def test_graphrag_enabled_is_app_only():
 
 
 # ---------------------------------------------------------------------------
-# 5. App-level ingestion settings are readable via settings service
+# 3. App-level ingestion settings are readable via settings service
 # ---------------------------------------------------------------------------
 
 def test_app_level_chunk_size_readable(db_session):
@@ -210,7 +135,7 @@ def test_app_level_graphrag_max_chunks_readable(db_session):
 
 
 # ---------------------------------------------------------------------------
-# 6. Org-overridable retrieval settings are correctly classified
+# 4. Org-overridable retrieval settings are correctly classified
 # ---------------------------------------------------------------------------
 
 def test_retrieval_top_k_is_org_overridable():

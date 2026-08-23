@@ -67,11 +67,6 @@ router = APIRouter()
 
 logger = logging.getLogger(__name__)
 
-class TestRetrievalRequest(BaseModel):
-    query: str
-    kb_id: int
-    top_k: int
-
 @router.post("", response_model=KnowledgeBaseResponse)
 def create_knowledge_base(
     *,
@@ -1130,45 +1125,6 @@ def download_document(
         filename=document.file_name,
         media_type=document.content_type or "application/octet-stream",
     )
-
-
-@router.post("/test-retrieval")
-async def test_retrieval(
-    request: TestRetrievalRequest,
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-) -> Any:
-    """
-    Test retrieval quality for a given query against a knowledge base.
-    """
-    try:
-        kb = db.query(KnowledgeBase).filter(
-            KnowledgeBase.id == request.kb_id,
-            _kb_owner_filter(current_user)
-        ).first()
-        
-        if not kb:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Knowledge base {request.kb_id} not found",
-            )
-        
-        from app.services.retrieval import hybrid_search
-        docs = await hybrid_search(
-            query=request.query,
-            kb_ids=[request.kb_id],
-            db=db,
-            org_id=current_user.org_id,
-        )
-        response = [
-            {"content": doc.page_content, "metadata": doc.metadata, "score": 0.0}
-            for doc in docs[: request.top_k]
-        ]
-        return {"results": response}
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ────────────────────────────────────────────────────────────────────────────

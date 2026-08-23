@@ -46,7 +46,7 @@ class RagRetrieveInput(BaseModel):
 1. Resolve `kb_ids`/`datastore_ids` from `AgentState` if not provided.
 2. **RBAC**: re-validate every `kb_id`/`datastore_id` against the authenticated user's entitlements via `rbac.py` filters. Drop denied ids; log them.
 3. Run enabled legs in parallel (existing functions).
-4. Merge via RRF (existing `_merge_docs`).
+4. Merge via recency-aware content_hash dedup + semantic dedup (existing `dedup_by_content_hash` + `semantic_dedup`).
 5. Rerank (existing `rerank`), filter (existing `filter`).
 6. If `graph_expand`, run `neo4j_expansion` and append.
 7. Score confidence (existing `score_retrieval`).
