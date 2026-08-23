@@ -1,33 +1,33 @@
 #!/usr/bin/env python3
 """
-Comprehensive abbreviation expansion test suite.
+Comprehensive abbreviation expansion test suite v2.
 
-Tests all expansion options for each pipeline stage using REAL models:
-  - Dense embeddings: qwen/qwen3-embedding-0.6b (LM Studio, dim=1024)
+Tests ALL combinations of expansion options for each pipeline stage using
+real models:
+  - Dense embeddings: qwen3-embedding-0.6b (LM Studio, dim=1024)
   - Sparse embeddings: SPLADE PP en v1 (FastEmbed, local ONNX)
   - Reranker: ms-marco-MiniLM-L-12-v2 (FastEmbed, local ONNX)
-  - Generation: qwen/qwen3.5-9b (LM Studio)
+  - Generation: gemma-4-12b (LM Studio, no thinking)
 
-Test matrix:
-  INGESTION:  none | suffix | replace | glossary_suffix
-  RETRIEVAL:  original_query | expanded_query_suffix | expanded_query_replace | llm_expanded
-  RERANKER:   orig_q+orig_chunk | exp_q+orig_chunk | orig_q+glossary_chunk | orig_q+suffix_chunk | exp_q+suffix_chunk
-  GENERATION: orig_context | glossary_context | suffix_context | llm_glossary_context
+Expansion strategies tested:
+  INGESTION:  none | suffix | replace | glossary_suffix | replace+glossary
+  QUERY:      original | suffix | replace | llm_replace | llm_replace+glossary
+  RERANKER:   orig_q+orig_c | orig_q+glossary_c | orig_q+suffix_c | orig_q+replace_c
+              | exp_q+orig_c | exp_q+glossary_c | exp_q+suffix_c
+              | llm_q+orig_c | llm_q+glossary_c
+  GENERATION: orig_only | glossary | suffix | replace | replace+glossary | llm_glossary
 
-Runs inside the backend container. No app code changes — uses app's model
-singletons and DB session directly.
+Runs inside the backend container. No app code changes.
 """
 import json
 import os
 import re
 import sys
 import time
-import hashlib
 import logging
 from collections import defaultdict
 from typing import List, Dict, Tuple, Optional
 
-# ─── Setup paths ───────────────────────────────────────────────────────────
 sys.path.insert(0, "/app")
 os.environ.setdefault("PYTHONPATH", "/app")
 
@@ -38,10 +38,9 @@ logger = logging.getLogger("abbr_test")
 CSV_PATH = "/app/assets/abbreviations_enhanced.csv"
 
 def load_abbreviations():
-    """Load the abbreviation CSV into forward and reverse maps."""
     import csv
-    forward = defaultdict(list)  # abbr -> [expanded forms]
-    reverse = defaultdict(list)  # expanded_form_lower -> [abbr]
+    forward = defaultdict(list)
+    reverse = defaultdict(list)
     with open(CSV_PATH, encoding="utf-8") as f:
         for row in csv.DictReader(f):
             abbr = row["abbreviation"].strip()
@@ -49,7 +48,6 @@ def load_abbreviations():
             if abbr and form:
                 forward[abbr].append(form)
                 reverse[form.lower()].append(abbr)
-    # Sort abbreviations by length (longest first) for matching
     all_abbrs = sorted(forward.keys(), key=len, reverse=True)
     return dict(forward), dict(reverse), all_abbrs
 
@@ -58,21 +56,23 @@ print(f"Loaded {len(FORWARD_MAP)} abbreviations, {sum(len(v) for v in FORWARD_MA
 
 # ─── Expansion functions ───────────────────────────────────────────────────
 
-def expand_suffix(text: str) -> str:
-    """Suffix mode: append [Expansions: abbr=form1 form2; ...] at end."""
+def find_abbrs_in_text(text: str) -> Dict[str, List[str]]:
+    """Find all abbreviations in text, return {abbr: [forms]}."""
     found = {}
     for abbr in ALL_ABBRS:
         pattern = re.compile(r'\b' + re.escape(abbr) + r'\b', re.IGNORECASE)
         if pattern.search(text):
-            forms = FORWARD_MAP[abbr]
-            found[abbr] = " ".join(forms)
+            found[abbr] = FORWARD_MAP[abbr]
+    return found
+
+def expand_suffix(text: str) -> str:
+    found = find_abbrs_in_text(text)
     if not found:
         return text
-    parts = [f"{a}={f}" for a, f in found.items()]
+    parts = [f"{a}={' '.join(f)}" for a, f in found.items()]
     return f"{text} [Expansions: {'; '.join(parts)}]"
 
 def expand_replace(text: str) -> str:
-    """Replace mode: replace abbreviation with all expanded forms."""
     result = text
     for abbr in ALL_ABBRS:
         forms = FORWARD_MAP[abbr]
@@ -81,37 +81,41 @@ def expand_replace(text: str) -> str:
     return result
 
 def build_glossary(text: str) -> str:
-    """Build a compact glossary for abbreviations found in text."""
-    found = {}
-    for abbr in ALL_ABBRS:
-        pattern = re.compile(r'\b' + re.escape(abbr) + r'\b', re.IGNORECASE)
-        if pattern.search(text):
-            forms = FORWARD_MAP[abbr]
-            found[abbr] = ", ".join(forms)
+    found = find_abbrs_in_text(text)
     if not found:
         return ""
-    return "\n".join(f"{a} = {f}" for a, f in sorted(found.items(), key=lambda x: x[0].lower()))
+    return "\n".join(f"{a} = {', '.join(f)}" for a, f in sorted(found.items(), key=lambda x: x[0].lower()))
 
 def expand_glossary_suffix(text: str) -> str:
-    """Glossary suffix: append [Abbreviation Glossary]\n... at end."""
     glossary = build_glossary(text)
     if not glossary:
         return text
     return f"{text}\n[Abbreviation Glossary]\n{glossary}"
 
+def expand_replace_plus_glossary(text: str) -> str:
+    """Replace abbreviations with first form, append glossary with all forms."""
+    found = find_abbrs_in_text(text)
+    if not found:
+        return text
+    # Replace each abbreviation with its first (primary) form
+    result = text
+    for abbr in sorted(found.keys(), key=len, reverse=True):
+        primary = found[abbr][0]
+        pattern = re.compile(r'\b' + re.escape(abbr) + r'\b', re.IGNORECASE)
+        result = pattern.sub(primary, result)
+    # Append glossary with all forms
+    glossary = "\n".join(f"{a} = {', '.join(f)}" for a, f in sorted(found.items(), key=lambda x: x[0].lower()))
+    return f"{result}\n[Abbreviation Glossary]\n{glossary}"
+
 def expand_query_suffix(query: str) -> str:
-    """Bidirectional query expansion in suffix mode."""
     result = query
-    # Forward: find abbreviations in query, append all forms
     found_abbrs = set()
     for abbr in ALL_ABBRS:
         pattern = re.compile(r'\b' + re.escape(abbr) + r'\b', re.IGNORECASE)
         if pattern.search(query):
             found_abbrs.add(abbr)
     for abbr in found_abbrs:
-        forms = FORWARD_MAP[abbr]
-        result += " " + " ".join(forms)
-    # Reverse: find full forms in query, append abbreviations
+        result += " " + " ".join(FORWARD_MAP[abbr])
     query_lower = query.lower()
     for form_lower, abbrs in REVERSE_MAP.items():
         pattern = re.compile(r'\b' + re.escape(form_lower) + r'\b', re.IGNORECASE)
@@ -122,67 +126,49 @@ def expand_query_suffix(query: str) -> str:
     return result
 
 def expand_query_replace(query: str) -> str:
-    """Replace abbreviations in query with their expanded forms."""
     return expand_replace(query)
 
-# ─── Test documents ────────────────────────────────────────────────────────
+# ─── Test data ─────────────────────────────────────────────────────────────
 
-# Military text with abbreviations that are common and obscure
 TEST_CHUNKS = [
-    # Chunk 1: Common abbreviations (CO, MO, HQ) + obscure (wdr, bns, adjt)
     "The CO ordered the bns to wdr from the forward position. The MO reported "
     "casualties. The adjt coordinated with HQ. The op was conducted at first light. "
     "The recce team provided intelligence on enemy positions.",
-
-    # Chunk 2: More military abbreviations
     "The GOC visited the bde HQ and briefed the bde comd on the op. The inf bn was "
     "tasked to secure the obj. The armd sqn was to provide spt. The arty bty was "
     "placed in sp of the inf.",
-
-    # Chunk 3: Non-military chunk (should not match military abbreviations)
     "The weather forecast indicates rain for the next three days. Temperature "
     "will drop to 15 degrees Celsius. Farmers should prepare for wet conditions.",
-
-    # Chunk 4: Abbreviation-heavy chunk with multiple meanings
     "The DA approved the medical resupply. The SP was established at checkpoint 4. "
     "The cas were evacuated to the Fd Amb. The spt elements moved up at 0600.",
-
-    # Chunk 5: Mixed - some abbreviations, some full forms
     "The commanding officer ordered the battalions to withdraw from the forward "
     "position. The medical officer reported casualties. The operation was "
     "conducted at first light by the reconnaissance team.",
 ]
 
-# Test queries — mix of abbreviation queries and full-form queries
 TEST_QUERIES = [
-    # Query 1: Full form query (should match abbreviation chunks)
     "battalions withdrew from position",
-    # Query 2: Abbreviation query (should match full-form chunks)
     "bns wdr from position",
-    # Query 3: Mixed query
     "CO ordered bns to wdr",
-    # Query 4: Full form that should match chunk 2
     "brigade headquarters operation objective",
-    # Query 5: Should match chunk 4 (DA has multiple meanings)
     "deputy assistant approved resupply",
-    # Query 6: Irrelevant query (should not match military chunks)
     "weather forecast rain temperature",
 ]
 
-# Expected chunk matches for each query (0-indexed)
 EXPECTED_MATCHES = {
-    "battalions withdrew from position": [0, 4],      # chunks with wdr/bns or full forms
-    "bns wdr from position": [0, 4],                  # same chunks, reverse direction
-    "CO ordered bns to wdr": [0, 4],                  # chunk 0 has abbreviations, chunk 4 has full forms
-    "brigade headquarters operation objective": [1],  # chunk 1
-    "deputy assistant approved resupply": [3],        # chunk 4 (DA = Deputy Assistant)
-    "weather forecast rain temperature": [2],         # chunk 2 (non-military)
+    "battalions withdrew from position": [0, 4],
+    "bns wdr from position": [0, 4],
+    "CO ordered bns to wdr": [0, 4],
+    "brigade headquarters operation objective": [1],
+    "deputy assistant approved resupply": [3],
+    "weather forecast rain temperature": [2],
 }
 
 # ─── Model accessors ───────────────────────────────────────────────────────
 
+GENERATION_MODEL = "huihui-gemma-4-12b-it-qat-unquantized-abliterated@q4_k"
+
 def get_dense_embedder():
-    """Get the OpenAI-compatible dense embedding client."""
     from openai import OpenAI
     from app.db.session import SessionLocal
     from app.services.settings_service import get_setting
@@ -196,17 +182,14 @@ def get_dense_embedder():
     return OpenAI(api_key=api_key, base_url=api_base), model
 
 def get_sparse_embedder():
-    """Get the SPLADE sparse embedder."""
     from app.services.infrastructure import get_sparse_embedder
     return get_sparse_embedder()
 
 def get_reranker():
-    """Get the cross-encoder reranker."""
     from app.services.retrieval.reranker import _get_cross_encoder
     return _get_cross_encoder()
 
 def get_generation_client():
-    """Get the OpenAI-compatible generation client."""
     from openai import OpenAI
     from app.db.session import SessionLocal
     from app.services.settings_service import get_setting
@@ -214,15 +197,13 @@ def get_generation_client():
     try:
         api_key = get_setting(db, "OPENAI_API_KEY", None) or "not-required"
         api_base = get_setting(db, "OPENAI_API_BASE", None)
-        model = get_setting(db, "OPENAI_MODEL", None)
     finally:
         db.close()
-    return OpenAI(api_key=api_key, base_url=api_base), model
+    return OpenAI(api_key=api_key, base_url=api_base), GENERATION_MODEL
 
-# ─── Embedding functions ───────────────────────────────────────────────────
+# ─── Embedding/scoring functions ───────────────────────────────────────────
 
 def embed_dense(texts: List[str]) -> List[List[float]]:
-    """Embed texts with the dense model."""
     client, model = get_dense_embedder()
     embeddings = []
     for i in range(0, len(texts), 32):
@@ -232,702 +213,489 @@ def embed_dense(texts: List[str]) -> List[List[float]]:
     return embeddings
 
 def embed_sparse(texts: List[str]) -> List:
-    """Embed texts with SPLADE."""
     embedder = get_sparse_embedder()
     return list(embedder.embed(texts))
 
 def rerank_scores(query: str, passages: List[str]) -> List[float]:
-    """Score query-passage pairs with the cross-encoder."""
     encoder = get_reranker()
     return list(encoder.rerank(query, passages))
 
-def strip_thinking(text: str) -> str:
-    """Strip Qwen3 thinking tags and numbered-list thinking from model output."""
-    # Strip thinking blocks
-    text = re.sub(r"\u2728.*?\u2728", "", text, flags=re.DOTALL).strip()
-    # If the model outputs thinking without tags (numbered list format),
-    # find the last non-numbered, non-bullet line as the answer
-    lines = text.split("\n")
-    answer_lines = []
-    in_thinking = True
-    for line in lines:
-        stripped = line.strip()
-        if not stripped:
-            if not in_thinking:
-                answer_lines.append(line)
-            continue
-        if in_thinking:
-            if stripped.startswith("*") or stripped.startswith("#"):
+def llm_replace_abbrs(query: str) -> str:
+    """Use LLM to replace abbreviations with correct full forms in context."""
+    client, model = get_generation_client()
+    system = (
+        "You are a military abbreviation expander. Replace each military "
+        "abbreviation in the user's query with its correct full form. "
+        "Output ONLY the rewritten query, nothing else. "
+        "If no abbreviations are present, output the query unchanged."
+    )
+    user = f"Query: {query}\nRewritten:"
+    for attempt in range(3):
+        try:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                max_tokens=200,
+                temperature=0.0,
+            )
+            content = resp.choices[0].message.content.strip()
+            # Take first non-empty line
+            lines = [l.strip() for l in content.split("\n") if l.strip()]
+            return lines[0] if lines else query
+        except Exception as exc:
+            if attempt < 2:
+                time.sleep(3)
                 continue
-            if re.match(r"^\d+\.", stripped):
-                continue
-            if stripped.startswith("**") and stripped.endswith("**"):
-                continue
-            in_thinking = False
-        answer_lines.append(line)
-    result = "\n".join(answer_lines).strip()
-    return result if result else text.strip()
+            return query
 
+def llm_replace_plus_glossary(query: str) -> str:
+    """LLM replacement + append deterministic glossary."""
+    replaced = llm_replace_abbrs(query)
+    glossary = build_glossary(replaced)
+    if glossary:
+        return f"{replaced}\n[Abbreviation Glossary]\n{glossary}"
+    return replaced
 
 def generate_answer(query: str, context: str, max_tokens: int = 500) -> str:
-    """Generate an answer using the LLM."""
     client, model = get_generation_client()
     system = (
         "You are a military assistant. Answer the user's question based ONLY on "
         "the provided context. If the context doesn't contain the answer, say "
-        "'I cannot answer based on the provided context.' Be concise. "
-        "Do not show your thinking process."
+        "'I cannot answer based on the provided context.' Be concise."
     )
     user = f"Context:\n{context}\n\nQuestion: {query}\n\nAnswer:"
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        max_tokens=max_tokens,
-        temperature=0.1,
-    )
-    content = resp.choices[0].message.content
-    return strip_thinking(content)
+    for attempt in range(3):
+        try:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                max_tokens=max_tokens,
+                temperature=0.1,
+            )
+            return resp.choices[0].message.content.strip()
+        except Exception as exc:
+            if attempt < 2:
+                time.sleep(3)
+                continue
+            return f"ERROR: {exc}"
 
-
-# ─── Similarity functions ──────────────────────────────────────────────────
-
-def cosine_similarity(a: List[float], b: List[float]) -> float:
-    """Compute cosine similarity between two vectors."""
+def cosine_similarity(a, b) -> float:
     import math
     dot = sum(x * y for x, y in zip(a, b))
     norm_a = math.sqrt(sum(x * x for x in a))
     norm_b = math.sqrt(sum(y * y for y in b))
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return dot / (norm_a * norm_b)
+    return dot / (norm_a * norm_b) if norm_a and norm_b else 0.0
 
 def sparse_dot_product(a, b) -> float:
-    """Compute dot product between two sparse vectors."""
-    # SPLADE returns SparseEmbedding with .indices and .values
     a_dict = dict(zip(a.indices.tolist(), a.values.tolist()))
     b_dict = dict(zip(b.indices.tolist(), b.values.tolist()))
     return sum(a_dict.get(k, 0) * b_dict.get(k, 0) for k in a_dict)
 
-# ─── Test runner ───────────────────────────────────────────────────────────
+# ─── Results collector ─────────────────────────────────────────────────────
 
-class TestResults:
+class Results:
     def __init__(self):
-        self.results = []
+        self.rows = []
+    def add(self, cat, test, metric, value, extra=None):
+        self.rows.append({"cat": cat, "test": test, "metric": metric, "value": value, "extra": extra or {}})
+    def save(self, path):
+        with open(path, "w") as f:
+            json.dump(self.rows, f, indent=2, default=str)
 
-    def add(self, category: str, test_name: str, metric: str, value, extra: dict = None):
-        self.results.append({
-            "category": category,
-            "test": test_name,
-            "metric": metric,
-            "value": value,
-            "extra": extra or {},
-        })
+R = Results()
 
-    def print_summary(self):
-        print("\n" + "=" * 80)
-        print("COMPREHENSIVE TEST RESULTS SUMMARY")
-        print("=" * 80)
-        current_cat = ""
-        for r in self.results:
-            if r["category"] != current_cat:
-                current_cat = r["category"]
-                print(f"\n── {current_cat} ──")
-            val = r["value"]
-            if isinstance(val, float):
-                val = f"{val:.4f}"
-            extra_str = ""
-            if r["extra"]:
-                extra_str = " | " + " ".join(f"{k}={v}" for k, v in r["extra"].items() if not isinstance(v, (list, dict)))
-            print(f"  {r['test']:40s} {r['metric']:25s} = {val}{extra_str}")
+def hit_rate(rows, filter_fn):
+    hits = sum(1 for r in rows if filter_fn(r) and r["extra"].get("hit"))
+    total = sum(1 for r in rows if filter_fn(r))
+    return hits, total, (hits / total * 100 if total else 0)
 
-# Skip tests that already completed successfully in prior runs
-SKIP_DENSE = os.environ.get('SKIP_DENSE', '0') == '1'
-SKIP_SPARSE = os.environ.get('SKIP_SPARSE', '0') == '1'
-SKIP_RERANKER = os.environ.get('SKIP_RERANKER', '0') == '1'
+# ─── Ingestion expansion options ───────────────────────────────────────────
 
-results = TestResults()
+INGESTION_OPTS = {
+    "none": lambda t: t,
+    "suffix": expand_suffix,
+    "replace": expand_replace,
+    "glossary_suffix": expand_glossary_suffix,
+    "replace+glossary": expand_replace_plus_glossary,
+}
 
-# ─── TEST 1: Dense Embedding Similarity ────────────────────────────────────
-def test_dense_embeddings():
-    """Test how different ingestion/query expansion options affect dense cosine similarity."""
-    if SKIP_DENSE:
-        print("\nSKIP: Dense embeddings (SKIP_DENSE=1)")
-        return
-    print("\n" + "─" * 80)
-    print("TEST 1: Dense Embedding Similarity (qwen3-embedding-0.6b)")
-    print("─" * 80)
+QUERY_OPTS = {
+    "original": lambda q: q,
+    "suffix": expand_query_suffix,
+    "replace": expand_query_replace,
+}
 
-    # Ingestion expansion options
-    ingestion_options = {
-        "none": lambda t: t,
-        "suffix": expand_suffix,
-        "replace": expand_replace,
-        "glossary_suffix": expand_glossary_suffix,
-    }
+# ─── TEST 1+2: Dense + Sparse ──────────────────────────────────────────────
 
-    # Query expansion options
-    query_options = {
-        "original": lambda q: q,
-        "suffix": expand_query_suffix,
-        "replace": expand_query_replace,
-    }
+def test_embeddings():
+    print("\n" + "=" * 80)
+    print("TEST 1+2: Dense + Sparse Embedding Similarity")
+    print("=" * 80)
 
     # Embed all chunk variants
-    print("\nEmbedding chunk variants...")
-    chunk_variants = {}  # option_name -> [embedded chunks]
-    for ing_name, ing_fn in ingestion_options.items():
-        chunk_texts = [ing_fn(c) for c in TEST_CHUNKS]
-        chunk_embs = embed_dense(chunk_texts)
-        chunk_variants[ing_name] = list(zip(chunk_texts, chunk_embs))
-        print(f"  {ing_name}: {len(chunk_texts)} chunks embedded")
-
-    # Embed all query variants
-    print("Embedding query variants...")
-    query_variants = {}  # option_name -> [(query_text, query_emb), ...]
-    for q_name, q_fn in query_options.items():
-        query_texts = [q_fn(q) for q in TEST_QUERIES]
-        query_embs = embed_dense(query_texts)
-        query_variants[q_name] = list(zip(query_texts, query_embs))
-        print(f"  {q_name}: {len(query_texts)} queries embedded")
-
-    # Compute cosine similarity for all combinations
-    print("\nComputing cosine similarities...")
-    for ing_name in ingestion_options:
-        for q_name in query_options:
-            for q_idx, (q_text, q_emb) in enumerate(query_variants[q_name]):
-                sims = []
-                for c_idx, (c_text, c_emb) in enumerate(chunk_variants[ing_name]):
-                    sim = cosine_similarity(q_emb, c_emb)
-                    sims.append((c_idx, sim))
-
-                # Sort by similarity (descending)
-                sims.sort(key=lambda x: x[1], reverse=True)
-                top_match = sims[0]
-                expected = EXPECTED_MATCHES.get(TEST_QUERIES[q_idx], [])
-
-                # Check if any expected chunk is in top-2
-                top2_chunks = [s[0] for s in sims[:2]]
-                hit = any(c in top2_chunks for c in expected)
-
-                results.add(
-                    "DENSE",
-                    f"ing={ing_name} q={q_name}",
-                    f"query_{q_idx}_top1",
-                    f"chunk_{top_match[0]}({top_match[1]:.3f})",
-                    {"expected": expected, "hit": hit, "query": TEST_QUERIES[q_idx][:30]},
-                )
-
-    # Print a detailed table for the most interesting combinations
-    print("\nDetailed results (top-3 matches per query):")
-    for q_idx, query in enumerate(TEST_QUERIES):
-        print(f"\n  Query {q_idx}: '{query}'")
-        print(f"  Expected chunks: {EXPECTED_MATCHES.get(query, [])}")
-        for ing_name in ingestion_options:
-            for q_name in query_options:
-                q_text, q_emb = query_variants[q_name][q_idx]
-                sims = []
-                for c_idx, (c_text, c_emb) in enumerate(chunk_variants[ing_name]):
-                    sim = cosine_similarity(q_emb, c_emb)
-                    sims.append((c_idx, sim))
-                sims.sort(key=lambda x: x[1], reverse=True)
-                top3 = " ".join(f"c{s[0]}:{s[1]:.3f}" for s in sims[:3])
-                print(f"    ing={ing_name:15s} q={q_name:10s} → {top3}")
-
-# ─── TEST 2: Sparse (SPLADE) Similarity ────────────────────────────────────
-def test_sparse_embeddings():
-    """Test how different expansion options affect SPLADE sparse similarity."""
-    if SKIP_SPARSE:
-        print("\nSKIP: Sparse embeddings (SKIP_SPARSE=1)")
-        return
-    print("\n" + "─" * 80)
-    print("TEST 2: Sparse (SPLADE) Similarity (Splade_PP_en_v1)")
-    print("─" * 80)
-
-    ingestion_options = {
-        "none": lambda t: t,
-        "suffix": expand_suffix,
-        "replace": expand_replace,
-        "glossary_suffix": expand_glossary_suffix,
-    }
-
-    query_options = {
-        "original": lambda q: q,
-        "suffix": expand_query_suffix,
-        "replace": expand_query_replace,
-    }
-
-    # Embed all chunk variants
-    print("\nEmbedding chunk variants with SPLADE...")
-    chunk_variants = {}
-    for ing_name, ing_fn in ingestion_options.items():
-        chunk_texts = [ing_fn(c) for c in TEST_CHUNKS]
-        chunk_embs = embed_sparse(chunk_texts)
-        chunk_variants[ing_name] = list(zip(chunk_texts, chunk_embs))
+    print("\nEmbedding chunk variants (dense + sparse)...")
+    chunk_dense = {}
+    chunk_sparse = {}
+    for ing_name, ing_fn in INGESTION_OPTS.items():
+        texts = [ing_fn(c) for c in TEST_CHUNKS]
+        chunk_dense[ing_name] = embed_dense(texts)
+        chunk_sparse[ing_name] = embed_sparse(texts)
         print(f"  {ing_name}: done")
 
-    # Embed all query variants
-    print("Embedding query variants with SPLADE...")
-    query_variants = {}
-    for q_name, q_fn in query_options.items():
-        query_texts = [q_fn(q) for q in TEST_QUERIES]
-        query_embs = embed_sparse(query_texts)
-        query_variants[q_name] = list(zip(query_texts, query_embs))
+    # Embed all query variants (deterministic only — LLM variants tested separately)
+    print("Embedding query variants (dense + sparse)...")
+    query_dense = {}
+    query_sparse = {}
+    for q_name, q_fn in QUERY_OPTS.items():
+        texts = [q_fn(q) for q in TEST_QUERIES]
+        query_dense[q_name] = embed_dense(texts)
+        query_sparse[q_name] = embed_sparse(texts)
         print(f"  {q_name}: done")
 
-    # Compute sparse dot product for all combinations
-    print("\nComputing sparse similarities...")
-    for ing_name in ingestion_options:
-        for q_name in query_options:
-            for q_idx, (q_text, q_emb) in enumerate(query_variants[q_name]):
-                sims = []
-                for c_idx, (c_text, c_emb) in enumerate(chunk_variants[ing_name]):
-                    sim = sparse_dot_product(q_emb, c_emb)
-                    sims.append((c_idx, sim))
-
-                sims.sort(key=lambda x: x[1], reverse=True)
-                top_match = sims[0]
-                expected = EXPECTED_MATCHES.get(TEST_QUERIES[q_idx], [])
-                top2_chunks = [s[0] for s in sims[:2]]
-                hit = any(c in top2_chunks for c in expected)
-
-                results.add(
-                    "SPARSE",
-                    f"ing={ing_name} q={q_name}",
-                    f"query_{q_idx}_top1",
-                    f"chunk_{top_match[0]}({top_match[1]:.1f})",
-                    {"expected": expected, "hit": hit, "query": TEST_QUERIES[q_idx][:30]},
-                )
-
-    # Print detailed table
-    print("\nDetailed results (top-3 matches per query):")
+    # Compute similarities
+    print("\nResults (top-3 per query, dense cosine / sparse dot):")
     for q_idx, query in enumerate(TEST_QUERIES):
-        print(f"\n  Query {q_idx}: '{query}'")
-        print(f"  Expected chunks: {EXPECTED_MATCHES.get(query, [])}")
-        for ing_name in ingestion_options:
-            for q_name in query_options:
-                q_text, q_emb = query_variants[q_name][q_idx]
-                sims = []
-                for c_idx, (c_text, c_emb) in enumerate(chunk_variants[ing_name]):
-                    sim = sparse_dot_product(q_emb, c_emb)
-                    sims.append((c_idx, sim))
-                sims.sort(key=lambda x: x[1], reverse=True)
-                top3 = " ".join(f"c{s[0]}:{s[1]:.1f}" for s in sims[:3])
-                print(f"    ing={ing_name:15s} q={q_name:10s} → {top3}")
+        expected = EXPECTED_MATCHES[query]
+        print(f"\n  Q{q_idx}: '{query}' → expected {expected}")
+        for ing_name in INGESTION_OPTS:
+            for q_name in QUERY_OPTS:
+                # Dense
+                d_sims = sorted(
+                    enumerate(cosine_similarity(query_dense[q_name][q_idx], ce) for ce in chunk_dense[ing_name]),
+                    key=lambda x: x[1], reverse=True
+                )
+                d_top2 = [s[0] for s in d_sims[:2]]
+                d_hit = any(c in d_top2 for c in expected)
+                R.add("DENSE", f"ing={ing_name} q={q_name}", f"q{q_idx}", f"c{d_sims[0][0]}({d_sims[0][1]:.3f})", {"hit": d_hit, "expected": expected, "top3": [(s[0], round(s[1], 3)) for s in d_sims[:3]]})
 
-# ─── TEST 3: Reranker (Cross-Encoder) ──────────────────────────────────────
+                # Sparse
+                s_sims = sorted(
+                    enumerate(sparse_dot_product(query_sparse[q_name][q_idx], ce) for ce in chunk_sparse[ing_name]),
+                    key=lambda x: x[1], reverse=True
+                )
+                s_top2 = [s[0] for s in s_sims[:2]]
+                s_hit = any(c in s_top2 for c in expected)
+                R.add("SPARSE", f"ing={ing_name} q={q_name}", f"q{q_idx}", f"c{s_sims[0][0]}({s_sims[0][1]:.1f})", {"hit": s_hit, "expected": expected, "top3": [(s[0], round(s[1], 1)) for s in s_sims[:3]]})
+
+                d_str = " ".join(f"c{s[0]}:{s[1]:.3f}" for s in d_sims[:3])
+                s_str = " ".join(f"c{s[0]}:{s[1]:.1f}" for s in s_sims[:3])
+                print(f"    ing={ing_name:16s} q={q_name:10s} D[{d_str}] S[{s_str}]")
+
+    # Print hit rate summary
+    print("\n  Hit rates (top-2):")
+    for label, cat in [("DENSE", "DENSE"), ("SPARSE", "SPARSE")]:
+        print(f"\n  {label}:")
+        for ing_name in INGESTION_OPTS:
+            for q_name in QUERY_OPTS:
+                h, t, pct = hit_rate(R.rows, lambda r: r["cat"] == cat and f"ing={ing_name}" in r["test"] and f"q={q_name}" in r["test"])
+                print(f"    ing={ing_name:16s} q={q_name:10s}  {h}/{t} ({pct:.0f}%)")
+
+# ─── TEST 3: Reranker ──────────────────────────────────────────────────────
+
 def test_reranker():
-    """Test how different expansion options affect cross-encoder reranker scores."""
-    if SKIP_RERANKER:
-        print("\nSKIP: Reranker (SKIP_RERANKER=1)")
-        return
-    print("\n" + "─" * 80)
+    print("\n" + "=" * 80)
     print("TEST 3: Reranker (ms-marco-MiniLM-L-12-v2)")
-    print("─" * 80)
+    print("=" * 80)
 
-    # Reranker options: (query_variant, chunk_variant)
-    # We test all meaningful combinations
-    reranker_combos = [
-        ("orig_q", "orig_chunk",     lambda q: q,                 lambda t: t),
-        ("orig_q", "suffix_chunk",   lambda q: q,                 expand_suffix),
-        ("orig_q", "replace_chunk",  lambda q: q,                 expand_replace),
-        ("orig_q", "glossary_chunk", lambda q: q,                 expand_glossary_suffix),
-        ("exp_q",  "orig_chunk",     expand_query_suffix,         lambda t: t),
-        ("exp_q",  "suffix_chunk",   expand_query_suffix,         expand_suffix),
-        ("exp_q",  "glossary_chunk", expand_query_suffix,         expand_glossary_suffix),
-        ("rep_q",  "orig_chunk",     expand_query_replace,        lambda t: t),
-        ("rep_q",  "glossary_chunk", expand_query_replace,        expand_glossary_suffix),
+    # Reranker combinations: (query_variant, chunk_variant)
+    RR_COMBOS = [
+        ("orig_q", "orig_c",       lambda q: q,                  lambda t: t),
+        ("orig_q", "suffix_c",     lambda q: q,                  expand_suffix),
+        ("orig_q", "replace_c",    lambda q: q,                  expand_replace),
+        ("orig_q", "glossary_c",   lambda q: q,                  expand_glossary_suffix),
+        ("orig_q", "repglos_c",    lambda q: q,                  expand_replace_plus_glossary),
+        ("exp_q",  "orig_c",       expand_query_suffix,          lambda t: t),
+        ("exp_q",  "suffix_c",     expand_query_suffix,          expand_suffix),
+        ("exp_q",  "glossary_c",   expand_query_suffix,          expand_glossary_suffix),
+        ("exp_q",  "repglos_c",    expand_query_suffix,          expand_replace_plus_glossary),
+        ("rep_q",  "orig_c",       expand_query_replace,         lambda t: t),
+        ("rep_q",  "glossary_c",   expand_query_replace,         expand_glossary_suffix),
+        ("rep_q",  "repglos_c",    expand_query_replace,         expand_replace_plus_glossary),
     ]
 
-    print("\nScoring all query-chunk combinations with cross-encoder...")
-    for q_label, c_label, q_fn, c_fn in reranker_combos:
+    print(f"\nScoring {len(RR_COMBOS)} reranker combos x {len(TEST_QUERIES)} queries...")
+    for q_label, c_label, q_fn, c_fn in RR_COMBOS:
         for q_idx, query in enumerate(TEST_QUERIES):
             q_text = q_fn(query)
             passages = [c_fn(c) for c in TEST_CHUNKS]
             scores = rerank_scores(q_text, passages)
-
             scored = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
-            top_match = scored[0]
-            expected = EXPECTED_MATCHES.get(query, [])
-            top2_chunks = [s[0] for s in scored[:2]]
-            hit = any(c in top2_chunks for c in expected)
+            expected = EXPECTED_MATCHES[query]
+            top2 = [s[0] for s in scored[:2]]
+            hit = any(c in top2 for c in expected)
+            R.add("RERANKER", f"q={q_label} c={c_label}", f"q{q_idx}", f"c{scored[0][0]}({scored[0][1]:.3f})", {"hit": hit, "expected": expected, "top3": [(s[0], round(s[1], 3)) for s in scored[:3]]})
 
-            results.add(
-                "RERANKER",
-                f"q={q_label} c={c_label}",
-                f"query_{q_idx}_top1",
-                f"chunk_{top_match[0]}({top_match[1]:.3f})",
-                {"expected": expected, "hit": hit, "query": query[:30]},
-            )
+    # Print results
+    print("\n  Hit rates (top-2):")
+    for q_label, c_label, _, _ in RR_COMBOS:
+        h, t, pct = hit_rate(R.rows, lambda r: r["cat"] == "RERANKER" and f"q={q_label}" in r["test"] and f"c={c_label}" in r["test"])
+        print(f"    q={q_label:8s} c={c_label:12s}  {h}/{t} ({pct:.0f}%)")
 
-    # Print detailed table
-    print("\nDetailed results (top-3 matches per query):")
+    # Detailed per-query for key combos
+    print("\n  Detailed (top-3 per query) for key combos:")
+    key_combos = [("orig_q", "orig_c"), ("orig_q", "glossary_c"), ("orig_q", "repglos_c"), ("exp_q", "orig_c"), ("exp_q", "glossary_c")]
     for q_idx, query in enumerate(TEST_QUERIES):
-        print(f"\n  Query {q_idx}: '{query}'")
-        print(f"  Expected chunks: {EXPECTED_MATCHES.get(query, [])}")
-        for q_label, c_label, q_fn, c_fn in reranker_combos:
-            q_text = q_fn(query)
-            passages = [c_fn(c) for c in TEST_CHUNKS]
-            scores = rerank_scores(q_text, passages)
-            scored = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
-            top3 = " ".join(f"c{s[0]}:{s[1]:.3f}" for s in scored[:3])
-            print(f"    q={q_label:8s} c={c_label:15s} → {top3}")
+        print(f"\n  Q{q_idx}: '{query}' → {EXPECTED_MATCHES[query]}")
+        for q_label, c_label in key_combos:
+            rows = [r for r in R.rows if r["cat"] == "RERANKER" and f"q={q_label}" in r["test"] and f"c={c_label}" in r["test"] and r["metric"] == f"q{q_idx}"]
+            if rows:
+                top3 = rows[0]["extra"]["top3"]
+                hit = rows[0]["extra"]["hit"]
+                print(f"    q={q_label:8s} c={c_label:12s}  {' '.join(f'c{c}:{s}' for c,s in top3)} {'✓' if hit else '✗'}")
 
-# ─── TEST 4: Generation Quality ────────────────────────────────────────────
-def test_generation():
-    """Test how different context formats affect LLM answer quality."""
-    print("\n" + "─" * 80)
-    print("TEST 4: Generation Quality (qwen3.5-9b)")
-    print("─" * 80)
+# ─── TEST 4: LLM Query Expansion ───────────────────────────────────────────
 
-    # We test generation with a query that requires abbreviation understanding
-    # Use chunk 0 (has abbreviations) and query "battalions withdrew from position"
-    test_chunk = TEST_CHUNKS[0]
-    test_query = "battalions withdrew from position"
-
-    context_options = {
-        "original_only": test_chunk,
-        "with_glossary": expand_glossary_suffix(test_chunk),
-        "with_suffix": expand_suffix(test_chunk),
-        "with_replace": expand_replace(test_chunk),
-    }
-
-    print(f"\nQuery: '{test_query}'")
-    print(f"Chunk: '{test_chunk[:80]}...'")
-
-    for ctx_name, ctx_text in context_options.items():
-        print(f"\n  Context option: {ctx_name}")
-        print(f"  Context length: {len(ctx_text)} chars")
-        answer = generate_answer(test_query, ctx_text, max_tokens=300)
-        print(f"  Answer: {answer[:200]}")
-
-        # Check if the answer correctly identifies that battalions withdrew
-        correct = any(word in answer.lower() for word in ["battalion", "withdraw", "order", "position"])
-        results.add(
-            "GENERATION",
-            f"ctx={ctx_name}",
-            "answer_correct",
-            correct,
-            {"answer_preview": answer[:100].replace("\n", " ")},
-        )
-
-    # Also test with a multi-meaning abbreviation (DA)
-    test_chunk2 = TEST_CHUNKS[3]
-    test_query2 = "who approved the medical resupply?"
-
-    context_options2 = {
-        "original_only": test_chunk2,
-        "with_glossary": expand_glossary_suffix(test_chunk2),
-        "with_suffix": expand_suffix(test_chunk2),
-    }
-
-    print(f"\n\nQuery: '{test_query2}'")
-    print(f"Chunk: '{test_chunk2[:80]}...'")
-
-    for ctx_name, ctx_text in context_options2.items():
-        print(f"\n  Context option: {ctx_name}")
-        answer = generate_answer(test_query2, ctx_text, max_tokens=300)
-        print(f"  Answer: {answer[:200]}")
-
-        # Check if the answer correctly identifies DA as Deputy Assistant or Defence Attache
-        correct = any(word in answer.lower() for word in ["deputy", "assistant", "attache", "da"])
-        results.add(
-            "GENERATION",
-            f"multi_meaning_ctx={ctx_name}",
-            "answer_correct",
-            correct,
-            {"answer_preview": answer[:100].replace("\n", " ")},
-        )
-
-# ─── TEST 5: LLM-Based Query Expansion ─────────────────────────────────────
 def test_llm_query_expansion():
-    """Test using the LLM to expand abbreviations in queries."""
-    print("\n" + "─" * 80)
-    print("TEST 5: LLM-Based Query Expansion (qwen3.5-9b)")
-    print("─" * 80)
+    print("\n" + "=" * 80)
+    print("TEST 4: LLM Query Expansion (gemma-4-12b)")
+    print("=" * 80)
 
-    client, model = get_generation_client()
-
-    def llm_expand(query: str) -> str:
-        """Use the LLM to expand abbreviations in a query."""
-        system = (
-            "You are a military abbreviation expander. Given a query that may contain "
-            "military abbreviations, expand each abbreviation to its full form. "
-            "Keep the original words. Append expanded forms at the end. "
-            "Output ONLY the expanded query, nothing else.\n\n"
-            "Example:\n"
-            "Input: bns wdr from position\n"
-            "Output: bns wdr from position battalions withdraw from position"
-        )
-        user = f"Input: {query}\nOutput:"
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            max_tokens=500,
-            temperature=0.0,
-        )
-        content = resp.choices[0].message.content
-        content = strip_thinking(content)
-        content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
-        # Take the last line (after any thinking)
-        lines = [l.strip() for l in content.split("\n") if l.strip() and not l.strip().startswith("*") and not l.strip().startswith("#")]
-        if lines:
-            return lines[-1]
-        return content
-
-    # Test LLM expansion on abbreviation queries
     abbr_queries = [q for q in TEST_QUERIES if any(
         re.search(r'\b' + re.escape(a) + r'\b', q, re.IGNORECASE) for a in ALL_ABBRS if len(a) >= 2
     )]
 
-    print(f"\nTesting LLM expansion on {len(abbr_queries)} queries...")
+    print(f"\nLLM-expanding {len(abbr_queries)} abbreviation queries...")
     llm_expanded = {}
     for query in abbr_queries:
-        expanded = llm_expand(query)
+        expanded = llm_replace_abbrs(query)
         llm_expanded[query] = expanded
         print(f"  '{query}' → '{expanded}'")
-        results.add(
-            "LLM_EXPANSION",
-            f"query_expand",
-            query[:30],
-            expanded[:80],
-            {"original": query, "expanded": expanded},
-        )
+        R.add("LLM_EXPAND", "query_replace", query[:30], expanded, {"original": query, "expanded": expanded})
 
-    # Compare LLM expansion vs deterministic expansion in dense retrieval
+    # Compare in dense retrieval (against original chunks)
     if llm_expanded:
-        print("\nComparing LLM vs deterministic expansion in dense retrieval...")
-        # Use original chunks (no ingestion expansion)
+        print("\nComparing LLM vs deterministic vs original in dense retrieval:")
         chunk_embs = embed_dense(TEST_CHUNKS)
 
         for query, llm_exp in llm_expanded.items():
-            # LLM expanded query
             llm_emb = embed_dense([llm_exp])[0]
-            llm_sims = sorted(
-                enumerate(cosine_similarity(llm_emb, ce) for ce in chunk_embs),
-                key=lambda x: x[1], reverse=True
-            )
-
-            # Deterministic suffix expansion
             det_exp = expand_query_suffix(query)
             det_emb = embed_dense([det_exp])[0]
-            det_sims = sorted(
-                enumerate(cosine_similarity(det_emb, ce) for ce in chunk_embs),
-                key=lambda x: x[1], reverse=True
-            )
-
-            # Original query
             orig_emb = embed_dense([query])[0]
-            orig_sims = sorted(
-                enumerate(cosine_similarity(orig_emb, ce) for ce in chunk_embs),
-                key=lambda x: x[1], reverse=True
-            )
 
             expected = EXPECTED_MATCHES.get(query, [])
-            print(f"\n  Query: '{query}'")
-            print(f"  LLM expanded: '{llm_exp}'")
-            print(f"  Det expanded: '{det_exp[:80]}...'")
-            print(f"  Expected chunks: {expected}")
-            print(f"  Original:  {' '.join(f'c{s[0]}:{s[1]:.3f}' for s in orig_sims[:3])}")
-            print(f"  LLM exp:   {' '.join(f'c{s[0]}:{s[1]:.3f}' for s in llm_sims[:3])}")
-            print(f"  Det exp:   {' '.join(f'c{s[0]}:{s[1]:.3f}' for s in det_sims[:3])}")
+            llm_sims = sorted(enumerate(cosine_similarity(llm_emb, ce) for ce in chunk_embs), key=lambda x: x[1], reverse=True)
+            det_sims = sorted(enumerate(cosine_similarity(det_emb, ce) for ce in chunk_embs), key=lambda x: x[1], reverse=True)
+            orig_sims = sorted(enumerate(cosine_similarity(orig_emb, ce) for ce in chunk_embs), key=lambda x: x[1], reverse=True)
 
-            for label, sims in [("original", orig_sims), ("llm", llm_sims), ("det_suffix", det_sims)]:
+            for label, sims in [("original", orig_sims), ("llm_replace", llm_sims), ("det_suffix", det_sims)]:
                 top2 = [s[0] for s in sims[:2]]
                 hit = any(c in top2 for c in expected)
-                results.add(
-                    "LLM_VS_DET",
-                    f"q_expand_{label}",
-                    f"query_hit",
-                    hit,
-                    {"query": query[:30], "top1": f"chunk_{sims[0][0]}", "top1_sim": f"{sims[0][1]:.3f}"},
-                )
+                R.add("LLM_VS_DET", f"q_{label}", f"hit_{query[:20]}", hit, {"top1": sims[0][0], "top1_sim": round(sims[0][1], 3), "expected": expected})
 
-# ─── TEST 6: Combined Pipeline (Dense + Reranker) ──────────────────────────
-def test_combined_pipeline():
-    """Test the full retrieval pipeline: dense retrieval → reranker → generation."""
-    print("\n" + "─" * 80)
-    print("TEST 6: Combined Pipeline (Dense → Reranker → Generation)")
-    print("─" * 80)
+            print(f"\n  '{query}' → expected {expected}")
+            print(f"    original:     {' '.join(f'c{s[0]}:{s[1]:.3f}' for s in orig_sims[:3])}")
+            print(f"    llm_replace:  {' '.join(f'c{s[0]}:{s[1]:.3f}' for s in llm_sims[:3])}")
+            print(f"    det_suffix:   {' '.join(f'c{s[0]}:{s[1]:.3f}' for s in det_sims[:3])}")
 
-    # Test the best combinations from previous tests
-    # We'll use a realistic scenario: 5 chunks, query, retrieve top-3, rerank, generate
+# ─── TEST 5: Generation Quality ────────────────────────────────────────────
 
-    ingestion_options = {
-        "none": lambda t: t,
-        "suffix": expand_suffix,
-        "glossary_suffix": expand_glossary_suffix,
+def test_generation():
+    print("\n" + "=" * 80)
+    print("TEST 5: Generation Quality (gemma-4-12b)")
+    print("=" * 80)
+
+    # Test 1: Abbreviation-heavy chunk, full-form query
+    chunk = TEST_CHUNKS[0]
+    query = "battalions withdrew from position"
+
+    ctx_opts = {
+        "original": chunk,
+        "glossary": expand_glossary_suffix(chunk),
+        "suffix": expand_suffix(chunk),
+        "replace": expand_replace(chunk),
+        "replace+glossary": expand_replace_plus_glossary(chunk),
     }
 
-    query_options = {
-        "original": lambda q: q,
-        "suffix": expand_query_suffix,
+    print(f"\n  Query: '{query}'")
+    print(f"  Chunk: '{chunk[:60]}...'")
+
+    for ctx_name, ctx_text in ctx_opts.items():
+        answer = generate_answer(query, ctx_text)
+        correct = any(w in answer.lower() for w in ["battalion", "withdraw", "order", "position"])
+        R.add("GENERATION", f"ctx={ctx_name}", "correct", correct, {"answer": answer[:150], "query": query, "chunk": 0})
+        print(f"\n  ctx={ctx_name} ({len(ctx_text)} chars):")
+        print(f"    {answer[:200]}")
+
+    # Test 2: Multi-meaning abbreviation (DA)
+    chunk2 = TEST_CHUNKS[3]
+    query2 = "who approved the medical resupply?"
+
+    ctx_opts2 = {
+        "original": chunk2,
+        "glossary": expand_glossary_suffix(chunk2),
+        "suffix": expand_suffix(chunk2),
+        "replace+glossary": expand_replace_plus_glossary(chunk2),
     }
 
-    reranker_options = {
-        "orig_q_orig_c": (lambda q: q, lambda t: t),
-        "orig_q_glossary_c": (lambda q: q, expand_glossary_suffix),
-        "exp_q_orig_c": (expand_query_suffix, lambda t: t),
-        "exp_q_glossary_c": (expand_query_suffix, expand_glossary_suffix),
+    print(f"\n  Query: '{query2}'")
+    print(f"  Chunk: '{chunk2[:60]}...'")
+
+    for ctx_name, ctx_text in ctx_opts2.items():
+        answer = generate_answer(query2, ctx_text)
+        correct = any(w in answer.lower() for w in ["deputy", "assistant", "attache", "da", "approved"])
+        R.add("GENERATION", f"multi_ctx={ctx_name}", "correct", correct, {"answer": answer[:150], "query": query2, "chunk": 3})
+        print(f"\n  ctx={ctx_name} ({len(ctx_text)} chars):")
+        print(f"    {answer[:200]}")
+
+    # Test 3: Abbreviation query, full-form chunk (reverse direction)
+    chunk3 = TEST_CHUNKS[4]
+    query3 = "bns wdr from position"
+
+    ctx_opts3 = {
+        "original": chunk3,
+        "glossary": expand_glossary_suffix(chunk3),
     }
+
+    print(f"\n  Query: '{query3}'")
+    print(f"  Chunk: '{chunk3[:60]}...'")
+
+    for ctx_name, ctx_text in ctx_opts3.items():
+        answer = generate_answer(query3, ctx_text)
+        correct = any(w in answer.lower() for w in ["battalion", "withdraw", "commanding", "position"])
+        R.add("GENERATION", f"abbr_q_ctx={ctx_name}", "correct", correct, {"answer": answer[:150], "query": query3, "chunk": 4})
+        print(f"\n  ctx={ctx_name} ({len(ctx_text)} chars):")
+        print(f"    {answer[:200]}")
+
+# ─── TEST 6: Full Pipeline (Dense → Reranker → Generation) ─────────────────
+
+def test_full_pipeline():
+    print("\n" + "=" * 80)
+    print("TEST 6: Full Pipeline (Dense → Reranker → Generation)")
+    print("=" * 80)
+
+    # Test the most promising combinations
+    pipeline_combos = [
+        # (ingestion, query, reranker_q, reranker_c, gen_context)
+        ("none",            "original", "orig_q", "orig_c",    "glossary"),
+        ("none",            "suffix",   "orig_q", "glossary_c","glossary"),
+        ("suffix",          "suffix",   "orig_q", "orig_c",    "glossary"),
+        ("suffix",          "suffix",   "exp_q",  "glossary_c","glossary"),
+        ("replace",         "original", "orig_q", "orig_c",    "glossary"),
+        ("replace+glossary","original", "orig_q", "orig_c",    "replace+glossary"),
+        ("replace+glossary","suffix",   "orig_q", "repglos_c", "replace+glossary"),
+        ("glossary_suffix", "suffix",   "orig_q", "glossary_c","glossary"),
+    ]
 
     test_query = "battalions withdrew from position"
     expected = EXPECTED_MATCHES[test_query]
 
-    print(f"\nQuery: '{test_query}'")
-    print(f"Expected chunks: {expected}")
+    print(f"\n  Query: '{test_query}' → expected {expected}")
 
-    for ing_name, ing_fn in ingestion_options.items():
-        # Embed chunks
-        chunk_texts = [ing_fn(c) for c in TEST_CHUNKS]
+    ing_fns = {
+        "none": lambda t: t,
+        "suffix": expand_suffix,
+        "replace": expand_replace,
+        "glossary_suffix": expand_glossary_suffix,
+        "replace+glossary": expand_replace_plus_glossary,
+    }
+    rr_q_fns = {
+        "orig_q": lambda q: q,
+        "exp_q": expand_query_suffix,
+    }
+    rr_c_fns = {
+        "orig_c": lambda t: t,
+        "glossary_c": expand_glossary_suffix,
+        "repglos_c": expand_replace_plus_glossary,
+    }
+    gen_fns = {
+        "glossary": lambda t: expand_glossary_suffix(t),
+        "replace+glossary": lambda t: expand_replace_plus_glossary(t),
+        "original": lambda t: t,
+    }
+    q_fns = {
+        "original": lambda q: q,
+        "suffix": expand_query_suffix,
+    }
+
+    for ing_name, q_name, rr_q, rr_c, gen_ctx in pipeline_combos:
+        # Dense retrieval
+        chunk_texts = [ing_fns[ing_name](c) for c in TEST_CHUNKS]
         chunk_embs = embed_dense(chunk_texts)
+        q_text = q_fns[q_name](test_query)
+        q_emb = embed_dense([q_text])[0]
+        sims = sorted(enumerate(cosine_similarity(q_emb, ce) for ce in chunk_embs), key=lambda x: x[1], reverse=True)
+        top3_idx = [s[0] for s in sims[:3]]
 
-        for q_name, q_fn in query_options.items():
-            q_text = q_fn(test_query)
-            q_emb = embed_dense([q_text])[0]
+        # Rerank
+        rr_query = rr_q_fns[rr_q](test_query)
+        rr_passages = [rr_c_fns[rr_c](TEST_CHUNKS[i]) for i in top3_idx]
+        rr_scores = rerank_scores(rr_query, rr_passages)
+        rr_ranked = sorted(zip(top3_idx, rr_scores), key=lambda x: x[1], reverse=True)
+        rr_top1 = rr_ranked[0][0]
+        rr_hit = rr_top1 in expected
 
-            # Dense retrieval: get top-3
-            sims = sorted(
-                enumerate(cosine_similarity(q_emb, ce) for ce in chunk_embs),
-                key=lambda x: x[1], reverse=True
-            )
-            top3_idx = [s[0] for s in sims[:3]]
-            top3_scores = [s[1] for s in sims[:3]]
+        # Generate
+        top_chunk = TEST_CHUNKS[rr_top1]
+        gen_context = gen_fns[gen_ctx](top_chunk)
+        answer = generate_answer(test_query, gen_context, max_tokens=300)
+        answer_correct = any(w in answer.lower() for w in ["battalion", "withdraw", "order", "position"])
 
-            # Rerank top-3
-            for rr_name, (rr_q_fn, rr_c_fn) in reranker_options.items():
-                rr_query = rr_q_fn(test_query)
-                rr_passages = [rr_c_fn(TEST_CHUNKS[i]) for i in top3_idx]
-                rr_scores = rerank_scores(rr_query, rr_passages)
+        R.add("PIPELINE", f"ing={ing_name} q={q_name} rr={rr_q}+{rr_c} gen={gen_ctx}",
+              "result", f"hit={rr_hit} correct={answer_correct}",
+              {"rr_top1": rr_top1, "expected": expected, "answer": answer[:100]})
 
-                # Sort by reranker score
-                rr_ranked = sorted(zip(top3_idx, rr_scores), key=lambda x: x[1], reverse=True)
-                rr_top1 = rr_ranked[0][0]
-                rr_hit = rr_top1 in expected
-
-                results.add(
-                    "PIPELINE",
-                    f"ing={ing_name} q={q_name} rr={rr_name}",
-                    "reranked_top1",
-                    f"chunk_{rr_top1}",
-                    {"hit": rr_hit, "expected": expected, "dense_top3": top3_idx},
-                )
-
-                # Generate answer with top-1 chunk
-                top_chunk = TEST_CHUNKS[rr_top1]  # original text
-                # Build context with glossary
-                glossary = build_glossary(top_chunk)
-                if glossary:
-                    context = f"{top_chunk}\n[Abbreviation Glossary]\n{glossary}"
-                else:
-                    context = top_chunk
-
-                answer = generate_answer(test_query, context, max_tokens=200)
-                answer_correct = any(w in answer.lower() for w in ["battalion", "withdraw", "order", "position"])
-
-                results.add(
-                    "PIPELINE",
-                    f"ing={ing_name} q={q_name} rr={rr_name}",
-                    "answer_correct",
-                    answer_correct,
-                    {"answer_preview": answer[:80].replace("\n", " ")},
-                )
-
-                print(f"  ing={ing_name:15s} q={q_name:10s} rr={rr_name:25s} "
-                      f"→ dense_top3={top3_idx} rerank_top1=chunk_{rr_top1} "
-                      f"hit={rr_hit} answer_correct={answer_correct}")
+        print(f"  ing={ing_name:16s} q={q_name:10s} rr={rr_q}+{rr_c:12s} gen={gen_ctx:16s} → top1=c{rr_top1} hit={rr_hit} correct={answer_correct}")
+        print(f"    answer: {answer[:120]}")
 
 # ─── MAIN ──────────────────────────────────────────────────────────────────
 
 def main():
     print("=" * 80)
-    print("ABBREVIATION EXPANSION COMPREHENSIVE TEST SUITE")
+    print(f"ABBREVIATION EXPANSION TEST SUITE v2")
+    print(f"Models: dense=qwen3-embedding-0.6b, sparse=SPLADE, reranker=MiniLM, gen={GENERATION_MODEL}")
+    print(f"Abbreviations: {len(FORWARD_MAP)}, chunks: {len(TEST_CHUNKS)}, queries: {len(TEST_QUERIES)}")
     print("=" * 80)
-    print(f"Abbreviations loaded: {len(FORWARD_MAP)}")
-    print(f"Test chunks: {len(TEST_CHUNKS)}")
-    print(f"Test queries: {len(TEST_QUERIES)}")
 
-    # Run all tests
-    test_dense_embeddings()
-    test_sparse_embeddings()
+    test_embeddings()
     test_reranker()
     test_llm_query_expansion()
-    test_combined_pipeline()
     test_generation()
+    test_full_pipeline()
 
-    # Print summary
-    results.print_summary()
+    R.save("/app/assets/abbr_test_results_v2.json")
+    print(f"\nResults saved to /app/assets/abbr_test_results_v2.json")
 
-    # Save results to JSON
-    output_path = "/app/assets/abbr_test_results.json"
-    with open(output_path, "w") as f:
-        json.dump(results.results, f, indent=2, default=str)
-    print(f"\nResults saved to {output_path}")
-
-    # Print final conclusions
+    # ─── Final summary ─────────────────────────────────────────────────────
     print("\n" + "=" * 80)
-    print("FINAL CONCLUSIONS")
+    print("FINAL SUMMARY")
     print("=" * 80)
 
-    # Analyze hit rates
-    categories = defaultdict(lambda: {"hits": 0, "total": 0})
-    for r in results.results:
-        if "hit" in r["extra"]:
-            cat = r["category"]
-            categories[cat]["total"] += 1
-            if r["extra"]["hit"]:
-                categories[cat]["hits"] += 1
+    print("\n1. DENSE hit rates (top-2):")
+    for ing_name in INGESTION_OPTS:
+        for q_name in QUERY_OPTS:
+            h, t, pct = hit_rate(R.rows, lambda r: r["cat"] == "DENSE" and f"ing={ing_name}" in r["test"] and f"q={q_name}" in r["test"])
+            if t: print(f"   ing={ing_name:16s} q={q_name:10s}  {h}/{t} ({pct:.0f}%)")
 
-    print("\nHit rates by category:")
-    for cat, stats in sorted(categories.items()):
-        rate = stats["hits"] / stats["total"] * 100 if stats["total"] > 0 else 0
-        print(f"  {cat:20s}: {stats['hits']}/{stats['total']} ({rate:.1f}%)")
+    print("\n2. SPARSE hit rates (top-2):")
+    for ing_name in INGESTION_OPTS:
+        for q_name in QUERY_OPTS:
+            h, t, pct = hit_rate(R.rows, lambda r: r["cat"] == "SPARSE" and f"ing={ing_name}" in r["test"] and f"q={q_name}" in r["test"])
+            if t: print(f"   ing={ing_name:16s} q={q_name:10s}  {h}/{t} ({pct:.0f}%)")
 
-    # Analyze by ingestion option
-    print("\nHit rates by ingestion option (dense + sparse):")
-    for ing_name in ["none", "suffix", "replace", "glossary_suffix"]:
-        hits = 0
-        total = 0
-        for r in results.results:
-            if r["category"] in ("DENSE", "SPARSE") and f"ing={ing_name}" in r["test"]:
-                total += 1
-                if r["extra"].get("hit"):
-                    hits += 1
-        rate = hits / total * 100 if total > 0 else 0
-        print(f"  ing={ing_name:15s}: {hits}/{total} ({rate:.1f}%)")
+    print("\n3. RERANKER hit rates (top-2):")
+    rr_combos = sorted(set(r["test"] for r in R.rows if r["cat"] == "RERANKER"))
+    for combo in rr_combos:
+        h, t, pct = hit_rate(R.rows, lambda r: r["cat"] == "RERANKER" and r["test"] == combo)
+        if t: print(f"   {combo:35s}  {h}/{t} ({pct:.0f}%)")
 
-    # Analyze by query option
-    print("\nHit rates by query option (dense + sparse):")
-    for q_name in ["original", "suffix", "replace"]:
-        hits = 0
-        total = 0
-        for r in results.results:
-            if r["category"] in ("DENSE", "SPARSE") and f"q={q_name}" in r["test"]:
-                total += 1
-                if r["extra"].get("hit"):
-                    hits += 1
-        rate = hits / total * 100 if total > 0 else 0
-        print(f"  q={q_name:10s}: {hits}/{total} ({rate:.1f}%)")
+    print("\n4. GENERATION correctness:")
+    gen_tests = sorted(set(r["test"] for r in R.rows if r["cat"] == "GENERATION"))
+    for gt in gen_tests:
+        rows = [r for r in R.rows if r["cat"] == "GENERATION" and r["test"] == gt]
+        correct = sum(1 for r in rows if r["value"])
+        print(f"   {gt:35s}  {correct}/{len(rows)} correct")
 
-    # Analyze reranker combinations
-    print("\nHit rates by reranker combination:")
-    for q_label in ["orig_q", "exp_q", "rep_q"]:
-        for c_label in ["orig_chunk", "suffix_chunk", "replace_chunk", "glossary_chunk"]:
-            hits = 0
-            total = 0
-            for r in results.results:
-                if r["category"] == "RERANKER" and f"q={q_label}" in r["test"] and f"c={c_label}" in r["test"]:
-                    total += 1
-                    if r["extra"].get("hit"):
-                        hits += 1
-            if total > 0:
-                rate = hits / total * 100
-                print(f"  q={q_label:8s} c={c_label:15s}: {hits}/{total} ({rate:.1f}%)")
+    print("\n5. PIPELINE results:")
+    for r in R.rows:
+        if r["cat"] == "PIPELINE":
+            print(f"   {r['test']:60s}  {r['value']}")
 
 if __name__ == "__main__":
     main()
