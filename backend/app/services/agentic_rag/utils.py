@@ -36,6 +36,7 @@ def format_context_string(
     file_markdown: str | None = None,
     db: Any = None,
     org_id: Any = None,
+    query_glossary: str = "",
 ) -> str:
     """Format a list of serialized documents into a context string for the LLM.
 
@@ -44,7 +45,9 @@ def format_context_string(
 
     Uses ``original_text`` from doc metadata when available (for clean prose
     in generation). Appends a scoped abbreviation glossary when abbreviation
-    expansion is enabled.
+    expansion is enabled. The glossary merges *query_glossary* (pre-built by
+    expand_query_node) with any additional abbreviations found in the chunk
+    texts.
 
     Contiguous chunks from the same document have their overlap pruned
     so the LLM doesn't see duplicated text (300 chars per adjacent pair
@@ -65,22 +68,37 @@ def format_context_string(
     if file_markdown:
         parts.append(f"[File Content]\n{file_markdown}")
 
-    # Append scoped abbreviation glossary
-    if db is not None:
+    # Append scoped abbreviation glossary.
+    # query_glossary is pre-built by expand_query_node; scan chunk texts
+    # only for additional abbreviations not already covered.
+    if db is not None or query_glossary:
         try:
             from app.services.abbreviation_service import build_lookup, build_glossary_from_texts
-            abbr_lookup = build_lookup(db, org_id)
-            if abbr_lookup and not abbr_lookup.is_empty:
-                # Collect original texts to scan for abbreviations
-                texts = []
-                for doc in (pruned_docs or []):
-                    md = doc.get("metadata", {})
-                    texts.append(md.get("original_text", doc.get("page_content", "")))
-                glossary = build_glossary_from_texts(texts, abbr_lookup)
-                if glossary:
-                    parts.append(f"[Abbreviation Glossary]\n{glossary}")
+            chunk_glossary = ""
+            if db is not None:
+                abbr_lookup = build_lookup(db, org_id)
+                if abbr_lookup and not abbr_lookup.is_empty:
+                    texts = []
+                    for doc in (pruned_docs or []):
+                        md = doc.get("metadata", {})
+                        texts.append(md.get("original_text", doc.get("page_content", "")))
+                    chunk_glossary = build_glossary_from_texts(texts, abbr_lookup)
+            # Merge: query glossary first, then any chunk-only abbreviations
+            merged_lines = []
+            seen_abbrs = set()
+            for g in (query_glossary, chunk_glossary):
+                if not g:
+                    continue
+                for line in g.split("\n"):
+                    abbr = line.split("=", 1)[0].strip() if "=" in line else line.strip()
+                    if abbr and abbr not in seen_abbrs:
+                        seen_abbrs.add(abbr)
+                        merged_lines.append(line)
+            if merged_lines:
+                parts.append(f"[Abbreviation Glossary]\n" + "\n".join(merged_lines))
         except Exception:
-            pass
+            if query_glossary:
+                parts.append(f"[Abbreviation Glossary]\n{query_glossary}")
 
     return "\n\n---\n\n".join(parts)
 
@@ -227,6 +245,7 @@ async def resolve_retrieval_query(
     query_model: str | None = None,
     openai_api_key: str = "",
     openai_api_base: str = "",
+    glossary: str = "",
 ) -> tuple[str, dict]:
     """Resolve *query* into a standalone retrieval string.
 
@@ -252,6 +271,7 @@ async def resolve_retrieval_query(
             query_model=query_model,
             openai_api_key=openai_api_key,
             openai_api_base=openai_api_base,
+            glossary=glossary,
         )
     except Exception as exc:  # network, timeout, provider error
         return query, {"resolved": False, "reason": f"resolver_failed: {exc}"}
@@ -320,6 +340,7 @@ async def _call_rewriter(
     query_model: str | None,
     openai_api_key: str,
     openai_api_base: str,
+    glossary: str = "",
 ) -> str:
     """Single rewriter LLM call. Raises on provider failure."""
     system_msg = REWRITE_SYSTEM_PROMPT.format(memory_section="")
@@ -332,7 +353,10 @@ async def _call_rewriter(
             messages.append({"role": "user", "content": m.content})
         elif isinstance(m, AIMessage):
             messages.append({"role": "assistant", "content": m.content})
-    messages.append({"role": "user", "content": query})
+    user_content = query
+    if glossary:
+        user_content += f"\n\n[Abbreviation Glossary]\n{glossary}"
+    messages.append({"role": "user", "content": user_content})
 
     from openai import AsyncOpenAI as _AsyncOAI
     client = _AsyncOAI(api_key=openai_api_key, base_url=api_base or openai_api_base)

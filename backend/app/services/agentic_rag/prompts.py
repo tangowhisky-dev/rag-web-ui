@@ -8,6 +8,18 @@ from __future__ import annotations
 
 from app.services.prompts.loader import append_chart_instructions
 
+# ── Abbreviation Glossary Instructions ──────────────────────────────────────
+# Appended to system prompts for all LLM calls that see the user query or
+# retrieved chunks. Tells the LLM to use the [Abbreviation Glossary] section
+# for interpreting abbreviations, not to echo it in output.
+
+GLOSSARY_INSTRUCTIONS: str = """\
+
+# Abbreviation Glossary
+
+If a [Abbreviation Glossary] section is provided in the context, use it to interpret abbreviations found in the user query and retrieved documents. Each line maps an abbreviation to its expanded form(s). Do not echo the glossary in your output — use it silently for comprehension.
+"""
+
 # ── Query Rewriting ─────────────────────────────────────────────────────────
 
 REWRITE_SYSTEM_PROMPT: str = """\
@@ -32,6 +44,10 @@ For example, if the user asks 'what is mutex', do NOT add 'mutual exclusion', \
 7. Keep the output short — one sentence or a keyword phrase, maximum 30 words.
 8. If the user's query is already self-contained (no pronouns, no references to prior turns), \
 return it EXACTLY as-is. Do not rephrase, do not expand, do not add terms.
+9. If a [Abbreviation Glossary] section is provided, use it to understand abbreviations \
+in the query. You may replace abbreviations with their expanded forms when doing so \
+improves retrieval clarity, but do not add terms beyond what the glossary provides. \
+Do NOT remove or strip the [Abbreviation Glossary] section from your output — pass it through unchanged.
 {memory_section}
 
 Examples:
@@ -376,6 +392,8 @@ EVALUATION_SYSTEM_PROMPT: str = """\
 You are an answer quality evaluator. Given a query, retrieved context, and generated answer,
 assess the quality of the answer.
 
+If a [Abbreviation Glossary] section is provided in the context, use it to interpret abbreviations in the query and retrieved documents when evaluating faithfulness and completeness.
+
 Rules:
 - faithfulness (0-100): What percentage of the answer is actually supported by the retrieved context?
   - 100 = everything cited or clearly supported by context
@@ -429,6 +447,8 @@ Critical rules:
 - If you cannot find the answer in the provided context, say so. Do not fabricate.
 - Cite the retrieved document chunks that support each factual claim.
 - Be concise and follow the user's formatting instructions exactly.
+- If a [Abbreviation Glossary] section is provided in the context, use it to interpret \
+abbreviations in the user query and retrieved documents. Do not echo the glossary in your output.
 """
 
 # Answer-generation prompt for finalize_node.  Derived from
@@ -553,6 +573,8 @@ Avoid unnecessary verbosity.
 PLAN_SYSTEM_PROMPT: str = """\
 You are the planning module for an autonomous knowledge assistant. Given the user's query, the conversation context, the previous answer summary, attached file metadata, and the available tools, produce a plan.
 
+If a [Abbreviation Glossary] section is provided in the context, use it to interpret abbreviations in the user query. Do not echo the glossary in your output.
+
 Available tools:
 - rag_retrieve: search the knowledge base.
 - file_read: read a section of an attached file.
@@ -590,6 +612,8 @@ Previous-answer requests (e.g. "summarize what you just told me", "put that in b
 
 THINK_SYSTEM_PROMPT: str = """\
 You are the acting module. You have a plan, a list of previous tool observations, and a set of tools. Decide the next action.
+
+If a [Abbreviation Glossary] section is provided in the context, use it to interpret abbreviations in the user query and observations. Do not echo the glossary in your output.
 
 If the gateway supports function-calling, emit native tool calls. If it does not, emit a JSON block in your response:
 { "tool_calls": [{"tool": "<name>", "arguments": {...}}] }

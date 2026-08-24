@@ -197,6 +197,9 @@ async def rewrite_query_node(
         query = state.get("expanded_query", "") or original
         recent_history = select_recent_history(messages, db=db, org_id=org_id)
 
+        # Glossary was built once by expand_query_node — reuse it.
+        glossary = state.get("abbreviation_glossary", "")
+
         # A clarification answer is part of the request, not a new turn:
         # fold it into the text sent to the resolver.
         clarification = (state.get("clarification_response") or "").strip()
@@ -229,6 +232,7 @@ async def rewrite_query_node(
             query_model=query_model,
             openai_api_key=api_key,
             openai_api_base=api_base,
+            glossary=glossary,
         )
 
         if provenance.get("reason") == "provenance_rejected":
@@ -261,15 +265,17 @@ def expand_query_node(
     dense/sparse/exact retrieval. The reranker uses the rewritten query (not
     expanded) to preserve user intent.
     """
-    from app.services.abbreviation_service import build_lookup, expand_query_suffix
+    from app.services.abbreviation_service import build_lookup, expand_query_suffix, build_glossary
 
     original = state.get("original_query", "")
     org_id = org_id if org_id is not None else state.get("org_id")
 
+    glossary = ""
     try:
         abbr_lookup = build_lookup(db, org_id) if db else None
         if abbr_lookup and not abbr_lookup.is_empty:
             expanded = expand_query_suffix(original, abbr_lookup)
+            glossary = build_glossary(original, abbr_lookup)
         else:
             expanded = original
     except Exception as exc:
@@ -283,7 +289,7 @@ def expand_query_node(
         if writer:
             writer({"event": "expanded_query", "query": expanded})
 
-    return {"expanded_query": expanded}
+    return {"expanded_query": expanded, "abbreviation_glossary": glossary}
 
 
 # ---------------------------------------------------------------------------
@@ -677,7 +683,9 @@ async def answer_evaluation_node(
                 "retrieval_score": 0,
             }
 
-        context_text = format_context_string(docs, state.get("file_markdown"))
+        _db = ctx.db if ctx is not None else None
+        _org_id = ctx.org_id if ctx is not None else None
+        context_text = format_context_string(docs, state.get("file_markdown"), db=_db, org_id=_org_id, query_glossary=state.get("abbreviation_glossary", ""))
         conf_level = (
             "very_high" if retrieval_conf > 0.8 else
             "high" if retrieval_conf > 0.6 else

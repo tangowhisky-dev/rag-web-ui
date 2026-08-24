@@ -47,6 +47,9 @@ class AgentState(MessagesState):
     original_query: Annotated[str, _last_value] = ""
     rewritten_query: Annotated[str, _last_value] = ""
     expanded_query: Annotated[str, _last_value] = ""
+    # Abbreviation glossary built once by expand_query_node, reused by all
+    # downstream LLM calls (rewrite, plan, think, finalize, evaluation).
+    abbreviation_glossary: Annotated[str, _last_value] = ""
     # Where each reference in rewritten_query was resolved from, or the
     # reason resolution was skipped/rejected.
     resolution_provenance: Annotated[Optional[dict], _last_value] = None

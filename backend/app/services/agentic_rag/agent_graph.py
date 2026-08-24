@@ -774,10 +774,15 @@ async def plan_node(state: AgentState, ctx: ToolContext) -> dict:
         clarification = (state.get("clarification_response") or "").strip()
     
         system = AGENT_SYSTEM_PROMPT + "\n\n" + PLAN_SYSTEM_PROMPT
+
+        # Glossary was built once by expand_query_node — reuse it.
+        glossary = state.get("abbreviation_glossary", "")
+
         user = (
             f"User message: {original}\n"
             f"Retrieval query: {rewritten}\n"
             + (f"User clarification: {clarification}\n" if clarification else "")
+            + (f"[Abbreviation Glossary]\n{glossary}\n\n" if glossary else "")
             + f"Previous answer summary: {last_summary}\n"
             f"Recalled long-term memory (context only, not evidence):\n{recalled_text}\n\n"
             f"Attached files: {json.dumps(file_meta)}\n\n"
@@ -898,11 +903,15 @@ async def think_node(state: AgentState, ctx: ToolContext) -> dict:
             if tried_queries else ""
         )
 
+        # Glossary was built once by expand_query_node — reuse it.
+        glossary = state.get("abbreviation_glossary", "")
+
         def _build_think_user_prompt() -> str:
             return (
                 f"Iteration: {iteration}/{max_iter}\n"
                 f"User message: {original}\n"
                 f"Retrieval query: {query}\n"
+                + (f"[Abbreviation Glossary]\n{glossary}\n\n" if glossary else "")
                 + (f"Earlier conversation summary:\n{summary_text}\n" if summary_text else "")
                 + f"Conversation history (recent turns):\n{history_text or '  (none)'}\n"
                 f"Previous answer context:\n{lao_text or '  (none)'}\n"
@@ -1316,7 +1325,7 @@ async def finalize_node(state: AgentState, ctx: ToolContext) -> dict:
         if precomputed:
             final = precomputed
         else:
-            context_text = format_context_string(docs, state.get("file_markdown"), db=ctx.db, org_id=ctx.org_id)
+            context_text = format_context_string(docs, state.get("file_markdown"), db=ctx.db, org_id=ctx.org_id, query_glossary=state.get("abbreviation_glossary", ""))
             # Non-retrieval tool results (code_execute, chart_generate, etc.)
             # are not in retrieved_docs; surface them separately. Retrieval
             # results are already in context_text — don't duplicate.
@@ -1375,7 +1384,7 @@ async def finalize_node(state: AgentState, ctx: ToolContext) -> dict:
                 state = {**state, **compaction_local}
                 observations = state.get("observations", [])
                 docs = state.get("retrieved_docs", docs)
-                context_text = format_context_string(docs, state.get("file_markdown"), db=ctx.db, org_id=ctx.org_id)
+                context_text = format_context_string(docs, state.get("file_markdown"), db=ctx.db, org_id=ctx.org_id, query_glossary=state.get("abbreviation_glossary", ""))
                 non_rag_text = _non_retrieval_observations_text(observations)
                 recent = select_recent_history(state.get("messages", []), max_pairs=get_setting(ctx.db, "AGENT_HISTORY_PAIRS", ctx.org_id))
                 history_text = history_to_text(recent)
