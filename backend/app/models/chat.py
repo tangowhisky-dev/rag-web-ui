@@ -94,6 +94,7 @@ class Message(Base, TimestampMixin):
     completeness = Column(Integer, nullable=True)
     retrieval_score = Column(Integer, nullable=True)   # 0-100, from retrieval_confidence
     rewritten_query = Column(LONGTEXT, nullable=True)  # standalone retrieval query after rewrite
+    expanded_query = Column(LONGTEXT, nullable=True)   # abbreviation-expanded user query (original + glossary suffix)
     last_answer_object = Column(JSON, nullable=True)    # structured summary of the assistant answer
     plan = Column(JSON, nullable=True)                  # plan object for this turn (debugging/replay)
     tool_calls = Column(JSON, nullable=True)            # array of tool-call/observation records

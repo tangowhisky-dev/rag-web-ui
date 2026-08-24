@@ -252,6 +252,13 @@ async def generate_response(
                 yield f'1:{json.dumps({"rewritten_query": rewritten_q})}\n'
                 await asyncio.sleep(0)
 
+            elif event_type == "expanded_query":
+                expanded_q = event.get("query", "")
+                user_message.expanded_query = expanded_q
+                db.commit()
+                yield f'eq:{json.dumps({"expanded_query": expanded_q})}\n'
+                await asyncio.sleep(0)
+
             elif event_type == "context":
                 # Capture confidence data for persistence (written after stream)
                 _confidence_level = event.get("confidence")

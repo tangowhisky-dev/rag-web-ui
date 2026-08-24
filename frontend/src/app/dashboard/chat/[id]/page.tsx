@@ -15,7 +15,7 @@ function generateId(): string {
 import { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback } from "react";
 
 import { useRouter } from "next/navigation";
-import { Copy, Trash2, ChevronDown } from "lucide-react";
+import { Copy, Trash2, ChevronDown, Info } from "lucide-react";
 import { useChatContext } from "@/contexts/chat-context";
 import { api, ApiError, handleAuthRedirect } from "@/lib/api";
 import { APP_LOGO_SRC } from "@/lib/app-config";
@@ -28,6 +28,7 @@ import { BranchPicker } from "@/components/chat/branch-picker";
 import ClarificationDialog from "@/components/chat/clarification-dialog";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { LoadingDots } from "@/components/ui/loading-dots";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
 interface AgentStep {
   node: string;
@@ -48,6 +49,7 @@ interface Message {
   content: string;
   citations?: Citation[];
   rewrittenQuery?: string;
+  expandedQuery?: string;
   confidence?: "very_high" | "high" | "medium" | "low" | "none";
   confidenceScore?: number;
   confidenceBreakdown?: Record<string, unknown>;
@@ -95,6 +97,7 @@ interface ChatMessage {
   file_name?: string;
   file_id?: number;
   citations?: Citation[];
+  expanded_query?: string;
 }
 
 interface ChatMeta {
@@ -244,6 +247,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
         file_name: msg.file_name ?? undefined,
         file_id: msg.file_id ?? undefined,
         citations: msg.citations ?? [],
+        expandedQuery: msg.expanded_query ?? undefined,
       };
 
     // Assistant message — citations come from the API, content is the raw answer text
@@ -448,7 +452,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     );
   };
 
-  const processStreamLine = (line: string, assistantId: string) => {
+  const processStreamLine = (line: string, assistantId: string, userMessageId?: string) => {
     const trimmedLine = line.trim();
 
     if (!trimmedLine || trimmedLine === "d:[DONE]") {
@@ -465,6 +469,23 @@ function ChatPageInner({ params }: { params: { id: string } }) {
         }));
       } catch (e) {
         console.error("Failed to parse rewritten_query event:", e);
+      }
+      return;
+    }
+
+    // eq: expanded query — abbreviation glossary appended to user query
+    if (trimmedLine.startsWith("eq:")) {
+      try {
+        const payload = JSON.parse(trimmedLine.slice(3)) as { expanded_query: string };
+        if (userMessageId) {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === userMessageId ? { ...m, expandedQuery: payload.expanded_query } : m
+            )
+          );
+        }
+      } catch (e) {
+        console.error("Failed to parse expanded_query event:", e);
       }
       return;
     }
@@ -809,6 +830,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     assistantId: string,
     fileId?: number,
     parentMessageId?: string,
+    userMessageId?: string,
   ) => {
     // Reset transient state for new query
     setProgressMessages([]);
@@ -855,9 +877,9 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       for (const line of lines) {
         const t = line.trim();
         if (t.startsWith("1:") || t.startsWith("2:")) {
-          processStreamLine(line, assistantId);
+          processStreamLine(line, assistantId, userMessageId);
         } else if (t) {
-          processStreamLine(line, assistantId);
+          processStreamLine(line, assistantId, userMessageId);
         }
       }
       // Always flush so UI updates progressively between agent steps
@@ -865,7 +887,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     }
 
     if (buffer.trim()) {
-      processStreamLine(buffer, assistantId);
+      processStreamLine(buffer, assistantId, userMessageId);
       await flushToBrowser();
     }
   };
@@ -919,7 +941,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     setTimeout(scrollToBottom, 0);
 
     try {
-      await streamFromMessages(requestMessages, assistantId, sentFile?.id);
+      await streamFromMessages(requestMessages, assistantId, sentFile?.id, undefined, userId);
     } catch (error) {
       // AbortError is intentional (user clicked stop) — drop the placeholder, no toast
       if (error instanceof Error && error.name === "AbortError") {
@@ -1334,6 +1356,26 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                   <div key={message.clientId} className="flex justify-end items-start gap-2 group">
                     <div className="flex flex-col items-end gap-1 max-w-[70%]">
                       <div className="flex flex-row items-center gap-2">
+                        {message.expandedQuery && (
+                          <Popover>
+                            <PopoverTrigger asChild>
+                              <button
+                                title="Abbreviation glossary"
+                                className="shrink-0 rounded-full p-1 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                              >
+                                <Info className="h-3.5 w-3.5" />
+                              </button>
+                            </PopoverTrigger>
+                            <PopoverContent side="left" align="center" className="max-w-md w-80 text-xs">
+                              <div className="space-y-1.5">
+                                <p className="font-medium text-foreground">Expanded query</p>
+                                <p className="text-muted-foreground whitespace-pre-wrap break-words">
+                                  {message.expandedQuery}
+                                </p>
+                              </div>
+                            </PopoverContent>
+                          </Popover>
+                        )}
                         {message.file_name && message.file_id && (
                           <MessageFileChip
                             fileName={message.file_name}

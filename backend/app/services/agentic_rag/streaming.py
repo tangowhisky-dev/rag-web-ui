@@ -169,6 +169,8 @@ class AgenticRAGTransformer(StreamTransformer):
             self.events.push({"event": "task_list", "tasks": data.get("tasks", [])})
         elif kind == "rewritten_query":
             self.events.push({"event": "rewritten_query", **{k: v for k, v in data.items() if k != "event"}})
+        elif kind == "expanded_query":
+            self.events.push({"event": "expanded_query", **{k: v for k, v in data.items() if k != "event"}})
         elif kind == "progress":
             self.events.push({"event": "progress", **{k: v for k, v in data.items() if k != "event"}})
         elif kind == "thinking":

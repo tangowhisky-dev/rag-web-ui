@@ -39,6 +39,7 @@ class MessageResponse(MessageBase):
     completeness: Optional[int] = None
     retrieval_score: Optional[int] = None
     rewritten_query: Optional[str] = None
+    expanded_query: Optional[str] = None
     file_name: Optional[str] = None  # filename if a chat file was attached to this message
     file_id: Optional[int] = None      # chat_files.id — used to build download URL
     # citations is added by the API endpoint after model_validate

@@ -1103,6 +1103,7 @@ async def submit_clarification(
             mapping = {
                 "token": "0",
                 "rewritten_query": "1",
+                "expanded_query": "eq",
                 "context": "2",
                 "error": "3",
                 "agent_step": "4",

@@ -276,6 +276,13 @@ def expand_query_node(
         logger.warning("[ABBREV_EXPAND] failed: %s", exc)
         expanded = original
 
+    # Stream the expanded query so the UI can show it as a tooltip on the user bubble.
+    # Only emit when something was actually expanded (differs from original).
+    if expanded != original:
+        writer = _safe_writer()
+        if writer:
+            writer({"event": "expanded_query", "query": expanded})
+
     return {"expanded_query": expanded}
 
 
