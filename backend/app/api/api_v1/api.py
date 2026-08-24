@@ -3,6 +3,7 @@ from app.api.api_v1 import auth, knowledge_base, chat, query, chat_files, folder
 from app.api.api_v1 import datastores, datastore_scan, datastore_recovery
 from app.api.api_v1 import settings as settings_router
 from app.api.api_v1 import abbreviations as abbreviations_router
+from app.api.api_v1 import search as search_router
 from app.core.config import settings
 from app.core.security import get_current_user
 from app.models.user import User
@@ -14,6 +15,7 @@ api_router.include_router(knowledge_base.router, prefix="/knowledge-base", tags=
 api_router.include_router(chat.router, prefix="/chat", tags=["chat"])
 api_router.include_router(chat_files.router, prefix="/chat", tags=["chat-files"])
 api_router.include_router(query.router, prefix="/query", tags=["query"])
+api_router.include_router(search_router.router, prefix="/search", tags=["search"])
 api_router.include_router(folders.router, prefix="/folders", tags=["folders"])
 api_router.include_router(admin.org_router, prefix="/admin", tags=["admin"])
 api_router.include_router(admin.user_router, prefix="/admin", tags=["admin"])

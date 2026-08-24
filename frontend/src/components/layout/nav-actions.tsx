@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { LogOut } from "lucide-react";
+import { LogOut, Search } from "lucide-react";
+import Link from "next/link";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 import { ChangePasswordDialog } from "@/components/ui/change-password-dialog";
 import { UserName } from "./user-name";
@@ -21,6 +22,14 @@ export function NavActions({ showPasswordButton = true }: NavActionsProps) {
 
   return (
     <>
+      <Link
+        href="/dashboard/search"
+        className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm text-muted-foreground hover:text-primary hover:bg-primary/10 transition-colors"
+        title="Search knowledge bases"
+      >
+        <Search className="h-4 w-4" />
+        <span className="hidden sm:inline">Search</span>
+      </Link>
       {showPasswordButton && (
         <button
           onClick={() => setPasswordDialogOpen(true)}

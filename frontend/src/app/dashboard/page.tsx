@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import DashboardLayout from "@/components/layout/dashboard-layout";
-import { Book, MessageSquare, ArrowRight, Plus, Brain, Sparkles, Shield, Upload, Link2 } from "lucide-react";
+import { Book, MessageSquare, ArrowRight, Plus, Brain, Sparkles, Shield, Upload, Link2, Search } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { useHydrated } from "@/lib/hooks";
 
@@ -73,7 +73,7 @@ export default function DashboardPage() {
         </div>
 
         {/* Stats */}
-        <div className="grid gap-6 md:grid-cols-2 mb-8">
+        <div className="grid gap-6 md:grid-cols-3 mb-8">
           {/* Primary stat: accent-tinted */}
           <div className="rounded-lg border bg-gradient-to-b from-primary/5 to-transparent p-8">
             <div className="flex items-center gap-6">
@@ -110,6 +110,26 @@ export default function DashboardPage() {
               className="mt-6 flex items-center text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
             >
               View all chat sessions
+              <ArrowRight className="ml-2 h-4 w-4" />
+            </a>
+          </div>
+
+          {/* Search card */}
+          <div className="rounded-md border bg-card p-8">
+            <div className="flex items-center gap-6">
+              <div className="rounded-md bg-muted p-3">
+                <Search className="h-6 w-6 text-muted-foreground" />
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold">KB Search</h3>
+                <p className="text-muted-foreground mt-1 text-sm">Search files directly</p>
+              </div>
+            </div>
+            <a
+              href="/dashboard/search"
+              className="mt-6 flex items-center text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
+            >
+              Search knowledge bases
               <ArrowRight className="ml-2 h-4 w-4" />
             </a>
           </div>

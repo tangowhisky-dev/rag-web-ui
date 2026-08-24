@@ -21,6 +21,7 @@ from app.models.datastore import DataStore, OrganizationDataStore, DataStoreFile
 from app.models.abbreviation import AbbreviationList, Abbreviation
 from app.models.setting import Setting
 from app.models.clarification import ClarificationRequest
+from app.models.search_history import SearchHistory
 from app.core.config import settings
 
 # this is the Alembic Config object, which provides
