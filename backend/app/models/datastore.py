@@ -36,8 +36,9 @@ class DataStore(Base):
     description = Column(Text, nullable=True)
 
     # Folder configuration
-    folder_path = Column(String(1024), nullable=False, unique=True)
-    scan_pattern = Column(String(100), default="*")  # e.g. "*.pdf,*.docx"
+    # VARCHAR(768): max length that fits MySQL's 3072-byte index limit with utf8mb4 (768×4=3072)
+    folder_path = Column(String(768), nullable=False, unique=True)
+    scan_pattern = Column(String(255), default="*")  # e.g. "*.pdf,*.docx"
 
     # Status
     is_active = Column(Boolean, default=True, index=True)
@@ -134,7 +135,7 @@ class DataStoreFileManifest(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     datastore_id = Column(Integer, ForeignKey("data_stores.id", ondelete="CASCADE"), nullable=False, index=True)
-    file_path = Column(String(1024), nullable=False)
+    file_path = Column(String(767), nullable=False)
     file_hash = Column(String(64), nullable=False)  # SHA-256 hex digest
     file_size = Column(BigInteger, nullable=False)
     file_mtime = Column(BigInteger, nullable=True)  # st_mtime_ns from os.stat()

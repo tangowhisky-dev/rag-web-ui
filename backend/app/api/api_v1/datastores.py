@@ -70,7 +70,7 @@ def _validate_folder_path(folder_path: str) -> str:
 class DataStoreCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     description: Optional[str] = None
-    folder_path: str = Field(..., min_length=1, max_length=1024)
+    folder_path: str = Field(..., min_length=1, max_length=768)
     scan_pattern: str = Field(default="*")
     auto_scan_enabled: bool = False
     auto_scan_interval_minutes: int = Field(default=60, ge=1, le=1440)
@@ -79,7 +79,7 @@ class DataStoreCreate(BaseModel):
 class DataStoreUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=255)
     description: Optional[str] = None
-    folder_path: Optional[str] = Field(default=None, min_length=1, max_length=1024)
+    folder_path: Optional[str] = Field(default=None, min_length=1, max_length=768)
     scan_pattern: Optional[str] = None
     is_active: Optional[bool] = None
     auto_scan_enabled: Optional[bool] = None

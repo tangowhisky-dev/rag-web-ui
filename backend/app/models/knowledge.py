@@ -49,8 +49,8 @@ class Document(Base, TimestampMixin):
     __tablename__ = "documents"
 
     id = Column(Integer, primary_key=True, index=True)
-    file_path = Column(String(1024), nullable=False)  # Path in local storage
-    file_name = Column(String(255), nullable=False)  # Actual file name
+    file_path = Column(String(767), nullable=False)  # Path in local storage
+    file_name = Column(String(512), nullable=False)  # Actual file name
     file_size = Column(BigInteger, nullable=False)  # File size in bytes
     content_type = Column(String(100), nullable=False)  # MIME type
     file_hash = Column(String(64), index=True)  # SHA-256 hash of file content
@@ -78,13 +78,13 @@ class DocumentUpload(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     knowledge_base_id = Column(Integer, ForeignKey("knowledge_bases.id", ondelete="CASCADE"), nullable=False)
-    file_name = Column(String, nullable=False)
-    file_hash = Column(String, nullable=False)
+    file_name = Column(String(255), nullable=False)
+    file_hash = Column(String(64), nullable=False)
     file_size = Column(BigInteger, nullable=False)
-    content_type = Column(String, nullable=False)
-    temp_path = Column(String, nullable=False)
-    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
-    status = Column(String, nullable=False, server_default="pending")
+    content_type = Column(String(100), nullable=False)
+    temp_path = Column(String(1024), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
+    status = Column(String(50), nullable=False, server_default="pending", index=True)
     error_message = Column(Text)
     
     # Relationships
@@ -101,7 +101,7 @@ class ProcessingTask(Base):
     status = Column(String(50), default="pending", index=True)  # pending, processing, completed, failed
     error_message = Column(Text, nullable=True)
     progress = Column(Integer, default=0, nullable=True)          # 0-100
-    progress_message = Column(String(255), nullable=True)         # human-readable stage label
+    progress_message = Column(String(512), nullable=True)         # human-readable stage label
     # Graph extraction status: null = not attempted, pending, completed, failed
     graph_status = Column(String(50), nullable=True)
     graph_error = Column(Text, nullable=True)                     # last error if graph_status=failed

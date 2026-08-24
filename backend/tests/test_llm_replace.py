@@ -90,7 +90,10 @@ def expand_query_suffix(query: str) -> str:
 
 # ─── LLM replacement with glossary ─────────────────────────────────────────
 
-GENERATION_MODEL = "gemma-4-12b"
+# LM Studio configuration — hardcoded fallbacks for when DB settings are unavailable.
+_LM_STUDIO_BASE = os.environ.get("LM_STUDIO_BASE_URL", "http://192.168.1.3:2244/v1")
+_LM_STUDIO_KEY = os.environ.get("LM_STUDIO_API_KEY", "dummy")
+GENERATION_MODEL = os.environ.get("GENERATION_MODEL", "google/gemma-4-26b-a4b")
 
 def get_llm_client():
     from openai import OpenAI
@@ -98,8 +101,8 @@ def get_llm_client():
     from app.services.settings_service import get_setting
     db = SessionLocal()
     try:
-        api_key = get_setting(db, "OPENAI_API_KEY", None) or "not-required"
-        api_base = get_setting(db, "OPENAI_API_BASE", None)
+        api_key = get_setting(db, "OPENAI_API_KEY", None) or _LM_STUDIO_KEY
+        api_base = get_setting(db, "OPENAI_API_BASE", None) or _LM_STUDIO_BASE
     finally:
         db.close()
     return OpenAI(api_key=api_key, base_url=api_base)

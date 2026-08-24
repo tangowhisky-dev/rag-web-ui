@@ -36,8 +36,8 @@ from markitdown import MarkItDown
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
 
-VISION_BASE_URL = os.environ.get("OPENAI_VISION_API_BASE", "http://192.168.1.4:2244/v1")
-VISION_MODEL = os.environ.get("VISION_MODEL", "qwen/qwen3.5-9b-nothink")
+VISION_BASE_URL = os.environ.get("OPENAI_VISION_API_BASE", "http://192.168.1.3:2244/v1")
+VISION_MODEL = os.environ.get("VISION_MODEL", "qwen/qwen3.5-9b")
 VISION_API_KEY = os.environ.get("VISION_API_KEY", "not-required")
 
 # Only OCR embedded raster images larger than this (pixel count).  This filters

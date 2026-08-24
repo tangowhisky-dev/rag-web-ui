@@ -10,7 +10,7 @@ class Organisation(Base, TimestampMixin):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), nullable=False)
     parent_id = Column(Integer, ForeignKey("organisations.id"), nullable=True, index=True)
-    path = Column(String(1024), nullable=True)  # materialized path e.g. "/1/3/7"
+    path = Column(String(2048), nullable=True)  # materialized path e.g. "/1/3/7"
 
     # Adjacency-list relationships
     parent = relationship("Organisation", remote_side="Organisation.id", back_populates="children")

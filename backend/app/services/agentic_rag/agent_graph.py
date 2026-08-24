@@ -1794,14 +1794,14 @@ def build_agent_graph(ctx: ToolContext):
     graph.add_node("save_memory", partial(save_memory_node, ctx=ctx))
 
     graph.set_entry_point("load_context")
-    graph.add_edge("load_context", "rewrite_query")
-    graph.add_edge("rewrite_query", "expand_query")
-    graph.add_edge("expand_query", "plan")
+    graph.add_edge("load_context", "expand_query")
+    graph.add_edge("expand_query", "rewrite_query")
+    graph.add_edge("rewrite_query", "plan")
     graph.add_conditional_edges("plan", route_plan)
-    # Back through query resolution, not straight to plan: the clarification
+    # Back through expansion + rewrite, not straight to plan: the clarification
     # answer has to reach the retrieval query, which was computed from the
     # original ambiguous message.
-    graph.add_edge("clarify_interrupt", "rewrite_query")
+    graph.add_edge("clarify_interrupt", "expand_query")
     graph.add_conditional_edges("think", route_think)
     graph.add_conditional_edges("tool", route_tool)
     graph.add_edge("reflect", "think")

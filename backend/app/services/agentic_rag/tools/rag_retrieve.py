@@ -19,6 +19,7 @@ from app.core.config import settings
 from app.services.agentic_rag.nodes import (
     dense_retrieval_node,
     exact_retrieval_node,
+    expand_query_node,
     filter_node,
     merge_node,
     neo4j_expansion_node,
@@ -128,6 +129,10 @@ async def _run_retrieval_pass(
         "org_id": org_id,
         "file_markdown": file_markdown,
     }
+
+    # Expand abbreviations in the query for retrieval legs.
+    # The reranker uses rewritten_query (unexpanded) to preserve user intent.
+    state.update(expand_query_node(state, db=ctx.db, org_id=ctx.org_id))
 
     coros = []
     if "dense" in legs:

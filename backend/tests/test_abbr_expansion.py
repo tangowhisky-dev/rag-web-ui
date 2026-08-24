@@ -166,7 +166,12 @@ EXPECTED_MATCHES = {
 
 # ─── Model accessors ───────────────────────────────────────────────────────
 
-GENERATION_MODEL = "huihui-gemma-4-12b-it-qat-unquantized-abliterated@q4_k"
+# LM Studio configuration — hardcoded fallbacks for when DB settings are unavailable
+# (e.g. test DB doesn't have app_settings table populated).
+_LM_STUDIO_BASE = os.environ.get("LM_STUDIO_BASE_URL", "http://192.168.1.3:2244/v1")
+_LM_STUDIO_KEY = os.environ.get("LM_STUDIO_API_KEY", "dummy")
+_DENSE_MODEL = os.environ.get("DENSE_EMBEDDINGS_MODEL", "qwen/qwen3-embedding-0.6b")
+GENERATION_MODEL = os.environ.get("GENERATION_MODEL", "google/gemma-4-26b-a4b")
 
 def get_dense_embedder():
     from openai import OpenAI
@@ -174,9 +179,9 @@ def get_dense_embedder():
     from app.services.settings_service import get_setting
     db = SessionLocal()
     try:
-        api_key = get_setting(db, "EMBEDDING_API_KEY", None) or "not-required"
-        api_base = get_setting(db, "EMBEDDING_API_BASE", None)
-        model = get_setting(db, "DENSE_EMBEDDINGS_MODEL", None)
+        api_key = get_setting(db, "EMBEDDING_API_KEY", None) or _LM_STUDIO_KEY
+        api_base = get_setting(db, "EMBEDDING_API_BASE", None) or _LM_STUDIO_BASE
+        model = get_setting(db, "DENSE_EMBEDDINGS_MODEL", None) or _DENSE_MODEL
     finally:
         db.close()
     return OpenAI(api_key=api_key, base_url=api_base), model
@@ -195,8 +200,8 @@ def get_generation_client():
     from app.services.settings_service import get_setting
     db = SessionLocal()
     try:
-        api_key = get_setting(db, "OPENAI_API_KEY", None) or "not-required"
-        api_base = get_setting(db, "OPENAI_API_BASE", None)
+        api_key = get_setting(db, "OPENAI_API_KEY", None) or _LM_STUDIO_KEY
+        api_base = get_setting(db, "OPENAI_API_BASE", None) or _LM_STUDIO_BASE
     finally:
         db.close()
     return OpenAI(api_key=api_key, base_url=api_base), GENERATION_MODEL

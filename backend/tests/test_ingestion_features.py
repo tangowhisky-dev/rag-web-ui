@@ -1,9 +1,13 @@
 """
-test_ingestion_features.py — Tests for QueryExpander and OrgAbbreviation admin endpoints.
+test_ingestion_features.py — Tests for org ingestion status and ProgressTimeout.
 
-Groups:
-  1. QueryExpander unit tests (no DB)
-  2. Admin abbreviation CRUD tests (TestClient + SQLite via conftest)
+Tests for the legacy abbreviation CRUD API and QueryExpander have been removed.
+Abbreviation management is now tested via:
+  - tests/test_abbr_e2e.py
+  - tests/test_abbr_bidirectional.py
+  - tests/test_abbr_expansion.py
+  - tests/test_abbr_pipeline_order.py
+  - tests/test_abbr_robustness.py
 """
 import pytest
 from sqlalchemy.orm import sessionmaker
@@ -115,135 +119,7 @@ def get_admin_token(client, db) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 1. QueryExpander unit tests (no DB)
-# ---------------------------------------------------------------------------
-
-from app.services.retrieval import expand
-
-
-def test_query_expander_basic():
-    result = expand("what is KB?", {"KB": "Knowledge Base"})
-    assert result == "what is Knowledge Base?"
-
-
-def test_query_expander_case_insensitive():
-    result = expand("kb docs", {"KB": "Knowledge Base"})
-    assert result == "Knowledge Base docs"
-
-
-def test_query_expander_word_boundary():
-    """MKBS must NOT be replaced; only standalone KB should expand."""
-    result = expand("MKBS and KB", {"KB": "Knowledge Base"})
-    assert result == "MKBS and Knowledge Base"
-
-
-def test_query_expander_empty_dict():
-    result = expand("hello KB", {})
-    assert result == "hello KB"
-
-
-def test_query_expander_multiple():
-    result = expand("KB and DR plan", {"KB": "Knowledge Base", "DR": "Disaster Recovery"})
-    assert result == "Knowledge Base and Disaster Recovery plan"
-
-
-# ---------------------------------------------------------------------------
-# 2. Admin abbreviation CRUD tests
-# ---------------------------------------------------------------------------
-
-def test_create_abbreviation(client, db):
-    token = get_admin_token(client, db)
-    org = create_org(db, "TestOrg")
-
-    resp = client.post(
-        f"/api/admin/orgs/{org.id}/abbreviations",
-        json={"short": "KB", "expansion": "Knowledge Base"},
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    assert resp.status_code == 201, resp.text
-    data = resp.json()
-    assert data["org_id"] == org.id
-    assert data["short"] == "KB"
-    assert data["expansion"] == "Knowledge Base"
-    assert "id" in data
-
-
-def test_list_abbreviations(client, db):
-    token = get_admin_token(client, db)
-    org = create_org(db, "TestOrg2")
-
-    client.post(
-        f"/api/admin/orgs/{org.id}/abbreviations",
-        json={"short": "KB", "expansion": "Knowledge Base"},
-        headers={"Authorization": f"Bearer {token}"},
-    )
-
-    resp = client.get(
-        f"/api/admin/orgs/{org.id}/abbreviations",
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    assert resp.status_code == 200, resp.text
-    items = resp.json()
-    assert len(items) == 1
-    assert items[0]["short"] == "KB"
-
-
-def test_delete_abbreviation(client, db):
-    token = get_admin_token(client, db)
-    org = create_org(db, "TestOrg3")
-
-    create_resp = client.post(
-        f"/api/admin/orgs/{org.id}/abbreviations",
-        json={"short": "KB", "expansion": "Knowledge Base"},
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    abbrev_id = create_resp.json()["id"]
-
-    del_resp = client.delete(
-        f"/api/admin/orgs/{org.id}/abbreviations/{abbrev_id}",
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    assert del_resp.status_code == 204, del_resp.text
-
-    list_resp = client.get(
-        f"/api/admin/orgs/{org.id}/abbreviations",
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    assert list_resp.json() == []
-
-
-def test_create_abbreviation_duplicate_returns_409(client, db):
-    token = get_admin_token(client, db)
-    org = create_org(db, "TestOrg4")
-
-    client.post(
-        f"/api/admin/orgs/{org.id}/abbreviations",
-        json={"short": "KB", "expansion": "Knowledge Base"},
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    resp = client.post(
-        f"/api/admin/orgs/{org.id}/abbreviations",
-        json={"short": "KB", "expansion": "Knowledge Bases"},
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    assert resp.status_code == 409, resp.text
-
-
-def test_admin_abbreviation_rejects_regular_user(client, db):
-    create_user(db, "regularuser", "pass123", UserRole.user)
-    token = get_token(client, "regularuser", "pass123")
-    org = create_org(db, "TestOrg5")
-
-    resp = client.post(
-        f"/api/admin/orgs/{org.id}/abbreviations",
-        json={"short": "KB", "expansion": "Knowledge Base"},
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    assert resp.status_code == 403, resp.text
-
-
-# ---------------------------------------------------------------------------
-# 3. Org ingestion status tests
+# 1. Org ingestion status tests
 # ---------------------------------------------------------------------------
 
 def create_kb(db, name: str, org_id: int, user_id: int) -> KnowledgeBase:

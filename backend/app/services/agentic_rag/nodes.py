@@ -181,15 +181,20 @@ async def rewrite_query_node(
     The rewrite is conditional and provenance-bound:
     - Self-contained messages pass through byte-for-byte (no LLM call).
     - Otherwise the resolver may only introduce terms that appear in the
-      original query, the recent verbatim turns, the compaction summary,
+      expanded query, the recent verbatim turns, the compaction summary,
       or the previous answer object. A rewrite that invents terms is
-      rejected and the original query is used.
+      rejected and the expanded query is used.
+
+    Uses ``expanded_query`` (abbreviation-expanded original) as resolver
+    input so the LLM can see expanded forms during pronoun resolution.
+    Falls back to ``original_query`` if expansion was not run.
     """
     from .utils import resolve_retrieval_query
 
     with _agent_step("rewrite_query"):
         messages = state.get("messages", [])
-        query = state.get("original_query", "")
+        original = state.get("original_query", "")
+        query = state.get("expanded_query", "") or original
         recent_history = select_recent_history(messages, db=db, org_id=org_id)
 
         # A clarification answer is part of the request, not a new turn:
@@ -241,7 +246,7 @@ async def rewrite_query_node(
 
 
 # ---------------------------------------------------------------------------
-# Node: abbreviation expansion (runs after rewrite, before retrieval)
+# Node: abbreviation expansion (runs before rewrite)
 # ---------------------------------------------------------------------------
 
 def expand_query_node(
@@ -249,25 +254,27 @@ def expand_query_node(
     db: Any = None,
     org_id: Any = None,
 ) -> dict:
-    """Expand the rewritten query with abbreviation suffix expansion.
+    """Expand the original query with bidirectional abbreviation suffix expansion.
 
-    The expanded query is used for dense/sparse/exact retrieval.
-    The original/rewritten query is preserved for the reranker.
+    Runs BEFORE rewrite_query_node so the LLM rewriter can see expanded forms
+    during pronoun/reference resolution. The expanded query is also used for
+    dense/sparse/exact retrieval. The reranker uses the rewritten query (not
+    expanded) to preserve user intent.
     """
     from app.services.abbreviation_service import build_lookup, expand_query_suffix
 
-    rewritten = state.get("rewritten_query", state.get("original_query", ""))
+    original = state.get("original_query", "")
     org_id = org_id if org_id is not None else state.get("org_id")
 
     try:
         abbr_lookup = build_lookup(db, org_id) if db else None
         if abbr_lookup and not abbr_lookup.is_empty:
-            expanded = expand_query_suffix(rewritten, abbr_lookup)
+            expanded = expand_query_suffix(original, abbr_lookup)
         else:
-            expanded = rewritten
+            expanded = original
     except Exception as exc:
         logger.warning("[ABBREV_EXPAND] failed: %s", exc)
-        expanded = rewritten
+        expanded = original
 
     return {"expanded_query": expanded}
 
