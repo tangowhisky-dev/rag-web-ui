@@ -421,13 +421,13 @@ export default function DataSourcesPage() {
             if (data.error_files && data.error_files > 0) {
               parts.push(`Errors: ${data.error_files}`);
             }
-            toast({ title: 'Scan completed', description: parts.join(' | ') });
+            toast({ title: 'Processing completed (less graph ingestion)', description: parts.join(' | ') });
             setScanProgress((prev) => ({ ...prev, [dsId]: undefined }));
             cleanup();
             fetchData();
           } else if (data.status === 'error') {
             const errorMsg = data.error_message || `Errors: ${data.error_files || 1}`;
-            toast({ title: 'Scan failed', description: errorMsg, variant: 'destructive' });
+            toast({ title: 'Processing failed', description: errorMsg, variant: 'destructive' });
             setScanProgress((prev) => ({ ...prev, [dsId]: undefined }));
             cleanup();
             fetchData();
