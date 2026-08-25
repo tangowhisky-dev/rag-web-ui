@@ -18,23 +18,38 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+def _column_exists(table: str, column: str) -> bool:
+    """Check if a column exists in a table (MySQL)."""
+    bind = op.get_bind()
+    result = bind.execute(sa.text(
+        "SELECT COUNT(*) FROM information_schema.columns "
+        "WHERE table_schema = DATABASE() AND table_name = :table AND column_name = :column"
+    ), {"table": table, "column": column})
+    return result.scalar() > 0
+
+
 def upgrade() -> None:
-    op.alter_column('data_stores', 'auto_scan_enabled',
-                    new_column_name='auto_process_enabled',
-                    existing_type=sa.Boolean(),
-                    existing_nullable=True)
-    op.alter_column('data_stores', 'auto_scan_interval_minutes',
-                    new_column_name='auto_process_interval_minutes',
-                    existing_type=sa.Integer(),
-                    existing_nullable=True)
+    # Idempotent: the initial schema may already use the new column names.
+    if _column_exists('data_stores', 'auto_scan_enabled'):
+        op.alter_column('data_stores', 'auto_scan_enabled',
+                        new_column_name='auto_process_enabled',
+                        existing_type=sa.Boolean(),
+                        existing_nullable=True)
+    if _column_exists('data_stores', 'auto_scan_interval_minutes'):
+        op.alter_column('data_stores', 'auto_scan_interval_minutes',
+                        new_column_name='auto_process_interval_minutes',
+                        existing_type=sa.Integer(),
+                        existing_nullable=True)
 
 
 def downgrade() -> None:
-    op.alter_column('data_stores', 'auto_process_enabled',
-                    new_column_name='auto_scan_enabled',
-                    existing_type=sa.Boolean(),
-                    existing_nullable=True)
-    op.alter_column('data_stores', 'auto_process_interval_minutes',
-                    new_column_name='auto_scan_interval_minutes',
-                    existing_type=sa.Integer(),
-                    existing_nullable=True)
+    if _column_exists('data_stores', 'auto_process_enabled'):
+        op.alter_column('data_stores', 'auto_process_enabled',
+                        new_column_name='auto_scan_enabled',
+                        existing_type=sa.Boolean(),
+                        existing_nullable=True)
+    if _column_exists('data_stores', 'auto_process_interval_minutes'):
+        op.alter_column('data_stores', 'auto_process_interval_minutes',
+                        new_column_name='auto_scan_interval_minutes',
+                        existing_type=sa.Integer(),
+                        existing_nullable=True)
