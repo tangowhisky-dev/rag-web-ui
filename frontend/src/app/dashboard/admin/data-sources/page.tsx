@@ -823,9 +823,9 @@ export default function DataSourcesPage() {
                             }
                           }}
                           disabled={triggering.has(ds.id)}
-                          title={ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' || (scanProgress[ds.id]?.status !== 'completed' && scanProgress[ds.id]) ? 'Stop scan' : 'Trigger manual scan'}
+                          title={ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' || (scanProgress[ds.id]?.status !== 'completed' && scanProgress[ds.id]) ? 'Stop processing' : 'Trigger manual processing'}
                         >
-                          {ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' || (scanProgress[ds.id]?.status !== 'completed' && scanProgress[ds.id]) ? 'Stop' : 'Scan'}
+                          {ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' || (scanProgress[ds.id]?.status !== 'completed' && scanProgress[ds.id]) ? 'Stop' : 'Process'}
                         </Button>
                         {ds.pending_changes > 0 && (
                           <Button
@@ -859,7 +859,7 @@ export default function DataSourcesPage() {
                           size="sm"
                           onClick={() => openDelete(ds)}
                           disabled={ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' || (scanProgress[ds.id]?.status !== 'completed' && scanProgress[ds.id] !== undefined)}
-                          title={ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' || (scanProgress[ds.id]?.status !== 'completed' && scanProgress[ds.id] !== undefined) ? 'Stop the scan before deleting' : 'Delete data store'}
+                          title={ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' || (scanProgress[ds.id]?.status !== 'completed' && scanProgress[ds.id] !== undefined) ? 'Stop processing before deleting' : 'Delete data store'}
                         >
                           Delete
                         </Button>
