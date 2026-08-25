@@ -48,29 +48,29 @@ class StartupRecoveryService:
     # ------------------------------------------------------------------
 
     def start(self) -> None:
-        """Launch one background recovery thread per active DataStore.
+        """Launch background recovery for active DataStores on startup.
+
+        Recovery logic per datastore:
+        - auto_process_enabled=True: always run full discovery + ingestion.
+          The watcher was supposed to be processing files continuously; any
+          downtime means missed events. Recovery fills that gap.
+        - auto_process_enabled=False + last_scan_status="running": a manual
+          scan was interrupted by the restart. Run discovery + ingestion to
+          resume the interrupted work.
+        - auto_process_enabled=False + no interrupted scan: skip discovery
+          entirely. The user hasn't asked for processing — respect that.
+          But still run _retry_pending_graph_builds to handle graph builds
+          left pending/failed from a previous completed scan.
 
         Called from ``startup_event()`` after the database is ready.
-        If the migration hasn't run yet (``tables_not_found``), logs a
-        warning and skips gracefully.
         """
         logger.info("[RECOVERY] StartupRecoveryService.start() invoked")
         db: Session = SessionLocal()
         try:
             active = db.query(DataStore).filter(DataStore.is_active == True).all()  # noqa: E712
 
-            # Reset stale "running" scan statuses from a previous run that was
-            # interrupted by a backend restart.  The recovery service re-processes
-            # any pending work, so a leftover "running" status is stale.
-            stale = [ds for ds in active if ds.last_scan_status == "running"]
-            for ds in stale:
-                ds.last_scan_status = "completed"
-                logger.info(
-                    "[RECOVERY] reset_stale_scan_status datastore_id=%s name=%s",
-                    ds.id, ds.name,
-                )
-            if stale:
-                db.commit()
+            # Do NOT reset "running" status to "completed" — it's the signal
+            # that a scan was interrupted. The old code destroyed this evidence.
         except Exception as e:
             logger.warning("[RECOVERY] Could not query DataStores (migration may not be applied): %s", e)
             return
@@ -82,22 +82,61 @@ class StartupRecoveryService:
             return
 
         for ds in active:
-            logger.info("[RECOVERY] recovery_start datastore_id=%s name=%s", ds.id, ds.name)
-            scan_id = self._next_scan_id()
-            self._active_scans[scan_id] = {
-                "datastore_id": ds.id,
-                "datastore_name": ds.name,
-                "status": "running",
-                "scan_id": scan_id,
-                "total_files": 0,
-                "processed_files": 0,
-                "new_files": 0,
-                "modified_files": 0,
-                "deleted_files": 0,
-                "error_message": None,
-                "started_at": datetime.now(timezone.utc).isoformat(),
-            }
-            self.executor.submit(self._discovery_pipeline_worker, ds.id, scan_id)
+            should_discover = False
+            reason = ""
+
+            if ds.auto_process_enabled:
+                should_discover = True
+                reason = "auto_process_enabled"
+            elif ds.last_scan_status == "running":
+                should_discover = True
+                reason = "interrupted_scan (last_scan_status=running)"
+            else:
+                # Check for interrupted ingestion tasks (pending/processing)
+                task_db: Session = SessionLocal()
+                try:
+                    interrupted = (
+                        task_db.query(ProcessingTask)
+                        .filter(
+                            ProcessingTask.data_store_id == ds.id,
+                            ProcessingTask.status.in_(["pending", "processing"]),
+                        )
+                        .count()
+                    )
+                    if interrupted > 0:
+                        should_discover = True
+                        reason = f"interrupted_tasks ({interrupted} pending/processing)"
+                finally:
+                    task_db.close()
+
+            if should_discover:
+                logger.info(
+                    "[RECOVERY] recovery_start datastore_id=%s name=%s reason=%s",
+                    ds.id, ds.name, reason,
+                )
+                scan_id = self._next_scan_id()
+                self._active_scans[scan_id] = {
+                    "datastore_id": ds.id,
+                    "datastore_name": ds.name,
+                    "status": "running",
+                    "scan_id": scan_id,
+                    "total_files": 0,
+                    "processed_files": 0,
+                    "new_files": 0,
+                    "modified_files": 0,
+                    "deleted_files": 0,
+                    "error_message": None,
+                    "started_at": datetime.now(timezone.utc).isoformat(),
+                }
+                self.executor.submit(self._discovery_pipeline_worker, ds.id, scan_id)
+            else:
+                # No discovery needed, but still retry pending graph builds
+                # from any previously completed scan.
+                logger.info(
+                    "[RECOVERY] skip_discovery datastore_id=%s name=%s — no interrupted work, checking graph builds only",
+                    ds.id, ds.name,
+                )
+                self.executor.submit(self._graph_only_worker, ds.id)
 
     def stop(self) -> None:
         """Signal shutdown and stop accepting new work."""
@@ -145,6 +184,20 @@ class StartupRecoveryService:
         with self._scan_id_lock:
             self._scan_id_counter += 1
             return self._scan_id_counter
+
+    def _graph_only_worker(self, datastore_id: int) -> None:
+        """Retry pending/failed graph builds without running discovery.
+
+        Used for manual-scan datastores that have no interrupted scan but
+        may have graph builds left pending from a previous completed scan.
+        """
+        try:
+            self._retry_pending_graph_builds(datastore_id)
+        except Exception as e:
+            logger.warning(
+                "[RECOVERY] graph_retry_failed datastore_id=%s: %s",
+                datastore_id, e,
+            )
 
     def _update_datastore_scan_fields(
         self, datastore_id: int, total_files: int | None = None,
