@@ -32,7 +32,7 @@ def test_infrastructure_settings_on_settings():
         "QDRANT_HOST", "QDRANT_PORT",
         "REDIS_URL", "REDIS_HOST", "REDIS_PORT",
         "NEO4J_URI", "NEO4J_USER", "NEO4J_PASSWORD",
-        "UPLOAD_DIR", "WATCH_DIR",
+        "UPLOAD_DIR",
         "SPLADE_MODEL", "FASTEMBED_CACHE_DIR",
         "RERANKER_MODEL", "RERANKER_CACHE_DIR",
         "SANDBOX_BACKEND",

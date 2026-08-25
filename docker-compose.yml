@@ -10,7 +10,7 @@ services:
     volumes:
       - ./uploads:/app/uploads
       - ./assets:/app/assets
-      - ./data:/app/data
+      - ${WATCH_DIR:-./data}:/app/data
     networks:
       - app_network
     depends_on:

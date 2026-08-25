@@ -51,8 +51,6 @@ class Settings(BaseSettings):
     # File storage
     UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", "/app/uploads")
 
-    # Watcher — legacy fallback directory (per-org watch config is in Organisation model)
-    WATCH_DIR: str = os.getenv("WATCH_DIR", "/app/uploads")
     # Use inotify (Linux native) instead of polling observer.
     # inotify provides near-instant event delivery on local filesystems
     # (ext4/xfs/btrfs with Docker bind-mounts).
