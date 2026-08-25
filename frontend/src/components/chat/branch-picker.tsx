@@ -60,8 +60,13 @@ export function BranchPicker({
     setDraft(content);
   }, [content]);
 
-  // Fetch siblings on mount so navigation arrows appear for branched messages
+  // Fetch siblings on mount so navigation arrows appear for branched messages.
+  // Skip while the message ID is still a client-generated UUID placeholder —
+  // the server hasn't persisted the message yet, so it can't have siblings.
+  // Once the SSE "done" event replaces the UUID with the real DB int ID,
+  // this effect re-fires and fetches siblings correctly.
   useEffect(() => {
+    if (messageId.includes("-")) return;  // UUID placeholder, not yet persisted
     fetchSiblings(messageId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messageId]);
@@ -106,6 +111,7 @@ export function BranchPicker({
   const handleConfirm = async () => {
     const trimmed = draft.trim();
     if (!trimmed || trimmed === content || isSaving) return;
+    if (messageId.includes("-")) return;  // UUID placeholder, not yet persisted
 
     setIsSaving(true);
     try {
@@ -205,8 +211,8 @@ export function BranchPicker({
       {/* Edit trigger — always visible in this area (parent controls hover) */}
       <button
         onClick={handleEdit}
-        disabled={disabled}
-        title="Edit message"
+        disabled={disabled || messageId.includes("-")}
+        title={messageId.includes("-") ? "Message not yet saved" : "Edit message"}
         className="flex items-center gap-1 px-2 py-0.5 rounded text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-50"
       >
         <Pencil className="h-3 w-3" />
