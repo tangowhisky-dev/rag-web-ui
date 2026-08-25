@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from typing import Dict, Optional, Set
 
 from sqlalchemy.orm import Session
@@ -40,6 +41,14 @@ _graph_cancel_events: Dict[int, threading.Event] = {}
 # Reverse index: datastore_id → set of task_ids with in-flight graph builds.
 _graph_builds_by_datastore: Dict[int, Set[int]] = {}
 _graph_cancel_lock = threading.Lock()
+
+# Global semaphore limiting concurrent graph build threads.
+# Prevents thread explosion when many documents complete ingestion
+# simultaneously (e.g. 1000-file scan).  Threads waiting here consume
+# no GPU — they're blocked on the semaphore, not making LLM calls.
+# The LLM call concurrency is separately capped by the global LLM
+# semaphore in graph_service.py.
+_global_graph_thread_sem = threading.Semaphore(8)
 
 # Track in-flight ingestions by datastore so delete can wait for them.
 # datastore_id → set of task_ids currently being ingested.
@@ -295,7 +304,24 @@ def run_graph_build_in_thread(req: GraphBuildRequest) -> None:
         if req.data_store_id is not None:
             _graph_builds_by_datastore.setdefault(req.data_store_id, set()).add(req.task_id)
 
+    _thread_sem_acquired = False
     try:
+        # Wait for a global thread slot, checking cancel periodically.
+        # This prevents thread explosion when many documents complete
+        # ingestion simultaneously.  Threads waiting here consume no
+        # GPU — they're blocked on the semaphore, not making LLM calls.
+        while True:
+            if cancel_event.is_set():
+                logger.info(
+                    "graph_build_skipped task_id=%s — cancelled while waiting for thread slot",
+                    req.task_id,
+                )
+                return
+            if _global_graph_thread_sem.acquire(blocking=False):
+                _thread_sem_acquired = True
+                break
+            time.sleep(0.1)
+
         # Check if the task was already cancelled (e.g. scan stopped while
         # ingestion was finishing and the graph thread hadn't started yet).
         existing_status = _get_graph_status(req.task_id)
@@ -385,6 +411,8 @@ def run_graph_build_in_thread(req: GraphBuildRequest) -> None:
             except Exception:
                 pass
     finally:
+        if _thread_sem_acquired:
+            _global_graph_thread_sem.release()
         with _active_graph_lock:
             _active_graph_builds.discard(req.task_id)
         with _graph_cancel_lock:

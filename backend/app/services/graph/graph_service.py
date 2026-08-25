@@ -86,6 +86,14 @@ _neo4j_driver: Optional[neo4j.Driver] = None
 _graph_batch_progress: dict[int, tuple[int, int]] = {}
 _graph_progress_lock = threading.Lock()
 
+# Global semaphore limiting concurrent LLM calls across ALL graph builds.
+# Each graph build thread runs in its own event loop, so we use
+# threading.Semaphore (not asyncio.Semaphore) which works across
+# threads/loops.  This caps total in-flight LLM calls at 4 regardless
+# of how many documents are being graph-extracted simultaneously,
+# preventing GPU endpoint overload.
+_global_llm_sem = threading.Semaphore(4)
+
 
 def get_graph_batch_progress(task_id: int) -> tuple[int, int] | None:
     """Return (completed_batches, total_batches) for an in-progress graph extraction."""
@@ -347,6 +355,23 @@ def _build_extraction_batches(
     return batches
 
 
+async def _acquire_global_llm_sem(cancel_event) -> bool:
+    """Acquire the global LLM semaphore, yielding to the event loop.
+
+    Returns True if acquired, False if cancelled while waiting.
+    Uses non-blocking poll (50 ms interval) so the event loop stays
+    responsive and no thread-pool threads are consumed — unlike
+    ``run_in_executor`` with a blocking ``acquire()`` which would
+    exhaust the default thread pool under high batch concurrency.
+    """
+    while True:
+        if cancel_event is not None and cancel_event.is_set():
+            return False
+        if _global_llm_sem.acquire(blocking=False):
+            return True
+        await asyncio.sleep(0.05)
+
+
 async def _extract_with_llm(
     document_id: int,
     file_name: str,
@@ -402,8 +427,6 @@ async def _extract_with_llm(
         document_id, len(effective_chunks), len(batches), neo4j_llm_context,
     )
 
-    _batch_sem = asyncio.Semaphore(4)
-
     # Track per-batch progress in-memory for the API to read
     total_batches = len(batches)
     completed_batches = 0
@@ -424,7 +447,18 @@ async def _extract_with_llm(
             )
             skipped_batches += 1
             return 0, 0
-        async with _batch_sem:
+        # Acquire global LLM semaphore (cancel-aware, non-blocking poll).
+        # This caps total concurrent LLM calls across ALL graph builds at 4,
+        # regardless of how many documents are being processed simultaneously.
+        acquired = await _acquire_global_llm_sem(cancel_event)
+        if not acquired:
+            logger.info(
+                "GraphService[llm]: doc %d batch %d — cancelled while waiting for LLM semaphore, skipping",
+                document_id, batch_idx,
+            )
+            skipped_batches += 1
+            return 0, 0
+        try:
             # Re-check cancellation after acquiring the semaphore — the
             # batch may have been waiting while pause was fired.
             if cancel_event is not None and cancel_event.is_set():
@@ -572,6 +606,8 @@ async def _extract_with_llm(
                 document_id, batch_idx, last_exc,
             )
             return 0, 0
+        finally:
+            _global_llm_sem.release()
 
     results = await asyncio.gather(*[
         _process_batch(idx, text, pids)
@@ -700,26 +736,22 @@ async def build_graph_for_document(
         logger.info("GraphService[llm]: doc %d — cancelled before extraction", document_id)
         return 0
 
-    # Extract entities and relationships — throttled by semaphore so we don't
-    # run all 20 documents' extraction simultaneously on one local LLM.
-    # Lazily create semaphore inside the function so it is bound to the
-    # *current* event loop (the module-level one is created at import time
-    # and may be on a different loop from the running task).
-    sem = asyncio.Semaphore(1)
-    async with sem:
-        total_entities, total_relations, skipped_batches = await _extract_with_llm(
-            document_id=document_id,
-            file_name=file_name,
-            chunks=chunks,
-            qdrant_point_ids=qdrant_point_ids,
-            pt=pt,
-            max_chunks=max_chunks,
-            neo4j_llm_context=neo4j_llm_context,
-            kb_id=kb_id,
-            data_store_id=data_store_id,
-            task_id=task_id,
-            cancel_event=cancel_event,
-        )
+    # Extract entities and relationships.  Concurrency is controlled by the
+    # global LLM semaphore inside _extract_with_llm, which caps total
+    # concurrent LLM calls across all documents at 4.
+    total_entities, total_relations, skipped_batches = await _extract_with_llm(
+        document_id=document_id,
+        file_name=file_name,
+        chunks=chunks,
+        qdrant_point_ids=qdrant_point_ids,
+        pt=pt,
+        max_chunks=max_chunks,
+        neo4j_llm_context=neo4j_llm_context,
+        kb_id=kb_id,
+        data_store_id=data_store_id,
+        task_id=task_id,
+        cancel_event=cancel_event,
+    )
 
     logger.info(
         "GraphService[llm]: doc %d — %d entities, %d relations written to Neo4j (skipped_batches=%d)",
