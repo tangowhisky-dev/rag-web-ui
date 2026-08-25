@@ -351,6 +351,7 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
     kb_sql = text(
         """
         SELECT dc.chunk_text, dc.chunk_metadata, dc.kb_id, dc.document_id, dc.chunk_index,
+               dc.file_name,
                COALESCE(d.modified_at, d.created_at) AS modified_at,
                MATCH(dc.chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE) AS fts_score
         FROM   document_chunks dc
@@ -367,6 +368,7 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
     ds_sql = text(
         """
         SELECT dc.chunk_text, dc.chunk_metadata, dc.kb_id, dc.document_id, dc.chunk_index,
+               dc.file_name,
                COALESCE(d.modified_at, d.created_at) AS modified_at,
                MATCH(dc.chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE) AS fts_score
         FROM   document_chunks dc
@@ -449,6 +451,11 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
                 meta["document_id"] = row.document_id
             if "chunk_index" not in meta and hasattr(row, "chunk_index"):
                 meta["chunk_index"] = row.chunk_index
+            # file_name is a column on document_chunks but stripped from
+            # chunk_metadata during ingestion. Add it so downstream consumers
+            # (search endpoint, citations) can display the source filename.
+            if "file_name" not in meta and hasattr(row, "file_name") and row.file_name:
+                meta["file_name"] = row.file_name
             # Store modified_at from the JOIN for recency-aware dedup.
             if hasattr(row, "modified_at") and row.modified_at:
                 meta["_modified_at"] = row.modified_at.isoformat() if hasattr(row.modified_at, "isoformat") else str(row.modified_at)
