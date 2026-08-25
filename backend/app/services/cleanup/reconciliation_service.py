@@ -318,14 +318,18 @@ def _reconcile_neo4j(summary: dict, active_kb_ids: List[int], active_ds_ids: Lis
                         if n == 0:
                             break
 
-                # Sweep orphaned entities scoped to this datastore
+                # Delete ALL entities scoped to this stale datastore.
+                # Entities carry data_store_id as a property. We delete all
+                # entities for the stale datastore, not just orphaned ones,
+                # because graph builds that completed after the datastore
+                # was deleted may have written entities WITH FROM_CHUNK
+                # edges to newly written (and also stale) chunk nodes.
                 with driver.session() as session:
                     rec = session.run(
                         """
                         MATCH (e)
                         WHERE (e:__KGBuilder__ OR e:Entity OR e:__Entity__)
                           AND e.data_store_id = $ds_id
-                          AND NOT EXISTS { MATCH (e)-[:FROM_CHUNK]->() }
                         DETACH DELETE e
                         RETURN count(e) AS n
                         """,
@@ -333,7 +337,7 @@ def _reconcile_neo4j(summary: dict, active_kb_ids: List[int], active_ds_ids: Lis
                     ).single()
                     if rec and rec["n"]:
                         logger.info(
-                            "[RECONCILE] Neo4j: cleaned %d orphaned entities for stale ds_%s",
+                            "[RECONCILE] Neo4j: cleaned %d entities for stale ds_%s",
                             rec["n"], stale_ds_id,
                         )
 
