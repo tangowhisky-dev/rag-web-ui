@@ -328,7 +328,7 @@ def run_graph_build_in_thread(req: GraphBuildRequest) -> None:
         try:
             asyncio.set_event_loop(loop)
 
-            async def _do() -> None:
+            async def _do() -> int:
                 from app.services.graph import build_graph_for_document
                 from app.services.graph.graph_service import delete_graph_for_document
 
@@ -342,7 +342,7 @@ def run_graph_build_in_thread(req: GraphBuildRequest) -> None:
 
                 # Pass the cancel event so build_graph_for_document can check
                 # it between extraction batches and abort if the scan is stopped.
-                await build_graph_for_document(
+                skipped = await build_graph_for_document(
                     kb_id=req.kb_id,
                     document_id=req.document_id,
                     file_name=req.file_name,
@@ -352,14 +352,26 @@ def run_graph_build_in_thread(req: GraphBuildRequest) -> None:
                     task_id=req.task_id,
                     cancel_event=cancel_event,
                 )
+                return skipped
 
-            loop.run_until_complete(_do())
+            skipped_batches = loop.run_until_complete(_do())
 
-            _set_graph_status(req.task_id, "completed", error=None)
-            logger.info(
-                "graph_build_completed task_id=%s document_id=%s",
-                req.task_id, req.document_id,
-            )
+            if skipped_batches > 0:
+                # Some extraction batches were skipped due to cancellation/pause.
+                # Mark as pending (not completed) so resume will retry the full
+                # document — delete_graph_for_document runs first on retry, so
+                # the partial entities from completed batches are cleaned up.
+                _set_graph_status(req.task_id, "pending", error=None)
+                logger.info(
+                    "graph_build_partial task_id=%s document_id=%s skipped_batches=%d — marked pending for retry",
+                    req.task_id, req.document_id, skipped_batches,
+                )
+            else:
+                _set_graph_status(req.task_id, "completed", error=None)
+                logger.info(
+                    "graph_build_completed task_id=%s document_id=%s",
+                    req.task_id, req.document_id,
+                )
         except Exception as e:
             logger.warning(
                 "graph_build_failed task_id=%s document_id=%s error=%s",

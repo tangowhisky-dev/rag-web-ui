@@ -359,7 +359,7 @@ async def _extract_with_llm(
     data_store_id: Optional[int] = None,
     task_id: Optional[int] = None,
     cancel_event=None,  # optional threading.Event — abort if set
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     """Run neo4j-graphrag LLM extraction on context-sized batches of chunks.
 
     Consecutive chunks are merged into batches sized to NEO4J_LLM_CONTEXT
@@ -373,6 +373,10 @@ async def _extract_with_llm(
 
     Up to 4 batches run concurrently. All synchronous Neo4j I/O is
     dispatched via run_in_executor.
+
+    Returns (total_nodes, total_rels, skipped_batches). skipped_batches > 0
+    means some batches were skipped due to cancellation/pause — the caller
+    should mark the graph build as pending, not completed, so it gets retried.
     """
     from neo4j_graphrag.experimental.components.types import TextChunks, TextChunk
 
@@ -403,6 +407,7 @@ async def _extract_with_llm(
     # Track per-batch progress in-memory for the API to read
     total_batches = len(batches)
     completed_batches = 0
+    skipped_batches = 0
     if task_id is not None:
         with _graph_progress_lock:
             _graph_batch_progress[task_id] = (0, total_batches)
@@ -410,12 +415,14 @@ async def _extract_with_llm(
     async def _process_batch(
         batch_idx: int, combined_text: str, batch_point_ids: list[str]
     ) -> tuple[int, int]:
+        nonlocal skipped_batches
         # Check cancellation before starting this batch.
         if cancel_event is not None and cancel_event.is_set():
             logger.info(
                 "GraphService[llm]: doc %d batch %d — cancelled, skipping",
                 document_id, batch_idx,
             )
+            skipped_batches += 1
             return 0, 0
         async with _batch_sem:
             last_exc = None
@@ -576,7 +583,7 @@ async def _extract_with_llm(
             return (rec["node_count"] if rec else 0, rec["rel_count"] if rec else 0)
 
     total_nodes, total_rels = await loop.run_in_executor(None, _count_nodes_rels)
-    return total_nodes, total_rels
+    return total_nodes, total_rels, skipped_batches
 
 
 # ── Ingest ─────────────────────────────────────────────────────────────────────
@@ -593,9 +600,10 @@ async def build_graph_for_document(
     org_id: Optional[int] = None,
     task_id: Optional[int] = None,
     cancel_event=None,  # optional threading.Event — abort if set
-) -> None:
-    """
-    Extract entity/relationship graph from document chunks and store in Neo4j.
+) -> int:
+    """Extract entity/relationship graph from document chunks and store in Neo4j.
+
+    Returns the number of extraction batches skipped due to cancellation/pause.
 
     chunk_ids are the SHA-256 hex strings from document_processor — we convert
     them to the actual Qdrant point UUIDs here via the same deterministic
@@ -672,7 +680,7 @@ async def build_graph_for_document(
     # Check if cancelled before starting expensive LLM extraction.
     if cancel_event is not None and cancel_event.is_set():
         logger.info("GraphService[llm]: doc %d — cancelled before extraction", document_id)
-        return
+        return 0
 
     # Extract entities and relationships — throttled by semaphore so we don't
     # run all 20 documents' extraction simultaneously on one local LLM.
@@ -681,7 +689,7 @@ async def build_graph_for_document(
     # and may be on a different loop from the running task).
     sem = asyncio.Semaphore(1)
     async with sem:
-        total_entities, total_relations = await _extract_with_llm(
+        total_entities, total_relations, skipped_batches = await _extract_with_llm(
             document_id=document_id,
             file_name=file_name,
             chunks=chunks,
@@ -696,9 +704,10 @@ async def build_graph_for_document(
         )
 
     logger.info(
-        "GraphService[llm]: doc %d — %d entities, %d relations written to Neo4j",
-        document_id, total_entities, total_relations,
+        "GraphService[llm]: doc %d — %d entities, %d relations written to Neo4j (skipped_batches=%d)",
+        document_id, total_entities, total_relations, skipped_batches,
     )
+    return skipped_batches
 
 
 # ── Retrieval: graph expansion ─────────────────────────────────────────────────
