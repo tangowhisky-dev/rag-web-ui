@@ -2,6 +2,8 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { Search as SearchIcon, FileText, ExternalLink, Info, Loader2 } from "lucide-react";
+import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import DashboardLayout from "@/components/layout/dashboard-layout";
 import { api, ApiError } from "@/lib/api";
 import { useHydrated } from "@/lib/hooks";
@@ -16,6 +18,7 @@ interface KbItem {
 
 interface SearchResult {
   chunk_text: string;
+  original_text: string | null;
   file_name: string;
   document_id: number;
   kb_id: number | null;
@@ -32,8 +35,8 @@ interface SearchResponse {
   latency_ms: number;
 }
 
-function snippet(text: string, maxChars = 350): string {
-  const clean = text.replace(/\s+/g, " ").trim();
+function snippet(text: string, maxChars = 500): string {
+  const clean = text.trim();
   if (clean.length <= maxChars) return clean;
   return clean.slice(0, maxChars).trimEnd() + "…";
 }
@@ -226,9 +229,11 @@ export default function SearchPage() {
                   </div>
                   <ExternalLink className="h-3.5 w-3.5 text-muted-foreground/50 shrink-0 group-hover:text-primary transition-colors" />
                 </div>
-                <p className="mt-2 text-sm text-muted-foreground leading-relaxed line-clamp-4">
-                  {snippet(result.chunk_text)}
-                </p>
+                <div className="mt-2 text-sm text-muted-foreground leading-relaxed prose prose-sm dark:prose-invert max-w-none pointer-events-none line-clamp-4">
+                  <Markdown remarkPlugins={[remarkGfm]}>
+                    {snippet(result.original_text || result.chunk_text)}
+                  </Markdown>
+                </div>
                 <div className="mt-2 flex items-center gap-3 text-xs text-muted-foreground/70">
                   {result.kb_id && (
                     <span>

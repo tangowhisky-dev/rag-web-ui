@@ -44,6 +44,7 @@ class SearchRequest(BaseModel):
 
 class SearchResultItem(BaseModel):
     chunk_text: str
+    original_text: Optional[str] = None
     file_name: str
     document_id: int
     kb_id: Optional[int] = None
@@ -138,6 +139,7 @@ def search(
         meta = doc.metadata or {}
         results.append(SearchResultItem(
             chunk_text=doc.page_content or "",
+            original_text=meta.get("original_text"),
             file_name=meta.get("file_name", "Unknown"),
             document_id=meta.get("document_id", 0),
             kb_id=meta.get("kb_id"),
