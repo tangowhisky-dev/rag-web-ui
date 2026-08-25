@@ -444,6 +444,15 @@ def create_datastore(
 
     resp = _serialize_ds(ds)
     resp["assigned_orgs"] = assigned_org_ids
+
+    # Sync watcher so auto_scan-enabled datastores start watching immediately
+    if ds.auto_scan_enabled:
+        try:
+            watcher = _get_watcher()
+            watcher.sync_watchers_with_database()
+        except Exception:
+            logger.warning("[DATASTORE] failed_to_sync_watchers_on_create id=%d", ds.id)
+
     return DataStoreResponse(**resp)
 
 

@@ -102,10 +102,18 @@ def _matches_pattern(file_path: str, pattern: str, skip_hidden: bool = True) -> 
 
     Checks *fnmatch* against the file name and, when *skip_hidden* is
     ``True``, excludes files whose basename starts with ``"."``.
+    Also excludes temp/lock files from common editors and office suites.
     """
     base = os.path.basename(file_path)
 
     if skip_hidden and base.startswith("."):
+        return False
+    # Skip temp/lock files: ~$file.docx (MS Office), .~file (Emacs/gedit),
+    # file.tmp, file.swp, file.bak
+    if base.startswith("~$") or base.startswith(".~"):
+        return False
+    ext = os.path.splitext(base)[1].lower()
+    if ext in (".tmp", ".swp", ".swo", ".bak", ".lock"):
         return False
 
     return fnmatch.fnmatch(base, pattern)

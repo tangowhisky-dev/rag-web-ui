@@ -137,6 +137,16 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
         # datastore doesn't block others).
         self._processing: set[int] = set()
 
+        # Per-datastore batch timers for auto_scan_enabled datastores.
+        # When auto_scan is enabled, file events are queued but NOT processed
+        # immediately — they accumulate until the timer fires, then the batch
+        # is processed. This matches the UI description: "File changes are
+        # automatically processed every N minutes."
+        # When auto_scan is disabled (min_interval_seconds <= 0), events are
+        # processed immediately (the original behavior).
+        self._batch_timers: Dict[int, threading.Timer] = {}
+        self._batch_timers_lock = threading.Lock()
+
         self._lock = threading.Lock()
 
         # Lock for scan progress updates — prevents race between event-driven
@@ -149,9 +159,16 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
     # ------------------------------------------------------------------
 
     def add_folder(self, datastore_id: int, org_id: int, folder_path: str, min_interval_seconds: int = 300) -> None:
-        """Register a datastore folder path for monitoring."""
+        """Register a datastore folder path for monitoring.
+
+        When min_interval_seconds > 0, file events are batched and processed
+        every min_interval_seconds (auto_scan mode). When <= 0, events are
+        processed immediately.
+        """
         with self._lock:
             self.folder_paths[datastore_id] = (org_id, folder_path, min_interval_seconds)
+        # Cancel any existing batch timer for this datastore
+        self._cancel_batch_timer(datastore_id)
         logger.info(
             "[WATCHER] handler_folder_added datastore_id=%d path=%s",
             datastore_id, folder_path,
@@ -159,6 +176,7 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
 
     def remove_folder(self, datastore_id: int) -> None:
         """Unregister a datastore folder path and flush pending changes."""
+        self._cancel_batch_timer(datastore_id)
         with self._lock:
             if datastore_id in self.pending_changes and self.pending_changes[datastore_id]:
                 # Flush pending changes before removing the folder
@@ -178,6 +196,47 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
             if datastore_id in self.folder_paths:
                 del self.folder_paths[datastore_id]
         logger.info("[WATCHER] handler_folder_removed datastore_id=%s", datastore_id)
+
+    def _cancel_batch_timer(self, datastore_id: int) -> None:
+        """Cancel the batch timer for a datastore if one is running."""
+        with self._batch_timers_lock:
+            timer = self._batch_timers.pop(datastore_id, None)
+        if timer is not None:
+            timer.cancel()
+
+    def _schedule_batch_timer(self, datastore_id: int) -> None:
+        """Schedule (or reschedule) the batch processing timer for a datastore.
+
+        If the datastore has min_interval_seconds > 0 (auto_scan enabled),
+        a timer is set to fire after that interval, at which point all
+        accumulated pending_changes are processed as a batch.
+
+        If min_interval_seconds <= 0, events are processed immediately
+        and no timer is scheduled.
+        """
+        entry = self.folder_paths.get(datastore_id)
+        if entry is None:
+            return
+        _, _, min_interval = entry
+        if min_interval <= 0:
+            return  # immediate mode — no timer needed
+
+        self._cancel_batch_timer(datastore_id)
+
+        def _fire():
+            # Process accumulated changes when the timer fires
+            self._process_pending_changes(datastore_id)
+            # Reschedule if there are still pending changes or the datastore
+            # is still being watched
+            if datastore_id in self.folder_paths:
+                self._schedule_batch_timer(datastore_id)
+
+        timer = threading.Timer(min_interval, _fire)
+        timer.daemon = True
+        timer.name = f"batch-timer-{datastore_id}"
+        with self._batch_timers_lock:
+            self._batch_timers[datastore_id] = timer
+        timer.start()
 
     # ------------------------------------------------------------------
     # Datastore resolution from event path
@@ -241,6 +300,11 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
         For event-driven processing: process immediately after the change is queued.
         For flush (manual): process immediately — no batch timer.
         The batch timer was removed to avoid 5-minute delays in event-driven processing.
+
+        Deduplicates by file path: if a change for the same path is already
+        queued, it is replaced with the latest event. This prevents processing
+        the same file multiple times when it is saved repeatedly while a batch
+        is being processed.
         """
         change = {
             "datastore_id": datastore_id,
@@ -251,7 +315,15 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
         }
 
         with self._lock:
-            self.pending_changes.setdefault(datastore_id, []).append(change)
+            queue = self.pending_changes.setdefault(datastore_id, [])
+            # Deduplicate by file path — replace any existing entry for the
+            # same path with the latest event. This avoids ingesting the same
+            # file N times when it is saved N times while a batch is running.
+            for i, existing in enumerate(queue):
+                if existing["path"] == change["path"]:
+                    queue[i] = change
+                    return
+            queue.append(change)
 
     def _process_pending_changes(self, datastore_id: int) -> None:
         """Process all pending changes for a datastore immediately.
@@ -286,6 +358,7 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
 
     def force_process_pending(self, datastore_id: int) -> None:
         """Force process pending changes for a datastore (used on shutdown)."""
+        self._cancel_batch_timer(datastore_id)
         with self._lock:
             changes = self.pending_changes.pop(datastore_id, [])
 
@@ -436,7 +509,15 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
                 ds_id = self._resolve_datastore(p)
                 if ds_id is not None:
                     self._queue_change(ds_id, event, et)
-                    self._process_pending_changes(ds_id)
+                    # If auto_scan is enabled (min_interval > 0), schedule a
+                    # batch timer instead of processing immediately. The
+                    # changes accumulate until the timer fires.
+                    entry = self.folder_paths.get(ds_id)
+                    min_interval = entry[2] if entry else 0
+                    if min_interval > 0:
+                        self._schedule_batch_timer(ds_id)
+                    else:
+                        self._process_pending_changes(ds_id)
             except Exception as e:
                 logger.warning("[WATCHER] delayed_dispatch error path=%s: %s", p, e)
             finally:
@@ -494,7 +575,8 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
         _, ext = os.path.splitext(fname)
         ext = ext.lower()
 
-        # Skip non-supported extensions
+        # Skip non-supported extensions — only process files the document
+        # engine can actually parse (anydoc/markitdown/text/image OCR).
         if ext not in SUPPORTED_EXTENSIONS:
             logger.debug(
                 "[WATCHER] file_detected path=%s ext=%s action=skip reason=unsupported_ext",
@@ -503,11 +585,19 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
             )
             return
 
-        # Skip hidden/system files
-        if fname.startswith("."):
+        # Skip hidden/system files and temp/lock files from editors
+        # (~$file.docx, .~file.txt, file.tmp, file.swp, file.bak)
+        if fname.startswith(".") or fname.startswith("~$") or fname.startswith(".~"):
             logger.debug(
-                "[WATCHER] file_detected path=%s action=skip reason=hidden_file",
+                "[WATCHER] file_detected path=%s action=skip reason=hidden_or_temp",
                 event_path,
+            )
+            return
+        if ext in (".tmp", ".swp", ".swo", ".bak", ".lock"):
+            logger.debug(
+                "[WATCHER] file_detected path=%s ext=%s action=skip reason=temp_ext",
+                event_path,
+                ext,
             )
             return
 
@@ -709,11 +799,18 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
             )
             return
 
-        # Skip hidden/system files
-        if fname.startswith("."):
+        # Skip hidden/system files and temp/lock files
+        if fname.startswith(".") or fname.startswith("~$") or fname.startswith(".~"):
             logger.debug(
-                "[WATCHER] file_detected path=%s action=skip reason=hidden_file",
+                "[WATCHER] file_detected path=%s action=skip reason=hidden_or_temp",
                 event_path,
+            )
+            return
+        if ext in (".tmp", ".swp", ".swo", ".bak", ".lock"):
+            logger.debug(
+                "[WATCHER] file_detected path=%s ext=%s action=skip reason=temp_ext",
+                event_path,
+                ext,
             )
             return
 

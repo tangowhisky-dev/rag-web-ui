@@ -923,7 +923,9 @@ class DataStoreWatcher:
         if ext not in SUPPORTED_EXTENSIONS:
             return
 
-        if fname.startswith("."):
+        if fname.startswith(".") or fname.startswith("~$") or fname.startswith(".~"):
+            return
+        if ext in (".tmp", ".swp", ".swo", ".bak", ".lock"):
             return
 
         if not os.path.exists(event_path):
@@ -1029,6 +1031,10 @@ class DataStoreWatcher:
         ext = ext.lower()
 
         if ext not in SUPPORTED_EXTENSIONS:
+            return
+        if fname.startswith(".") or fname.startswith("~$") or fname.startswith(".~"):
+            return
+        if ext in (".tmp", ".swp", ".swo", ".bak", ".lock"):
             return
         if not os.path.exists(event_path):
             return

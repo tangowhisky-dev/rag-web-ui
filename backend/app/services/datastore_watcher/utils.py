@@ -90,10 +90,21 @@ def release_file_lock(db, datastore_id: int, file_path: str) -> None:
 def matches_pattern(filepath: str, pattern: str = "*") -> bool:
     """Check if a filepath matches the scan pattern.
 
-    Excludes hidden files regardless of pattern.
+    Excludes hidden files and temp/lock files regardless of pattern.
     """
     fname = os.path.basename(filepath)
     if fname.startswith("."):
+        return False
+    # Skip temp/lock files from common editors and office suites:
+    #   ~$file.docx  — MS Office lock files
+    #   .~file.txt   — Emacs/gedit temp files
+    #   file.tmp     — generic temp
+    #   file.swp     — vim swap
+    #   file.bak     — backup
+    if fname.startswith("~$") or fname.startswith(".~"):
+        return False
+    ext = os.path.splitext(fname)[1].lower()
+    if ext in (".tmp", ".swp", ".swo", ".bak", ".lock"):
         return False
     if pattern == "*":
         return True
@@ -112,9 +123,11 @@ def matches_pattern(filepath: str, pattern: str = "*") -> bool:
 def count_files_in_folder(folder_path: str, scan_pattern: str = "*") -> int:
     """Count files matching pattern in folder.
 
-    Excludes hidden files. Returns 0 on any error.
+    Excludes hidden files, temp files, and files with unsupported extensions.
+    Returns 0 on any error.
     """
     try:
+        from app.services.ingestion.document_converter import SUPPORTED_EXTENSIONS
         path = Path(folder_path)
         if not path.exists():
             return 0
@@ -127,7 +140,15 @@ def count_files_in_folder(folder_path: str, scan_pattern: str = "*") -> int:
                 matched = list(path.rglob(pattern))
             else:
                 matched = list(path.glob(pattern))
-            all_files.update(f for f in matched if f.is_file() and not f.name.startswith("."))
+            for f in matched:
+                if not f.is_file():
+                    continue
+                if not matches_pattern(str(f), scan_pattern):
+                    continue
+                ext = f.suffix.lower()
+                if ext not in SUPPORTED_EXTENSIONS:
+                    continue
+                all_files.add(f)
 
         return len(all_files)
     except Exception:
