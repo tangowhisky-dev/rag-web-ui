@@ -336,9 +336,9 @@ class TestSyncWatchersWithoutOrgAssignment:
         mock_ds = MagicMock()
         mock_ds.id = 42
         mock_ds.folder_path = str(ds_path)
-        mock_ds.auto_scan_interval_minutes = 60
+        mock_ds.auto_process_interval_minutes = 60
         mock_ds.is_active = True
-        mock_ds.auto_scan_enabled = True
+        mock_ds.auto_process_enabled = True
         mock_ds.__name__ = "DataStore"
 
         mock_assignment_query = MagicMock()

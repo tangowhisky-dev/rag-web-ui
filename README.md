@@ -260,11 +260,11 @@ When a scan completes, the datastore record includes:
 | `last_scan_errors` | Number of files that failed ingestion |
 | `last_scan_error` | Error message if any files failed |
 
-#### How auto-scan works
+#### How background processing works
 
-Auto-scan is **event-driven**, not periodic. When a file is added or modified in the folder, the watchdog observer detects the filesystem event and begins ingestion after a 1-second delay (to let the file write complete). The `auto_scan_interval_minutes` configures the **minimum processing interval** for the same datastore — rapid repeated events (e.g., VS Code temp-file write-and-rename) within this window are coalesced into a single processing run. This prevents duplicate ingestion of the same file.
+Background processing is **event-driven**. When a file is added or modified in the folder, the watchdog observer detects the filesystem event and queues it. The `auto_process_interval_minutes` configures the **batch processing interval** — accumulated file changes are processed (ingested) every N minutes. This batches rapid repeated events (e.g., saving a file multiple times) into a single processing run, preventing duplicate ingestion of the same file.
 
-If a manual scan is triggered while auto-scan is running, both operate independently: the manual scan walks all files, while event-driven ingestion continues to pick up new changes as they occur.
+If a manual scan is triggered while background processing is running, both operate independently: the manual scan walks all files, while event-driven ingestion continues to pick up new changes as they occur.
 
 ## API Reference
 

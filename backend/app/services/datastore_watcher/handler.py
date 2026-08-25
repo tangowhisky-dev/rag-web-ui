@@ -137,12 +137,12 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
         # datastore doesn't block others).
         self._processing: set[int] = set()
 
-        # Per-datastore batch timers for auto_scan_enabled datastores.
-        # When auto_scan is enabled, file events are queued but NOT processed
+        # Per-datastore batch timers for auto_process_enabled datastores.
+        # When auto_process is enabled, file events are queued but NOT processed
         # immediately — they accumulate until the timer fires, then the batch
         # is processed. This matches the UI description: "File changes are
         # automatically processed every N minutes."
-        # When auto_scan is disabled (min_interval_seconds <= 0), events are
+        # When auto_process is disabled (min_interval_seconds <= 0), events are
         # processed immediately (the original behavior).
         self._batch_timers: Dict[int, threading.Timer] = {}
         self._batch_timers_lock = threading.Lock()
@@ -162,7 +162,7 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
         """Register a datastore folder path for monitoring.
 
         When min_interval_seconds > 0, file events are batched and processed
-        every min_interval_seconds (auto_scan mode). When <= 0, events are
+        every min_interval_seconds (auto_process mode). When <= 0, events are
         processed immediately.
         """
         with self._lock:
@@ -207,7 +207,7 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
     def _schedule_batch_timer(self, datastore_id: int) -> None:
         """Schedule (or reschedule) the batch processing timer for a datastore.
 
-        If the datastore has min_interval_seconds > 0 (auto_scan enabled),
+        If the datastore has min_interval_seconds > 0 (auto_process enabled),
         a timer is set to fire after that interval, at which point all
         accumulated pending_changes are processed as a batch.
 
@@ -509,7 +509,7 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
                 ds_id = self._resolve_datastore(p)
                 if ds_id is not None:
                     self._queue_change(ds_id, event, et)
-                    # If auto_scan is enabled (min_interval > 0), schedule a
+                    # If auto_process is enabled (min_interval > 0), schedule a
                     # batch timer instead of processing immediately. The
                     # changes accumulate until the timer fires.
                     entry = self.folder_paths.get(ds_id)

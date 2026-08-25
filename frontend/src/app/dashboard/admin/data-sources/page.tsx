@@ -39,8 +39,8 @@ interface DataStore {
   folder_path: string;
   scan_pattern: string;
   is_active: boolean;
-  auto_scan_enabled: boolean;
-  auto_scan_interval_minutes: number;
+  auto_process_enabled: boolean;
+  auto_process_interval_minutes: number;
   last_scan_at: string | null;
   last_scan_status: string;
   last_scan_error: string | null;
@@ -149,8 +149,8 @@ export default function DataSourcesPage() {
     description: '',
     folder_path: '',
     scan_pattern: '*',
-    auto_scan_enabled: false,
-    auto_scan_interval_minutes: 30,
+    auto_process_enabled: false,
+    auto_process_interval_minutes: 30,
   };
 
   // Create/Edit dialog
@@ -292,7 +292,7 @@ export default function DataSourcesPage() {
 
   function openEdit(ds: DataStore) {
     setEditingId(ds.id);
-    setForm({ ...formDefaults, name: ds.name, description: ds.description ?? '', folder_path: ds.folder_path, scan_pattern: ds.scan_pattern, auto_scan_enabled: ds.auto_scan_enabled, auto_scan_interval_minutes: ds.auto_scan_interval_minutes });
+    setForm({ ...formDefaults, name: ds.name, description: ds.description ?? '', folder_path: ds.folder_path, scan_pattern: ds.scan_pattern, auto_process_enabled: ds.auto_process_enabled, auto_process_interval_minutes: ds.auto_process_interval_minutes });
     setDialogOpen(true);
   }
 
@@ -613,7 +613,7 @@ export default function DataSourcesPage() {
                     )}
                   </TableCell>
                   <TableCell>
-                    {ds.auto_scan_enabled ? (
+                    {ds.auto_process_enabled ? (
                       <Badge variant="secondary" className="bg-green-100 text-green-700">
                         Immediate + auto-scan
                       </Badge>
@@ -956,32 +956,32 @@ export default function DataSourcesPage() {
                   <input
                     type="checkbox"
                     id="ds-auto"
-                    checked={form.auto_scan_enabled}
+                    checked={form.auto_process_enabled}
                     onChange={(e) =>
-                      setForm({ ...form, auto_scan_enabled: e.target.checked })
+                      setForm({ ...form, auto_process_enabled: e.target.checked })
                     }
                     className="h-4 w-4 rounded border-gray-300"
                   />
                   <Label htmlFor="ds-auto">Background processing enabled</Label>
                 </div>
-                {form.auto_scan_enabled && (
+                {form.auto_process_enabled && (
                   <div className="space-y-1">
                     <Label htmlFor="ds-interval">Process Interval (minutes)</Label>
                     <p className="text-xs text-muted-foreground">
-                      File changes are automatically processed every {form.auto_scan_interval_minutes} minutes
+                      File changes are automatically processed every {form.auto_process_interval_minutes} minutes
                     </p>
                     <Input
                       id="ds-interval"
                       type="number"
                       min={1}
                       max={1440}
-                      value={form.auto_scan_interval_minutes}
+                      value={form.auto_process_interval_minutes}
                       onChange={(e) =>
                         setForm({
                           ...form,
-                          auto_scan_interval_minutes: e.target.value
-                            ? parseInt(e.target.value, 10) || formDefaults.auto_scan_interval_minutes
-                            : form.auto_scan_interval_minutes,
+                          auto_process_interval_minutes: e.target.value
+                            ? parseInt(e.target.value, 10) || formDefaults.auto_process_interval_minutes
+                            : form.auto_process_interval_minutes,
                         })
                       }
                     />

@@ -72,8 +72,8 @@ class DataStoreCreate(BaseModel):
     description: Optional[str] = None
     folder_path: str = Field(..., min_length=1, max_length=768)
     scan_pattern: str = Field(default="*")
-    auto_scan_enabled: bool = False
-    auto_scan_interval_minutes: int = Field(default=60, ge=1, le=1440)
+    auto_process_enabled: bool = False
+    auto_process_interval_minutes: int = Field(default=60, ge=1, le=1440)
 
 
 class DataStoreUpdate(BaseModel):
@@ -82,8 +82,8 @@ class DataStoreUpdate(BaseModel):
     folder_path: Optional[str] = Field(default=None, min_length=1, max_length=768)
     scan_pattern: Optional[str] = None
     is_active: Optional[bool] = None
-    auto_scan_enabled: Optional[bool] = None
-    auto_scan_interval_minutes: Optional[int] = Field(default=None, ge=1, le=1440)
+    auto_process_enabled: Optional[bool] = None
+    auto_process_interval_minutes: Optional[int] = Field(default=None, ge=1, le=1440)
 
 
 class DataStoreResponse(BaseModel):
@@ -93,8 +93,8 @@ class DataStoreResponse(BaseModel):
     folder_path: str
     scan_pattern: str
     is_active: bool
-    auto_scan_enabled: bool
-    auto_scan_interval_minutes: int
+    auto_process_enabled: bool
+    auto_process_interval_minutes: int
     last_scan_at: Optional[str] = None
     last_scan_status: str
     last_scan_error: Optional[str] = None
@@ -212,8 +212,8 @@ def _serialize_ds(ds: DataStore) -> dict:
         "folder_path": ds.folder_path,
         "scan_pattern": ds.scan_pattern,
         "is_active": ds.is_active,
-        "auto_scan_enabled": ds.auto_scan_enabled,
-        "auto_scan_interval_minutes": ds.auto_scan_interval_minutes,
+        "auto_process_enabled": ds.auto_process_enabled,
+        "auto_process_interval_minutes": ds.auto_process_interval_minutes,
         "last_scan_at": _utc_iso(ds.last_scan_at),
         "last_scan_status": ds.last_scan_status,
         "last_scan_error": ds.last_scan_error,
@@ -416,8 +416,8 @@ def create_datastore(
         description=payload.description,
         folder_path=abs_path,
         scan_pattern=payload.scan_pattern,
-        auto_scan_enabled=payload.auto_scan_enabled,
-        auto_scan_interval_minutes=payload.auto_scan_interval_minutes,
+        auto_process_enabled=payload.auto_process_enabled,
+        auto_process_interval_minutes=payload.auto_process_interval_minutes,
         last_scan_total_files=file_count,
         last_scan_status="never",
         last_scan_processed=0,
@@ -446,7 +446,7 @@ def create_datastore(
     resp["assigned_orgs"] = assigned_org_ids
 
     # Sync watcher so auto_scan-enabled datastores start watching immediately
-    if ds.auto_scan_enabled:
+    if ds.auto_process_enabled:
         try:
             watcher = _get_watcher()
             watcher.sync_watchers_with_database()
@@ -563,15 +563,15 @@ def update_datastore(
         ds.scan_pattern = payload.scan_pattern
     if payload.is_active is not None:
         ds.is_active = payload.is_active
-    if payload.auto_scan_enabled is not None:
-        ds.auto_scan_enabled = payload.auto_scan_enabled
-    if payload.auto_scan_interval_minutes is not None:
-        ds.auto_scan_interval_minutes = payload.auto_scan_interval_minutes
+    if payload.auto_process_enabled is not None:
+        ds.auto_process_enabled = payload.auto_process_enabled
+    if payload.auto_process_interval_minutes is not None:
+        ds.auto_process_interval_minutes = payload.auto_process_interval_minutes
 
     db.commit()
 
     # Immediately sync watchers when auto-scan settings change
-    if payload.auto_scan_enabled is not None or payload.auto_scan_interval_minutes is not None:
+    if payload.auto_process_enabled is not None or payload.auto_process_interval_minutes is not None:
         try:
             watcher = _get_watcher()
             if watcher.is_running:

@@ -1150,7 +1150,7 @@ class DataStoreWatcher:
     def _sync_watchers_with_database(self) -> None:
         """Sync watchers with database configuration.
 
-        Registers all active, auto_scan_enabled datastores — regardless of
+        Registers all active, auto_process_enabled datastores — regardless of
         whether they have org assignments. Unassigned datastores are watched
         with org_id=None; file processing works identically since org_id is
         only used for logging and KB-deletion cleanup (which already guards
@@ -1171,7 +1171,7 @@ class DataStoreWatcher:
                 db.query(DataStore)
                 .filter(
                     DataStore.is_active == True,
-                    DataStore.auto_scan_enabled == True,
+                    DataStore.auto_process_enabled == True,
                 )
                 .all()
             )
@@ -1181,7 +1181,7 @@ class DataStoreWatcher:
                 ds_id = ds.id
                 datastore_ids.add(ds_id)
                 org_id = assignment_map.get(ds_id)  # None for unassigned
-                interval = ds.auto_scan_interval_minutes or 60
+                interval = ds.auto_process_interval_minutes or 60
                 self.add_datastore(
                     ds_id,
                     org_id,
