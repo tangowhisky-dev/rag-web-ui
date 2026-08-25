@@ -425,6 +425,15 @@ async def _extract_with_llm(
             skipped_batches += 1
             return 0, 0
         async with _batch_sem:
+            # Re-check cancellation after acquiring the semaphore — the
+            # batch may have been waiting while pause was fired.
+            if cancel_event is not None and cancel_event.is_set():
+                logger.info(
+                    "GraphService[llm]: doc %d batch %d — cancelled while waiting for semaphore, skipping",
+                    document_id, batch_idx,
+                )
+                skipped_batches += 1
+                return 0, 0
             last_exc = None
             for attempt in range(1, 4):  # up to 3 attempts
                 try:
@@ -434,8 +443,17 @@ async def _extract_with_llm(
                         examples="",
                     )
 
-                    # If the datastore was deleted while the LLM call was
-                    # in flight, discard the result — don't write to Neo4j.
+                    # If the datastore was deleted or graph ingestion was
+                    # paused while the LLM call was in flight, discard the
+                    # result — don't write to Neo4j.
+                    if cancel_event is not None and cancel_event.is_set():
+                        logger.info(
+                            "GraphService[llm]: doc %d batch %d — cancelled during LLM call, discarding result",
+                            document_id, batch_idx,
+                        )
+                        skipped_batches += 1
+                        return 0, 0
+
                     if data_store_id is not None:
                         from app.services.ingestion.ingestion_dispatcher import is_datastore_deleted
                         if is_datastore_deleted(data_store_id):
