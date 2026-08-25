@@ -316,6 +316,7 @@ def run_graph_build_in_thread(req: GraphBuildRequest) -> None:
                     "graph_build_skipped task_id=%s — cancelled while waiting for thread slot",
                     req.task_id,
                 )
+                _set_graph_status(req.task_id, "pending")
                 return
             if _global_graph_thread_sem.acquire(blocking=False):
                 _thread_sem_acquired = True
@@ -346,6 +347,7 @@ def run_graph_build_in_thread(req: GraphBuildRequest) -> None:
                 "graph_build_skipped task_id=%s — graph ingestion paused for datastore %s",
                 req.task_id, req.data_store_id,
             )
+            _set_graph_status(req.task_id, "pending")
             return
 
         _set_graph_status(req.task_id, "pending")
