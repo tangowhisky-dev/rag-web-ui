@@ -91,6 +91,8 @@ class DataStoreInfo(BaseModel):
     id: int
     name: str
     folder_path: str
+    auto_process_enabled: bool = False
+    document_count: int = 0
 
     model_config = ConfigDict(from_attributes=True)
 

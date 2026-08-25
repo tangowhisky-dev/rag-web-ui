@@ -122,12 +122,33 @@ def get_knowledge_bases(
             ).all()
         }
 
+    # Batch-count documents per datastore (avoids N+1)
+    from sqlalchemy import func as sa_func
+    doc_counts: dict[int, int] = {}
+    if all_ds_ids:
+        count_rows = (
+            db.query(Document.data_store_id, sa_func.count(Document.id))
+            .filter(Document.data_store_id.in_(all_ds_ids))
+            .group_by(Document.data_store_id)
+            .all()
+        )
+        doc_counts = {row[0]: int(row[1]) for row in count_rows}
+
     # Add data_sources to each response (only explicitly linked ones)
     result = []
     for kb in knowledge_bases:
         linked_ds_ids = [link.data_store_id for link in kb.data_sources]
         linked_datastores = [all_datastores[did] for did in linked_ds_ids if did in all_datastores]
-        data_sources = [DataStoreInfo(id=ds.id, name=ds.name, folder_path=ds.folder_path) for ds in linked_datastores]
+        data_sources = [
+            DataStoreInfo(
+                id=ds.id,
+                name=ds.name,
+                folder_path=ds.folder_path,
+                auto_process_enabled=bool(ds.auto_process_enabled),
+                document_count=doc_counts.get(ds.id, 0),
+            )
+            for ds in linked_datastores
+        ]
 
         kb_dict = {
             "id": kb.id,
@@ -327,7 +348,29 @@ def get_knowledge_base(
         DataStore.id.in_(linked_ds_ids),
         DataStore.is_active == True
     ).all()
-    data_sources = [DataStoreInfo(id=ds.id, name=ds.name, folder_path=ds.folder_path) for ds in linked_datastores]
+
+    # Batch-count documents per datastore (avoids N+1)
+    from sqlalchemy import func as sa_func
+    doc_counts: dict[int, int] = {}
+    if linked_ds_ids:
+        count_rows = (
+            db.query(Document.data_store_id, sa_func.count(Document.id))
+            .filter(Document.data_store_id.in_(linked_ds_ids))
+            .group_by(Document.data_store_id)
+            .all()
+        )
+        doc_counts = {row[0]: int(row[1]) for row in count_rows}
+
+    data_sources = [
+        DataStoreInfo(
+            id=ds.id,
+            name=ds.name,
+            folder_path=ds.folder_path,
+            auto_process_enabled=bool(ds.auto_process_enabled),
+            document_count=doc_counts.get(ds.id, 0),
+        )
+        for ds in linked_datastores
+    ]
     
     # Build response with data_sources
     kb_dict = {

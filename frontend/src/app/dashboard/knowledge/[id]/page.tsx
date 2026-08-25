@@ -30,6 +30,8 @@ interface DataSource {
   id: number;
   name: string;
   folder_path: string;
+  auto_process_enabled: boolean;
+  document_count: number;
 }
 
 interface AvailableDataSource extends DataSource {
@@ -199,9 +201,14 @@ export default function KnowledgeBasePage() {
                       <div className="flex-1">
                         <div className="font-medium flex items-center gap-2">
                           {ds.name}
-                          <Badge variant="secondary" className="text-xs">
-                            Auto-process
-                          </Badge>
+                          {ds.auto_process_enabled && (
+                            <Badge variant="secondary" className="text-xs">
+                              Auto-process
+                            </Badge>
+                          )}
+                          <span className="text-xs text-muted-foreground">
+                            {ds.document_count} {ds.document_count === 1 ? "doc" : "docs"}
+                          </span>
                         </div>
                         <div className="text-xs text-muted-foreground truncate">{ds.folder_path}</div>
                       </div>
