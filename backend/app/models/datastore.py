@@ -66,6 +66,11 @@ class DataStore(Base):
     # Recovery tracking
     last_recovered_at = Column(DateTime, nullable=True)
 
+    # Graph ingestion pause — when true, Neo4j graph builds are not started.
+    # Pending graph builds remain in graph_status="pending" and can be
+    # resumed by setting this to false.  Qdrant ingestion is unaffected.
+    graph_ingestion_paused = Column(Boolean, default=False)
+
     # Timestamps
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at = Column(

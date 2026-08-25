@@ -7,6 +7,8 @@ Endpoints:
     POST   /api/admin/datastores/{id}/stop-scan           — stop scan
     POST   /api/admin/datastores/{id}/scan                — trigger scan
     POST   /api/admin/datastores/{id}/flush               — flush pending changes
+    POST   /api/admin/datastores/{id}/graph-pause         — pause graph ingestion
+    POST   /api/admin/datastores/{id}/graph-resume        — resume graph ingestion
 """
 
 import asyncio
@@ -433,6 +435,97 @@ def stop_datastore_scan(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to stop scan: {str(e)}")
+
+
+@router.post("/datastores/{datastore_id}/graph-pause")
+def pause_graph_ingestion(
+    datastore_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_super_admin),
+):
+    """Pause Neo4j graph ingestion for a datastore.
+
+    Signals in-flight graph builds to stop and prevents new ones from
+    starting.  Qdrant ingestion is unaffected.  Pending graph builds
+    remain in graph_status='pending' and can be resumed with graph-resume.
+    """
+    ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
+    if ds is None:
+        raise HTTPException(status_code=404, detail="DataStore not found")
+    _check_datastore_scope(db, datastore_id, current_user)
+
+    ds.graph_ingestion_paused = True
+    db.commit()
+
+    # Signal in-flight graph builds to stop
+    from app.services.ingestion.ingestion_dispatcher import cancel_graph_builds_for_datastore
+    cancelled = cancel_graph_builds_for_datastore(datastore_id)
+
+    logger.info(
+        "[DATASTORE] graph_ingestion_paused id=%d cancelled_graph_builds=%d",
+        datastore_id, cancelled,
+    )
+    return {
+        "message": "Graph ingestion paused",
+        "datastore_id": datastore_id,
+        "cancelled_graph_builds": cancelled,
+    }
+
+
+@router.post("/datastores/{datastore_id}/graph-resume")
+def resume_graph_ingestion(
+    datastore_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_super_admin),
+):
+    """Resume Neo4j graph ingestion for a datastore.
+
+    Clears the pause flag and starts all pending graph builds for this
+    datastore.
+    """
+    ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
+    if ds is None:
+        raise HTTPException(status_code=404, detail="DataStore not found")
+    _check_datastore_scope(db, datastore_id, current_user)
+
+    ds.graph_ingestion_paused = False
+    db.commit()
+
+    # Reset graph_status from 'failed' (cancelled by pause) back to 'pending'
+    # so they get picked up by the retry
+    from app.models.knowledge import ProcessingTask
+    tasks = (
+        db.query(ProcessingTask)
+        .filter(
+            ProcessingTask.data_store_id == datastore_id,
+            ProcessingTask.status == "completed",
+            ProcessingTask.graph_status == "failed",
+        )
+        .all()
+    )
+    reset_count = 0
+    for t in tasks:
+        if t.graph_error and "Cancelled" in t.graph_error:
+            t.graph_status = "pending"
+            t.graph_error = None
+            reset_count += 1
+    if reset_count:
+        db.commit()
+
+    # Start pending graph builds
+    from app.services.discovery.startup_recovery_service import StartupRecoveryService
+    recovery = StartupRecoveryService()
+    recovery._retry_pending_graph_builds(datastore_id)
+
+    logger.info(
+        "[DATASTORE] graph_ingestion_resumed id=%d reset_failed=%d",
+        datastore_id, reset_count,
+    )
+    return {
+        "message": "Graph ingestion resumed",
+        "datastore_id": datastore_id,
+        "reset_failed_graph_builds": reset_count,
+    }
 
 
 @router.post("/datastores/{datastore_id}/scan", status_code=202)

@@ -718,9 +718,20 @@ class StartupRecoveryService:
 
         This handles the case where a graph build was interrupted (app crash,
         LLM API down) after the document was successfully ingested to Qdrant.
+
+        Skips datastores where graph ingestion is paused.
         """
         db: Session = SessionLocal()
         try:
+            # Check if graph ingestion is paused for this datastore
+            ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
+            if ds is not None and ds.graph_ingestion_paused:
+                logger.info(
+                    "[RECOVERY] graph_retry_skip datastore_id=%s — graph ingestion paused",
+                    datastore_id,
+                )
+                return
+
             tasks = (
                 db.query(ProcessingTask)
                 .filter(

@@ -95,6 +95,17 @@ def is_datastore_deleted(datastore_id: int) -> bool:
         db.close()
 
 
+def _is_graph_ingestion_paused(datastore_id: int) -> bool:
+    """Check if graph ingestion is paused for a datastore."""
+    from app.models.datastore import DataStore
+    db: Session = SessionLocal()
+    try:
+        ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
+        return ds is not None and bool(ds.graph_ingestion_paused)
+    finally:
+        db.close()
+
+
 def cancel_graph_builds_for_datastore(datastore_id: int) -> int:
     """Signal cancellation for all in-flight graph builds belonging to a datastore.
 
@@ -299,6 +310,14 @@ def run_graph_build_in_thread(req: GraphBuildRequest) -> None:
         if req.data_store_id is not None and is_datastore_deleted(req.data_store_id):
             logger.info(
                 "graph_build_skipped task_id=%s — datastore %s deleted",
+                req.task_id, req.data_store_id,
+            )
+            return
+
+        # Check if graph ingestion is paused for this datastore
+        if req.data_store_id is not None and _is_graph_ingestion_paused(req.data_store_id):
+            logger.info(
+                "graph_build_skipped task_id=%s — graph ingestion paused for datastore %s",
                 req.task_id, req.data_store_id,
             )
             return

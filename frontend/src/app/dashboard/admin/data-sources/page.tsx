@@ -25,7 +25,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { useToast } from '@/components/ui/use-toast';
 import { LoadingDots } from '@/components/ui/loading-dots';
-import { Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
+import { Loader2, CheckCircle2, AlertCircle, Pause } from 'lucide-react';
 
 interface Org {
   id: number;
@@ -74,6 +74,7 @@ interface DataStore {
     failed: number;
     status: string; // "idle" | "running" | "completed" | "failed"
   } | null;
+  graph_ingestion_paused: boolean;
 }
 
 interface ScanProgress {
@@ -523,6 +524,26 @@ export default function DataSourcesPage() {
     }
   }
 
+  async function handleGraphToggle(dsId: number, isPaused: boolean) {
+    const endpoint = isPaused ? 'graph-resume' : 'graph-pause';
+    try {
+      const resp = (await api.post(
+        `/api/admin/datastores/${dsId}/${endpoint}`,
+      )) as { message: string };
+      toast({
+        title: isPaused ? 'Graph ingestion resumed' : 'Graph ingestion paused',
+        description: resp.message,
+      });
+      await fetchData();
+    } catch (err) {
+      toast({
+        title: 'Error',
+        description: (err as ApiError).message ?? `Failed to ${isPaused ? 'resume' : 'pause'} graph ingestion`,
+        variant: 'destructive',
+      });
+    }
+  }
+
   async function openAssign(dsId: number) {
     setAssigningId(dsId);
     // Fetch current assignments directly instead of relying on stale datastores state
@@ -742,7 +763,15 @@ export default function DataSourcesPage() {
                     })()}
                     {ds.graph_summary && ds.graph_summary.total > 0 && (
                       <div className="mt-2 flex items-center gap-1.5 text-xs">
-                        {ds.graph_summary.status === 'running' && (
+                        {ds.graph_ingestion_paused && (
+                          <>
+                            <Pause className="h-3 w-3 text-amber-500" />
+                            <span className="text-amber-600">
+                              Graph paused ({ds.graph_summary.pending} pending)
+                            </span>
+                          </>
+                        )}
+                        {!ds.graph_ingestion_paused && ds.graph_summary.status === 'running' && (
                           <>
                             <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
                             <span className="text-muted-foreground">
@@ -834,6 +863,16 @@ export default function DataSourcesPage() {
                         >
                           {ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' || (scanProgress[ds.id]?.status !== 'completed' && scanProgress[ds.id]) ? 'Stop' : 'Process'}
                         </Button>
+                        {ds.graph_summary && ds.graph_summary.total > 0 && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => handleGraphToggle(ds.id, ds.graph_ingestion_paused)}
+                            title={ds.graph_ingestion_paused ? 'Resume graph ingestion' : 'Pause graph ingestion'}
+                          >
+                            {ds.graph_ingestion_paused ? 'Resume Graph' : 'Pause Graph'}
+                          </Button>
+                        )}
                         {ds.pending_changes > 0 && (
                           <Button
                             variant="outline"

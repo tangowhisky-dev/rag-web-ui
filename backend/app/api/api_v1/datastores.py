@@ -117,6 +117,8 @@ class DataStoreResponse(BaseModel):
     processing: bool = False
     # Aggregated graph build status across all documents in this datastore
     graph_summary: Optional[dict] = None
+    # Whether Neo4j graph ingestion is paused for this datastore
+    graph_ingestion_paused: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -365,6 +367,7 @@ def list_datastores(
         except HTTPException:
             pass
         resp["graph_summary"] = graph_counts.get(ds.id)
+        resp["graph_ingestion_paused"] = bool(getattr(ds, 'graph_ingestion_paused', False))
         result.append(DataStoreResponse(**resp))
     return DataStoreListResponse(items=result, total=total, skip=skip, limit=limit)
 
