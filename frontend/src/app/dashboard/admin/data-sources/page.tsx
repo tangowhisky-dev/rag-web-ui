@@ -191,10 +191,11 @@ export default function DataSourcesPage() {
       if (pollingRef.current) {
         clearInterval(pollingRef.current);
       }
-      if (scanEventSourceRef.current) {
-        scanEventSourceRef.current.close();
-        scanEventSourceRef.current = null;
-      }
+      // NOTE: Do NOT close scanEventSourceRef here.  The SSE connection is
+      // managed by handleTriggerScan (opens) and its onmessage/onerror
+      // handlers (closes).  Closing it here kills the SSE stream every time
+      // datastores changes (which happens on every poll), leaving
+      // scanProgress stuck at 0/0 until the page is refreshed.
     };
   }, [triggering, datastores]);
 
