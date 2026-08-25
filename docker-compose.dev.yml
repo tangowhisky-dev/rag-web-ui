@@ -90,19 +90,7 @@ services:
       - app_network
     healthcheck:
       test:
-        [
-          "CMD",
-          "mysqladmin",
-          "ping",
-          "-h",
-          "localhost",
-          "-u",
-          "$$MYSQL_USER",
-          "--password=$$MYSQL_PASSWORD",
-          "--default-auth=caching_sha2_password",
-          "--ssl-mode=DISABLED",
-          "--get-server-public-key",
-        ]
+        ["CMD-SHELL", "mysqladmin ping -h localhost -u $$MYSQL_USER --password=$$MYSQL_PASSWORD"]
       interval: 5s
       timeout: 5s
       retries: 5
