@@ -96,10 +96,17 @@ interface RecoveryProgress {
 }
 
 interface RecoveryStatus {
-  datastore_id: number;
-  scan_id: string;
+  id: number;
+  name: string;
   recovery_status: string;
-  file_counts: Record<string, number>;
+  scan_id: number | null;
+  total_files: number;
+  processed_files: number;
+  new_files: number;
+  modified_files: number;
+  deleted_files: number;
+  started_at: string | null;
+  error_message: string | null;
   last_recovered_at: string | null;
 }
 
@@ -221,14 +228,14 @@ export default function DataSourcesPage() {
         const statusMap: Record<number, RecoveryStatus> = {};
         const progressMap: Record<number, RecoveryProgress | undefined> = {};
         for (const s of statuses) {
-          statusMap[s.datastore_id] = s;
+          statusMap[s.id] = s;
           const st = s.recovery_status;
           if (st === 'running' || st === 'complete' || st === 'error') {
-            progressMap[s.datastore_id] = {
+            progressMap[s.id] = {
               status: st,
-              new_files: s.file_counts.new_files ?? 0,
-              modified: s.file_counts.modified ?? 0,
-              deleted: s.file_counts.deleted ?? 0,
+              new_files: s.new_files ?? 0,
+              modified: s.modified_files ?? 0,
+              deleted: s.deleted_files ?? 0,
             };
           }
         }

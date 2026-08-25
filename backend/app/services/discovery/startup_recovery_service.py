@@ -146,11 +146,50 @@ class StartupRecoveryService:
             self._scan_id_counter += 1
             return self._scan_id_counter
 
-    def _discovery_pipeline_worker(self, datastore_id: int, scan_id: int) -> None:
-        """Run the discovery pipeline in a background thread."""
+    def _update_datastore_scan_fields(
+        self, datastore_id: int, total_files: int | None = None,
+        processed: int | None = None, status: str | None = None,
+    ) -> None:
+        """Update DataStore last_scan_* fields so the UI Status column
+        reflects recovery progress in real time."""
+        db: Session = SessionLocal()
         try:
-            from app.services.discovery import discover_datastore  # noqa: T100
+            ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
+            if not ds:
+                return
+            if total_files is not None:
+                ds.last_scan_total_files = total_files
+            if processed is not None:
+                ds.last_scan_processed = processed
+            if status is not None:
+                ds.last_scan_status = status
+            db.commit()
+        except Exception as e:
+            logger.warning("[RECOVERY] Failed to update scan fields: %s", e)
+            db.rollback()
+        finally:
+            db.close()
 
+    def _increment_progress(self, scan_id: int) -> None:
+        """Atomically increment processed_files for a scan."""
+        current = self._active_scans[scan_id].get("processed_files", 0)
+        self._active_scans[scan_id]["processed_files"] = current + 1
+
+    def _discovery_pipeline_worker(self, datastore_id: int, scan_id: int) -> None:
+        """Run the discovery pipeline in a background thread.
+
+        Phases:
+        1. Discovery — classify files as new/modified/deleted/unchanged.
+        2. Queue ingestion for new + modified files (non-blocking).
+        3. Handle deletions synchronously.
+        4. Wait for all ingestion futures to complete, updating progress
+           incrementally as each future resolves.
+        5. Mark recovery complete only after all ingestion is done.
+        """
+        from concurrent.futures import Future
+        from app.services.discovery import discover_datastore  # noqa: T100
+
+        try:
             db: Session = SessionLocal()
             try:
                 result: DiscoveryResult = discover_datastore(datastore_id)
@@ -172,47 +211,87 @@ class StartupRecoveryService:
             )
 
             # Update status with discovery counts
-            self._active_scans[scan_id]["total_files"] = result.total_files_discovered
+            total_to_process = len(result.new_files) + len(result.modified_files)
+            self._active_scans[scan_id]["total_files"] = total_to_process
             self._active_scans[scan_id]["new_files"] = len(result.new_files)
             self._active_scans[scan_id]["modified_files"] = len(result.modified_files)
             self._active_scans[scan_id]["deleted_files"] = len(result.deleted_files)
 
-            # Process new files
+            # Update DataStore scan fields so the Status column reflects
+            # recovery activity, not stale creation-time defaults.
+            self._update_datastore_scan_fields(
+                datastore_id,
+                total_files=total_to_process,
+                processed=0,
+                status="running",
+            )
+
+            # Phase 2: Queue ingestion for new + modified files.
+            # Collect futures so we can wait for actual completion.
+            ingestion_futures: list[tuple[Future, str]] = []
+
             for fmeta in result.new_files:
                 if not self._running:
                     break
-                self.process_new_file(fmeta["file_path"], datastore_id)
+                future = self.process_new_file(fmeta["file_path"], datastore_id)
+                if future is not None:
+                    ingestion_futures.append((future, fmeta["file_path"]))
 
-            # Process modified files
             for fmeta in result.modified_files:
                 if not self._running:
                     break
-                self.process_new_file(fmeta["file_path"], datastore_id)
+                future = self.process_new_file(fmeta["file_path"], datastore_id)
+                if future is not None:
+                    ingestion_futures.append((future, fmeta["file_path"]))
 
-            # Delete orphaned records for deleted files
+            # Phase 3: Handle deletions synchronously (fast — no embedding)
             for fmeta in result.deleted_files:
                 if not self._running:
                     break
                 self._handle_deletion_records(fmeta["file_path"], datastore_id)
+                self._increment_progress(scan_id)
 
-            # Mark complete
+            # Phase 4: Wait for all ingestion futures to complete.
+            # Update progress incrementally as each future resolves.
+            completed_count = len(result.deleted_files)
+            self._active_scans[scan_id]["processed_files"] = completed_count
+
+            for future, fpath in ingestion_futures:
+                if not self._running:
+                    break
+                try:
+                    future.result(timeout=600)  # 10 min per file
+                except Exception as e:
+                    logger.error(
+                        "[RECOVERY] ingestion_failed scan_id=%s path=%s: %s",
+                        scan_id, fpath, e,
+                    )
+                completed_count += 1
+                self._active_scans[scan_id]["processed_files"] = completed_count
+                # Update DataStore last_scan_processed so the Status column
+                # shows live progress.
+                self._update_datastore_scan_fields(
+                    datastore_id,
+                    processed=completed_count,
+                    status="running",
+                )
+
+            # Phase 5: Mark complete only after all ingestion is done.
             self._active_scans[scan_id]["status"] = "complete"
-            self._active_scans[scan_id]["processed_files"] = (
-                len(result.new_files) + len(result.modified_files) + len(result.deleted_files)
-            )
             logger.info(
-                "[RECOVERY] recovery_complete datastore_id=%s scan_id=%s total_files=%d processed=%d",
-                datastore_id, scan_id,
-                len(result.new_files) + len(result.modified_files),
-                len(result.new_files) + len(result.modified_files) + len(result.deleted_files),
+                "[RECOVERY] recovery_complete datastore_id=%s scan_id=%s total=%d processed=%d",
+                datastore_id, scan_id, total_to_process, completed_count,
             )
 
             # Set last_recovered_at timestamp on the DataStore
+            recovered_at = datetime.now(timezone.utc)
             db2: Session = SessionLocal()
             try:
                 ds_record = db2.query(DataStore).filter(DataStore.id == datastore_id).first()
                 if ds_record:
-                    ds_record.last_recovered_at = datetime.now(timezone.utc)
+                    ds_record.last_recovered_at = recovered_at
+                    ds_record.last_scan_processed = completed_count
+                    ds_record.last_scan_status = "completed"
                     db2.commit()
                     logger.info(
                         "[RECOVERY] recovery_timestamp_set datastore_id=%s last_recovered_at=%s",
@@ -225,6 +304,9 @@ class StartupRecoveryService:
                 )
             finally:
                 db2.close()
+
+            # Store in scan dict so the API can return it
+            self._active_scans[scan_id]["last_recovered_at"] = recovered_at.isoformat()
 
             # Retry graph builds that were left pending or failed from a
             # previous run.  This runs after discovery so new/modified file
@@ -242,6 +324,7 @@ class StartupRecoveryService:
             logger.error("[RECOVERY] recovery_error datastore_id=%s scan_id=%s: %s", datastore_id, scan_id, e, exc_info=True)
             self._active_scans[scan_id]["status"] = "error"
             self._active_scans[scan_id]["error_message"] = str(e)
+            self._update_datastore_scan_fields(datastore_id, status="error")
             # Set last_recovered_at even on error so the UI shows the recovery
             # attempt timestamp rather than being indefinitely empty.
             try:
@@ -249,7 +332,9 @@ class StartupRecoveryService:
                 try:
                     ds_record = db3.query(DataStore).filter(DataStore.id == datastore_id).first()
                     if ds_record:
-                        ds_record.last_recovered_at = datetime.now(timezone.utc)
+                        recovered_at = datetime.now(timezone.utc)
+                        ds_record.last_recovered_at = recovered_at
+                        self._active_scans[scan_id]["last_recovered_at"] = recovered_at.isoformat()
                         db3.commit()
                         logger.info(
                             "[RECOVERY] recovery_timestamp_set datastore_id=%s last_recovered_at=%s reason=error",
@@ -266,12 +351,11 @@ class StartupRecoveryService:
     # New / Modified file ingestion
     # ------------------------------------------------------------------
 
-    def process_new_file(self, file_path: str, datastore_id: int) -> None:
+    def process_new_file(self, file_path: str, datastore_id: int) -> Optional[Any]:
         """Queue a file for ingestion via the background processor.
 
-        Checks if a Document already exists. If it does and a non-failed
-        ProcessingTask is already present, recovery skips this file to
-        avoid duplicating work the watcher already handled.
+        Returns the Future for the ingestion task, or None if the file was
+        skipped (already handled, unreadable, or error).
         """
         file_name = os.path.basename(file_path)
         db: Session = SessionLocal()
@@ -289,11 +373,11 @@ class StartupRecoveryService:
                 file_size = os.path.getsize(file_path)
             except OSError as e:
                 logger.warning("[RECOVERY] Cannot read file during ingestion queue: %s", e)
-                return
+                return None
 
             if not file_hash:
                 logger.warning("[RECOVERY] Cannot hash file, skipping: %s", file_path)
-                return
+                return None
 
             task_id: int | None = None  # set by one of the branches below
 
@@ -332,7 +416,7 @@ class StartupRecoveryService:
                             "[RECOVERY] skip_file_already_handled datastore_id=%s file_path=%s doc_id=%s task_id=%s",
                             datastore_id, file_path, doc.id, existing_task.id,
                         )
-                        return
+                        return None
                 else:
                     # No existing task — update document metadata and create task
                     doc.file_hash = file_hash
@@ -380,7 +464,8 @@ class StartupRecoveryService:
                 task_id = task.id
 
             # Submit to background processor (async)
-            self._submit_ingestion(file_path, file_name, datastore_id, doc, file_hash, file_size, task_id)
+            future = self._submit_ingestion(file_path, file_name, datastore_id, doc, file_hash, file_size, task_id)
+            return future
 
         except Exception as e:
             logger.warning("[RECOVERY] Failed to queue file for ingestion: %s", e, exc_info=True)
@@ -388,6 +473,7 @@ class StartupRecoveryService:
                 db.rollback()
             except Exception:
                 pass
+            return None
         finally:
             db.close()
 
@@ -400,8 +486,11 @@ class StartupRecoveryService:
         file_hash: str,
         file_size: int,
         task_id: int,
-    ) -> None:
-        """Submit a file to the async background processor (non-blocking)."""
+    ) -> Any:
+        """Submit a file to the async background processor (non-blocking).
+
+        Returns the Future so callers can wait for completion.
+        """
         future = self.executor.submit(
             self._run_ingestion,
             file_path,
@@ -416,6 +505,7 @@ class StartupRecoveryService:
         future.add_done_callback(
             lambda f: self._on_ingestion_done(f, task_id, file_path)
         )
+        return future
 
     def _run_ingestion(
         self,
