@@ -284,7 +284,10 @@ export default function AdminOrgsPage() {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
             </svg>
           </div>
-          <Button onClick={() => setCreateOpen(true)}>+ New Organization</Button>
+          <Button onClick={() => {
+            setNewOrgParentId(orgs.length > 0 ? String(orgs[0].id) : '');
+            setCreateOpen(true);
+          }}>+ New Organization</Button>
         </div>
       </div>
 
