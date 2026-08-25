@@ -344,6 +344,14 @@ async def process_document_background(
             else:
                 logger.error(f"Task {task_id}: No collection — neither data_store_id nor kb_id provided")
                 return
+            # Check if the datastore was deleted while we were processing.
+            # If so, bail out before writing to Qdrant/Neo4j.
+            if data_store_id is not None:
+                from app.services.ingestion.ingestion_dispatcher import is_datastore_deleted
+                if is_datastore_deleted(data_store_id):
+                    logger.info(f"Task {task_id}: Datastore {data_store_id} deleted during processing — aborting")
+                    return
+
             _ensure_qdrant_collection(get_qdrant_client(), collection_name)
     
             # ── Step 4: Move to permanent storage (DataStore files stay in place) ───

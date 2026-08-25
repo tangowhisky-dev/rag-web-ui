@@ -41,6 +41,59 @@ _graph_cancel_events: Dict[int, threading.Event] = {}
 _graph_builds_by_datastore: Dict[int, Set[int]] = {}
 _graph_cancel_lock = threading.Lock()
 
+# Track in-flight ingestions by datastore so delete can wait for them.
+# datastore_id → set of task_ids currently being ingested.
+_active_ingestions_by_datastore: Dict[int, Set[int]] = {}
+_active_ingestions_lock = threading.Lock()
+
+
+def register_ingestion(datastore_id: int, task_id: int) -> None:
+    """Register an in-flight ingestion for a datastore."""
+    with _active_ingestions_lock:
+        _active_ingestions_by_datastore.setdefault(datastore_id, set()).add(task_id)
+
+
+def unregister_ingestion(datastore_id: int, task_id: int) -> None:
+    """Remove an in-flight ingestion after completion."""
+    with _active_ingestions_lock:
+        tasks = _active_ingestions_by_datastore.get(datastore_id)
+        if tasks:
+            tasks.discard(task_id)
+            if not tasks:
+                del _active_ingestions_by_datastore[datastore_id]
+
+
+def wait_for_ingestions(datastore_id: int, timeout: float = 30.0) -> int:
+    """Wait for all in-flight ingestions for a datastore to finish.
+
+    Returns the number of ingestions that were still running when timeout
+    was reached (0 = all finished).
+    """
+    import time
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with _active_ingestions_lock:
+            tasks = _active_ingestions_by_datastore.get(datastore_id)
+            if not tasks:
+                return 0
+            remaining = len(tasks)
+        if remaining == 0:
+            return 0
+        time.sleep(0.5)
+    with _active_ingestions_lock:
+        tasks = _active_ingestions_by_datastore.get(datastore_id, set())
+        return len(tasks)
+
+
+def is_datastore_deleted(datastore_id: int) -> bool:
+    """Check if a datastore has been deleted from the database."""
+    from app.models.datastore import DataStore
+    db: Session = SessionLocal()
+    try:
+        return db.query(DataStore).filter(DataStore.id == datastore_id).first() is None
+    finally:
+        db.close()
+
 
 def cancel_graph_builds_for_datastore(datastore_id: int) -> int:
     """Signal cancellation for all in-flight graph builds belonging to a datastore.
@@ -108,8 +161,24 @@ def run_ingestion_in_thread(
     """
     loop = asyncio.new_event_loop()
     graph_request: Optional[GraphBuildRequest] = None
+    ds_id_for_tracking = data_store_id
+
+    # Register this ingestion so delete can wait for it
+    if ds_id_for_tracking is not None:
+        register_ingestion(ds_id_for_tracking, task_id)
+
     try:
         asyncio.set_event_loop(loop)
+
+        # Bail out early if the datastore was already deleted
+        if ds_id_for_tracking is not None and is_datastore_deleted(ds_id_for_tracking):
+            logger.info(
+                "ingestion_skipped task_id=%s — datastore %s deleted",
+                task_id, ds_id_for_tracking,
+            )
+            _mark_task_status(task_id, "failed", progress=0,
+                              message="Datastore deleted")
+            return
 
         async def _do() -> Optional[GraphBuildRequest]:
             return await process_document_background(
@@ -149,6 +218,9 @@ def run_ingestion_in_thread(
             loop.close()
         except Exception:
             pass
+        # Unregister this ingestion so delete can proceed
+        if ds_id_for_tracking is not None:
+            unregister_ingestion(ds_id_for_tracking, task_id)
 
     # Fire graph build in a separate daemon thread with its own event loop.
     # This decouples graph extraction (slow, LLM-bound) from the ingestion
@@ -164,6 +236,13 @@ def run_ingestion_in_thread(
             # If so, skip the graph build — the cancel function already marked
             # pending graph builds as failed in the DB.
             if graph_request.data_store_id is not None:
+                # Check if the datastore was deleted while ingestion was running
+                if is_datastore_deleted(graph_request.data_store_id):
+                    logger.info(
+                        "graph_build_skipped task_id=%s — datastore %s deleted",
+                        task_id, graph_request.data_store_id,
+                    )
+                    return
                 graph_status = _get_graph_status(task_id)
                 if graph_status == "failed":
                     logger.info(
@@ -213,6 +292,14 @@ def run_graph_build_in_thread(req: GraphBuildRequest) -> None:
             logger.info(
                 "graph_build_skipped task_id=%s — already cancelled",
                 req.task_id,
+            )
+            return
+
+        # Check if the datastore was deleted while ingestion was running
+        if req.data_store_id is not None and is_datastore_deleted(req.data_store_id):
+            logger.info(
+                "graph_build_skipped task_id=%s — datastore %s deleted",
+                req.task_id, req.data_store_id,
             )
             return
 

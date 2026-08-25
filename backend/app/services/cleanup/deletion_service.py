@@ -129,11 +129,12 @@ def _delete_neo4j_for_kb(db: Session, kb_id: int) -> None:
 
 
 def _delete_neo4j_for_ds(datastore_id: int) -> None:
-    """Delete Neo4j Chunk nodes for a DataStore, and orphaned Entity nodes."""
+    """Delete Neo4j Chunk and Entity nodes for a DataStore."""
     try:
         from app.services.graph import _get_driver
         if settings.NEO4J_URI:
             driver = _get_driver()
+            ds_id_str = str(datastore_id)
             with driver.session() as session:
                 # 1. Delete Chunk nodes for this datastore
                 session.run(
@@ -141,9 +142,24 @@ def _delete_neo4j_for_ds(datastore_id: int) -> None:
                     MATCH (c:Chunk {data_store_id: $data_store_id})
                     DETACH DELETE c
                     """,
-                    data_store_id=str(datastore_id),
+                    data_store_id=ds_id_str,
                 )
-                # 2. Clean up orphaned Entity nodes (no FROM_CHUNK edges remain)
+                # 2. Delete Entity nodes scoped to this datastore.
+                # Entities carry data_store_id as a property (set during
+                # extraction). This catches entities written by graph builds
+                # that completed after the delete started.
+                session.run(
+                    """
+                    MATCH (e)
+                    WHERE (e:__KGBuilder__ OR e:Entity OR e:__Entity__)
+                      AND e.data_store_id = $data_store_id
+                    DETACH DELETE e
+                    """,
+                    data_store_id=ds_id_str,
+                )
+                # 3. Clean up any remaining orphaned Entity nodes (no
+                # FROM_CHUNK edges remain). This catches entities whose
+                # data_store_id property wasn't set (older code path).
                 session.run(
                     """
                     MATCH (e)

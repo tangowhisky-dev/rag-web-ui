@@ -654,6 +654,23 @@ def delete_datastore(
     except Exception:
         pass
 
+    # Wait for in-flight ingestion threads to finish.  Cancellation signals
+    # stop *new* work, but threads already past the check point (e.g. doing
+    # OCR) will continue.  Waiting prevents them from recreating Qdrant
+    # collections or Neo4j nodes after the delete cleans them up.
+    try:
+        from app.services.ingestion.ingestion_dispatcher import wait_for_ingestions
+        remaining = wait_for_ingestions(datastore_id, timeout=30.0)
+        if remaining > 0:
+            logger.warning(
+                "[DATASTORE] %d ingestions still running after 30s wait — proceeding with delete id=%d",
+                remaining, datastore_id,
+            )
+        elif remaining == 0:
+            logger.info("[DATASTORE] all ingestions finished before delete id=%d", datastore_id)
+    except Exception:
+        logger.warning("[DATASTORE] failed to wait for ingestions before delete id=%d", datastore_id)
+
     from app.services.cleanup import delete_datastore as _delete_ds
     result, status = _delete_ds(db, datastore_id)
     # Return 204 No Content for success (maintains backward compatibility)

@@ -427,6 +427,17 @@ async def _extract_with_llm(
                         examples="",
                     )
 
+                    # If the datastore was deleted while the LLM call was
+                    # in flight, discard the result — don't write to Neo4j.
+                    if data_store_id is not None:
+                        from app.services.ingestion.ingestion_dispatcher import is_datastore_deleted
+                        if is_datastore_deleted(data_store_id):
+                            logger.info(
+                                "GraphService[llm]: doc %d batch %d — datastore %s deleted during LLM call, discarding",
+                                document_id, batch_idx, data_store_id,
+                            )
+                            return 0, 0
+
                     # 2. Inject kb_id/data_store_id into entity node properties
                     #    so entities are scoped per-KB/per-datastore. This
                     #    prevents entity cross-contamination between KBs.
