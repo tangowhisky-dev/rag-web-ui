@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import { usePathname } from "next/navigation";
 import { api } from "@/lib/api";
 import {
   Dialog,
@@ -34,6 +35,7 @@ interface PreflightResult {
 export function PreflightCheck() {
   const [result, setResult] = useState<PreflightResult | null>(null);
   const [dismissed, setDismissed] = useState(false);
+  const pathname = usePathname();
 
   const checkPreflight = useCallback(async () => {
     try {
@@ -47,6 +49,13 @@ export function PreflightCheck() {
   useEffect(() => {
     checkPreflight();
   }, [checkPreflight]);
+
+  // Auto-dismiss when navigating to any settings page
+  useEffect(() => {
+    if (pathname?.includes("/settings")) {
+      setDismissed(true);
+    }
+  }, [pathname]);
 
   const errorIssues = result?.issues.filter((i) => i.severity === "error") ?? [];
   const warningIssues = result?.issues.filter((i) => i.severity === "warning") ?? [];
@@ -124,7 +133,7 @@ export function PreflightCheck() {
             Dismiss
           </Button>
           {isAdmin && settingsHref && (
-            <a href={settingsHref}>
+            <a href={settingsHref} onClick={() => setDismissed(true)}>
               <Button size="sm">
                 <Settings className="h-3.5 w-3.5 mr-1" />
                 Go to Settings

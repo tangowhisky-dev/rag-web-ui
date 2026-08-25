@@ -58,6 +58,19 @@ class StartupRecoveryService:
         db: Session = SessionLocal()
         try:
             active = db.query(DataStore).filter(DataStore.is_active == True).all()  # noqa: E712
+
+            # Reset stale "running" scan statuses from a previous run that was
+            # interrupted by a backend restart.  The recovery service re-processes
+            # any pending work, so a leftover "running" status is stale.
+            stale = [ds for ds in active if ds.last_scan_status == "running"]
+            for ds in stale:
+                ds.last_scan_status = "completed"
+                logger.info(
+                    "[RECOVERY] reset_stale_scan_status datastore_id=%s name=%s",
+                    ds.id, ds.name,
+                )
+            if stale:
+                db.commit()
         except Exception as e:
             logger.warning("[RECOVERY] Could not query DataStores (migration may not be applied): %s", e)
             return
@@ -398,6 +411,7 @@ class StartupRecoveryService:
             task_id,
             file_hash,
             file_size,
+            doc.content_type,
         )
         future.add_done_callback(
             lambda f: self._on_ingestion_done(f, task_id, file_path)
@@ -412,6 +426,7 @@ class StartupRecoveryService:
         task_id: int,
         file_hash: Optional[str] = None,
         file_size: Optional[int] = None,
+        content_type: Optional[str] = None,
     ) -> None:
         """Run the async ingestion pipeline in a threadpool worker.
 
@@ -426,6 +441,7 @@ class StartupRecoveryService:
             data_store_id=datastore_id,
             file_hash=file_hash,
             file_size=file_size,
+            content_type=content_type,
         )
 
     def _on_ingestion_done(self, future, task_id: int, file_path: str) -> None:

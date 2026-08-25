@@ -10,7 +10,6 @@ Pipeline types: ``"kb"`` or ``"ds"``.
 from __future__ import annotations
 
 import logging
-import traceback
 from pathlib import Path
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointIdsList
@@ -60,7 +59,7 @@ def _delete_qdrant_for_kb(kb_id: int) -> None:
     collection_name = f"kb_{kb_id}"
     try:
         qdrant = _get_qdrant()
-        logger.warning("[DELETE] _delete_qdrant_for_kb: ABOUT TO DELETE %s — traceback:\n%s", collection_name, "".join(traceback.format_stack()))
+        logger.warning("[DELETE] _delete_qdrant_for_kb: deleting collection %s", collection_name)
         qdrant.delete_collection(collection_name)
         logger.info("DeletionService: deleted Qdrant collection %s", collection_name)
     except Exception as e:
@@ -102,7 +101,7 @@ def _delete_qdrant_for_ds(db: Session, datastore_id: int) -> None:
         try:
             collections = [c.name for c in qdrant.get_collections().collections]
             if collection_name in collections:
-                logger.warning("[DELETE] _delete_qdrant_for_ds: ABOUT TO DELETE %s — traceback:\n%s", collection_name, "".join(traceback.format_stack()))
+                logger.warning("[DELETE] _delete_qdrant_for_ds: deleting collection %s", collection_name)
                 qdrant.delete_collection(collection_name)
                 logger.info("DeletionService: deleted Qdrant collection %s", collection_name)
         except Exception as e:

@@ -1,5 +1,6 @@
 from .graph_service import (
     build_graph_for_document,
+    close_llm_clients,
     delete_graph_for_document,
     delete_graph_for_kb,
     expand_docs_via_graph,
@@ -14,6 +15,7 @@ from .entity_extractor import (
 
 __all__ = [
     "build_graph_for_document",
+    "close_llm_clients",
     "delete_graph_for_document",
     "delete_graph_for_kb",
     "expand_docs_via_graph",

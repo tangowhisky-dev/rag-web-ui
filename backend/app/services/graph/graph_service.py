@@ -142,6 +142,33 @@ _global_extractor = None
 _global_writer = None
 
 
+async def close_llm_clients():
+    """Close the global extractor's httpx async clients and reset globals.
+
+    Call this before closing the event loop that ran graph extraction.
+    If left open, Python's GC tries to close the httpx AsyncClient after
+    the loop is already closed, producing "Event loop is closed" errors.
+    The next call to _get_extractor_and_writer() will recreate everything.
+    """
+    global _global_extractor, _global_writer
+    if _global_extractor is not None:
+        try:
+            llm = getattr(_global_extractor, "llm", None)
+            if llm is not None:
+                # Close sync client first (no event loop needed)
+                sync_client = getattr(llm, "client", None)
+                if sync_client and hasattr(sync_client, "close"):
+                    sync_client.close()
+                # Close async client on the current loop
+                async_client = getattr(llm, "async_client", None)
+                if async_client and hasattr(async_client, "close"):
+                    await async_client.close()
+        except Exception as e:
+            logger.debug("GraphService[llm]: error closing LLM clients: %s", e)
+    _global_extractor = None
+    _global_writer = None
+
+
 def _get_extractor_and_writer():
     """
     Build (once) the LLM entity-relation extractor and Neo4j writer as
@@ -224,6 +251,9 @@ def _get_extractor_and_writer():
         api_base = get_setting(_db, "GRAPHRAG_API_BASE", None) or get_setting(_db, "OPENAI_API_BASE", None)
     finally:
         _db.close()
+
+    if not api_key:
+        api_key = "not-required"
 
     llm = OpenAILLM(
         model_name=graph_model,
@@ -328,6 +358,7 @@ async def _extract_with_llm(
     kb_id: Optional[int] = None,
     data_store_id: Optional[int] = None,
     task_id: Optional[int] = None,
+    cancel_event=None,  # optional threading.Event — abort if set
 ) -> tuple[int, int]:
     """Run neo4j-graphrag LLM extraction on context-sized batches of chunks.
 
@@ -379,6 +410,13 @@ async def _extract_with_llm(
     async def _process_batch(
         batch_idx: int, combined_text: str, batch_point_ids: list[str]
     ) -> tuple[int, int]:
+        # Check cancellation before starting this batch.
+        if cancel_event is not None and cancel_event.is_set():
+            logger.info(
+                "GraphService[llm]: doc %d batch %d — cancelled, skipping",
+                document_id, batch_idx,
+            )
+            return 0, 0
         async with _batch_sem:
             last_exc = None
             for attempt in range(1, 4):  # up to 3 attempts
@@ -543,6 +581,7 @@ async def build_graph_for_document(
     db: Optional[Session] = None,
     org_id: Optional[int] = None,
     task_id: Optional[int] = None,
+    cancel_event=None,  # optional threading.Event — abort if set
 ) -> None:
     """
     Extract entity/relationship graph from document chunks and store in Neo4j.
@@ -619,6 +658,11 @@ async def build_graph_for_document(
 
     await loop.run_in_executor(None, _write_chunk_nodes)
 
+    # Check if cancelled before starting expensive LLM extraction.
+    if cancel_event is not None and cancel_event.is_set():
+        logger.info("GraphService[llm]: doc %d — cancelled before extraction", document_id)
+        return
+
     # Extract entities and relationships — throttled by semaphore so we don't
     # run all 20 documents' extraction simultaneously on one local LLM.
     # Lazily create semaphore inside the function so it is bound to the
@@ -637,6 +681,7 @@ async def build_graph_for_document(
             kb_id=kb_id,
             data_store_id=data_store_id,
             task_id=task_id,
+            cancel_event=cancel_event,
         )
 
     logger.info(

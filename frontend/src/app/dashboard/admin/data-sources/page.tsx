@@ -351,6 +351,20 @@ export default function DataSourcesPage() {
       // Start the scan
       await api.post(`/api/admin/datastores/${dsId}/scan`);
 
+      // Refresh datastores so polling effect detects the running scan
+      // even if SSE is buffered/broken.
+      fetchData();
+
+      // Clear triggering immediately — the button state is now driven by
+      // scanProgress and ds.last_scan_status, not by the triggering set.
+      // Keeping it locked until SSE cleanup makes the stop button unclickable
+      // if SSE is buffered/broken.
+      setTriggering((prev) => {
+        const next = new Set(prev);
+        next.delete(dsId);
+        return next;
+      });
+
       // Subscribe to SSE stream for real-time progress updates.
       const es = new EventSource(`/api/admin/datastores/${dsId}/scan-progress-stream`);
       scanEventSourceRef.current = es;
@@ -360,11 +374,6 @@ export default function DataSourcesPage() {
         if (scanEventSourceRef.current === es) {
           scanEventSourceRef.current = null;
         }
-        setTriggering((prev) => {
-          const next = new Set(prev);
-          next.delete(dsId);
-          return next;
-        });
       };
 
       es.onmessage = (event) => {
@@ -631,11 +640,12 @@ export default function DataSourcesPage() {
                         const pct = progress.total_files > 0
                           ? Math.min((progress.processed_files / Math.max(progress.total_files, 1)) * 100, 100)
                           : 0;
+                        const finalizing = pct >= 100 && progress.status === 'running';
                         return (
                           <div className="space-y-2">
                             <div className="flex items-center gap-2">
                               <LoadingDots size="sm" />
-                              <span className="text-xs text-blue-600">Processing...</span>
+                              <span className="text-xs text-blue-600">{finalizing ? 'Finalizing ingestion...' : 'Processing...'}</span>
                             </div>
                             <div className="w-full bg-gray-200 rounded-full h-2">
                               <div 
@@ -660,11 +670,12 @@ export default function DataSourcesPage() {
                         const pct = ds.last_scan_total_files > 0
                           ? Math.min((ds.last_scan_processed / Math.max(ds.last_scan_total_files, 1)) * 100, 100)
                           : 0;
+                        const finalizing = pct >= 100;
                         return (
                           <div className="space-y-2">
                             <div className="flex items-center gap-2">
                               <LoadingDots size="sm" />
-                              <span className="text-xs text-blue-600">Processing...</span>
+                              <span className="text-xs text-blue-600">{finalizing ? 'Finalizing ingestion...' : 'Processing...'}</span>
                             </div>
                             <div className="w-full bg-gray-200 rounded-full h-2">
                               <div 
@@ -805,7 +816,8 @@ export default function DataSourcesPage() {
                           variant="destructive"
                           size="sm"
                           onClick={() => openDelete(ds)}
-                          title="Delete data store"
+                          disabled={ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' || (scanProgress[ds.id]?.status !== 'completed' && scanProgress[ds.id] !== undefined)}
+                          title={ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' || (scanProgress[ds.id]?.status !== 'completed' && scanProgress[ds.id] !== undefined) ? 'Stop the scan before deleting' : 'Delete data store'}
                         >
                           Delete
                         </Button>

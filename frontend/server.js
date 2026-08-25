@@ -23,11 +23,55 @@ const BACKEND_PORT = parseInt(process.env.BACKEND_PORT || "8000", 10);
 
 // Matches /api/chat/<id>/messages  (id = any non-slash segment)
 const STREAMING_ROUTE = /^\/api\/chat\/[^/]+\/messages$/;
+// Matches /api/admin/datastores/<id>/scan-progress-stream (SSE GET)
+const SSE_ROUTE = /^\/api\/admin\/datastores\/[^/]+\/scan-progress-stream$/;
 
 app.prepare().then(() => {
   createServer((req, res) => {
     const parsedUrl = parse(req.url, true);
     const { pathname } = parsedUrl;
+
+    // SSE GET routes — proxy with streaming (Next.js rewrite buffers SSE)
+    if (req.method === "GET" && SSE_ROUTE.test(pathname)) {
+      const proxyReq = http.request(
+        {
+          hostname: BACKEND_HOST,
+          port: BACKEND_PORT,
+          path: pathname,
+          method: "GET",
+          headers: {
+            "Accept": req.headers["accept"] || "text/event-stream",
+            "Authorization": req.headers["authorization"] || "",
+            "Cookie": req.headers["cookie"] || "",
+          },
+        },
+        (proxyRes) => {
+          res.writeHead(proxyRes.statusCode, {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+          });
+
+          if (res.socket) res.socket.setNoDelay(true);
+
+          proxyRes.on("data", (chunk) => {
+            res.write(chunk);
+          });
+          proxyRes.on("end", () => res.end());
+          proxyRes.on("error", () => res.end());
+        },
+      );
+
+      proxyReq.on("error", (err) => {
+        console.error("[sse-proxy] backend error:", err.message);
+        if (!res.headersSent) res.writeHead(502);
+        res.end();
+      });
+
+      proxyReq.end();
+      return;
+    }
 
     if (req.method === "POST" && STREAMING_ROUTE.test(pathname)) {
       const chunks = [];

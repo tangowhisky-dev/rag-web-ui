@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from typing import Optional
+from typing import Dict, Optional, Set
 
 from sqlalchemy.orm import Session
 
@@ -31,6 +31,55 @@ logger = logging.getLogger(__name__)
 # to start a graph build for a task that's already in-flight, it's skipped.
 _active_graph_builds: set[int] = set()
 _active_graph_lock = threading.Lock()
+
+# Cancellation registry: task_id → threading.Event.
+# When a scan is cancelled, events are set for all in-flight graph builds
+# belonging to that datastore.  The graph build loop checks the event
+# between extraction batches and aborts if set.
+_graph_cancel_events: Dict[int, threading.Event] = {}
+# Reverse index: datastore_id → set of task_ids with in-flight graph builds.
+_graph_builds_by_datastore: Dict[int, Set[int]] = {}
+_graph_cancel_lock = threading.Lock()
+
+
+def cancel_graph_builds_for_datastore(datastore_id: int) -> int:
+    """Signal cancellation for all in-flight graph builds belonging to a datastore.
+
+    Also marks pending (not-yet-started) graph builds as failed in the DB so
+    the recovery service won't retry them.
+
+    Returns the number of builds cancelled.
+    """
+    cancelled = 0
+
+    # 1. Signal in-flight graph builds to stop via threading.Event.
+    with _graph_cancel_lock:
+        task_ids = list(_graph_builds_by_datastore.get(datastore_id, set()))
+    for task_id in task_ids:
+        event = _graph_cancel_events.get(task_id)
+        if event:
+            event.set()
+            cancelled += 1
+
+    # 2. Mark pending graph builds as failed in DB so recovery won't retry.
+    try:
+        db: Session = SessionLocal()
+        try:
+            tasks = db.query(ProcessingTask).filter(
+                ProcessingTask.data_store_id == datastore_id,
+                ProcessingTask.graph_status == "pending",
+            ).all()
+            for t in tasks:
+                t.graph_status = "failed"
+                t.graph_error = "Cancelled by admin"
+                cancelled += 1
+            db.commit()
+        finally:
+            db.close()
+    except Exception:
+        pass
+
+    return cancelled
 
 
 def run_ingestion_in_thread(
@@ -96,7 +145,10 @@ def run_ingestion_in_thread(
                           message=f"Ingestion failed: {e}")
         raise
     finally:
-        loop.close()
+        try:
+            loop.close()
+        except Exception:
+            pass
 
     # Fire graph build in a separate daemon thread with its own event loop.
     # This decouples graph extraction (slow, LLM-bound) from the ingestion
@@ -108,6 +160,17 @@ def run_ingestion_in_thread(
         # was marked failed by a timeout or concurrent operation.
         task_status = _get_task_status(task_id)
         if task_status == "completed":
+            # Check if the scan was cancelled while ingestion was running.
+            # If so, skip the graph build — the cancel function already marked
+            # pending graph builds as failed in the DB.
+            if graph_request.data_store_id is not None:
+                graph_status = _get_graph_status(task_id)
+                if graph_status == "failed":
+                    logger.info(
+                        "graph_build_skipped task_id=%s — scan cancelled",
+                        task_id,
+                    )
+                    return
             _start_graph_build_thread(graph_request)
         else:
             logger.warning(
@@ -122,6 +185,8 @@ def run_graph_build_in_thread(req: GraphBuildRequest) -> None:
     Updates ProcessingTask.graph_status to pending → completed/failed.
     Calls delete_graph_for_document first to ensure idempotency on retry.
     Skips if a graph build for the same task is already in-flight.
+    Aborts early if the task's graph_status was already set to "failed"
+    (e.g. cancelled by admin before the thread started).
     """
     # Deduplication guard: skip if another thread is already building this graph.
     with _active_graph_lock:
@@ -133,7 +198,24 @@ def run_graph_build_in_thread(req: GraphBuildRequest) -> None:
             return
         _active_graph_builds.add(req.task_id)
 
+    # Register cancellation event for this graph build.
+    cancel_event = threading.Event()
+    with _graph_cancel_lock:
+        _graph_cancel_events[req.task_id] = cancel_event
+        if req.data_store_id is not None:
+            _graph_builds_by_datastore.setdefault(req.data_store_id, set()).add(req.task_id)
+
     try:
+        # Check if the task was already cancelled (e.g. scan stopped while
+        # ingestion was finishing and the graph thread hadn't started yet).
+        existing_status = _get_graph_status(req.task_id)
+        if existing_status == "failed":
+            logger.info(
+                "graph_build_skipped task_id=%s — already cancelled",
+                req.task_id,
+            )
+            return
+
         _set_graph_status(req.task_id, "pending")
 
         loop = asyncio.new_event_loop()
@@ -152,6 +234,8 @@ def run_graph_build_in_thread(req: GraphBuildRequest) -> None:
                     data_store_id=req.data_store_id,
                 )
 
+                # Pass the cancel event so build_graph_for_document can check
+                # it between extraction batches and abort if the scan is stopped.
                 await build_graph_for_document(
                     kb_id=req.kb_id,
                     document_id=req.document_id,
@@ -160,9 +244,11 @@ def run_graph_build_in_thread(req: GraphBuildRequest) -> None:
                     chunk_ids=req.chunk_ids,
                     data_store_id=req.data_store_id,
                     task_id=req.task_id,
+                    cancel_event=cancel_event,
                 )
 
             loop.run_until_complete(_do())
+
             _set_graph_status(req.task_id, "completed", error=None)
             logger.info(
                 "graph_build_completed task_id=%s document_id=%s",
@@ -176,10 +262,32 @@ def run_graph_build_in_thread(req: GraphBuildRequest) -> None:
             )
             _set_graph_status(req.task_id, "failed", error=str(e)[:1000])
         finally:
-            loop.close()
+            try:
+                loop.close()
+            except Exception:
+                pass
     finally:
         with _active_graph_lock:
             _active_graph_builds.discard(req.task_id)
+        with _graph_cancel_lock:
+            _graph_cancel_events.pop(req.task_id, None)
+            if req.data_store_id is not None:
+                _graph_builds_by_datastore.get(req.data_store_id, set()).discard(req.task_id)
+
+
+def _get_graph_status(task_id: int) -> Optional[str]:
+    """Read the current graph_status for a task (best-effort)."""
+    try:
+        db: Session = SessionLocal()
+        try:
+            task = db.query(ProcessingTask).filter(
+                ProcessingTask.id == task_id
+            ).first()
+            return task.graph_status if task else None
+        finally:
+            db.close()
+    except Exception:
+        return None
 
 
 def _start_graph_build_thread(req: GraphBuildRequest) -> None:

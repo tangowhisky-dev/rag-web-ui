@@ -44,7 +44,7 @@ from app.services.ingestion.document_qdrant import (
 from app.services.infrastructure import get_qdrant_client
 
 from app.models.knowledge import ProcessingTask, Document, DocumentChunk, DocumentUpload, KnowledgeBase
-from app.models.datastore import DataStore
+from app.models.datastore import DataStore, OrganizationDataStore
 
 logger = logging.getLogger(__name__)
 
@@ -369,7 +369,9 @@ async def process_document_background(
                 # DataStore: use pre-computed values from watcher
                 doc_file_hash = file_hash if file_hash else None
                 doc_file_size = file_size if file_size else None
-                doc_content_type = content_type if content_type else None
+                doc_content_type = content_type if content_type else CONTENT_TYPE_MAP.get(
+                    os.path.splitext(file_name)[1].lower(), "application/octet-stream",
+                )
             else:
                 # KnowledgeBase: use task.upload values
                 doc_file_hash = file_hash if file_hash else task.document_upload.file_hash
@@ -472,8 +474,15 @@ async def process_document_background(
                     kb = db.query(KnowledgeBase).filter(KnowledgeBase.id == kb_id).first()
                     org_id_for_abbr = kb.org_id if kb else None
                 elif data_store_id:
-                    ds = db.query(DataStore).filter(DataStore.id == data_store_id).first()
-                    org_id_for_abbr = ds.org_id if ds else None
+                    link = (
+                        db.query(OrganizationDataStore)
+                        .filter(
+                            OrganizationDataStore.data_store_id == data_store_id,
+                            OrganizationDataStore.is_active == True,
+                        )
+                        .first()
+                    )
+                    org_id_for_abbr = link.org_id if link else None
 
                 abbr_lookup = build_lookup(db, org_id_for_abbr)
 

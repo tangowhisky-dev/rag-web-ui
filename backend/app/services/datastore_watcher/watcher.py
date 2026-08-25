@@ -546,7 +546,13 @@ class DataStoreWatcher:
         self._cleanup_stale_scans()
 
     def _cancel_scan(self, datastore_id: int) -> bool:
-        """Cancel a running scan on a datastore. Returns True if cancelled."""
+        """Cancel a running scan on a datastore. Returns True if cancelled.
+
+        Cancels:
+        - Prevents new files from being submitted (status → cancelled)
+        - Cancels all in-flight ingestion futures for this scan
+        - Cancels all pending and in-flight graph builds for this datastore
+        """
         db: Session = SessionLocal()
         try:
             ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
@@ -561,15 +567,34 @@ class DataStoreWatcher:
             # SSE endpoint may still be reading from _active_scans and needs
             # to find the cancelled entry to emit the final status event.
             # Stale scans are cleaned up in _init_scan before adding a new scan.
+            cancelled_scan_ids: list[int] = []
             with self._active_scans_lock:
                 for sid, info in self._active_scans.items():
                     if info["datastore_id"] == datastore_id:
                         info["status"] = "cancelled"
                         info["error_message"] = "Scan cancelled by admin"
                         info["_completed_at"] = time_module.time()
+                        cancelled_scan_ids.append(sid)
                         break
 
-            logger.info("[WATCHER] scan_cancelled datastore_id=%d", datastore_id)
+            # Cancel all in-flight ingestion futures for this datastore's scans.
+            cancelled_futures = 0
+            for scan_id in cancelled_scan_ids:
+                with self._scan_futures_lock:
+                    futures = self._scan_futures.get(scan_id, [])
+                    for f in futures:
+                        if not f.done():
+                            f.cancel()
+                            cancelled_futures += 1
+
+            # Cancel all pending and in-flight graph builds for this datastore.
+            from app.services.ingestion.ingestion_dispatcher import cancel_graph_builds_for_datastore
+            cancelled_graphs = cancel_graph_builds_for_datastore(datastore_id)
+
+            logger.info(
+                "[WATCHER] scan_cancelled datastore_id=%d futures=%d graph_builds=%d",
+                datastore_id, cancelled_futures, cancelled_graphs,
+            )
             return True
         finally:
             db.close()
@@ -706,8 +731,15 @@ class DataStoreWatcher:
                     )
                     if future is not None:
                         ingestion_futures.append(future)
+                        # Progress is incremented when the ingestion future
+                        # completes (via _on_scan_ingestion_done callback),
+                        # not when it's submitted. This gives the UI real-time
+                        # progress that reflects actual completion.
+                    else:
+                        # File was skipped (unsupported extension, duplicate,
+                        # or already ingested) — count it as processed now.
+                        self._update_scan_progress(datastore_id, 1)
 
-                    self._update_scan_progress(datastore_id, 1)
                     with self._active_scans_lock:
                         for sid, scan_info in self._active_scans.items():
                             if scan_info["datastore_id"] == datastore_id:
@@ -961,7 +993,7 @@ class DataStoreWatcher:
                 content_type=content_type,
             )
             future.add_done_callback(
-                lambda f: self._on_ingestion_done(f, task.id, event_path)
+                lambda f, ds=datastore_id: self._on_scan_ingestion_done(f, task.id, event_path, ds)
             )
 
             if scan_id > 0:
@@ -1056,7 +1088,7 @@ class DataStoreWatcher:
                 content_type=content_type,
             )
             future.add_done_callback(
-                lambda f: self._on_ingestion_done(f, task.id, event_path)
+                lambda f, ds=datastore_id: self._on_scan_ingestion_done(f, task.id, event_path, ds)
             )
 
             if scan_id > 0:
@@ -1293,3 +1325,19 @@ class DataStoreWatcher:
                 task_id,
                 event_path,
             )
+
+    def _on_scan_ingestion_done(
+        self, future, task_id: int, event_path: str, datastore_id: int,
+    ) -> None:
+        """Callback after scan-submitted ingestion completes.
+
+        Delegates to _on_ingestion_done for logging, then increments the
+        scan's processed counter so the UI progress reflects actual
+        completion rather than mere submission.
+        """
+        self._on_ingestion_done(future, task_id, event_path)
+        # Only increment progress if the scan is still running.
+        # If cancelled, _cancel_scan already set status to "cancelled" and
+        # we don't want to muddy the progress counter.
+        if not self._is_scan_cancelled(datastore_id):
+            self._update_scan_progress(datastore_id, 1)

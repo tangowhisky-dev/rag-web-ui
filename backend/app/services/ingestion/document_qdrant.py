@@ -129,30 +129,37 @@ async def _embed_texts_batch(
         base_url=api_base,
     )
 
-    # Slice into batches
-    batches = [texts[i : i + _EMBED_BATCH_SIZE]
-               for i in range(0, len(texts), _EMBED_BATCH_SIZE)]
-    total_batches = len(batches)
+    try:
+        # Slice into batches
+        batches = [texts[i : i + _EMBED_BATCH_SIZE]
+                   for i in range(0, len(texts), _EMBED_BATCH_SIZE)]
+        total_batches = len(batches)
 
-    sem = asyncio.Semaphore(_EMBED_CONCURRENCY)
-    done_count = 0
+        sem = asyncio.Semaphore(_EMBED_CONCURRENCY)
+        done_count = 0
 
-    async def _embed_one(batch_idx: int, batch: List[str]) -> List[List[float]]:
-        nonlocal done_count
-        async with sem:
-            response = await client.embeddings.create(input=batch, model=embed_model)
-        # Report progress outside the semaphore so slow batches don't block it
-        done_count += 1
-        if progress_cb is not None:
-            frac = done_count / total_batches
-            pct = int(progress_start + frac * (progress_end - progress_start))
-            done = min(batch_idx * _EMBED_BATCH_SIZE + len(batch), len(texts))
-            progress_cb(pct, f"Embedding chunks {done}/{len(texts)}…")
-        return [r.embedding for r in response.data]
+        async def _embed_one(batch_idx: int, batch: List[str]) -> List[List[float]]:
+            nonlocal done_count
+            async with sem:
+                response = await client.embeddings.create(input=batch, model=embed_model)
+            # Report progress outside the semaphore so slow batches don't block it
+            done_count += 1
+            if progress_cb is not None:
+                frac = done_count / total_batches
+                pct = int(progress_start + frac * (progress_end - progress_start))
+                done = min(batch_idx * _EMBED_BATCH_SIZE + len(batch), len(texts))
+                progress_cb(pct, f"Embedding chunks {done}/{len(texts)}…")
+            return [r.embedding for r in response.data]
 
-    results = await asyncio.gather(
-        *[_embed_one(i, b) for i, b in enumerate(batches)]
-    )
+        results = await asyncio.gather(
+            *[_embed_one(i, b) for i, b in enumerate(batches)]
+        )
+    finally:
+        # Close the AsyncOpenAI client before returning so httpx connection
+        # pool cleanup happens on the live event loop, not after loop close.
+        # Without this, GC triggers aclose() on a dead loop → "Event loop is closed".
+        await client.close()
+
     # Flatten in order
     all_embeddings: List[List[float]] = []
     for emb_list in results:
