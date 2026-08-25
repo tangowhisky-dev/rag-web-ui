@@ -163,6 +163,11 @@ class StartupRecoveryService:
                 ds.last_scan_processed = processed
             if status is not None:
                 ds.last_scan_status = status
+                # Set last_scan_at when recovery starts so the UI doesn't
+                # show "Completed never" — last_scan_at was null because
+                # recovery never set it (only manual scans did).
+                if status == "running" and ds.last_scan_at is None:
+                    ds.last_scan_at = datetime.now(timezone.utc)
             db.commit()
         except Exception as e:
             logger.warning("[RECOVERY] Failed to update scan fields: %s", e)
@@ -292,6 +297,7 @@ class StartupRecoveryService:
                     ds_record.last_recovered_at = recovered_at
                     ds_record.last_scan_processed = completed_count
                     ds_record.last_scan_status = "completed"
+                    ds_record.last_scan_at = recovered_at
                     db2.commit()
                     logger.info(
                         "[RECOVERY] recovery_timestamp_set datastore_id=%s last_recovered_at=%s",
