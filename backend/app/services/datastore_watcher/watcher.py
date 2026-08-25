@@ -1166,13 +1166,14 @@ class DataStoreWatcher:
             ):
                 assignment_map[a.data_store_id] = a.org_id
 
-            # Query all active datastores with auto-scan enabled
+            # Query all active datastores — register ALL of them with the
+            # handler so file events are resolved for every datastore.
+            # auto_process_enabled=True: interval in minutes (batch processing)
+            # auto_process_enabled=False: interval=-1 (track-only mode —
+            #   update file counts but don't ingest)
             datastores = (
                 db.query(DataStore)
-                .filter(
-                    DataStore.is_active == True,
-                    DataStore.auto_process_enabled == True,
-                )
+                .filter(DataStore.is_active == True)
                 .all()
             )
 
@@ -1181,7 +1182,10 @@ class DataStoreWatcher:
                 ds_id = ds.id
                 datastore_ids.add(ds_id)
                 org_id = assignment_map.get(ds_id)  # None for unassigned
-                interval = ds.auto_process_interval_minutes or 60
+                if ds.auto_process_enabled:
+                    interval = ds.auto_process_interval_minutes or 60
+                else:
+                    interval = -1  # track-only mode
                 self.add_datastore(
                     ds_id,
                     org_id,

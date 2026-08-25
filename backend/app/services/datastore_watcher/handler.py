@@ -504,16 +504,20 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
         def _delayed_dispatch(p, et):
             _time.sleep(1.0)
             try:
-                # Create a synthetic event with is_directory and event_type attributes
-                event = _SyntheticEvent(src_path=p, is_directory=False, event_type=et)
                 ds_id = self._resolve_datastore(p)
                 if ds_id is not None:
-                    self._queue_change(ds_id, event, et)
-                    # If auto_process is enabled (min_interval > 0), schedule a
-                    # batch timer instead of processing immediately. The
-                    # changes accumulate until the timer fires.
                     entry = self.folder_paths.get(ds_id)
                     min_interval = entry[2] if entry else 0
+
+                    # Track-only mode (min_interval == -1): manual-scan
+                    # datastores. Update file counts but don't ingest.
+                    if min_interval == -1:
+                        self._update_file_count(ds_id, p, et)
+                        return
+
+                    # Ingest mode: queue the change for processing
+                    event = _SyntheticEvent(src_path=p, is_directory=False, event_type=et)
+                    self._queue_change(ds_id, event, et)
                     if min_interval > 0:
                         self._schedule_batch_timer(ds_id)
                     else:
@@ -1233,6 +1237,57 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
     # ------------------------------------------------------------------
     # File count refresh
     # ------------------------------------------------------------------
+
+    def _update_file_count(self, datastore_id: int, file_path: str, event_type: str) -> None:
+        """Incrementally update last_scan_total_files for a track-only datastore.
+
+        Called when a file event fires for a manual-scan datastore. Instead of
+        ingesting the file, just adjusts the file count so the UI always shows
+        the current number of files in the folder.
+
+        Uses the same filtering as _handle_file: only counts files with
+        supported extensions and skips hidden/temp files.
+        """
+        from app.services.ingestion.document_converter import SUPPORTED_EXTENSIONS
+        fname = os.path.basename(file_path)
+        _, ext = os.path.splitext(fname)
+        ext = ext.lower()
+
+        # Same filtering as _handle_file — don't count unsupported/temp files
+        if ext not in SUPPORTED_EXTENSIONS:
+            return
+        if fname.startswith(".") or fname.startswith("~$") or fname.startswith(".~"):
+            return
+        if ext in (".tmp", ".swp", ".swo", ".bak", ".lock"):
+            return
+
+        delta = 0
+        if event_type in ("created", "moved"):
+            if os.path.exists(file_path):
+                delta = 1
+        elif event_type in ("deleted", "moved_from"):
+            delta = -1
+
+        if delta == 0:
+            return
+
+        db: Session = SessionLocal()
+        try:
+            from sqlalchemy import text
+            db.execute(
+                text("UPDATE data_stores SET last_scan_total_files = GREATEST(last_scan_total_files + :delta, 0) WHERE id = :ds_id"),
+                {"delta": delta, "ds_id": datastore_id},
+            )
+            db.commit()
+            logger.debug(
+                "[WATCHER] file_count_updated datastore_id=%d delta=%d event=%s",
+                datastore_id, delta, event_type,
+            )
+        except Exception as e:
+            logger.warning("[WATCHER] file_count_update_failed datastore_id=%d: %s", datastore_id, e)
+            db.rollback()
+        finally:
+            db.close()
 
     def _refresh_file_count(self, datastore_id: int) -> None:
         """Refresh last_scan_total_files from the filesystem."""
