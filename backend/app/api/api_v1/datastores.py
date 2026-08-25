@@ -615,6 +615,9 @@ def delete_datastore(
     """
     Delete a datastore and all its associated data.
 
+    Stops all in-flight ingestion and graph builds before deleting to
+    prevent race conditions with background Neo4j writes.
+
     Note: Actual files in the DataStore folder are NOT deleted from disk.
     Only database records (DataStore, Documents, Chunks, Vectors, Graph data) are removed.
     """
@@ -622,6 +625,34 @@ def delete_datastore(
     ds = _get_datastore_or_404(db, datastore_id)
     if not _datastore_in_scope(db, datastore_id, admin_org_ids):
         raise HTTPException(status_code=404, detail="DataStore not found")
+
+    # Stop all ingestion and graph builds before deleting.
+    # Neo4j graph builds run in background daemon threads and can outlive
+    # the scan that started them. Cancelling prevents writes to Neo4j
+    # while the deletion service is trying to clean up graph data.
+    try:
+        watcher = _get_watcher()
+        if watcher and watcher.is_running:
+            watcher._cancel_scan(datastore_id)
+            logger.info("[DATASTORE] stopped scan before delete id=%d", datastore_id)
+    except Exception:
+        logger.warning("[DATASTORE] failed to stop scan before delete id=%d", datastore_id)
+
+    try:
+        from app.services.ingestion.ingestion_dispatcher import cancel_graph_builds_for_datastore
+        cancelled_graphs = cancel_graph_builds_for_datastore(datastore_id)
+        if cancelled_graphs:
+            logger.info("[DATASTORE] cancelled %d graph builds before delete id=%d", cancelled_graphs, datastore_id)
+    except Exception:
+        logger.warning("[DATASTORE] failed to cancel graph builds before delete id=%d", datastore_id)
+
+    # Remove the datastore from the watcher so no new file events are processed
+    try:
+        watcher = _get_watcher()
+        if watcher and watcher.is_running:
+            watcher.remove_datastore(datastore_id)
+    except Exception:
+        pass
 
     from app.services.cleanup import delete_datastore as _delete_ds
     result, status = _delete_ds(db, datastore_id)

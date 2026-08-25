@@ -865,8 +865,7 @@ export default function DataSourcesPage() {
                           variant="destructive"
                           size="sm"
                           onClick={() => openDelete(ds)}
-                          disabled={ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' || (scanProgress[ds.id]?.status !== 'completed' && scanProgress[ds.id] !== undefined)}
-                          title={ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' || (scanProgress[ds.id]?.status !== 'completed' && scanProgress[ds.id] !== undefined) ? 'Stop processing before deleting' : 'Delete data store'}
+                          title="Delete data store"
                         >
                           Delete
                         </Button>
@@ -893,6 +892,7 @@ export default function DataSourcesPage() {
               Are you sure you want to permanently delete this data store? This action:
             </p>
             <ul className="list-disc pl-5 text-sm text-muted-foreground space-y-1">
+              <li>Stops all running ingestion and graph builds for this data store</li>
               <li>Removes the data store permanently (cannot be undone)</li>
               <li>Does NOT delete files from the folder</li>
               <li>Unassigns the data store from all organizations</li>
