@@ -1,10 +1,13 @@
 """
 POST /api/search — standalone KB search (Google-style).
+GET  /api/search/history — recent searches for the current user.
+POST /api/search/suggestions — LLM-generated query suggestions from history.
 
 Runs abbreviation expansion + 3-leg retrieval + merge/dedup + cross-encoder
 reranking, then returns ranked chunk results. No LLM rewrite, no generation,
 no chat session. Logs each search to search_history for auditing.
 """
+import json
 import time
 import logging
 from typing import Any, List, Optional
@@ -172,3 +175,113 @@ def search(
         total=len(results),
         latency_ms=latency_ms,
     )
+
+
+# ── Recent searches ──────────────────────────────────────────────────────────
+
+class SearchHistoryItem(BaseModel):
+    id: int
+    query: str
+    result_count: int
+    created_at: str
+
+
+@router.get("/history", response_model=List[SearchHistoryItem])
+def get_search_history(
+    *,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    limit: int = 10,
+) -> Any:
+    """Return recent searches for the current user, newest first."""
+    rows = (
+        db.query(SearchHistory)
+        .filter(SearchHistory.user_id == current_user.id)
+        .order_by(SearchHistory.created_at.desc())
+        .limit(min(limit, 50))
+        .all()
+    )
+    return [
+        SearchHistoryItem(
+            id=r.id,
+            query=r.query,
+            result_count=r.result_count,
+            created_at=r.created_at.isoformat() if r.created_at else "",
+        )
+        for r in rows
+    ]
+
+
+# ── LLM query suggestions ────────────────────────────────────────────────────
+
+class SuggestionResponse(BaseModel):
+    suggestions: List[str]
+
+
+@router.post("/suggestions", response_model=SuggestionResponse)
+async def get_suggestions(
+    *,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Any:
+    """Generate 3 query suggestions from the user's recent search history.
+
+    Uses the configured chat LLM with a concise system prompt. Falls back
+    to an empty list if no LLM is configured or the call fails.
+    """
+    # Fetch recent searches (up to 20 for context)
+    rows = (
+        db.query(SearchHistory)
+        .filter(SearchHistory.user_id == current_user.id)
+        .order_by(SearchHistory.created_at.desc())
+        .limit(20)
+        .all()
+    )
+    if not rows:
+        return SuggestionResponse(suggestions=[])
+
+    recent_queries = [r.query for r in rows]
+
+    # Resolve LLM config
+    model_name = get_setting(db, "QUERY_MODEL", None) or get_setting(db, "OPENAI_MODEL", None)
+    api_base = get_setting(db, "OPENAI_API_BASE", None)
+    api_key = get_setting(db, "OPENAI_API_KEY", None)
+    if not model_name or not api_base:
+        return SuggestionResponse(suggestions=[])
+
+    if not api_key:
+        api_key = "not-required"
+
+    system_prompt = (
+        "You are a search assistant. Given the user's recent search queries, "
+        "suggest 3 new queries they might want to search next. "
+        "Return ONLY a JSON array of 3 strings, no explanation."
+    )
+    user_prompt = "Recent searches:\n" + "\n".join(f"- {q}" for q in recent_queries[:15])
+
+    try:
+        from openai import AsyncOpenAI
+        client = AsyncOpenAI(api_key=api_key, base_url=api_base)
+        resp = await client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.7,
+            max_tokens=200,
+        )
+        content = resp.choices[0].message.content or ""
+        # Parse JSON array from response — handle markdown code fences
+        content = content.strip()
+        if content.startswith("```"):
+            content = content.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        suggestions = json.loads(content)
+        if isinstance(suggestions, list):
+            suggestions = [s.strip() for s in suggestions if isinstance(s, str)][:3]
+        else:
+            suggestions = []
+        return SuggestionResponse(suggestions=suggestions)
+    except Exception as exc:
+        logger.warning("[SEARCH] suggestion LLM call failed: %s", exc)
+        return SuggestionResponse(suggestions=[])
