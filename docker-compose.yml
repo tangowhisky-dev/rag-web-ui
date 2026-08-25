@@ -82,6 +82,9 @@ services:
           "-u",
           "$$MYSQL_USER",
           "--password=$$MYSQL_PASSWORD",
+          "--default-auth=caching_sha2_password",
+          "--ssl-mode=DISABLED",
+          "--get-server-public-key",
         ]
       interval: 5s
       timeout: 5s
@@ -116,9 +119,9 @@ services:
     networks:
       - app_network
     healthcheck:
-      test: ["CMD", "neo4j", "status"]
+      test: ["CMD", "wget", "-qO-", "http://localhost:7474"]
       interval: 10s
-      timeout: 10s
+      timeout: 5s
       retries: 10
       start_period: 30s
 
