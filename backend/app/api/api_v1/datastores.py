@@ -700,15 +700,15 @@ def assign_datastore_to_orgs(
                 detail="Empty org_ids would remove all assignments. "
                        "Set force_clear=true to confirm.",
             )
-        # Remove only assignments within the admin's scope
-        deleted = (
-            db.query(OrganizationDataStore)
-            .filter(
-                OrganizationDataStore.data_store_id == datastore_id,
-                OrganizationDataStore.org_id.in_(admin_org_ids or []),
-            )
-            .delete(synchronize_session=False)
+        # Remove only assignments within the admin's scope.
+        # super_admin (admin_org_ids=None) has access to all orgs,
+        # so don't filter by org_id in that case.
+        q = db.query(OrganizationDataStore).filter(
+            OrganizationDataStore.data_store_id == datastore_id,
         )
+        if admin_org_ids is not None:
+            q = q.filter(OrganizationDataStore.org_id.in_(admin_org_ids))
+        deleted = q.delete(synchronize_session=False)
         logger.info(
             "[DATASTORE] removed %d assignments in scope for id=%d",
             deleted, datastore_id,
