@@ -135,6 +135,7 @@ class DocumentChunk(Base, TimestampMixin):
 
     __table_args__ = (
         sa.Index('idx_kb_file_name', 'kb_id', 'file_name'),
+        sa.Index('idx_chunk_text_fts', 'chunk_text', mysql_prefix='FULLTEXT'),
     )
 # Event listener for conditional document deletion on KB deletion
 from sqlalchemy import event
