@@ -115,6 +115,8 @@ class DataStoreResponse(BaseModel):
     last_recovered_at: Optional[str] = None
     # Whether changes are currently being processed (event-driven ingestion)
     processing: bool = False
+    # Aggregated graph build status across all documents in this datastore
+    graph_summary: Optional[dict] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -290,6 +292,50 @@ def list_datastores(
             {"id": link.organisation.id, "name": link.organisation.name}
         )
 
+    # Batch-fetch graph status counts per datastore (avoids N+1)
+    from app.models.knowledge import ProcessingTask
+    from sqlalchemy import func, case
+    graph_counts: dict[int, dict[str, int]] = {}
+    if ds_ids:
+        rows = (
+            db.query(
+                ProcessingTask.data_store_id,
+                func.count().label("total"),
+                func.sum(case(
+                    (ProcessingTask.graph_status == "pending", 1), else_=0,
+                )).label("pending"),
+                func.sum(case(
+                    (ProcessingTask.graph_status == "completed", 1), else_=0,
+                )).label("completed"),
+                func.sum(case(
+                    (ProcessingTask.graph_status == "failed", 1), else_=0,
+                )).label("failed"),
+            )
+            .filter(ProcessingTask.data_store_id.in_(ds_ids))
+            .group_by(ProcessingTask.data_store_id)
+            .all()
+        )
+        for r in rows:
+            total = int(r.total or 0)
+            pending = int(r.pending or 0)
+            completed = int(r.completed or 0)
+            failed = int(r.failed or 0)
+            if pending > 0:
+                status = "running"
+            elif failed > 0 and completed < total:
+                status = "failed"
+            elif completed == total and total > 0:
+                status = "completed"
+            else:
+                status = "idle"
+            graph_counts[r.data_store_id] = {
+                "total": total,
+                "pending": pending,
+                "completed": completed,
+                "failed": failed,
+                "status": status,
+            }
+
     result = []
     for ds in datastores:
         resp = _serialize_ds(ds)
@@ -318,6 +364,7 @@ def list_datastores(
                     break
         except HTTPException:
             pass
+        resp["graph_summary"] = graph_counts.get(ds.id)
         result.append(DataStoreResponse(**resp))
     return DataStoreListResponse(items=result, total=total, skip=skip, limit=limit)
 
@@ -428,6 +475,42 @@ def get_datastore(
         {"id": link.organisation.id, "name": link.organisation.name}
         for link in links
     ]
+    # Graph summary for single datastore
+    from app.models.knowledge import ProcessingTask
+    from sqlalchemy import func, case
+    row = (
+        db.query(
+            func.count().label("total"),
+            func.sum(case(
+                (ProcessingTask.graph_status == "pending", 1), else_=0,
+            )).label("pending"),
+            func.sum(case(
+                (ProcessingTask.graph_status == "completed", 1), else_=0,
+            )).label("completed"),
+            func.sum(case(
+                (ProcessingTask.graph_status == "failed", 1), else_=0,
+            )).label("failed"),
+        )
+        .filter(ProcessingTask.data_store_id == ds.id)
+        .first()
+    )
+    if row and (row.total or 0) > 0:
+        total = int(row.total or 0)
+        pending = int(row.pending or 0)
+        completed = int(row.completed or 0)
+        failed = int(row.failed or 0)
+        if pending > 0:
+            status = "running"
+        elif failed > 0 and completed < total:
+            status = "failed"
+        elif completed == total and total > 0:
+            status = "completed"
+        else:
+            status = "idle"
+        resp["graph_summary"] = {
+            "total": total, "pending": pending,
+            "completed": completed, "failed": failed, "status": status,
+        }
     return DataStoreResponse(**resp)
 
 

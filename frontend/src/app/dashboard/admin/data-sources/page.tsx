@@ -25,6 +25,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { useToast } from '@/components/ui/use-toast';
 import { LoadingDots } from '@/components/ui/loading-dots';
+import { Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
 
 interface Org {
   id: number;
@@ -65,6 +66,14 @@ interface DataStore {
   pending_changes: number;
   // Whether changes are currently being processed (event-driven ingestion)
   processing: boolean;
+  // Aggregated graph build status across all documents
+  graph_summary?: {
+    total: number;
+    pending: number;
+    completed: number;
+    failed: number;
+    status: string; // "idle" | "running" | "completed" | "failed"
+  } | null;
 }
 
 interface ScanProgress {
@@ -175,7 +184,10 @@ export default function DataSourcesPage() {
     const hasRunningScan = datastores.some(
       (ds) => ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running'
     );
-    if (hasProcessing || hasRunningScan) {
+    const hasRunningGraph = datastores.some(
+      (ds) => ds.graph_summary?.status === 'running'
+    );
+    if (hasProcessing || hasRunningScan || hasRunningGraph) {
       // Poll every 2-5 seconds for event-driven processing and background scans
       pollingRef.current = setInterval(() => {
         fetchData();
@@ -721,6 +733,35 @@ export default function DataSourcesPage() {
                         </div>
                       );
                     })()}
+                    {ds.graph_summary && ds.graph_summary.total > 0 && (
+                      <div className="mt-2 flex items-center gap-1.5 text-xs">
+                        {ds.graph_summary.status === 'running' && (
+                          <>
+                            <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+                            <span className="text-muted-foreground">
+                              Graph {ds.graph_summary.completed}/{ds.graph_summary.total}
+                            </span>
+                          </>
+                        )}
+                        {ds.graph_summary.status === 'completed' && (
+                          <>
+                            <CheckCircle2 className="h-3 w-3 text-muted-foreground" />
+                            <span className="text-muted-foreground">
+                              Graph {ds.graph_summary.completed}/{ds.graph_summary.total}
+                            </span>
+                          </>
+                        )}
+                        {ds.graph_summary.status === 'failed' && (
+                          <>
+                            <AlertCircle className="h-3 w-3 text-amber-500" />
+                            <span className="text-muted-foreground">
+                              Graph {ds.graph_summary.completed}/{ds.graph_summary.total}
+                              {ds.graph_summary.failed > 0 && ` (${ds.graph_summary.failed} failed)`}
+                            </span>
+                          </>
+                        )}
+                      </div>
+                    )}
                   </TableCell>
                   <TableCell>
                     {(() => {
