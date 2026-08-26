@@ -254,7 +254,16 @@ async def _upsert_to_qdrant(
     """
     if not chunk_payloads:
         return
-    texts = [p[1] for p in chunk_payloads]
+    # Prepend document title to chunk text for embedding. The title enriches
+    # both dense and sparse vectors with document-level semantics without
+    # polluting the stored chunk_text. The stored payload keeps clean text.
+    texts = []
+    for _chunk_id, chunk_text, source_meta, _idx in chunk_payloads:
+        title = (source_meta or {}).get("title", "")
+        if title:
+            texts.append(f"{title}\n\n{chunk_text}")
+        else:
+            texts.append(chunk_text)
 
     # Run dense and sparse embeddings concurrently
     dense_embs, sparse_embs = await asyncio.gather(

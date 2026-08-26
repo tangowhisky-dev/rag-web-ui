@@ -63,7 +63,13 @@ def format_context_string(
         metadata = doc.get("metadata", {})
         content = metadata.get("original_text", doc.get("page_content", "")).strip()
         source = metadata.get("source", "")
-        header = f"[KB-{i}]" + (f" ({source})" if source else "")
+        title = metadata.get("title", "")
+        # Header shows title as primary identifier, filename in parentheses.
+        # Falls back to filename only when no title is available.
+        if title and title != source:
+            header = f"[KB-{i}] {title} ({source})"
+        else:
+            header = f"[KB-{i}]" + (f" ({source})" if source else "")
         parts.append(f"{header}\n{content}")
     if file_markdown:
         parts.append(f"[File Content]\n{file_markdown}")
@@ -246,6 +252,7 @@ async def resolve_retrieval_query(
     openai_api_key: str = "",
     openai_api_base: str = "",
     glossary: str = "",
+    retrieved_titles: list[str] | None = None,
 ) -> tuple[str, dict]:
     """Resolve *query* into a standalone retrieval string.
 
@@ -272,6 +279,7 @@ async def resolve_retrieval_query(
             openai_api_key=openai_api_key,
             openai_api_base=openai_api_base,
             glossary=glossary,
+            retrieved_titles=retrieved_titles,
         )
     except Exception as exc:  # network, timeout, provider error
         return query, {"resolved": False, "reason": f"resolver_failed: {exc}"}
@@ -341,6 +349,7 @@ async def _call_rewriter(
     openai_api_key: str,
     openai_api_base: str,
     glossary: str = "",
+    retrieved_titles: list[str] | None = None,
 ) -> str:
     """Single rewriter LLM call. Raises on provider failure."""
     system_msg = REWRITE_SYSTEM_PROMPT.format(memory_section="")
@@ -356,6 +365,9 @@ async def _call_rewriter(
     user_content = query
     if glossary:
         user_content += f"\n\n[Abbreviation Glossary]\n{glossary}"
+    if retrieved_titles:
+        titles_text = "\n".join(f"- {t}" for t in retrieved_titles)
+        user_content += f"\n\n[Retrieved Document Titles]\n{titles_text}"
     messages.append({"role": "user", "content": user_content})
 
     from openai import AsyncOpenAI as _AsyncOAI

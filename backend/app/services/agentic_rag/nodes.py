@@ -223,6 +223,22 @@ async def rewrite_query_node(
             if isinstance(doc, dict):
                 provenance_sources.append(str(doc.get("page_content", "")))
 
+        # Look up document titles from the last answer's citations so the
+        # rewriter can resolve references like "what about logistics?" using
+        # the titles of previously retrieved documents as provenance.
+        retrieved_titles: list[str] = []
+        if lao is not None and db is not None:
+            try:
+                from app.models.knowledge import Document
+                cited_doc_ids = {c.document_id for c in (getattr(lao, "citations", None) or [])}
+                if cited_doc_ids:
+                    docs = db.query(Document).filter(Document.id.in_(cited_doc_ids)).all()
+                    retrieved_titles = [d.title for d in docs if d.title]
+            except Exception:
+                pass
+        if retrieved_titles:
+            provenance_sources.extend(retrieved_titles)
+
         rewritten, provenance = await resolve_retrieval_query(
             query=resolver_input,
             original_query=query,
@@ -233,6 +249,7 @@ async def rewrite_query_node(
             openai_api_key=api_key,
             openai_api_base=api_base,
             glossary=glossary,
+            retrieved_titles=retrieved_titles,
         )
 
         if provenance.get("reason") == "provenance_rejected":

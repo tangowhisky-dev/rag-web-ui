@@ -31,6 +31,7 @@ interface KbItem {
 interface SearchResult {
   chunk_text: string;
   original_text: string | null;
+  title: string | null;
   file_name: string;
   document_id: number;
   kb_id: number | null;
@@ -79,6 +80,13 @@ function scoreTier(score: number): { label: string; className: string } {
   if (score >= 0.8) return { label: "high", className: "bg-success/15 text-success border-success/20" };
   if (score >= 0.5) return { label: "med", className: "bg-warning/15 text-warning border-warning/20" };
   return { label: "low", className: "bg-muted text-muted-foreground border-border" };
+}
+
+// Clean a filename into a title-like string for comparison, so we don't
+// show a redundant filename line when the title is just the cleaned name.
+function cleanFilename(name: string): string {
+  const stem = name.replace(/\.[^.]+$/, "").replace(/[_-]/g, " ").replace(/\./g, " ");
+  return stem.replace(/\s+/g, " ").trim();
 }
 
 // Bold query terms in markdown source so they render emphasized within
@@ -427,6 +435,8 @@ export default function SearchPage() {
                 : result.data_store_id
                   ? `DS #${result.data_store_id}`
                   : null;
+              const displayTitle = result.title || result.file_name;
+              const showFilename = result.title && result.title !== cleanFilename(result.file_name);
               return (
                 <a
                   key={`${result.document_id}-${result.chunk_index}-${i}`}
@@ -438,9 +448,16 @@ export default function SearchPage() {
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex items-center gap-2 min-w-0">
                       <Icon className="h-4 w-4 text-muted-foreground shrink-0" />
-                      <span className="text-sm font-medium text-foreground truncate group-hover:text-primary transition-colors">
-                        {result.file_name}
-                      </span>
+                      <div className="min-w-0">
+                        <span className="text-sm font-medium text-foreground truncate block group-hover:text-primary transition-colors">
+                          {displayTitle}
+                        </span>
+                        {showFilename && (
+                          <span className="text-xs text-muted-foreground/70 truncate block">
+                            {result.file_name}
+                          </span>
+                        )}
+                      </div>
                     </div>
                     <span className={cn(
                       "shrink-0 rounded-full border px-2 py-0.5 text-xs font-medium tabular-nums",

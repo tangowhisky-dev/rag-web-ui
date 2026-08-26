@@ -95,7 +95,17 @@ def rerank(
 
     encoder = _get_cross_encoder()
 
-    passages = [doc.page_content for doc in docs]
+    # Prepend document title to each passage so the cross-encoder gets
+    # document-level context. A chunk about "withdrawal procedures" from
+    # "Tactical Operations Doctrine" scores higher for a "tactical doctrine"
+    # query when the title is visible to the reranker.
+    passages = []
+    for doc in docs:
+        title = (doc.metadata or {}).get("title", "")
+        if title:
+            passages.append(f"{title}\n\n{doc.page_content}")
+        else:
+            passages.append(doc.page_content)
     scores: List[float] = list(encoder.rerank(query, passages))
 
     scored = sorted(zip(scores, docs), key=lambda x: x[0], reverse=True)

@@ -561,6 +561,101 @@ def _get_engine() -> MarkdownEngine:
         return _engine_instance
 
 
+# ── Title extraction ────────────────────────────────────────────────────────
+
+import re as _re
+
+_H1_RE = _re.compile(r"^#\s+(.+?)\s*$", _re.MULTILINE)
+_PDF_TITLE_EXTS = {".pdf"}
+
+
+def _clean_filename_to_title(file_name: str) -> str:
+    """Last-resort title: strip extension, replace separators with spaces."""
+    stem = os.path.splitext(file_name)[0]
+    stem = stem.replace("_", " ").replace("-", " ").replace(".", " ")
+    stem = _re.sub(r"\s+", " ", stem).strip()
+    return stem[:512] if stem else file_name
+
+
+def _extract_title_from_markdown(markdown_text: str) -> str | None:
+    """Extract title from the first H1 heading in markdown.
+
+    Falls back to the first non-empty line if it looks like a title
+    (short, no terminal punctuation, not a list/table element).
+    """
+    # 1. First H1 heading
+    m = _H1_RE.search(markdown_text)
+    if m:
+        title = m.group(1).strip()
+        # Strip markdown formatting from the title
+        title = _re.sub(r"\*+|_+|`+", "", title).strip()
+        if title and len(title) <= 512:
+            return title
+
+    # 2. First non-empty line that looks like a title
+    for line in markdown_text.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        # Skip list items, table rows, code fences, blockquotes
+        if line.startswith(("-", "*", "+", "|", ">", "```", "#")):
+            continue
+        # Skip lines that are only punctuation/numbers
+        if _re.match(r"^[\d\W]+$", line):
+            continue
+        # Must be reasonably short and not end with sentence punctuation
+        if len(line) > 200:
+            continue
+        if line.endswith((".", ";", ",", ":", "!", "?")):
+            continue
+        # Strip markdown formatting
+        clean = _re.sub(r"\*+|_+|`+", "", line).strip()
+        if clean:
+            return clean[:512]
+    return None
+
+
+def _extract_pdf_metadata_title(abs_path: str) -> str | None:
+    """Extract title from PDF metadata (Title field in document info)."""
+    try:
+        import pymupdf
+        with pymupdf.open(abs_path) as doc:
+            metadata = doc.metadata or {}
+            title = (metadata.get("title") or "").strip()
+            if title and title.lower() != "untitled":
+                return title[:512]
+    except Exception:
+        pass
+    return None
+
+
+def extract_title(markdown_text: str, file_name: str, abs_path: str | None = None) -> str:
+    """Extract a document title using a priority cascade.
+
+    1. PDF metadata Title field (if abs_path is a PDF)
+    2. First H1 heading in the markdown
+    3. First non-empty line that looks like a title
+    4. Cleaned filename as last resort
+
+    Always returns a non-empty string.
+    """
+    # 1. PDF metadata
+    if abs_path:
+        ext = os.path.splitext(abs_path)[1].lower()
+        if ext in _PDF_TITLE_EXTS:
+            pdf_title = _extract_pdf_metadata_title(abs_path)
+            if pdf_title:
+                return pdf_title
+
+    # 2 + 3. Markdown content
+    md_title = _extract_title_from_markdown(markdown_text)
+    if md_title:
+        return md_title
+
+    # 4. Cleaned filename
+    return _clean_filename_to_title(file_name)
+
+
 def _convert_to_markdown(abs_path: str, file_name: str, enable_ocr: Optional[bool] = None) -> str:
     """Convert any supported file to clean Markdown text.
 

@@ -22,6 +22,7 @@ class KnowledgeBaseUpdate(KnowledgeBaseBase):
 
 class DocumentBase(BaseModel):
     file_name: str
+    title: Optional[str] = None
     file_path: str
     file_hash: str
     file_size: int

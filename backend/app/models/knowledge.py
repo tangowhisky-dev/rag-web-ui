@@ -51,6 +51,7 @@ class Document(Base, TimestampMixin):
     id = Column(Integer, primary_key=True, index=True)
     file_path = Column(String(767), nullable=False)  # Path in local storage
     file_name = Column(String(512), nullable=False)  # Actual file name
+    title = Column(String(512), nullable=True)  # Extracted document title (PDF metadata, first H1, or cleaned filename)
     file_size = Column(BigInteger, nullable=False)  # File size in bytes
     content_type = Column(String(100), nullable=False)  # MIME type
     file_hash = Column(String(64), index=True)  # SHA-256 hash of file content

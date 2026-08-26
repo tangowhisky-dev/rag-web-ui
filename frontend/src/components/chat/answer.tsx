@@ -89,6 +89,7 @@ interface KnowledgeBaseInfo {
 
 interface DocumentInfo {
   file_name: string;
+  title?: string | null;
   knowledge_base: KnowledgeBaseInfo;
 }
 
@@ -101,6 +102,7 @@ interface CitationInfo {
 // Used for data store documents that don't have a kb_id.
 interface GenericDocInfo {
   file_name: string;
+  title?: string | null;
   parent_name: string | null;
 }
 
@@ -334,6 +336,7 @@ export const Answer: FC<{
                 knowledge_base: { name: kb.name },
                 document: {
                   file_name: doc.file_name,
+                  title: doc.title,
                   knowledge_base: { name: kb.name },
                 },
               } as CitationInfo,
@@ -354,6 +357,7 @@ export const Answer: FC<{
               key,
               info: {
                 file_name: doc.file_name,
+                title: doc.title,
                 parent_name: doc.parent_name,
               } as GenericDocInfo,
             };
@@ -418,8 +422,11 @@ export const Answer: FC<{
         : null;
 
       // Resolve display fields: prefer KB citationInfo, fall back to genericInfo
+      const displayTitle = citationInfo?.document.title ?? genericInfo?.title ?? null;
       const displayFileName = citationInfo?.document.file_name ?? genericInfo?.file_name;
       const displayParentName = citationInfo?.knowledge_base.name ?? genericInfo?.parent_name ?? "Unknown";
+      const showFilenameInCitation = displayTitle && displayFileName &&
+        displayTitle !== displayFileName.replace(/\.[^.]+$/, "").replace(/[_-]/g, " ").replace(/\s+/g, " ").trim();
       // Build download URL: KB docs use kb_id path, data store docs use generic path
       const downloadUrl = effectiveKbId && effectiveDocId
         ? `/api/knowledge-base/${effectiveKbId}/documents/${effectiveDocId}/download`
@@ -445,12 +452,12 @@ export const Answer: FC<{
             className="max-w-2xl w-[calc(100vw-100px)] p-0 rounded-lg shadow-lg overflow-hidden"
           >
             <div className="text-sm space-y-3 max-h-[min(70vh,520px)] overflow-y-auto p-4" style={{ scrollbarGutter: "stable" }}>
-              {displayFileName && (
+              {(displayTitle || displayFileName) && (
                 <div className="flex items-center gap-2 text-xs font-medium text-foreground bg-muted p-2 rounded">
                   <div className="w-5 h-5 flex items-center justify-center shrink-0">
                     <FileIcon
                       extension={
-                        displayFileName.split(".").pop() || ""
+                        displayFileName?.split(".").pop() || ""
                       }
                       color="#E2E8F0"
                       labelColor="#94A3B8"
@@ -464,13 +471,21 @@ export const Answer: FC<{
                       className="truncate hover:underline text-primary"
                       title={`Open ${displayFileName}`}
                     >
-                      {displayParentName} /{" "}
-                      {displayFileName}
+                      <span className="font-medium">{displayParentName}</span>
+                      {" / "}
+                      <span className="font-medium">{displayTitle || displayFileName}</span>
+                      {showFilenameInCitation && (
+                        <span className="text-muted-foreground/70"> ({displayFileName})</span>
+                      )}
                     </a>
                   ) : (
                     <span className="truncate">
-                      {displayParentName} /{" "}
-                      {displayFileName}
+                      <span className="font-medium">{displayParentName}</span>
+                      {" / "}
+                      <span className="font-medium">{displayTitle || displayFileName}</span>
+                      {showFilenameInCitation && (
+                        <span className="text-muted-foreground/70"> ({displayFileName})</span>
+                      )}
                     </span>
                   )}
                 </div>

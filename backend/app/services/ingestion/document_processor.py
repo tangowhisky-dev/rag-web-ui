@@ -29,6 +29,7 @@ from app.services.ingestion.document_converter import (
     SUPPORTED_EXTENSIONS,
     CONTENT_TYPE_MAP,
     _convert_to_markdown,
+    extract_title,
 )
 from app.services.ingestion.document_qdrant import (
     _get_qdrant_collection_name,
@@ -310,6 +311,10 @@ async def process_document_background(
                     f"Document produced no extractable text. "
                     f"The file may be empty, password-protected, or in an unreadable format."
                 )
+
+            # ── Step 1b: Extract document title ───────────────────────────────
+            doc_title = extract_title(markdown_text, file_name, abs_path=local_temp_path)
+            logger.info(f"Task {task_id}: Extracted title: {doc_title!r}")
     
             # ── Step 2: Chunk ────────────────────────────────────────────────────
             _set_progress(20, "Splitting into chunks…")
@@ -396,6 +401,7 @@ async def process_document_background(
                     document.content_type = doc_content_type
                     document.data_store_id = data_store_id
                     document.knowledge_base_id = kb_id if kb_id else None
+                    document.title = doc_title
                     try:
                         document.modified_at = datetime.fromtimestamp(os.stat(doc_file_path).st_mtime, tz=timezone.utc)
                     except (OSError, TypeError):
@@ -412,6 +418,7 @@ async def process_document_background(
                     mtime = datetime.now(timezone.utc)
                 document = Document(
                     file_name=file_name,
+                    title=doc_title,
                     file_path=doc_file_path,
                     file_hash=doc_file_hash,
                     file_size=doc_file_size,
@@ -508,6 +515,8 @@ async def process_document_background(
                         k: v for k, v in chunk.metadata.items()
                         if k not in ("kb_id", "document_id", "chunk_id", "file_name")
                     }
+                    if doc_title:
+                        source_metadata["title"] = doc_title
                     if not abbr_lookup.is_empty and expanded_text != original_text:
                         source_metadata["original_text"] = original_text
                     db_chunks.append(DocumentChunk(

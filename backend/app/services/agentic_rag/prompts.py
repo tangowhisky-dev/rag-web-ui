@@ -48,6 +48,9 @@ return it EXACTLY as-is. Do not rephrase, do not expand, do not add terms.
 in the query. You may replace abbreviations with their expanded forms when doing so \
 improves retrieval clarity, but do not add terms beyond what the glossary provides. \
 Do NOT remove or strip the [Abbreviation Glossary] section from your output — pass it through unchanged.
+10. If a [Retrieved Document Titles] section is provided, use the titles solely to resolve \
+references to previously discussed documents (e.g. 'that manual' → the specific title). \
+Do NOT add document titles to the query unless the user's message explicitly refers to them.
 {memory_section}
 
 Examples:

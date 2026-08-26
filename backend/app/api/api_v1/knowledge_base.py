@@ -272,6 +272,7 @@ async def get_document_by_id(
     return {
         "id": document.id,
         "file_name": document.file_name,
+        "title": document.title,
         "file_path": document.file_path,
         "file_size": document.file_size,
         "content_type": document.content_type,

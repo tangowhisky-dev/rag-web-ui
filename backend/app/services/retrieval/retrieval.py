@@ -347,34 +347,42 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
     if not query.strip():
         return {}
 
-    # Query KB documents (direct uploads) — JOIN documents for modified_at
+    # Query KB documents — JOIN documents for modified_at and title.
+    # Title matches get 2x weight: a chunk from a document whose title
+    # matches the query is more relevant than one matching only in body.
     kb_sql = text(
         """
         SELECT dc.chunk_text, dc.chunk_metadata, dc.kb_id, dc.document_id, dc.chunk_index,
-               dc.file_name,
+               dc.file_name, d.title,
                COALESCE(d.modified_at, d.created_at) AS modified_at,
-               MATCH(dc.chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE) AS fts_score
+               (MATCH(dc.chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE)
+                + COALESCE(MATCH(d.title) AGAINST(:query IN NATURAL LANGUAGE MODE), 0) * 2.0
+               ) AS fts_score
         FROM   document_chunks dc
         JOIN   documents d ON dc.document_id = d.id
         WHERE  dc.kb_id IN :kb_ids
           AND  dc.data_store_id IS NULL
-          AND  MATCH(dc.chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE) > 0
+          AND  (MATCH(dc.chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE) > 0
+                OR MATCH(d.title) AGAINST(:query IN NATURAL LANGUAGE MODE) > 0)
         ORDER  BY fts_score DESC
         LIMIT  :candidates
         """
     ).bindparams(bindparam("kb_ids", expanding=True))
 
-    # Query DataStore documents — JOIN documents for modified_at
+    # Query DataStore documents — same title-weighted scoring
     ds_sql = text(
         """
         SELECT dc.chunk_text, dc.chunk_metadata, dc.kb_id, dc.document_id, dc.chunk_index,
-               dc.file_name,
+               dc.file_name, d.title,
                COALESCE(d.modified_at, d.created_at) AS modified_at,
-               MATCH(dc.chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE) AS fts_score
+               (MATCH(dc.chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE)
+                + COALESCE(MATCH(d.title) AGAINST(:query IN NATURAL LANGUAGE MODE), 0) * 2.0
+               ) AS fts_score
         FROM   document_chunks dc
         JOIN   documents d ON dc.document_id = d.id
         WHERE  dc.data_store_id IN :ds_ids
-          AND  MATCH(dc.chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE) > 0
+          AND  (MATCH(dc.chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE) > 0
+                OR MATCH(d.title) AGAINST(:query IN NATURAL LANGUAGE MODE) > 0)
         ORDER  BY fts_score DESC
         LIMIT  :candidates
         """
@@ -456,6 +464,9 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
             # (search endpoint, citations) can display the source filename.
             if "file_name" not in meta and hasattr(row, "file_name") and row.file_name:
                 meta["file_name"] = row.file_name
+            # title comes from the documents JOIN, not chunk_metadata.
+            if "title" not in meta and hasattr(row, "title") and row.title:
+                meta["title"] = row.title
             # Store modified_at from the JOIN for recency-aware dedup.
             if hasattr(row, "modified_at") and row.modified_at:
                 meta["_modified_at"] = row.modified_at.isoformat() if hasattr(row.modified_at, "isoformat") else str(row.modified_at)
