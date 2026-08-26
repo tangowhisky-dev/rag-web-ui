@@ -121,7 +121,7 @@ export default function DashboardPage() {
                 <Search className="h-6 w-6 text-muted-foreground" />
               </div>
               <div>
-                <h3 className="text-lg font-semibold">KB Search</h3>
+                <h3 className="text-lg font-semibold">Search</h3>
                 <p className="text-muted-foreground mt-1 text-sm">Search files directly</p>
               </div>
             </div>

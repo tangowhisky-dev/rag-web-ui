@@ -573,6 +573,7 @@ def _get_engine() -> MarkdownEngine:
 import re as _re
 
 _H1_RE = _re.compile(r"^#\s+(.+?)\s*$", _re.MULTILINE)
+_H2_RE = _re.compile(r"^##\s+(.+?)\s*$", _re.MULTILINE)
 _PDF_TITLE_EXTS = {".pdf"}
 _DOCX_TITLE_EXTS = {".docx", ".docm"}
 _HTML_TITLE_EXTS = {".html", ".htm", ".xhtml"}
@@ -591,6 +592,37 @@ _BOILERPLATE_RE = _re.compile(
     r"|^\s*\d+\s*$"                               # just a number
     r"|untitle[d]?"
     r"|^\s*$"
+    # Web page navigation / UI elements (common in web-to-PDF and saved pages)
+    r"|sign\s*in"
+    r"|log\s*in"
+    r"|log\s*out"
+    r"|sign\s*up"
+    r"|sign\s*out"
+    r"|register"
+    r"|subscribe"
+    r"|unsubscribe"
+    r"|search"
+    r"|menu"
+    r"|write\b"
+    r"|read\b"
+    r"|share"
+    r"|save\b"
+    r"|print"
+    r"|download"
+    r"|skip\s+to\s+(main\s+)?content"
+    r"|skip\s+navigation"
+    r"|home\b"
+    r"|about\s+us"
+    r"|contact\s+us"
+    r"|all\s+rights\s+reserved"
+    r"|privacy\s+policy"
+    r"|terms\s+of\s+(service|use)"
+    r"|cookie\s+(policy|preferences)"
+    # Document converter watermarks
+    r"|translated\s+from\b"
+    r"|converted\s+from\b"
+    r"|created\s+with\b"
+    r"|generated\s+by\b"
     r")",
     _re.IGNORECASE,
 )
@@ -621,11 +653,12 @@ def _clean_title(title: str) -> str:
     return title.strip()[:512]
 
 
-def _extract_title_from_markdown(markdown_text: str) -> str | None:
-    """Extract title from the first H1 heading in markdown.
+def _extract_title_from_markdown_headings(markdown_text: str) -> str | None:
+    """Extract title from the first H1 or H2 heading in markdown.
 
-    Falls back to the first non-empty line if it looks like a title
-    (short, no terminal punctuation, not a list/table element, not boilerplate).
+    This is a strong signal — explicit headings are reliable title indicators.
+    Used for PDFs where the font heuristic failed (OCR'd text is noisy and
+    the first-line fallback would pick up random words).
     """
     # 1. First H1 heading (skip boilerplate H1s, try next)
     for m in _H1_RE.finditer(markdown_text):
@@ -633,27 +666,54 @@ def _extract_title_from_markdown(markdown_text: str) -> str | None:
         if title and len(title) <= 512 and not _is_boilerplate(title):
             return title
 
-    # 2. First non-empty line that looks like a title
+    # 2. First H2 heading (some converters use H2 for the document title)
+    for m in _H2_RE.finditer(markdown_text):
+        title = _clean_title(m.group(1))
+        if title and len(title) <= 512 and not _is_boilerplate(title):
+            return title
+    return None
+
+
+def _extract_title_from_markdown(markdown_text: str) -> str | None:
+    """Extract title from markdown using a heading-first, then first-line cascade.
+
+    Priority:
+    1. First H1 heading (skip boilerplate H1s, try next)
+    2. First H2 heading (many converters emit H2 for document titles)
+    3. First non-empty line that looks like a title
+       (short, no terminal punctuation, not a list/table element, not boilerplate)
+    """
+    # Try headings first
+    heading_title = _extract_title_from_markdown_headings(markdown_text)
+    if heading_title:
+        return heading_title
+
+    # 3. First non-empty line that looks like a title
     for line in markdown_text.split("\n"):
         line = line.strip()
         if not line:
             continue
-        # Skip list items, table rows, code fences, blockquotes, headings
-        if line.startswith(("-", "*", "+", "|", ">", "```", "#")):
+        # Strip markdown formatting BEFORE skip checks so that **bold** titles
+        # and _italic_ titles are not skipped just because they start with * or _
+        stripped = _re.sub(r"^[*`>]+|[*`_]+$", "", line).strip()
+        if not stripped:
+            continue
+        # Skip list items, table rows, code fences, headings
+        if line.startswith(("- ", "* ", "+ ", "|", "```", "#")):
             continue
         # Skip lines that are only punctuation/numbers
-        if _re.match(r"^[\d\W]+$", line):
+        if _re.match(r"^[\d\W]+$", stripped):
             continue
         # Skip boilerplate (page numbers, dates, "Confidential", etc.)
-        if _is_boilerplate(line):
+        if _is_boilerplate(stripped):
             continue
         # Must be reasonably short and not end with sentence punctuation
-        if len(line) > 200:
+        if len(stripped) > 200:
             continue
-        if line.endswith((".", ";", ",", ":", "!", "?")):
+        if stripped.endswith((".", ";", ",", ":", "!", "?")):
             continue
         # Strip markdown formatting
-        clean = _clean_title(line)
+        clean = _clean_title(stripped)
         if clean and not _is_boilerplate(clean):
             return clean
     return None
@@ -750,19 +810,57 @@ def _extract_pdf_font_title(abs_path: str) -> str | None:
             if not title_candidates:
                 return None
 
-            # The title is typically the first (topmost) line with the largest font.
-            # If multiple lines share the max size, join the first 1-2 consecutive ones.
-            best = title_candidates[0][1]
+            # Detect repeated text: if the largest-font line appears 2+ times,
+            # it's likely a navigation header or running element, not a title.
+            # Return None so the cascade falls through to TOC/metadata, which
+            # are more reliable for web-to-PDF conversions with repeated nav.
+            from collections import Counter
+            candidate_texts = [t for _, t in title_candidates]
+            text_counts = Counter(candidate_texts)
+            non_repeated = [
+                (s, t) for s, t in title_candidates
+                if text_counts[t] == 1
+            ]
+
+            if not non_repeated:
+                # All largest-font lines are repeated (navigation headers).
+                # The font heuristic is unreliable for this page layout.
+                return None
+
+            # Use the first non-repeated candidate
+            best = non_repeated[0][1]
+
             # If the first candidate is very short (< 10 chars) and there's a second
             # one right after, join them (subtitle pattern).
-            if len(best) < 10 and len(title_candidates) > 1:
-                best = f"{best} {title_candidates[1][1]}"
+            if len(best) < 10 and len(non_repeated) > 1:
+                best = f"{best} {non_repeated[1][1]}"
 
             if best and not _is_boilerplate(best):
                 return _clean_title(best)
     except Exception:
         pass
     return None
+
+
+def _pdf_page1_has_text(abs_path: str) -> bool:
+    """Check if PDF page 1 has any extractable text (not image-only)."""
+    try:
+        import pymupdf
+        with pymupdf.open(abs_path) as doc:
+            if doc.page_count == 0:
+                return False
+            page = doc[0]
+            blocks = page.get_text("dict", flags=pymupdf.TEXTFLAGS_TEXT).get("blocks", [])
+            for block in blocks:
+                if block.get("type", 0) != 0:
+                    continue
+                for line in block.get("lines", []):
+                    for span in line.get("spans", []):
+                        if span.get("text", "").strip():
+                            return True
+            return False
+    except Exception:
+        return False
 
 
 def _extract_pdf_toc_title(abs_path: str) -> str | None:
@@ -839,13 +937,15 @@ def extract_title(markdown_text: str, file_name: str, abs_path: str | None = Non
     3. PDF metadata Title field (filtered for bogus patterns)
     4. DOCX core properties title
     5. HTML <title> or og:title tag
-    6. First H1 heading in the converted markdown
+    6. First H1 or H2 heading in the converted markdown
     7. First non-empty line that looks like a title (not boilerplate)
+       — skipped for PDFs where font/TOC/metadata all failed (noisy OCR text)
     8. Cleaned filename as last resort
 
     Always returns a non-empty string. All signals are validated against
-    boilerplate patterns (page numbers, dates, "Confidential", "DRAFT", etc.)
-    and cleaned of markdown formatting and trailing page numbers.
+    boilerplate patterns (page numbers, dates, "Confidential", "DRAFT",
+    web navigation, converter watermarks, etc.) and cleaned of markdown
+    formatting and trailing page numbers.
     """
     ext = os.path.splitext(abs_path or file_name)[1].lower() if abs_path else ""
 
@@ -882,10 +982,21 @@ def extract_title(markdown_text: str, file_name: str, abs_path: str | None = Non
         if html_title:
             return html_title
 
-    # 6 + 7. Markdown content (H1 heading or first title-like line)
-    md_title = _extract_title_from_markdown(markdown_text)
-    if md_title:
-        return md_title
+    # 6 + 7. Markdown content (H1/H2 heading or first title-like line)
+    # For PDFs where font/TOC/metadata all failed:
+    #   - If page 1 has text: try markdown headings only (strong signal)
+    #   - If page 1 is image-only: skip markdown entirely (OCR text from
+    #     later pages is too noisy — section headings like "Team" are not
+    #     document titles). Fall through to filename.
+    if ext in _PDF_TITLE_EXTS:
+        if _pdf_page1_has_text(abs_path):
+            md_heading = _extract_title_from_markdown_headings(markdown_text)
+            if md_heading:
+                return md_heading
+    else:
+        md_title = _extract_title_from_markdown(markdown_text)
+        if md_title:
+            return md_title
 
     # 8. Cleaned filename
     return _clean_filename_to_title(file_name)

@@ -230,52 +230,46 @@ export default function SearchPage() {
 
   return (
     <DashboardLayout pageTitle="Search">
-      <div className="max-w-5xl mx-auto">
-        {/* Search bar */}
+      <div className="max-w-3xl mx-auto">
+        {/* Search bar — single input, Enter to submit */}
         <form
           onSubmit={(e) => { e.preventDefault(); handleSearch(); }}
-          className="relative mb-3"
+          className="relative mb-4"
         >
-          <div className="flex items-center gap-2">
-            <div className="relative flex-1">
-              <SearchIcon className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-              <input
-                ref={inputRef}
-                type="text"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search your knowledge bases…"
-                className="w-full rounded-lg border bg-background pl-10 pr-4 py-2.5 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-                autoFocus
-              />
+          <div className="relative">
+            <SearchIcon className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <input
+              ref={inputRef}
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search your knowledge bases…"
+              className="w-full rounded-lg border bg-background pl-10 pr-10 py-2.5 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+              autoFocus
+            />
+            {/* Loading spinner or expanded-query indicator inside the input */}
+            <div className="absolute right-2.5 top-1/2 -translate-y-1/2 flex items-center gap-1">
+              {loading && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
+              {!loading && showExpandedTooltip && (
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <button
+                      type="button"
+                      title="Abbreviation glossary"
+                      className="rounded-full p-0.5 text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                      <Info className="h-4 w-4" />
+                    </button>
+                  </PopoverTrigger>
+                  <PopoverContent side="bottom" align="end" className="max-w-md w-80 text-xs">
+                    <div className="space-y-1.5">
+                      <p className="font-medium text-foreground">Expanded query</p>
+                      <p className="text-muted-foreground whitespace-pre-wrap break-words">{expandedQuery}</p>
+                    </div>
+                  </PopoverContent>
+                </Popover>
+              )}
             </div>
-            {showExpandedTooltip && (
-              <Popover>
-                <PopoverTrigger asChild>
-                  <button
-                    type="button"
-                    title="Abbreviation glossary"
-                    className="shrink-0 rounded-full p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-                  >
-                    <Info className="h-4 w-4" />
-                  </button>
-                </PopoverTrigger>
-                <PopoverContent side="bottom" align="center" className="max-w-md w-80 text-xs">
-                  <div className="space-y-1.5">
-                    <p className="font-medium text-foreground">Expanded query</p>
-                    <p className="text-muted-foreground whitespace-pre-wrap break-words">{expandedQuery}</p>
-                  </div>
-                </PopoverContent>
-              </Popover>
-            )}
-            <button
-              type="submit"
-              disabled={loading || !query.trim()}
-              className="shrink-0 rounded-lg bg-primary p-2.5 text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              title="Search"
-            >
-              {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <SearchIcon className="h-4 w-4" />}
-            </button>
           </div>
         </form>
 
@@ -359,12 +353,7 @@ export default function SearchPage() {
 
         {/* Empty state — recent searches + LLM suggestions */}
         {!loading && !hasSearched && (
-          <div className="py-12">
-            <div className="text-center mb-8">
-              <SearchIcon className="h-8 w-8 mx-auto mb-3 opacity-40" />
-              <p className="text-sm text-muted-foreground">Search across your selected knowledge bases.</p>
-            </div>
-
+          <div className="py-10">
             {/* LLM suggestions */}
             {suggestionsLoading && (
               <div className="max-w-md mx-auto space-y-2">
