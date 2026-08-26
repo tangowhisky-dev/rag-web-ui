@@ -13,7 +13,6 @@ import {
   Shield,
   Zap,
   Network,
-  ChevronRight,
   Loader2,
   AlertTriangle,
 } from "lucide-react";
@@ -109,12 +108,6 @@ export default function Home() {
           </nav>
           <div className="ml-auto flex items-center gap-2">
             <ThemeToggle />
-            <Link
-              href="/register"
-              className="text-sm px-4 py-1.5 rounded-full border hover:bg-muted transition-colors"
-            >
-              Create account
-            </Link>
           </div>
         </div>
       </header>
@@ -139,13 +132,6 @@ export default function Home() {
                 Ask questions in plain language and get precise, cited answers in seconds.
               </p>
               <div className="flex flex-col sm:flex-row gap-3">
-                <Link
-                  href="/register"
-                  className="inline-flex items-center justify-center gap-2 rounded-full bg-primary text-primary-foreground px-6 py-3 text-sm font-semibold hover:bg-primary/90 transition-colors"
-                >
-                  Create Account
-                  <ChevronRight className="h-4 w-4" />
-                </Link>
               </div>
               {/* Trust signals */}
               <div className="flex flex-wrap items-center gap-6 pt-2">
@@ -213,10 +199,7 @@ export default function Home() {
                 </form>
 
                 <p className="text-center text-sm text-muted-foreground">
-                  No account? Please contact your system administrator {" "}
-                  {/* <Link href="/register" className="text-foreground font-medium hover:underline">
-                    Create one now
-                  </Link> */}
+                  No account? Please contact your system administrator.
                 </p>
               </div>
             </div>
@@ -320,7 +303,6 @@ export default function Home() {
             <img src={APP_ICON_SRC} alt={APP_NAME} className="h-5 w-5 rounded" />
             <span>{APP_NAME} — {APP_DESCRIPTION}</span>
           </div>
-          {/* <Link href="/register" className="hover:text-foreground transition-colors">Create account</Link> */}
         </div>
       </footer>
     </div>

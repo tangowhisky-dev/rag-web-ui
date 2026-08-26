@@ -66,15 +66,6 @@ def _get_token(client, username, password):
     return resp.json()["access_token"]
 
 
-def test_register_is_disabled(client):
-    resp = client.post("/api/auth/register", json={
-        "username": "newuser",
-        "email": "newuser@example.com",
-        "password": "Pass12345",
-    })
-    assert resp.status_code == 403
-
-
 def test_change_password_success(client, db):
     _create_user(db, "changer", "OldPass123", role=UserRole.user)
     token = _get_token(client, "changer", "OldPass123")

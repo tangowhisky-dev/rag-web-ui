@@ -13,7 +13,7 @@ from app.core.rate_limiter import check_rate_limit, record_failed_attempt, reset
 from app.db.session import get_db
 from app.models.user import User, UserRole
 from app.schemas.token import Token, HeartbeatResponse
-from app.schemas.user import UserCreate, UserResponse, PasswordChange
+from app.schemas.user import UserResponse, PasswordChange
 
 logger = logging.getLogger(__name__)
 
@@ -35,14 +35,6 @@ def _get_client_ip(request: Request) -> str:
         if forwarded_for:
             return forwarded_for.split(",")[0].strip()
     return peer or "unknown"
-
-@router.post("/register", response_model=UserResponse)
-def register(*, db: Session = Depends(get_db), user_in: UserCreate) -> Any:
-    """Public registration is disabled. Users must be created by an admin or the seed process."""
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail="Public registration is disabled.",
-    )
 
 @router.post("/token", response_model=Token)
 def login_access_token(
