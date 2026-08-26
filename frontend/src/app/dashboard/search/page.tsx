@@ -11,6 +11,8 @@ import {
   Info,
   Loader2,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Clock,
   Sparkles,
 } from "lucide-react";
@@ -139,6 +141,8 @@ export default function SearchPage() {
   const [loading, setLoading] = useState(false);
   const [latencyMs, setLatencyMs] = useState(0);
   const [kbPickerOpen, setKbPickerOpen] = useState(false);
+  const [page, setPage] = useState(0);
+  const PAGE_SIZE = 10;
 
   // Empty-state data
   const [recentSearches, setRecentSearches] = useState<HistoryItem[]>([]);
@@ -197,6 +201,7 @@ export default function SearchPage() {
     setLoading(true);
     setHasSearched(true);
     setKbPickerOpen(false);
+    setPage(0);
     try {
       const res = await api.post("/api/search", {
         query: searchQuery,
@@ -411,65 +416,101 @@ export default function SearchPage() {
         )}
 
         {/* Results */}
-        {!loading && results.length > 0 && (
-          <div className="space-y-3">
-            <p className="text-xs text-muted-foreground tabular-nums">
-              {results.length} result{results.length !== 1 ? "s" : ""} · {latencyMs}ms
-            </p>
-            {results.map((result, i) => {
-              const Icon = fileIcon(result.file_name);
-              const tier = scoreTier(result.reranker_score);
-              const kbName = result.kb_id
-                ? kbs.find((kb) => kb.id === result.kb_id)?.name ?? `#${result.kb_id}`
-                : result.data_store_id
-                  ? `DS #${result.data_store_id}`
-                  : null;
-              const displayTitle = result.title || result.file_name;
-              const showFilename = result.title && result.title !== cleanFilename(result.file_name);
-              return (
-                <a
-                  key={`${result.document_id}-${result.chunk_index}-${i}`}
-                  href={`/api/knowledge-base/documents/${result.document_id}/download`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="block rounded-lg border bg-card p-4 hover:border-primary/30 transition-colors group"
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <Icon className="h-4 w-4 text-muted-foreground shrink-0" />
-                      <div className="min-w-0">
-                        <span className="text-sm font-medium text-foreground truncate block group-hover:text-primary transition-colors">
-                          {displayTitle}
-                        </span>
-                        {showFilename && (
-                          <span className="text-xs text-muted-foreground/70 truncate block">
-                            {result.file_name}
+        {!loading && results.length > 0 && (() => {
+          const totalPages = Math.ceil(results.length / PAGE_SIZE);
+          const pageResults = results.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+          const startIdx = page * PAGE_SIZE + 1;
+          const endIdx = Math.min((page + 1) * PAGE_SIZE, results.length);
+          return (
+            <div className="space-y-3">
+              <p className="text-xs text-muted-foreground tabular-nums">
+                {results.length} result{results.length !== 1 ? "s" : ""} · {latencyMs}ms
+              </p>
+              {pageResults.map((result, i) => {
+                const Icon = fileIcon(result.file_name);
+                const tier = scoreTier(result.reranker_score);
+                const kbName = result.kb_id
+                  ? kbs.find((kb) => kb.id === result.kb_id)?.name ?? `#${result.kb_id}`
+                  : result.data_store_id
+                    ? `DS #${result.data_store_id}`
+                    : null;
+                const displayTitle = result.title || result.file_name;
+                const showFilename = result.title && result.title !== cleanFilename(result.file_name);
+                return (
+                  <a
+                    key={`${result.document_id}-${result.chunk_index}-${i}`}
+                    href={`/api/knowledge-base/documents/${result.document_id}/download`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="block rounded-lg border bg-card p-4 hover:border-primary/30 transition-colors group"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <Icon className="h-4 w-4 text-muted-foreground shrink-0" />
+                        <div className="min-w-0">
+                          <span className="text-sm font-medium text-foreground truncate block group-hover:text-primary transition-colors">
+                            {displayTitle}
                           </span>
-                        )}
+                          {showFilename && (
+                            <span className="text-xs text-muted-foreground/70 truncate block">
+                              {result.file_name}
+                            </span>
+                          )}
+                        </div>
                       </div>
+                      <span className={cn(
+                        "shrink-0 rounded-full border px-2 py-0.5 text-xs font-medium tabular-nums",
+                        tier.className,
+                      )}>
+                        {result.reranker_score.toFixed(2)}
+                      </span>
                     </div>
-                    <span className={cn(
-                      "shrink-0 rounded-full border px-2 py-0.5 text-xs font-medium tabular-nums",
-                      tier.className,
-                    )}>
-                      {result.reranker_score.toFixed(2)}
+                    <div className="mt-2 text-sm text-muted-foreground leading-relaxed prose prose-sm dark:prose-invert max-w-none pointer-events-none line-clamp-4">
+                      <Markdown remarkPlugins={[remarkGfm]}>
+                        {highlightInMarkdown(snippet(result.original_text || result.chunk_text), query)}
+                      </Markdown>
+                    </div>
+                    {kbName && (
+                      <div className="mt-2 text-xs text-muted-foreground/70">
+                        {kbName}
+                      </div>
+                    )}
+                  </a>
+                );
+              })}
+              {totalPages > 1 && (
+                <div className="flex items-center justify-between pt-2">
+                  <span className="text-xs text-muted-foreground tabular-nums">
+                    {startIdx}–{endIdx} of {results.length}
+                  </span>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => { setPage((p) => Math.max(0, p - 1)); window.scrollTo({ top: 0, behavior: "smooth" }); }}
+                      disabled={page === 0}
+                      className="rounded-md border p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                      aria-label="Previous page"
+                    >
+                      <ChevronLeft className="h-4 w-4" />
+                    </button>
+                    <span className="text-xs text-muted-foreground tabular-nums px-2">
+                      {page + 1} / {totalPages}
                     </span>
+                    <button
+                      type="button"
+                      onClick={() => { setPage((p) => Math.min(totalPages - 1, p + 1)); window.scrollTo({ top: 0, behavior: "smooth" }); }}
+                      disabled={page >= totalPages - 1}
+                      className="rounded-md border p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                      aria-label="Next page"
+                    >
+                      <ChevronRight className="h-4 w-4" />
+                    </button>
                   </div>
-                  <div className="mt-2 text-sm text-muted-foreground leading-relaxed prose prose-sm dark:prose-invert max-w-none pointer-events-none line-clamp-4">
-                    <Markdown remarkPlugins={[remarkGfm]}>
-                      {highlightInMarkdown(snippet(result.original_text || result.chunk_text), query)}
-                    </Markdown>
-                  </div>
-                  {kbName && (
-                    <div className="mt-2 text-xs text-muted-foreground/70">
-                      {kbName}
-                    </div>
-                  )}
-                </a>
-              );
-            })}
-          </div>
-        )}
+                </div>
+              )}
+            </div>
+          );
+        })()}
       </div>
     </DashboardLayout>
   );
