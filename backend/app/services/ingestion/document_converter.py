@@ -115,17 +115,28 @@ _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".webp"}
 _MIN_IMAGE_PIXELS = 10_000
 
 # OCR prompt reused across engines
-_OCR_PROMPT = (
-    "Extract all text from this image into clean, naturally flowing paragraphs, "
-    "while preserving document structure and any table or sub-element layout.\n\n"
-    "Rules:\n"
-    "- Remove unnatural line breaks within sentences\n"
-    "- Join split words and sentences caused by column layout or line wrapping\n"
-    "- Keep proper paragraph breaks where the topic clearly changes\n"
-    "- Preserve tables using Markdown table syntax\n"
-    "- Preserve all original meaning and technical terms exactly\n"
-    "- Output only the extracted text, no explanations or commentary"
-)
+# Previous prompt (7-rule English instruction) — designed for general vision LLMs
+# (GPT-4V, Qwen-VL). Caused hallucinations on GLM-OCR because the model is a
+# specialized 0.9B OCR model trained on fixed prompts, not a general LLM that
+# follows free-form instructions. Kept for reference and potential model-aware
+# fallback in the future.
+#
+# _OCR_PROMPT_LEGACY = (
+#     "Extract all text from this image into clean, naturally flowing paragraphs, "
+#     "while preserving document structure and any table or sub-element layout.\n\n"
+#     "Rules:\n"
+#     "- Remove unnatural line breaks within sentences\n"
+#     "- Join split words and sentences caused by column layout or line wrapping\n"
+#     "- Keep proper paragraph breaks where the topic clearly changes\n"
+#     "- Preserve tables using Markdown table syntax\n"
+#     "- Preserve all original meaning and technical terms exactly\n"
+#     "- Output only the extracted text, no explanations or commentary"
+# )
+#
+# GLM-OCR official prompt — the model was trained on exactly this prompt
+# for text recognition. See https://huggingface.co/zai-org/GLM-OCR
+# Using any other prompt is out-of-distribution and can cause hallucinations.
+_OCR_PROMPT = "Text Recognition:"
 
 
 # ── Vision config (shared across engines) ──────────────────────────────────
