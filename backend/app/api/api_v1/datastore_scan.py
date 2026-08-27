@@ -664,21 +664,38 @@ async def trigger_datastore_scan(
                 datastore_id, force_full_hash=force_full_hash,
             )
 
-            # Update datastore status with scan results
-            ds_local.last_scan_at = datetime.now(timezone.utc)
-            ds_local.last_scan_status = "completed" if result.get("errors", 0) == 0 else "error"
-            ds_local.last_scan_total_files = latest_file_count
-            ds_local.last_scan_processed = result.get("scanned", 0)
-            ds_local.last_scan_new = result.get("new", 0)
-            ds_local.last_scan_modified = result.get("modified", 0)
-            ds_local.last_scan_skipped = result.get("skipped", 0)
-            ds_local.last_scan_errors = result.get("errors", 0)
-            if result.get("errors", 0) > 0:
-                ds_local.last_scan_error = f"{result['errors']} errors during scan"
+            # Check if the scan was paused or cancelled while running.
+            # If so, do NOT overwrite the status — _cancel_scan already set
+            # it to "paused" or "idle". Overwriting would clobber the pause
+            # state and cause recovery to auto-resume on restart.
+            #
+            # _complete_scan (inside scan_single_datastore) uses a different
+            # session, so ds_local may have a stale identity map. Expire it
+            # to force a fresh DB read.
+            db_session.expire_all()
+            ds_fresh = db_session.query(DataStore).filter(DataStore.id == datastore_id).first()
+            current_status = ds_fresh.last_scan_status if ds_fresh else "unknown"
+            if current_status in ("paused", "idle"):
+                logger.info(
+                    "[DATASTORE] scan_thread_exit id=%d status=%s — preserving status, not overwriting",
+                    datastore_id, current_status,
+                )
             else:
-                ds_local.last_scan_error = None
+                # Update datastore status with scan results
+                ds_local.last_scan_at = datetime.now(timezone.utc)
+                ds_local.last_scan_status = "completed" if result.get("errors", 0) == 0 else "error"
+                ds_local.last_scan_total_files = latest_file_count
+                ds_local.last_scan_processed = result.get("scanned", 0)
+                ds_local.last_scan_new = result.get("new", 0)
+                ds_local.last_scan_modified = result.get("modified", 0)
+                ds_local.last_scan_skipped = result.get("skipped", 0)
+                ds_local.last_scan_errors = result.get("errors", 0)
+                if result.get("errors", 0) > 0:
+                    ds_local.last_scan_error = f"{result['errors']} errors during scan"
+                else:
+                    ds_local.last_scan_error = None
 
-            db_session.commit()
+                db_session.commit()
             logger.info(
                 "[DATASTORE] scan_complete id=%d scanned=%d new=%d modified=%d skipped=%d errors=%d",
                 datastore_id,

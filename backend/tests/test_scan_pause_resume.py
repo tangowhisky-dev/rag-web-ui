@@ -97,6 +97,8 @@ class TestCancelScanPause:
             ds_check = db.query(DataStore).filter(DataStore.id == ds.id).first()
             assert ds_check.last_scan_status == "paused"
             assert "paused" in (ds_check.last_scan_error or "").lower()
+            # Pause should also set graph_ingestion_paused to stop graph LLM calls
+            assert ds_check.graph_ingestion_paused is True
         finally:
             db.close()
 
@@ -116,6 +118,8 @@ class TestCancelScanPause:
         try:
             ds_check = db.query(DataStore).filter(DataStore.id == ds.id).first()
             assert ds_check.last_scan_status == "idle"
+            # Stop should NOT set graph_ingestion_paused — only pause does
+            assert ds_check.graph_ingestion_paused is False
         finally:
             db.close()
 

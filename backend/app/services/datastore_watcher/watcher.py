@@ -458,6 +458,15 @@ class DataStoreWatcher:
             ds.last_scan_status = "running"
             ds.last_scan_at = datetime.now(timezone.utc)
             ds.last_scan_error = None
+            # Clear graph ingestion pause flag — starting a scan means
+            # graph builds should run too. Pause sets this flag; resume
+            # (which calls this scan endpoint) clears it.
+            if ds.graph_ingestion_paused:
+                ds.graph_ingestion_paused = False
+                logger.info(
+                    "[WATCHER] graph_ingestion_resumed datastore_id=%d (cleared by scan init)",
+                    datastore_id,
+                )
 
             # Count total files to scan
             total_files = self._count_files_in_folder(ds.folder_path, ds.scan_pattern)
@@ -535,11 +544,32 @@ class DataStoreWatcher:
             db.close()
 
     def _complete_scan(self, datastore_id: int, success: bool, error: Optional[str] = None) -> None:
-        """Mark a scan as completed."""
+        """Mark a scan as completed.
+
+        If the scan was paused or cancelled (status already changed by
+        _cancel_scan), preserve that status instead of overwriting it.
+        """
         db: Session = SessionLocal()
         try:
             ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
             if not ds:
+                return
+
+            # If the scan was paused or stopped, _cancel_scan already set
+            # the appropriate status. Do NOT overwrite it.
+            current_status = ds.last_scan_status
+            if current_status in ("paused", "idle"):
+                logger.info(
+                    "[WATCHER] complete_scan_skip datastore_id=%d status=%s — preserving",
+                    datastore_id, current_status,
+                )
+                # Still update _active_scans so SSE can close
+                with self._active_scans_lock:
+                    for sid, info in self._active_scans.items():
+                        if info["datastore_id"] == datastore_id:
+                            info["status"] = current_status
+                            info["_completed_at"] = time_module.time()
+                            break
                 return
 
             # Find this datastore in active scans and update its status
@@ -593,6 +623,11 @@ class DataStoreWatcher:
             if pause:
                 ds.last_scan_status = "paused"
                 ds.last_scan_error = "Scan paused by admin"
+                # Pause graph ingestion too — otherwise recovery's
+                # _retry_pending_graph_builds will immediately re-queue
+                # the graph builds we just cancelled, causing LLM calls
+                # to continue while the user expects everything stopped.
+                ds.graph_ingestion_paused = True
             else:
                 ds.last_scan_status = "idle"
                 ds.last_scan_error = "Scan cancelled by admin"
