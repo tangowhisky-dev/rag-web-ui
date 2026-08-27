@@ -108,6 +108,14 @@ class StartupRecoveryService:
             elif ds.last_scan_status == "running":
                 should_discover = True
                 reason = "interrupted_scan (last_scan_status=running)"
+            elif ds.last_scan_status == "paused":
+                # Scan was intentionally paused by an admin. Do NOT auto-resume.
+                # The user must click Resume in the UI to continue.
+                # Interrupted tasks from the pause are left as-is; the scan
+                # will reprocess incomplete files when manually resumed
+                # (idempotent design: manifest hash + chunk existence check).
+                should_discover = False
+                reason = "paused_by_admin"
             else:
                 # Check for interrupted ingestion tasks (pending/processing)
                 task_db: Session = SessionLocal()

@@ -222,31 +222,124 @@ class TestRecoverySkipsPaused:
     def test_recovery_does_not_discover_paused_datastore(self, running_datastore):
         """Recovery should NOT auto-discover a datastore with last_scan_status='paused'.
 
-        Recovery logic:
-          - auto_process_enabled=True: always discover
-          - last_scan_status=='running': discover (interrupted scan)
-          - else: skip discovery, only retry graph builds
-
-        A paused scan is NOT 'running', so it should be skipped (unless auto_process is on).
+        Even if there are interrupted tasks (pending/processing) from the pause,
+        recovery must respect the paused state and skip discovery.
+        The user must manually click Resume to continue.
         """
+        ds, ds_path = running_datastore
+
         db = TestingSessionLocal()
         try:
-            ds_record = db.query(DataStore).filter(
-                DataStore.id == running_datastore[0].id
-            ).first()
+            # Set to paused
+            ds_record = db.query(DataStore).filter(DataStore.id == ds.id).first()
             ds_record.last_scan_status = "paused"
             ds_record.auto_process_enabled = False
             db.commit()
 
-            # The recovery condition:
-            # if ds.auto_process_enabled: should_discover = True
-            # elif ds.last_scan_status == "running": should_discover = True
-            # else: skip
+            # Create a document with a pending task (simulating pause cancelling a future)
+            doc = Document(
+                data_store_id=ds.id,
+                file_path=os.path.join(ds_path, "file1.pdf"),
+                file_name="file1.pdf",
+                file_size=100,
+                content_type="application/pdf",
+                file_hash="abc123",
+                is_selected=True,
+            )
+            db.add(doc)
+            db.commit()
+            db.refresh(doc)
+
+            task = ProcessingTask(
+                data_store_id=ds.id,
+                document_id=doc.id,
+                status="pending",
+            )
+            db.add(task)
+            db.commit()
+
+            # Verify the recovery decision logic:
+            # The new elif branch checks for "paused" BEFORE the interrupted-tasks check.
+            # So even with interrupted tasks, a paused datastore should NOT be discovered.
             assert ds_record.auto_process_enabled is False
-            assert ds_record.last_scan_status != "running"
-            # Recovery would set should_discover = False — correct behavior.
+            assert ds_record.last_scan_status == "paused"
+            # The interrupted tasks check would find this task:
+            interrupted = (
+                db.query(ProcessingTask)
+                .filter(
+                    ProcessingTask.data_store_id == ds.id,
+                    ProcessingTask.status.in_(["pending", "processing"]),
+                )
+                .count()
+            )
+            assert interrupted > 0
+            # But recovery should still skip because of the "paused" check.
         finally:
             db.close()
+
+    def test_recovery_skips_paused_even_with_processing_tasks(self, running_datastore):
+        """Explicitly test the recovery code path for paused datastores.
+
+        Calls the recovery start() method and verifies that no discovery
+        pipeline worker is submitted for a paused datastore.
+        """
+        from app.services.discovery.startup_recovery_service import StartupRecoveryService
+        ds, ds_path = running_datastore
+
+        db = TestingSessionLocal()
+        try:
+            ds_record = db.query(DataStore).filter(DataStore.id == ds.id).first()
+            ds_record.last_scan_status = "paused"
+            ds_record.auto_process_enabled = False
+            db.commit()
+
+            doc = Document(
+                data_store_id=ds.id,
+                file_path=os.path.join(ds_path, "file1.pdf"),
+                file_name="file1.pdf",
+                file_size=100,
+                content_type="application/pdf",
+                file_hash="abc123",
+                is_selected=True,
+            )
+            db.add(doc)
+            db.commit()
+            db.refresh(doc)
+
+            task = ProcessingTask(
+                data_store_id=ds.id,
+                document_id=doc.id,
+                status="processing",
+            )
+            db.add(task)
+            db.commit()
+        finally:
+            db.close()
+
+        service = StartupRecoveryService()
+        # Mock the executor to track what gets submitted
+        submitted = []
+        original_submit = service.executor.submit
+
+        def track_submit(fn, *args, **kwargs):
+            submitted.append((fn.__name__ if hasattr(fn, '__name__') else str(fn), args))
+            # Return a mock future
+            future = MagicMock()
+            future.done.return_value = True
+            future.result.return_value = None
+            return future
+
+        service.executor.submit = track_submit
+
+        with patch("app.services.discovery.startup_recovery_service.SessionLocal", side_effect=TestingSessionLocal):
+            service.start()
+
+        # Should have submitted graph_only_worker, NOT discovery_pipeline_worker
+        worker_names = [s[0] for s in submitted]
+        assert "_graph_only_worker" in worker_names
+        assert "_discovery_pipeline_worker" not in worker_names
+
+        service.stop()
 
     def test_recovery_discovers_running_datastore(self, running_datastore):
         """Recovery SHOULD auto-discover a datastore with last_scan_status='running'."""
