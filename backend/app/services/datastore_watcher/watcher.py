@@ -568,11 +568,19 @@ class DataStoreWatcher:
 
         self._cleanup_stale_scans()
 
-    def _cancel_scan(self, datastore_id: int) -> bool:
+    def _cancel_scan(self, datastore_id: int, pause: bool = False) -> bool:
         """Cancel a running scan on a datastore. Returns True if cancelled.
 
+        When *pause* is False (default): sets status to "idle" — the scan
+        is fully stopped and must be re-triggered from scratch.
+
+        When *pause* is True: sets status to "paused" — the scan stops
+        but can be resumed by calling the scan endpoint again. The scan
+        is idempotent: already-processed files (with manifest entries and
+        existing chunks) are skipped on resume.
+
         Cancels:
-        - Prevents new files from being submitted (status → cancelled)
+        - Prevents new files from being submitted (status → cancelled/paused)
         - Cancels all in-flight ingestion futures for this scan
         - Cancels all pending and in-flight graph builds for this datastore
         """
@@ -582,8 +590,12 @@ class DataStoreWatcher:
             if not ds or ds.last_scan_status != "running":
                 return False
 
-            ds.last_scan_status = "idle"
-            ds.last_scan_error = "Scan cancelled by admin"
+            if pause:
+                ds.last_scan_status = "paused"
+                ds.last_scan_error = "Scan paused by admin"
+            else:
+                ds.last_scan_status = "idle"
+                ds.last_scan_error = "Scan cancelled by admin"
             db.commit()
 
             # Find this datastore in active scans — do NOT remove it. The
@@ -591,11 +603,13 @@ class DataStoreWatcher:
             # to find the cancelled entry to emit the final status event.
             # Stale scans are cleaned up in _init_scan before adding a new scan.
             cancelled_scan_ids: list[int] = []
+            scan_status = "paused" if pause else "cancelled"
+            scan_msg = "Scan paused by admin" if pause else "Scan cancelled by admin"
             with self._active_scans_lock:
                 for sid, info in self._active_scans.items():
                     if info["datastore_id"] == datastore_id:
-                        info["status"] = "cancelled"
-                        info["error_message"] = "Scan cancelled by admin"
+                        info["status"] = scan_status
+                        info["error_message"] = scan_msg
                         info["_completed_at"] = time_module.time()
                         cancelled_scan_ids.append(sid)
                         break
@@ -615,7 +629,8 @@ class DataStoreWatcher:
             cancelled_graphs = cancel_graph_builds_for_datastore(datastore_id)
 
             logger.info(
-                "[WATCHER] scan_cancelled datastore_id=%d futures=%d graph_builds=%d",
+                "[WATCHER] scan_%s datastore_id=%d futures=%d graph_builds=%d",
+                "paused" if pause else "cancelled",
                 datastore_id, cancelled_futures, cancelled_graphs,
             )
             return True

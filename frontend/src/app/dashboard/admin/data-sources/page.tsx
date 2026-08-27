@@ -118,6 +118,7 @@ const STATUS_CONFIG: Record<string, { cls: string; label: string }> = {
   error: { cls: 'bg-red-100 text-red-700', label: 'Error' },
   idle: { cls: 'bg-gray-100 text-gray-600', label: '—' },
   cancelled: { cls: 'bg-yellow-100 text-yellow-700', label: 'Cancelled' },
+  paused: { cls: 'bg-amber-100 text-amber-700', label: 'Paused' },
 };
 
 const RECOVERY_STATUS_CONFIG: Record<string, { cls: string; label: string }> = {
@@ -443,6 +444,10 @@ export default function DataSourcesPage() {
             setScanProgress((prev) => ({ ...prev, [dsId]: undefined }));
             cleanup();
             fetchData();
+          } else if (data.status === 'paused') {
+            setScanProgress((prev) => ({ ...prev, [dsId]: undefined }));
+            cleanup();
+            fetchData();
           }
         } catch {
           // Ignore malformed events
@@ -499,13 +504,13 @@ export default function DataSourcesPage() {
     });
   }
 
-  async function handleStopScan(dsId: number) {
+  async function handlePauseScan(dsId: number) {
     try {
       const resp = (await api.post(
-        `/api/admin/datastores/${dsId}/stop-scan`,
+        `/api/admin/datastores/${dsId}/stop-scan?pause=true`,
       )) as { message: string };
       toast({
-        title: 'Scan stopped',
+        title: 'Scan paused',
         description: resp.message,
       });
       // Close the SSE stream and clear progress state
@@ -518,7 +523,7 @@ export default function DataSourcesPage() {
     } catch (err) {
       toast({
         title: 'Error',
-        description: (err as ApiError).message ?? 'Failed to stop scan',
+        description: (err as ApiError).message ?? 'Failed to pause scan',
         variant: 'destructive',
       });
     }
@@ -681,7 +686,7 @@ export default function DataSourcesPage() {
                   <TableCell>
                     {(() => {
                       const progress = scanProgress[ds.id];
-                      if (progress && progress.status !== 'completed') {
+                      if (progress && progress.status !== 'completed' && progress.status !== 'paused') {
                         const pct = progress.total_files > 0
                           ? Math.min((progress.processed_files / Math.max(progress.total_files, 1)) * 100, 100)
                           : 0;
@@ -707,6 +712,28 @@ export default function DataSourcesPage() {
                               {progress.modified_files != null && progress.modified_files > 0 && <span>Modified: {progress.modified_files}</span>}
                               {progress.skipped_files != null && progress.skipped_files > 0 && <span>Skipped: {progress.skipped_files}</span>}
                               {progress.error_files != null && progress.error_files > 0 && <span className="text-red-500">Errors: {progress.error_files}</span>}
+                            </div>
+                          </div>
+                        );
+                      }
+                      if (ds.last_scan_status === 'paused') {
+                        const pct = ds.last_scan_total_files > 0
+                          ? Math.min((ds.last_scan_processed / Math.max(ds.last_scan_total_files, 1)) * 100, 100)
+                          : 0;
+                        return (
+                          <div className="space-y-2">
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs text-amber-600 font-medium">Paused</span>
+                            </div>
+                            <div className="w-full bg-gray-200 rounded-full h-2">
+                              <div 
+                                className="bg-amber-500 h-2 rounded-full"
+                                style={{ width: `${pct}%` }}
+                              ></div>
+                            </div>
+                            <div className="flex justify-between text-xs text-muted-foreground">
+                              <span>{ds.last_scan_processed} / {ds.last_scan_total_files}</span>
+                              <span>{pct.toFixed(0)}%</span>
                             </div>
                           </div>
                         );
@@ -852,21 +879,48 @@ export default function DataSourcesPage() {
                   <TableCell className="space-x-1">
                     {isSuperAdmin ? (
                       <>
-                        <Button
-                          variant={ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' || (scanProgress[ds.id]?.status !== 'completed' && scanProgress[ds.id]) ? 'destructive' : 'outline'}
-                          size="sm"
-                          onClick={() => {
-                            if (ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' || (scanProgress[ds.id]?.status !== 'completed' && scanProgress[ds.id])) {
-                              handleStopScan(ds.id);
-                            } else {
-                              handleTriggerScan(ds.id);
-                            }
-                          }}
-                          disabled={triggering.has(ds.id)}
-                          title={ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' || (scanProgress[ds.id]?.status !== 'completed' && scanProgress[ds.id]) ? 'Stop processing' : 'Trigger manual processing'}
-                        >
-                          {ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' || (scanProgress[ds.id]?.status !== 'completed' && scanProgress[ds.id]) ? 'Stop' : 'Process'}
-                        </Button>
+                        {(() => {
+                          const isRunning = ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' || (scanProgress[ds.id]?.status !== 'completed' && scanProgress[ds.id]?.status !== 'paused' && scanProgress[ds.id]);
+                          const isPaused = ds.last_scan_status === 'paused' || scanProgress[ds.id]?.status === 'paused';
+
+                          if (isRunning) {
+                            return (
+                              <Button
+                                variant="secondary"
+                                size="sm"
+                                onClick={() => handlePauseScan(ds.id)}
+                                disabled={triggering.has(ds.id)}
+                                title="Pause processing — can be resumed later"
+                              >
+                                Pause
+                              </Button>
+                            );
+                          }
+                          if (isPaused) {
+                            return (
+                              <Button
+                                variant="default"
+                                size="sm"
+                                onClick={() => handleTriggerScan(ds.id)}
+                                disabled={triggering.has(ds.id)}
+                                title="Resume processing"
+                              >
+                                Resume
+                              </Button>
+                            );
+                          }
+                          return (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => handleTriggerScan(ds.id)}
+                              disabled={triggering.has(ds.id)}
+                              title="Trigger manual processing"
+                            >
+                              Process
+                            </Button>
+                          );
+                        })()}
                         {ds.graph_summary && ds.graph_summary.total > 0 && (
                           <Button
                             variant="outline"

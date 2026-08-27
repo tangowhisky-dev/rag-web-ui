@@ -69,7 +69,7 @@ class ScanProgressResponse(BaseModel):
     modified_files: int
     skipped_files: int
     error_files: int
-    status: str  # running, completed, error, idle, cancelled
+    status: str  # running, completed, error, idle, cancelled, paused
     last_scan_at: Optional[str] = None
     error_message: Optional[str] = None
 
@@ -365,7 +365,7 @@ def scan_progress_stream(
                 last_status = current_status
 
             # If scan is done, stop streaming
-            if current_status in ("completed", "error", "cancelled"):
+            if current_status in ("completed", "error", "cancelled", "paused"):
                 break
 
             await asyncio.sleep(0.5)
@@ -415,10 +415,16 @@ def get_datastores_scan_status(
 @router.post("/datastores/{datastore_id}/stop-scan")
 def stop_datastore_scan(
     datastore_id: int,
+    pause: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_super_admin),
 ):
-    """Cancel a running scan on a datastore."""
+    """Cancel or pause a running scan on a datastore.
+
+    When *pause* is True, sets the scan status to "paused" so it can be
+    resumed by calling the scan endpoint again. Already-processed files
+    are skipped on resume (idempotent scan design).
+    """
     ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
     if ds is None:
         raise HTTPException(status_code=404, detail="DataStore not found")
@@ -426,9 +432,10 @@ def stop_datastore_scan(
 
     try:
         watcher = _get_watcher()
-        cancelled = watcher._cancel_scan(datastore_id)
+        cancelled = watcher._cancel_scan(datastore_id, pause=pause)
         if cancelled:
-            return {"message": "Scan cancelled", "datastore_id": datastore_id}
+            msg = "Scan paused" if pause else "Scan cancelled"
+            return {"message": msg, "datastore_id": datastore_id}
         else:
             return {"message": f"No running scan to cancel (status: {ds.last_scan_status})", "status": ds.last_scan_status}
     except HTTPException:
