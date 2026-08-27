@@ -22,9 +22,38 @@ import app.db.session as _session_mod
 from app.db.session import get_db
 from app.models.base import Base  # noqa
 import app.models.datastore  # noqa: ensure tables are registered
+from app.models.datastore import DataStoreFileManifest
 
 engine = _session_mod.engine
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+
+def _populate_manifest(datastore_id: int, file_paths: list[str]) -> None:
+    """Simulate downstream consumers (watcher/recovery) writing manifest entries.
+
+    On first scans with empty manifest, discovery skips hashing and returns
+    files with empty hashes. In production, the watcher/recovery hash each
+    file during ingestion and write manifest entries. This helper replicates
+    that step so multi-scan tests can verify modification/deletion detection.
+    """
+    from app.services.discovery import hash_file
+    db_session = TestingSessionLocal()
+    try:
+        for fp in file_paths:
+            h = hash_file(fp)
+            st = os.stat(fp)
+            db_session.add(DataStoreFileManifest(
+                datastore_id=datastore_id,
+                file_path=fp,
+                file_hash=h,
+                file_size=st.st_size,
+                file_mtime=st.st_mtime_ns,
+                discovered_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            ))
+        db_session.commit()
+    finally:
+        db_session.close()
 
 
 # ---------------------------------------------------------------------------
@@ -233,12 +262,12 @@ class TestDiscoverDatastore:
         assert len(result.modified_files) == 0
         assert len(result.deleted_files) == 0
 
-        # Verify hashes match actual SHA-256
-        expected_f1 = hashlib.sha256(b"alpha").hexdigest()
-        expected_f2 = hashlib.sha256(b"beta").hexdigest()
-        hashes = {e["file_hash"] for e in result.new_files}
-        assert expected_f1 in hashes
-        assert expected_f2 in hashes
+        # On first scan (empty manifest), discovery skips hashing and
+        # returns empty hashes — downstream consumers hash lazily.
+        for entry in result.new_files:
+            assert entry["file_hash"] == ""
+            assert entry["file_size"] > 0
+            assert entry["file_mtime"] is not None
 
     def test_modified_file_detected(self, tmp_datastore_dir, db):
         """Modifying a file's content must show up as a modified entry."""
@@ -254,6 +283,9 @@ class TestDiscoverDatastore:
         r1 = discover_datastore(ds.id)
         assert len(r1.new_files) == 1
         assert len(r1.modified_files) == 0
+
+        # Simulate downstream consumer writing manifest entry
+        _populate_manifest(ds.id, [f])
 
         # Modify the file content
         with open(f, "wb") as fh:
@@ -283,6 +315,9 @@ class TestDiscoverDatastore:
         r1 = discover_datastore(ds.id)
         assert len(r1.new_files) == 2
 
+        # Simulate downstream consumer writing manifest entries
+        _populate_manifest(ds.id, [f, g])
+
         # Delete one file
         os.remove(g)
 
@@ -310,6 +345,9 @@ class TestDiscoverDatastore:
         # First discovery: both files are new
         r1 = discover_datastore(ds.id)
         assert len(r1.new_files) == 2
+
+        # Simulate downstream consumer writing manifest entries
+        _populate_manifest(ds.id, [f_existing, f_delete])
 
         # Now: modify existing, delete one, add new
         with open(f_existing, "wb") as fh:

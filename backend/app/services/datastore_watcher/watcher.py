@@ -23,7 +23,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.core.config import settings
 from app.db.session import SessionLocal
-from app.models.datastore import DataStore, OrganizationDataStore
+from app.models.datastore import DataStore, DataStoreFileManifest, OrganizationDataStore
 from app.models.knowledge import Document, DocumentUpload, ProcessingTask, DocumentChunk
 from app.models.knowledge import KnowledgeBase
 from app.services.datastore_watcher.handler import (
@@ -62,8 +62,11 @@ class DataStoreWatcher:
         self._lock = threading.Lock()
         self._running = False
         self._health_thread = None
+        # Read INGESTION_CONCURRENCY from settings (default 16).
+        # reload="restart" — changing the setting requires a backend restart.
+        max_workers = self._read_ingestion_concurrency()
         self._executor = ThreadPoolExecutor(
-            max_workers=4, thread_name_prefix="watcher"
+            max_workers=max_workers, thread_name_prefix="watcher"
         )
         self._debouncer = _Debouncer(delay=1.0)
 
@@ -94,6 +97,26 @@ class DataStoreWatcher:
         # Futures tracking: scan_id -> [Future, ...] for waiting on ingestion tasks
         self._scan_futures: Dict[int, List[Future]] = {}
         self._scan_futures_lock = threading.Lock()
+
+    @staticmethod
+    def _read_ingestion_concurrency() -> int:
+        """Read INGESTION_CONCURRENCY from the settings table.
+
+        Falls back to 16 if the setting is missing or the DB is not yet
+        available (e.g. during early startup before migrations).
+        """
+        try:
+            from app.services.settings_service import get_setting
+            db = SessionLocal()
+            try:
+                val = get_setting(db, "INGESTION_CONCURRENCY", None)
+                if val and isinstance(val, int) and 1 <= val <= 32:
+                    return val
+            finally:
+                db.close()
+        except Exception:
+            pass
+        return 8
 
     # ------------------------------------------------------------------
     # Scan ID management (thread-safe)
@@ -855,10 +878,26 @@ class DataStoreWatcher:
             # Use the hash from discovery if available; otherwise compute it.
             # Discovery hashed the file moments ago during the walk phase,
             # so re-hashing would waste I/O on large files.
+            # On first scans (empty manifest), discovery skips hashing and
+            # passes file_hash=None — we hash here and write the manifest
+            # entry so the next scan can use stat-first comparison.
+            wrote_manifest = False
             if not file_hash:
                 file_hash = self._handler._compute_hash(event_path)
                 if not file_hash:
                     return
+                # Write manifest entry with mtime so future scans skip this file.
+                try:
+                    st = os.stat(event_path)
+                    file_size = st.st_size
+                    file_mtime = st.st_mtime_ns
+                except OSError:
+                    file_size = 0
+                    file_mtime = None
+                self._upsert_manifest_with_mtime(
+                    db, datastore_id, event_path, file_hash, file_size, file_mtime,
+                )
+                wrote_manifest = True
 
             # Check if document already exists for this file path
             existing = (
@@ -1253,6 +1292,49 @@ class DataStoreWatcher:
         """
         # Delegate to handler's _handle_file which handles all the logic
         return self._handler._handle_file(event_path, datastore_id, event_type)
+
+    def _upsert_manifest_with_mtime(
+        self,
+        db: Session,
+        datastore_id: int,
+        file_path: str,
+        file_hash: str,
+        file_size: int,
+        file_mtime: Optional[int],
+    ) -> None:
+        """Create or update a DataStoreFileManifest entry with mtime.
+
+        Unlike the handler's _upsert_manifest, this stores file_mtime so
+        the next discovery scan can use stat-first comparison and skip
+        hashing this file.
+        """
+        now = datetime.now(timezone.utc)
+        manifest = (
+            db.query(DataStoreFileManifest)
+            .filter(
+                DataStoreFileManifest.datastore_id == datastore_id,
+                DataStoreFileManifest.file_path == file_path,
+            )
+            .first()
+        )
+        if manifest:
+            manifest.file_hash = file_hash
+            manifest.file_size = file_size
+            manifest.file_mtime = file_mtime
+            manifest.updated_at = now
+        else:
+            db.add(
+                DataStoreFileManifest(
+                    datastore_id=datastore_id,
+                    file_path=file_path,
+                    file_hash=file_hash,
+                    file_size=file_size,
+                    file_mtime=file_mtime,
+                    discovered_at=now,
+                    updated_at=now,
+                )
+            )
+        db.commit()
 
     def _update_scan_progress(self, datastore_id: int, processed: int) -> None:
         """Increment last_scan_processed by the given delta.

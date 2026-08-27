@@ -108,6 +108,10 @@ _APP_ONLY = [
                "int", 12000, scope="app", reload="ingest", min_value=1000,
                requires_reindex=True,
                description="Char budget for extraction batches. ~3-4 chars per token."),
+    SettingDef("INGESTION_CONCURRENCY", "Ingestion", "Ingestion concurrency",
+               "int", 8, scope="app", reload="restart", min_value=1, max_value=32,
+               description="Max concurrent document ingestion tasks (convert → embed → store). "
+                           "Raise for fast networks / local SSD; lower for slow CIFS/SMB mounts."),
 
     # System — process-level services
     SettingDef("WATCHER_ENABLED", "System", "Enable file watcher",

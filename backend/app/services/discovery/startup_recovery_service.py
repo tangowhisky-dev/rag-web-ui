@@ -36,12 +36,29 @@ class StartupRecoveryService:
     """
 
     def __init__(self) -> None:
-        self.executor: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=4)
+        max_workers = self._read_ingestion_concurrency()
+        self.executor: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=max_workers)
         self._running: bool = True
         self._scan_id_counter: int = 0
         self._scan_id_lock = threading.Lock()
         # scan_id -> status dict
         self._active_scans: Dict[int, Dict[str, Any]] = {}
+
+    @staticmethod
+    def _read_ingestion_concurrency() -> int:
+        """Read INGESTION_CONCURRENCY from the settings table (default 16)."""
+        try:
+            from app.services.settings_service import get_setting
+            db = SessionLocal()
+            try:
+                val = get_setting(db, "INGESTION_CONCURRENCY", None)
+                if val and isinstance(val, int) and 1 <= val <= 32:
+                    return val
+            finally:
+                db.close()
+        except Exception:
+            pass
+        return 8
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -430,6 +447,8 @@ class StartupRecoveryService:
             try:
                 file_hash = _sha256(file_path)
                 file_size = os.path.getsize(file_path)
+                st = os.stat(file_path)
+                file_mtime = st.st_mtime_ns
             except OSError as e:
                 logger.warning("[RECOVERY] Cannot read file during ingestion queue: %s", e)
                 return None
@@ -437,6 +456,10 @@ class StartupRecoveryService:
             if not file_hash:
                 logger.warning("[RECOVERY] Cannot hash file, skipping: %s", file_path)
                 return None
+
+            # Write manifest entry so the next discovery scan can use
+            # stat-first comparison and skip hashing this file.
+            self._upsert_manifest(db, datastore_id, file_path, file_hash, file_size, file_mtime)
 
             task_id: int | None = None  # set by one of the branches below
 
@@ -608,6 +631,48 @@ class StartupRecoveryService:
                 task_id,
                 file_path,
             )
+
+    # ------------------------------------------------------------------
+    # Manifest sync
+    # ------------------------------------------------------------------
+
+    def _upsert_manifest(
+        self,
+        db: Session,
+        datastore_id: int,
+        file_path: str,
+        file_hash: str,
+        file_size: int,
+        file_mtime: Optional[int],
+    ) -> None:
+        """Create or update a DataStoreFileManifest entry with mtime."""
+        now = datetime.now(timezone.utc)
+        manifest = (
+            db.query(DataStoreFileManifest)
+            .filter(
+                DataStoreFileManifest.datastore_id == datastore_id,
+                DataStoreFileManifest.file_path == file_path,
+            )
+            .first()
+        )
+        if manifest:
+            manifest.file_hash = file_hash
+            manifest.file_size = file_size
+            manifest.file_mtime = file_mtime
+            manifest.updated_at = now
+        else:
+            db.add(
+                DataStoreFileManifest(
+                    datastore_id=datastore_id,
+                    file_path=file_path,
+                    file_hash=file_hash,
+                    file_size=file_size,
+                    file_mtime=file_mtime,
+                    discovered_at=now,
+                    updated_at=now,
+                )
+            )
+        db.commit()
 
     # ------------------------------------------------------------------
     # Deleted file cleanup

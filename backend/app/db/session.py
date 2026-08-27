@@ -4,8 +4,8 @@ from app.core.config import settings
 
 engine = create_engine(
     settings.get_database_url,
-    pool_size=10,
-    max_overflow=20,
+    pool_size=16,
+    max_overflow=16,
     pool_pre_ping=True,    # re-validate connections before use; prevents stale-connection errors
     pool_recycle=3600,     # recycle connections every hour so MySQL doesn't close them first
     isolation_level="READ COMMITTED",  # avoid gap locks from long-running background tasks
