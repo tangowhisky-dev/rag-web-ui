@@ -464,6 +464,14 @@ class StartupRecoveryService:
             task_id: int | None = None  # set by one of the branches below
 
             if doc:
+                # Skip if document was explicitly unselected by an admin
+                if not doc.is_selected:
+                    logger.info(
+                        "[RECOVERY] file_unselected path=%s doc_id=%s — skipping",
+                        file_path, doc.id,
+                    )
+                    return None
+
                 # Look for ANY non-completed task (including failed ones).
                 # If a failed task exists, reuse it by resetting its state
                 # rather than creating a duplicate.

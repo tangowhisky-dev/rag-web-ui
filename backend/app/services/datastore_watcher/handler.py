@@ -662,6 +662,14 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
             )
 
             if existing:
+                # Skip if document was explicitly unselected by an admin
+                if not existing.is_selected:
+                    logger.info(
+                        "[WATCHER] file_unselected path=%s doc_id=%s — skipping",
+                        event_path, existing.id,
+                    )
+                    return
+
                 # Document exists - check if hash changed (file modified)
                 if existing.file_hash == file_hash:
                     # File unchanged - but check if chunks exist (ingestion may have failed)

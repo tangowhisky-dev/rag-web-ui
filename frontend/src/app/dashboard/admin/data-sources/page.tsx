@@ -623,7 +623,11 @@ export default function DataSourcesPage() {
             ) : (
               datastores.map((ds) => (
                 <TableRow key={ds.id}>
-                  <TableCell className="font-medium">{ds.name}</TableCell>
+                  <TableCell className="font-medium">
+                    <a href={`/dashboard/admin/data-sources/${ds.id}`} className="hover:underline">
+                      {ds.name}
+                    </a>
+                  </TableCell>
                   <TableCell className="text-xs text-muted-foreground max-w-[200px] truncate">
                     {ds.folder_path}
                   </TableCell>

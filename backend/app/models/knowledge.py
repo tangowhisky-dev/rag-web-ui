@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, Text, DateTime, JSON, BigInteger
+from sqlalchemy import Column, Integer, String, ForeignKey, Text, DateTime, JSON, BigInteger, Boolean
 from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.orm import relationship
 from app.models.base import Base, TimestampMixin
@@ -60,6 +60,7 @@ class Document(Base, TimestampMixin):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     modified_at = Column(DateTime, nullable=True, index=True)  # Source file mtime; COALESCE(modified_at, created_at) in queries
+    is_selected = Column(Boolean, nullable=False, default=True, server_default=sa.text('1'))  # Controls ingestion participation; unselect = delete ingested data
     
     # Relationships
     knowledge_base = relationship("KnowledgeBase", back_populates="documents") 

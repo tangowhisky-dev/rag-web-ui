@@ -1,0 +1,578 @@
+'use client';
+
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useParams, useRouter } from 'next/navigation';
+import { api, ApiError } from '@/lib/api';
+
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { Checkbox } from '@/components/ui/checkbox';
+import { Input } from '@/components/ui/input';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { useToast } from '@/components/ui/use-toast';
+import { LoadingDots } from '@/components/ui/loading-dots';
+import {
+  ArrowLeft,
+  Folder,
+  FileText,
+  FileCode,
+  FileSpreadsheet,
+  FileImage,
+  File as FileIcon,
+  ChevronRight,
+  Loader2,
+  AlertTriangle,
+} from 'lucide-react';
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+interface BrowseItem {
+  type: 'folder' | 'file';
+  name: string;
+  path: string;
+  absolute_path?: string;
+  size?: number;
+  content_type?: string;
+  modified_at?: string | null;
+  document_id?: number | null;
+  is_selected?: boolean;
+  status?: string;
+  chunk_count?: number;
+  graph_status?: string | null;
+  title?: string | null;
+  error_message?: string | null;
+  file_count?: number;
+  ingested_count?: number;
+  selected_count?: number;
+}
+
+interface BrowseStats {
+  total_documents: number;
+  selected: number;
+  unselected: number;
+  ingested: number;
+  completed: number;
+  failed: number;
+  processing: number;
+  pending: number;
+}
+
+interface BrowseResponse {
+  datastore_id: number;
+  datastore_name: string;
+  folder_path: string;
+  current_path: string;
+  breadcrumbs: { name: string; path: string }[];
+  items: BrowseItem[];
+  total: number;
+  total_files: number;
+  total_folders: number;
+  page: number;
+  page_size: number;
+  stats: BrowseStats;
+  error?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function getFileIcon(name: string) {
+  const ext = name.split('.').pop()?.toLowerCase() || '';
+  if (['pdf'].includes(ext)) return <FileText className="h-4 w-4 text-red-500" />;
+  if (['docx', 'doc', 'odt', 'rtf', 'txt', 'md'].includes(ext)) return <FileText className="h-4 w-4 text-blue-500" />;
+  if (['xlsx', 'xls', 'csv', 'ods'].includes(ext)) return <FileSpreadsheet className="h-4 w-4 text-green-600" />;
+  if (['pptx', 'ppt', 'odp'].includes(ext)) return <FileText className="h-4 w-4 text-orange-500" />;
+  if (['jpg', 'jpeg', 'png', 'gif', 'bmp', 'tiff', 'webp'].includes(ext)) return <FileImage className="h-4 w-4 text-purple-500" />;
+  if (['html', 'htm', 'xml', 'json'].includes(ext)) return <FileCode className="h-4 w-4 text-cyan-600" />;
+  return <FileIcon className="h-4 w-4 text-muted-foreground" />;
+}
+
+function formatSize(bytes: number): string {
+  if (bytes === 0) return '—';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let i = 0;
+  let size = bytes;
+  while (size >= 1024 && i < units.length - 1) {
+    size /= 1024;
+    i++;
+  }
+  return `${size.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+type VisualState = 'excluded' | 'ingested' | 'pending' | 'dirty-unselect' | 'dirty-select';
+
+function getVisualState(item: BrowseItem, dirtyMap: Map<string, boolean>): VisualState {
+  if (item.type === 'folder') return 'excluded'; // folders don't have visual state
+  const original = item.is_selected ?? false;
+  const current = dirtyMap.get(item.path) ?? original;
+  const hasChunks = (item.chunk_count ?? 0) > 0;
+
+  if (original && !current && hasChunks) return 'dirty-unselect';
+  if (!original && current) return 'dirty-select';
+  if (current && !hasChunks) return 'pending';
+  if (current && hasChunks) return 'ingested';
+  return 'excluded';
+}
+
+function statusBadge(status: string | undefined) {
+  if (!status || status === 'not_ingested') return <span className="text-xs text-muted-foreground">—</span>;
+  if (status === 'completed') return <Badge variant="secondary" className="text-xs">✓ Done</Badge>;
+  if (status === 'failed') return <Badge variant="destructive" className="text-xs">✗ Failed</Badge>;
+  if (status === 'processing') return <Badge variant="default" className="text-xs"><Loader2 className="h-3 w-3 animate-spin mr-1" />Processing</Badge>;
+  if (status === 'pending') return <Badge variant="outline" className="text-xs">Pending</Badge>;
+  return <span className="text-xs text-muted-foreground">{status}</span>;
+}
+
+// ---------------------------------------------------------------------------
+// Page component
+// ---------------------------------------------------------------------------
+
+export default function DatastoreBrowsePage() {
+  const params = useParams();
+  const router = useRouter();
+  const { toast } = useToast();
+  const datastoreId = (params?.id ?? '') as string;
+
+  const [loading, setLoading] = useState(true);
+  const [data, setData] = useState<BrowseResponse | null>(null);
+  const [currentPath, setCurrentPath] = useState('');
+  const [sort, setSort] = useState('name');
+  const [search, setSearch] = useState('');
+  const [page, setPage] = useState(0);
+  const [saving, setSaving] = useState(false);
+
+  // Dirty state: path -> selected (true/false)
+  const [dirtyMap, setDirtyMap] = useState<Map<string, boolean>>(new Map());
+  // Original states from server (for computing dirty diff)
+  const [originalMap, setOriginalMap] = useState<Map<string, boolean>>(new Map());
+
+  // Confirm dialog
+  const [confirmOpen, setConfirmOpen] = useState(false);
+
+  const pageSize = 100;
+
+  const fetchData = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({
+        path: currentPath,
+        sort,
+        page: String(page),
+        page_size: String(pageSize),
+        search,
+      });
+      const resp = await api.get(`/api/admin/datastores/${datastoreId}/browse?${params.toString()}`) as BrowseResponse;
+      setData(resp);
+
+      // Update original map with server state
+      const newOriginal = new Map(originalMap);
+      for (const item of resp.items) {
+        if (item.type === 'file') {
+          newOriginal.set(item.path, item.is_selected ?? false);
+        }
+      }
+      setOriginalMap(newOriginal);
+    } catch (e) {
+      const msg = e instanceof ApiError ? e.message : 'Failed to load datastore contents';
+      toast({ title: 'Error', description: msg, variant: 'destructive' });
+    } finally {
+      setLoading(false);
+    }
+  }, [datastoreId, currentPath, sort, page, search]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    const debounce = setTimeout(fetchData, search ? 300 : 0);
+    return () => clearTimeout(debounce);
+  }, [fetchData]);
+
+  // Compute dirty changes
+  const dirtyChanges = useMemo(() => {
+    const toSelect: string[] = [];
+    const toUnselect: string[] = [];
+    for (const [path, selected] of dirtyMap) {
+      const original = originalMap.get(path);
+      if (original === undefined) continue;
+      if (selected !== original) {
+        if (selected) toSelect.push(path);
+        else toUnselect.push(path);
+      }
+    }
+    return { toSelect, toUnselect };
+  }, [dirtyMap, originalMap]);
+
+  const hasChanges = dirtyChanges.toSelect.length > 0 || dirtyChanges.toUnselect.length > 0;
+
+  // Toggle a file's selection
+  const toggleFile = (item: BrowseItem) => {
+    if (item.type !== 'file' || !item.absolute_path) return;
+    const original = item.is_selected ?? false;
+    const current = dirtyMap.get(item.path) ?? original;
+    const newMap = new Map(dirtyMap);
+    newMap.set(item.path, !current);
+    setDirtyMap(newMap);
+  };
+
+  // Toggle all files on current page
+  const toggleAllFiles = (checked: boolean) => {
+    if (!data) return;
+    const newMap = new Map(dirtyMap);
+    for (const item of data.items) {
+      if (item.type === 'file' && item.absolute_path) {
+        newMap.set(item.path, checked);
+      }
+    }
+    setDirtyMap(newMap);
+  };
+
+  // Get current checkbox state for a file
+  const getCheckState = (item: BrowseItem): boolean | 'indeterminate' => {
+    if (item.type !== 'file') return false;
+    const original = item.is_selected ?? false;
+    return dirtyMap.get(item.path) ?? original;
+  };
+
+  // All-files-on-page checkbox state
+  const pageCheckboxState = (): boolean | 'indeterminate' => {
+    if (!data) return false;
+    const files = data.items.filter(i => i.type === 'file');
+    if (files.length === 0) return false;
+    const checkedCount = files.filter(f => getCheckState(f) === true).length;
+    if (checkedCount === 0) return false;
+    if (checkedCount === files.length) return true;
+    return 'indeterminate';
+  };
+
+  // Navigate into a folder
+  const navigateTo = (path: string) => {
+    setCurrentPath(path);
+    setPage(0);
+    setSearch('');
+  };
+
+  // Save changes
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      const body = {
+        select: dirtyChanges.toSelect.map(p => {
+          const item = data?.items.find(i => i.path === p);
+          return item?.absolute_path || p;
+        }),
+        unselect: dirtyChanges.toUnselect.map(p => {
+          const item = data?.items.find(i => i.path === p);
+          return item?.absolute_path || p;
+        }),
+      };
+      await api.post(`/api/admin/datastores/${datastoreId}/save-selection`, body);
+      toast({
+        title: 'Changes saved',
+        description: `${dirtyChanges.toUnselect.length} file(s) unselected, ${dirtyChanges.toSelect.length} file(s) selected.`,
+      });
+      setDirtyMap(new Map());
+      setConfirmOpen(false);
+      await fetchData();
+    } catch (e) {
+      const msg = e instanceof ApiError ? e.message : 'Failed to save changes';
+      toast({ title: 'Error', description: msg, variant: 'destructive' });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // Discard changes
+  const discardChanges = () => {
+    setDirtyMap(new Map());
+  };
+
+  // Render
+  return (
+    <div className="container mx-auto p-6 max-w-7xl">
+      {/* Header */}
+      <div className="flex items-center gap-4 mb-6">
+        <Button variant="ghost" size="sm" onClick={() => router.push('/dashboard/admin/data-sources')}>
+          <ArrowLeft className="h-4 w-4 mr-1" />
+          Data Sources
+        </Button>
+      </div>
+
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <h1 className="text-xl font-semibold tracking-tight">
+            {data?.datastore_name || 'Datastore'}
+          </h1>
+          {data && (
+            <p className="text-sm text-muted-foreground mt-1">
+              {data.folder_path} · {data.stats.total_documents} documents · {data.stats.ingested} ingested
+            </p>
+          )}
+        </div>
+      </div>
+
+      {/* Stats bar */}
+      {data && (
+        <div className="flex flex-wrap gap-3 mb-4 text-sm">
+          <span className="text-muted-foreground">
+            <span className="font-medium text-foreground">{data.stats.ingested}</span> ingested
+          </span>
+          <span className="text-muted-foreground">·</span>
+          <span className="text-muted-foreground">
+            <span className="font-medium text-foreground">{data.stats.failed}</span> failed
+          </span>
+          <span className="text-muted-foreground">·</span>
+          <span className="text-muted-foreground">
+            <span className="font-medium text-foreground">{data.stats.pending}</span> pending
+          </span>
+          <span className="text-muted-foreground">·</span>
+          <span className="text-muted-foreground">
+            <span className="font-medium text-foreground">{data.stats.unselected}</span> excluded
+          </span>
+        </div>
+      )}
+
+      {/* Browser */}
+      <div className="border rounded-lg bg-card">
+        {/* Toolbar */}
+        <div className="flex items-center gap-3 p-3 border-b">
+          {/* Breadcrumbs */}
+          <div className="flex items-center gap-1 text-sm flex-1 min-w-0 overflow-x-auto">
+            {data?.breadcrumbs.map((bc, i) => (
+              <div key={i} className="flex items-center gap-1 shrink-0">
+                {i > 0 && <ChevronRight className="h-3 w-3 text-muted-foreground" />}
+                <button
+                  className="hover:underline text-muted-foreground hover:text-foreground"
+                  onClick={() => navigateTo(bc.path)}
+                >
+                  {bc.name}
+                </button>
+              </div>
+            ))}
+          </div>
+
+          {/* Search */}
+          <Input
+            placeholder="Search files..."
+            value={search}
+            onChange={(e) => { setSearch(e.target.value); setPage(0); }}
+            className="w-48 h-8"
+          />
+
+          {/* Sort */}
+          <Select value={sort} onValueChange={setSort}>
+            <SelectTrigger className="w-32 h-8">
+              <SelectValue placeholder="Sort" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="name">Name</SelectItem>
+              <SelectItem value="-name">Name (desc)</SelectItem>
+              <SelectItem value="size">Size</SelectItem>
+              <SelectItem value="-size">Size (desc)</SelectItem>
+              <SelectItem value="modified">Modified</SelectItem>
+              <SelectItem value="-modified">Modified (desc)</SelectItem>
+              <SelectItem value="status">Status</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+
+        {/* Table */}
+        {loading ? (
+          <div className="flex items-center justify-center py-12">
+            <LoadingDots />
+          </div>
+        ) : data && data.items.length > 0 ? (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="w-10">
+                  <Checkbox
+                    checked={pageCheckboxState()}
+                    onCheckedChange={(v) => toggleAllFiles(v === true)}
+                  />
+                </TableHead>
+                <TableHead>Name</TableHead>
+                <TableHead className="w-24">Size</TableHead>
+                <TableHead className="w-32">Status</TableHead>
+                <TableHead className="w-20">Chunks</TableHead>
+                <TableHead className="w-32">Modified</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {data.items.map((item) => {
+                if (item.type === 'folder') {
+                  return (
+                    <TableRow
+                      key={`folder-${item.path}`}
+                      className="cursor-pointer hover:bg-muted/50"
+                      onClick={() => navigateTo(item.path)}
+                    >
+                      <TableCell />
+                      <TableCell>
+                        <div className="flex items-center gap-2">
+                          <Folder className="h-4 w-4 text-muted-foreground" />
+                          <span className="font-medium">{item.name}</span>
+                          <span className="text-xs text-muted-foreground">
+                            {item.file_count} files · {item.ingested_count} ingested
+                          </span>
+                        </div>
+                      </TableCell>
+                      <TableCell />
+                      <TableCell />
+                      <TableCell />
+                      <TableCell />
+                    </TableRow>
+                  );
+                }
+
+                const vs = getVisualState(item, dirtyMap);
+                const checkState = getCheckState(item);
+
+                return (
+                  <TableRow
+                    key={`file-${item.path}`}
+                    className={vs === 'dirty-unselect' ? 'bg-red-50 dark:bg-red-950/20' : ''}
+                    onClick={() => toggleFile(item)}
+                  >
+                    <TableCell onClick={(e) => e.stopPropagation()}>
+                      <Checkbox
+                        checked={checkState}
+                        onCheckedChange={() => toggleFile(item)}
+                      />
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-2">
+                        {getFileIcon(item.name)}
+                        <div className="min-w-0">
+                          <div className={
+                            vs === 'excluded' ? 'text-muted-foreground italic text-sm truncate' :
+                            vs === 'dirty-unselect' ? 'text-red-600 dark:text-red-400 text-sm truncate' :
+                            vs === 'dirty-select' ? 'text-blue-600 dark:text-blue-400 font-medium text-sm truncate' :
+                            vs === 'pending' ? 'font-medium text-sm truncate' :
+                            'text-sm truncate'
+                          }>
+                            {item.title || item.name}
+                          </div>
+                          {item.title && item.title !== item.name && (
+                            <div className="text-xs text-muted-foreground truncate">{item.name}</div>
+                          )}
+                        </div>
+                      </div>
+                    </TableCell>
+                    <TableCell className="text-sm text-muted-foreground tabular-nums">
+                      {formatSize(item.size || 0)}
+                    </TableCell>
+                    <TableCell>{statusBadge(item.status)}</TableCell>
+                    <TableCell className="text-sm text-muted-foreground tabular-nums">
+                      {item.chunk_count || 0}
+                    </TableCell>
+                    <TableCell className="text-xs text-muted-foreground">
+                      {item.modified_at ? new Date(item.modified_at).toLocaleDateString() : '—'}
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+        ) : (
+          <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
+            <Folder className="h-8 w-8 mb-2 opacity-50" />
+            <p className="text-sm">No files in this folder</p>
+          </div>
+        )}
+
+        {/* Pagination */}
+        {data && data.total_files > pageSize && (
+          <div className="flex items-center justify-between p-3 border-t text-sm">
+            <span className="text-muted-foreground">
+              {page * pageSize + 1}–{Math.min((page + 1) * pageSize, data.total_files)} of {data.total_files}
+            </span>
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={page === 0}
+                onClick={() => setPage(p => p - 1)}
+              >
+                Previous
+              </Button>
+              <span className="flex items-center px-2 text-muted-foreground">
+                {page + 1} / {Math.ceil(data.total_files / pageSize)}
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={(page + 1) * pageSize >= data.total_files}
+                onClick={() => setPage(p => p + 1)}
+              >
+                Next
+              </Button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Dirty state bar */}
+      {hasChanges && (
+        <div className="fixed bottom-0 left-0 right-0 border-t bg-card shadow-lg z-50">
+          <div className="container mx-auto max-w-7xl flex items-center justify-between p-4">
+            <div className="flex items-center gap-3">
+              <AlertTriangle className="h-5 w-5 text-amber-500" />
+              <div className="text-sm">
+                <span className="font-medium">{dirtyChanges.toSelect.length + dirtyChanges.toUnselect.length} unsaved changes</span>
+                {dirtyChanges.toUnselect.length > 0 && (
+                  <span className="text-red-600 dark:text-red-400 ml-2">
+                    {dirtyChanges.toUnselect.length} file(s) will be DELETED from Qdrant/MySQL/Neo4j
+                  </span>
+                )}
+                {dirtyChanges.toSelect.length > 0 && (
+                  <span className="text-blue-600 dark:text-blue-400 ml-2">
+                    {dirtyChanges.toSelect.length} file(s) will be marked for ingestion
+                  </span>
+                )}
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <Button variant="outline" size="sm" onClick={discardChanges}>
+                Discard
+              </Button>
+              <Button size="sm" disabled={saving} onClick={() => setConfirmOpen(true)}>
+                {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Save Changes'}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Save confirmation */}
+      <ConfirmDialog
+        open={confirmOpen}
+        title="Save selection changes?"
+        description={
+          dirtyChanges.toUnselect.length > 0
+            ? `You are about to DELETE ingested data (vectors, chunks, graph nodes) for ${dirtyChanges.toUnselect.length} file(s) and mark ${dirtyChanges.toSelect.length} file(s) for ingestion. Files on disk will NOT be deleted.`
+            : `You are about to mark ${dirtyChanges.toSelect.length} file(s) for ingestion on next scan.`
+        }
+        confirmText="Confirm"
+        destructive={dirtyChanges.toUnselect.length > 0}
+        onConfirm={handleSave}
+        onCancel={() => setConfirmOpen(false)}
+      />
+    </div>
+  );
+}
