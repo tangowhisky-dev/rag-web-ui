@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { api, ApiError } from '@/lib/api';
 
@@ -162,12 +162,23 @@ export default function DatastoreBrowsePage() {
 
   // Dirty state: path -> selected (true/false)
   const [dirtyMap, setDirtyMap] = useState<Map<string, boolean>>(new Map());
+  // Ref mirror of dirtyMap so async functions always read the latest value
+  const dirtyMapRef = useRef(dirtyMap);
   // Original states from server (for computing dirty diff)
   const [originalMap, setOriginalMap] = useState<Map<string, boolean>>(new Map());
+  const originalMapRef = useRef(originalMap);
   // Folder-level dirty state: folder path -> selected (true/false)
   const [dirtyFolders, setDirtyFolders] = useState<Map<string, boolean>>(new Map());
+  const dirtyFoldersRef = useRef(dirtyFolders);
   // Track which folder paths have been expanded into dirtyMap
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
+  const expandedFoldersRef = useRef(expandedFolders);
+
+  // Sync refs whenever state changes
+  useEffect(() => { dirtyMapRef.current = dirtyMap; }, [dirtyMap]);
+  useEffect(() => { originalMapRef.current = originalMap; }, [originalMap]);
+  useEffect(() => { dirtyFoldersRef.current = dirtyFolders; }, [dirtyFolders]);
+  useEffect(() => { expandedFoldersRef.current = expandedFolders; }, [expandedFolders]);
 
   // Confirm dialog
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -247,20 +258,44 @@ export default function DatastoreBrowsePage() {
   // Toggle all items on current page (files + folders)
   const toggleAllFiles = async (checked: boolean) => {
     if (!data) return;
-    // Toggle files immediately
-    const newMap = new Map(dirtyMap);
+    // Start from the latest dirtyMap (via ref, not stale closure)
+    const newMap = new Map(dirtyMapRef.current);
+    const newOriginal = new Map(originalMapRef.current);
+    const newFolders = new Map(dirtyFoldersRef.current);
+    const newExpanded = new Set(expandedFoldersRef.current);
+
+    // Toggle files on current page immediately
     for (const item of data.items) {
       if (item.type === 'file' && item.absolute_path) {
         newMap.set(item.path, checked);
       }
     }
-    setDirtyMap(newMap);
 
-    // Toggle folders (async — each fetches its contained files)
+    // Toggle folders — fetch files for each and accumulate into newMap
     const folders = data.items.filter(i => i.type === 'folder');
     for (const folder of folders) {
-      await toggleFolderTo(folder, checked);
+      try {
+        const resp = await api.get(
+          `/api/admin/datastores/${datastoreId}/folder-files?path=${encodeURIComponent(folder.path)}`
+        ) as { files: { path: string; absolute_path: string; is_selected: boolean }[] };
+
+        for (const f of resp.files) {
+          newMap.set(f.path, checked);
+          if (!newOriginal.has(f.path)) {
+            newOriginal.set(f.path, f.is_selected);
+          }
+        }
+        newExpanded.add(folder.path);
+        newFolders.set(folder.path, checked);
+      } catch (e) {
+        // Skip folder on error — don't abort the whole operation
+      }
     }
+
+    setDirtyMap(newMap);
+    setOriginalMap(newOriginal);
+    setDirtyFolders(newFolders);
+    setExpandedFolders(newExpanded);
   };
 
   // Toggle a folder's selection — fetches all files under the folder
@@ -283,8 +318,8 @@ export default function DatastoreBrowsePage() {
         `/api/admin/datastores/${datastoreId}/folder-files?path=${encodeURIComponent(item.path)}`
       ) as { files: { path: string; absolute_path: string; is_selected: boolean }[] };
 
-      const newMap = new Map(dirtyMap);
-      const newOriginal = new Map(originalMap);
+      const newMap = new Map(dirtyMapRef.current);
+      const newOriginal = new Map(originalMapRef.current);
       for (const f of resp.files) {
         newMap.set(f.path, targetChecked);
         if (!newOriginal.has(f.path)) {
@@ -296,7 +331,7 @@ export default function DatastoreBrowsePage() {
       setExpandedFolders(prev => new Set(prev).add(item.path));
 
       // Track folder-level intent so save sends the folder path
-      const newFolders = new Map(dirtyFolders);
+      const newFolders = new Map(dirtyFoldersRef.current);
       newFolders.set(item.path, targetChecked);
       setDirtyFolders(newFolders);
     } catch (e) {
