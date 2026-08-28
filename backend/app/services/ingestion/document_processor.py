@@ -494,6 +494,7 @@ async def process_document_full(
     file_hash: Optional[str] = None,
     file_size: Optional[int] = None,
     content_type: Optional[str] = None,
+    skip_conversion: bool = False,
 ) -> Optional[GraphBuildRequest]:
     """Full pipeline: convert → ingest.  Replaces process_document_background.
 
@@ -634,14 +635,20 @@ async def process_document_full(
                 logger.info(f"Task {task_id}: Document record created with ID {document.id}")
 
             # ── Phase 1: Convert ──────────────────────────────────────────────
-            _set_progress(5, "Converting document…")
-            markdown_text = await convert_document(
-                document_id=document.id,
-                file_path=permanent_path if data_store_id is None else (file_path or temp_path),
-                file_name=file_name,
-                enable_ocr=enable_ocr,
-                db=db,
-            )
+            if skip_conversion:
+                # Use existing converted_markdown (e.g. markdown was edited)
+                _set_progress(5, "Re-ingesting edited markdown…")
+                markdown_text = None  # ingest_document will read from Document.converted_markdown
+                logger.info(f"Task {task_id}: Skipping conversion, using existing markdown")
+            else:
+                _set_progress(5, "Converting document…")
+                markdown_text = await convert_document(
+                    document_id=document.id,
+                    file_path=permanent_path if data_store_id is None else (file_path or temp_path),
+                    file_name=file_name,
+                    enable_ocr=enable_ocr,
+                    db=db,
+                )
 
             # ── Phase 2: Ingest ────────────────────────────────────────────────
             graph_request = await ingest_document(

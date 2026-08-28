@@ -278,6 +278,7 @@ def scan_progress_stream(
         if scan:
             initial_event = {
                 "total_files": scan.get("total", 0),
+                "total_files_on_disk": scan.get("total_files_on_disk", 0),
                 "processed_files": scan.get("processed", 0),
                 "scanned": scan.get("processed", 0),
                 "status": scan.get("status", "running"),
@@ -340,6 +341,7 @@ def scan_progress_stream(
             ):
                 event = {
                     "total_files": current_total,
+                    "total_files_on_disk": scan.get("total_files_on_disk", 0),
                     "processed_files": current_scanned,
                     "scanned": current_scanned,
                     "status": current_status,

@@ -18,7 +18,7 @@ from typing import Dict, Optional, Set
 from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal
-from app.models.knowledge import ProcessingTask
+from app.models.knowledge import ProcessingTask, Document
 from app.services.ingestion.document_processor import (
     process_document_background,
     GraphBuildRequest,
@@ -167,6 +167,7 @@ def run_ingestion_in_thread(
     file_hash: Optional[str] = None,
     file_size: Optional[int] = None,
     content_type: Optional[str] = None,
+    skip_conversion: bool = False,
 ) -> None:
     """Run ingestion in a brand-new event loop (for thread contexts).
 
@@ -215,12 +216,28 @@ def run_ingestion_in_thread(
                 content_type=content_type,
                 file_path=file_path if data_store_id is not None else None,
                 db=None,
+                skip_conversion=skip_conversion,
             )
 
         graph_request = loop.run_until_complete(_do())
 
         _mark_task_status(task_id, "completed", progress=100,
                           message="Ingestion completed")
+
+        # Clear needs_reprocess flag after successful ingestion
+        if document_id is not None:
+            try:
+                clear_db = SessionLocal()
+                try:
+                    doc = clear_db.query(Document).filter(Document.id == document_id).first()
+                    if doc and doc.needs_reprocess:
+                        doc.needs_reprocess = False
+                        clear_db.commit()
+                finally:
+                    clear_db.close()
+            except Exception:
+                pass
+
         logger.info(
             "ingestion_completed task_id=%s path=%s",
             task_id, file_path,

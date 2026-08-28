@@ -329,6 +329,7 @@ class TestRecoveryModifiedFileIngested:
                     content_type="text/plain",
                     file_hash="old_hash_that_will_change",
                     data_store_id=ds_id,
+                    is_selected=True,  # must be selected for recovery to process it
                     created_at=datetime.now(timezone.utc),
                     updated_at=datetime.now(timezone.utc),
                 )

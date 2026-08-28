@@ -50,6 +50,8 @@ interface DataStore {
   last_scan_modified: number;
   last_scan_skipped: number;
   last_scan_errors: number;
+  selected_files: number;
+  processed_files: number;
   assigned_orgs: Array<{ id: number; name: string }>;
   created_at: string;
   updated_at: string;
@@ -160,6 +162,7 @@ export default function DataSourcesPage() {
     scan_pattern: '*',
     auto_process_enabled: false,
     auto_process_interval_minutes: 30,
+    select_all_files: false,
   };
 
   // Create/Edit dialog
@@ -776,7 +779,9 @@ export default function DataSourcesPage() {
                         <div className="text-xs">
                           {ds.last_scan_total_files} files
                           <br />
-                          {ds.last_scan_processed} processed
+                          {ds.selected_files} selected
+                          <br />
+                          {ds.processed_files} processed
                           {ds.processing && (
                             <div className="mt-1 flex items-center gap-1">
                               <div className="w-2 h-2 rounded-full bg-orange-500 animate-pulse"></div>
@@ -1092,6 +1097,22 @@ export default function DataSourcesPage() {
                   </div>
                 )}
               </>
+            )}
+
+            {/* Select all files checkbox — only shown on creation */}
+            {!editingId && (
+              <div className="flex items-center space-x-2">
+                <input
+                  type="checkbox"
+                  id="ds-select-all"
+                  checked={form.select_all_files}
+                  onChange={(e) =>
+                    setForm({ ...form, select_all_files: e.target.checked })
+                  }
+                  className="h-4 w-4 rounded border-gray-300"
+                />
+                <Label htmlFor="ds-select-all">Select all files for immediate processing</Label>
+              </div>
             )}
           </div>
           <DialogFooter>

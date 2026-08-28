@@ -74,6 +74,7 @@ class DataStoreCreate(BaseModel):
     scan_pattern: str = Field(default="*")
     auto_process_enabled: bool = False
     auto_process_interval_minutes: int = Field(default=60, ge=1, le=1440)
+    select_all_files: bool = Field(default=False, description="Select all files for immediate processing on creation")
 
 
 class DataStoreUpdate(BaseModel):
@@ -104,6 +105,8 @@ class DataStoreResponse(BaseModel):
     last_scan_modified: int = 0
     last_scan_skipped: int = 0
     last_scan_errors: int = 0
+    selected_files: int = 0
+    processed_files: int = 0
     assigned_orgs: List[dict] = []
     created_at: datetime
     updated_at: datetime
@@ -225,6 +228,8 @@ def _serialize_ds(ds: DataStore) -> dict:
         "last_scan_modified": ds.last_scan_modified or 0,
         "last_scan_skipped": ds.last_scan_skipped or 0,
         "last_scan_errors": ds.last_scan_errors or 0,
+        "selected_files": 0,  # populated by list endpoint
+        "processed_files": 0,  # populated by list endpoint
         "last_event_processed": getattr(ds, "last_event_processed", 0) or 0,
         "last_event_at": _utc_iso(getattr(ds, "last_event_at", None)),
         "created_at": _utc_iso(ds.created_at),
@@ -295,9 +300,38 @@ def list_datastores(
         )
 
     # Batch-fetch graph status counts per datastore (avoids N+1)
-    from app.models.knowledge import ProcessingTask
+    from app.models.knowledge import ProcessingTask, Document, DocumentChunk
     from sqlalchemy import func, case
     graph_counts: dict[int, dict[str, int]] = {}
+
+    # Batch-fetch selected_files and processed_files per datastore
+    selected_counts: dict[int, int] = {}
+    processed_counts: dict[int, int] = {}
+    if ds_ids:
+        # Selected = Documents with is_selected=True
+        rows = (
+            db.query(Document.data_store_id, func.count(Document.id))
+            .filter(
+                Document.data_store_id.in_(ds_ids),
+                Document.is_selected == True,
+            )
+            .group_by(Document.data_store_id)
+            .all()
+        )
+        selected_counts = {r[0]: r[1] for r in rows}
+
+        # Processed = Documents that have at least one chunk
+        rows = (
+            db.query(Document.data_store_id, func.count(Document.id))
+            .filter(
+                Document.data_store_id.in_(ds_ids),
+                Document.chunks.any(),
+            )
+            .group_by(Document.data_store_id)
+            .all()
+        )
+        processed_counts = {r[0]: r[1] for r in rows}
+
     if ds_ids:
         rows = (
             db.query(
@@ -368,6 +402,8 @@ def list_datastores(
             pass
         resp["graph_summary"] = graph_counts.get(ds.id)
         resp["graph_ingestion_paused"] = bool(getattr(ds, 'graph_ingestion_paused', False))
+        resp["selected_files"] = selected_counts.get(ds.id, 0)
+        resp["processed_files"] = processed_counts.get(ds.id, 0)
         result.append(DataStoreResponse(**resp))
     return DataStoreListResponse(items=result, total=total, skip=skip, limit=limit)
 
@@ -394,25 +430,56 @@ def create_datastore(
             detail=f"DataStore with this path already exists (id={existing.id})",
         )
 
-    # Count files on creation (pre-scan heuristic — no ingestion yet)
-    def count_files_in_folder(folder_path: str, scan_pattern: str = "*") -> int:
+    # Walk the folder and create Document records for all supported files.
+    # is_selected is set based on select_all_files flag or auto_process_enabled.
+    from app.services.ingestion.document_converter import SUPPORTED_EXTENSIONS, CONTENT_TYPE_MAP
+    from app.models.knowledge import Document
+
+    def walk_and_create_documents(folder_path: str, scan_pattern: str, datastore_id: int, is_selected: bool) -> int:
+        import fnmatch as _fnmatch
         try:
             path = Path(folder_path)
             if not path.exists():
                 return 0
             patterns = [p.strip() for p in scan_pattern.split(",")]
-            all_files = set()
-            for pattern in patterns:
-                if "*" in pattern:
-                    matched = list(path.rglob(pattern))
-                else:
-                    matched = list(path.glob(pattern))
-                all_files.update(f for f in matched if f.is_file() and not f.name.startswith("."))
-            return len(all_files)
-        except Exception:
+            count = 0
+            for root, _dirs, filenames in os.walk(folder_path):
+                for fname in filenames:
+                    if fname.startswith(".") or fname.startswith("~$") or fname.startswith(".~"):
+                        continue
+                    ext = os.path.splitext(fname)[1].lower()
+                    if ext not in SUPPORTED_EXTENSIONS:
+                        continue
+                    # Check scan pattern
+                    matched = any(_fnmatch.fnmatch(fname, p) for p in patterns) if patterns else True
+                    if not matched:
+                        continue
+                    fp = os.path.join(root, fname)
+                    try:
+                        st = os.stat(fp)
+                        size = st.st_size
+                    except OSError:
+                        size = 0
+                    doc = Document(
+                        knowledge_base_id=None,
+                        data_store_id=datastore_id,
+                        file_path=fp,
+                        file_name=fname,
+                        file_size=size,
+                        content_type=CONTENT_TYPE_MAP.get(ext, "application/octet-stream"),
+                        is_selected=is_selected,
+                    )
+                    db.add(doc)
+                    count += 1
+            db.commit()
+            return count
+        except Exception as e:
+            logger.warning("[DATASTORE] walk_failed path=%s error=%s", folder_path, e)
             return 0
 
-    file_count = count_files_in_folder(abs_path, payload.scan_pattern)
+    # Determine initial selection state: select_all_files takes precedence,
+    # otherwise auto_process_enabled determines the default.
+    initial_selected = payload.select_all_files
 
     ds = DataStore(
         name=payload.name,
@@ -421,16 +488,22 @@ def create_datastore(
         scan_pattern=payload.scan_pattern,
         auto_process_enabled=payload.auto_process_enabled,
         auto_process_interval_minutes=payload.auto_process_interval_minutes,
-        last_scan_total_files=file_count,
+        last_scan_total_files=0,
         last_scan_status="never",
         last_scan_processed=0,
     )
     db.add(ds)
     db.commit()
     db.refresh(ds)
+
+    # Create Document records for all supported files in the folder
+    file_count = walk_and_create_documents(abs_path, payload.scan_pattern, ds.id, initial_selected)
+    ds.last_scan_total_files = file_count
+    db.commit()
+
     logger.info(
-        "[DATASTORE] created id=%d name=%s path=%s file_count=%d",
-        ds.id, ds.name, ds.folder_path, file_count,
+        "[DATASTORE] created id=%d name=%s path=%s file_count=%d selected=%s",
+        ds.id, ds.name, ds.folder_path, file_count, initial_selected,
     )
 
     # Auto-assign non-super-admin created datastores to the admin's own org
@@ -1073,15 +1146,14 @@ def update_document_markdown(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
-    """Save edited markdown and trigger re-ingest.
+    """Save edited markdown and earmark for reprocessing.
 
     1. Validate non-empty markdown.
     2. Optimistic lock check.
     3. Persist new markdown.
-    4. Reset old chunks/vectors/graph (keep document, is_selected, manifest).
-    5. Create a new ProcessingTask.
-    6. Queue async ingest.
-    Returns 202 Accepted with task info.
+    4. Set needs_reprocess=True so the next scan re-ingests using
+       the saved markdown (without re-converting the source file).
+    Returns 202 Accepted.
     """
     admin_org_ids = get_admin_org_ids(db, current_user)
     _get_datastore_or_404(db, datastore_id)
@@ -1104,137 +1176,25 @@ def update_document_markdown(
             detail="Document has not been converted yet — run re-convert first",
         )
 
-    from app.services.ingestion.reingest import reset_document_for_reingest
-    from app.models.knowledge import ProcessingTask
-    from app.services.ingestion.ingestion_dispatcher import run_ingestion_in_thread
-
-    # 1. Reset old data (chunks, vectors, graph, old task)
-    reset_result = reset_document_for_reingest(db, document_id, datastore_id, doc.knowledge_base_id)
-
-    # 2. Persist new markdown + bump lock version
+    # Persist new markdown + bump lock version + earmark for reprocessing
     doc.converted_markdown = body.markdown
     doc.conversion_status = "completed"
     doc.lock_version = doc.lock_version + 1
+    doc.needs_reprocess = True
     db.commit()
 
-    # 3. Create a new ProcessingTask
-    task = ProcessingTask(
-        document_id=document_id,
-        data_store_id=datastore_id,
-        knowledge_base_id=doc.knowledge_base_id,
-        status="pending",
-        progress=0,
-        progress_message="Queued for re-ingest…",
+    logger.info(
+        "[EDITOR] markdown_saved doc_id=%s datastore_id=%s — earmarked for reprocessing",
+        document_id, datastore_id,
     )
-    db.add(task)
-    db.commit()
-    db.refresh(task)
-
-    # 4. Queue async ingest — directly, NOT through process_document_full
-    #    which would re-convert and overwrite the edited markdown.
-    #    The editor save skips conversion (phase 1) and goes straight to
-    #    ingest (phase 2) using the saved markdown.
-    _fn = doc.file_name
-    _kb = doc.knowledge_base_id
-
-    import threading
-    import asyncio
-
-    def _do_reingest():
-        from app.db.session import SessionLocal
-        from app.services.ingestion.document_processor import ingest_document
-        from app.services.ingestion.ingestion_dispatcher import (
-            register_ingestion, unregister_ingestion, is_datastore_deleted,
-            _start_graph_build_thread, _mark_task_status,
-        )
-        from app.services.infrastructure.progress_timeout import ProgressTimeout
-
-        if datastore_id is not None:
-            register_ingestion(datastore_id, task.id)
-
-        loop = asyncio.new_event_loop()
-        try:
-            asyncio.set_event_loop(loop)
-            rdb = SessionLocal()
-            try:
-                if datastore_id is not None and is_datastore_deleted(datastore_id):
-                    _mark_task_status(task.id, "failed", 0, "Datastore deleted")
-                    return
-
-                # Progress callback using a separate session
-                progress_db = SessionLocal()
-                _pt_ref = [None]  # filled by ProgressTimeout __aenter__
-                def _set_progress(progress: int, message: str = ""):
-                    try:
-                        from app.models.knowledge import ProcessingTask as _PT
-                        t = progress_db.query(_PT).filter(_PT.id == task.id).first()
-                        if t:
-                            t.progress = progress
-                            t.progress_message = message
-                            if progress < 100:
-                                t.status = "processing"
-                            progress_db.commit()
-                    except Exception:
-                        progress_db.rollback()
-                    if _pt_ref[0]:
-                        _pt_ref[0].ping()
-
-                # Timeout callback
-                def _on_timeout():
-                    try:
-                        _mark_task_status(task.id, "failed", 0, "Progress timeout — no activity")
-                    except Exception:
-                        pass
-
-                async def _run_with_timeout():
-                    async with ProgressTimeout(
-                        silence_seconds=600,
-                        on_timeout=_on_timeout,
-                    ) as _pt:
-                        _pt_ref[0] = _pt
-                        return await ingest_document(
-                            document_id=document_id,
-                            file_name=_fn,
-                            data_store_id=datastore_id,
-                            kb_id=_kb,
-                            task_id=task.id,
-                            markdown_text=None,
-                            db=rdb,
-                            progress_cb=_set_progress,
-                            pt=_pt,
-                        )
-
-                try:
-                    graph_request = loop.run_until_complete(_run_with_timeout())
-
-                    # Mark task completed
-                    _mark_task_status(task.id, "completed", 100, "Re-ingest complete")
-
-                    if graph_request:
-                        _start_graph_build_thread(graph_request)
-                except Exception as e:
-                    logger.error("reingest_failed document_id=%s: %s", document_id, e)
-                    _mark_task_status(task.id, "failed", 0, str(e)[:500])
-                finally:
-                    progress_db.close()
-            finally:
-                rdb.close()
-        finally:
-            loop.close()
-            if datastore_id is not None:
-                unregister_ingestion(datastore_id, task.id)
-
-    t = threading.Thread(target=_do_reingest, name=f"reingest-{document_id}", daemon=True)
-    t.start()
 
     return JSONResponse(
         status_code=202,
         content={
             "document_id": document_id,
-            "task_id": task.id,
             "lock_version": doc.lock_version,
-            "reset": reset_result,
-            "message": "Re-ingest queued",
+            "needs_reprocess": True,
+            "message": "Markdown saved. File will be re-ingested on next process cycle.",
         },
     )
 
@@ -1300,6 +1260,13 @@ def reconvert_document(
 
                 try:
                     loop.run_until_complete(_run_with_timeout())
+                    # Mark for reprocessing — the markdown was regenerated
+                    # and needs to be re-ingested on next process cycle.
+                    from app.models.knowledge import Document as _Doc
+                    d = rdb.query(_Doc).filter(_Doc.id == document_id).first()
+                    if d:
+                        d.needs_reprocess = True
+                        rdb.commit()
                 except Exception as e:
                     logger.error("reconvert_failed document_id=%s: %s", document_id, e)
                     try:

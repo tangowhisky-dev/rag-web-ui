@@ -60,7 +60,8 @@ class Document(Base, TimestampMixin):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     modified_at = Column(DateTime, nullable=True, index=True)  # Source file mtime; COALESCE(modified_at, created_at) in queries
-    is_selected = Column(Boolean, nullable=False, default=True, server_default=sa.text('1'))  # Controls ingestion participation; unselect = delete ingested data
+    is_selected = Column(Boolean, nullable=False, default=False, server_default=sa.text('0'))  # Controls ingestion participation; unselect = delete ingested data
+    needs_reprocess = Column(Boolean, nullable=False, default=False, server_default=sa.text('0'))  # Set when markdown is edited; cleared after successful re-ingest
 
     # Three-phase pipeline: converted markdown is persisted so admins can
     # review and correct OCR/conversion artifacts before re-ingesting.

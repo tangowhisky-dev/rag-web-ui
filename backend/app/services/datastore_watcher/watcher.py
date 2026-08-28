@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from sqlalchemy import update
+from sqlalchemy import update, func
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
@@ -468,9 +468,20 @@ class DataStoreWatcher:
                     datastore_id,
                 )
 
-            # Count total files to scan
-            total_files = self._count_files_in_folder(ds.folder_path, ds.scan_pattern)
-            ds.last_scan_total_files = total_files
+            # Count selected files — the scan only processes selected files,
+            # so the progress denominator is the number of selected documents
+            # that need work (new, modified, or needs_reprocess).
+            # We also count files on disk for the total_files display.
+            total_files_on_disk = self._count_files_in_folder(ds.folder_path, ds.scan_pattern)
+            selected_count = (
+                db.query(func.count(Document.id))
+                .filter(
+                    Document.data_store_id == datastore_id,
+                    Document.is_selected == True,
+                )
+                .scalar()
+            ) or 0
+            ds.last_scan_total_files = total_files_on_disk
             ds.last_scan_processed = 0
 
             db.commit()
@@ -478,10 +489,13 @@ class DataStoreWatcher:
             # Track in memory — the SSE endpoint always finds the most
             # recently added scan for a given datastore by iterating
             # _active_scans in reverse insertion order (Python 3.7+).
+            # "total" is the number of selected files (progress denominator).
+            # "total_files_on_disk" is the total files in the folder (for display).
             with self._active_scans_lock:
                 self._active_scans[scan_id] = {
                     "datastore_id": datastore_id,
-                    "total": total_files,
+                    "total": selected_count,
+                    "total_files_on_disk": total_files_on_disk,
                     "processed": 0,
                     "status": "running",
                     "error_count": 0,
@@ -491,8 +505,8 @@ class DataStoreWatcher:
                     "error_message": None,  # string error message from _complete_scan
                 }
             logger.info(
-                "[WATCHER] scan_init scan_id=%d datastore_id=%d total_files=%d status=running",
-                scan_id, datastore_id, total_files,
+                "[WATCHER] scan_init scan_id=%d datastore_id=%d selected_files=%d total_on_disk=%d status=running",
+                scan_id, datastore_id, selected_count, total_files_on_disk,
             )
             # Initialize futures list for this scan
             with self._scan_futures_lock:
@@ -781,7 +795,8 @@ class DataStoreWatcher:
                         scan_info["skipped"] = summary["skipped"]
                         scan_info["deleted"] = summary["deleted"]
                         scan_info["error_count"] = summary["errors"]
-                        scan_info["total"] = total_files
+                        # Don't overwrite "total" — it's locked at scan start
+                        # to the count of selected files for a stable progress bar.
                         break
 
             # Collect futures from ingestion tasks
@@ -890,6 +905,89 @@ class DataStoreWatcher:
                 logger.info(
                     "[WATCHER] requeued_stuck_tasks datastore_id=%d count=%d",
                     datastore_id, requeued,
+                )
+
+            # Re-queue selected documents that have NO ProcessingTask and NO
+            # chunks.  This happens when a file was previously unselected
+            # (skipped during a prior scan) and is now selected.  The discovery
+            # engine classifies it as "unchanged" (manifest entry exists), so
+            # it's not in new/modified files.  But it has no chunks and no
+            # task, so it would be missed without this check.
+            orphan_selected = (
+                db.query(Document)
+                .outerjoin(ProcessingTask, ProcessingTask.document_id == Document.id)
+                .filter(
+                    Document.data_store_id == datastore_id,
+                    Document.is_selected == True,  # noqa: E712
+                    ProcessingTask.id.is_(None),
+                    ~Document.chunks.any(),
+                )
+                .all()
+            )
+            orphan_queued = 0
+            for doc in orphan_selected:
+                if doc.file_path in seen_paths:
+                    continue  # already handled above
+                if self._is_scan_cancelled(datastore_id):
+                    break
+                try:
+                    future = self._update_document_in_scan(
+                        doc.id, doc.file_path, doc.file_hash or "",
+                        datastore_id, scan_id,
+                    )
+                    if future is not None:
+                        ingestion_futures.append(future)
+                        orphan_queued += 1
+                except Exception as e:
+                    logger.error("[WATCHER] orphan_queue error for %s: %s", doc.file_path, e)
+                    summary["errors"] += 1
+            if orphan_queued:
+                logger.info(
+                    "[WATCHER] queued_orphan_selected datastore_id=%d count=%d",
+                    datastore_id, orphan_queued,
+                )
+
+            # Re-queue selected documents with needs_reprocess=True.
+            # This happens when an admin edited the markdown in the editor
+            # and saved it.  The file itself is unchanged (same hash), so
+            # discovery classifies it as "unchanged" and it's not in
+            # new/modified files.  But the markdown was edited and needs
+            # to be re-ingested using the saved markdown (skip_conversion=True).
+            reprocess_docs = (
+                db.query(Document)
+                .filter(
+                    Document.data_store_id == datastore_id,
+                    Document.is_selected == True,  # noqa: E712
+                    Document.needs_reprocess == True,  # noqa: E712
+                )
+                .all()
+            )
+            reprocess_queued = 0
+            for doc in reprocess_docs:
+                if doc.file_path in seen_paths:
+                    continue  # already handled above
+                if self._is_scan_cancelled(datastore_id):
+                    break
+                try:
+                    # Clear flag before re-ingesting
+                    doc.needs_reprocess = False
+                    db.commit()
+                    # Re-ingest using existing markdown (skip conversion)
+                    future = self._update_document_in_scan(
+                        doc.id, doc.file_path, doc.file_hash or "",
+                        datastore_id, scan_id,
+                        skip_conversion=True,
+                    )
+                    if future is not None:
+                        ingestion_futures.append(future)
+                        reprocess_queued += 1
+                except Exception as e:
+                    logger.error("[WATCHER] reprocess_queue error for %s: %s", doc.file_path, e)
+                    summary["errors"] += 1
+            if reprocess_queued:
+                logger.info(
+                    "[WATCHER] queued_needs_reprocess datastore_id=%d count=%d",
+                    datastore_id, reprocess_queued,
                 )
 
             # Process deleted files (files on disk that no longer exist)
@@ -1031,7 +1129,23 @@ class DataStoreWatcher:
 
                 # Document exists - check if hash changed (file modified)
                 if existing.file_hash == file_hash:
-                    # File unchanged - but check if chunks exist (ingestion may have failed)
+                    # File unchanged - check if re-ingest was requested (markdown edited)
+                    if existing.needs_reprocess:
+                        logger.info(
+                            "[WATCHER] re_ingest_needs_reprocess path=%s doc_id=%s datastore_id=%s",
+                            event_path, existing.id, datastore_id,
+                        )
+                        # Clear flag before re-ingesting
+                        existing.needs_reprocess = False
+                        db.commit()
+                        # Re-ingest using existing markdown (skip conversion)
+                        future = self._update_document_in_scan(
+                            existing.id, event_path, file_hash, datastore_id, scan_id,
+                            skip_conversion=True,
+                        )
+                        return future
+
+                    # File unchanged - check if chunks exist (ingestion may have failed)
                     chunk_count = db.query(DocumentChunk).filter(
                         DocumentChunk.document_id == existing.id
                     ).count()
@@ -1051,15 +1165,20 @@ class DataStoreWatcher:
                         )
                         return future
                 else:
-                    # File was modified - trigger re-ingestion
+                    # File was modified - trigger re-ingestion (will re-convert)
                     future = self._update_document_in_scan(
                         existing.id, event_path, file_hash, datastore_id, scan_id
                     )
                     return future
 
-            # File is new - trigger ingestion
+            # File is new - check datastore's auto_process_enabled to
+            # determine if it should be auto-selected for ingestion.
+            ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
+            auto_select = ds.auto_process_enabled if ds else False
+
             future = self._ingest_file_in_scan(
-                event_path, datastore_id, scan_id, file_hash=file_hash
+                event_path, datastore_id, scan_id, file_hash=file_hash,
+                is_selected=auto_select,
             )
             return future
         finally:
@@ -1072,6 +1191,7 @@ class DataStoreWatcher:
         datastore_id: int,
         scan_id: int,
         file_hash: Optional[str] = None,
+        is_selected: bool = False,
     ) -> Optional[Future]:
         """Create Document + ProcessingTask records and enqueue background processing for scans."""
         fname = os.path.basename(event_path)
@@ -1113,6 +1233,7 @@ class DataStoreWatcher:
                     file_hash=file_hash,
                     file_size=file_size,
                     content_type=content_type,
+                    is_selected=is_selected,
                 )
                 db.add(doc)
                 db.commit()
@@ -1182,8 +1303,13 @@ class DataStoreWatcher:
         file_hash: str,
         datastore_id: int,
         scan_id: int,
+        skip_conversion: bool = False,
     ) -> Optional[Future]:
-        """Update an existing document when file content changes during a scan."""
+        """Update an existing document when file content changes during a scan.
+
+        When skip_conversion=True, re-ingests using the existing
+        converted_markdown instead of re-converting the source file.
+        """
         fname = os.path.basename(event_path)
         _, ext = os.path.splitext(fname)
         ext = ext.lower()
@@ -1250,6 +1376,7 @@ class DataStoreWatcher:
                 file_hash=file_hash,
                 file_size=file_size,
                 content_type=content_type,
+                skip_conversion=skip_conversion,
             )
             future.add_done_callback(
                 lambda f, ds=datastore_id: self._on_scan_ingestion_done(f, task.id, event_path, ds)
@@ -1503,6 +1630,7 @@ class DataStoreWatcher:
         file_hash: Optional[str] = None,
         file_size: Optional[int] = None,
         content_type: Optional[str] = None,
+        skip_conversion: bool = False,
     ) -> None:
         """Run the async ingestion pipeline in a dedicated event loop (threaded).
 
@@ -1519,6 +1647,7 @@ class DataStoreWatcher:
             file_hash=file_hash,
             file_size=file_size,
             content_type=content_type,
+            skip_conversion=skip_conversion,
         )
 
     def _on_ingestion_done(self, future, task_id: int, event_path: str) -> None:
