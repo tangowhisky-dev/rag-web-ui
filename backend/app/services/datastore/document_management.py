@@ -151,16 +151,21 @@ def get_folder_contents(
         )
         chunk_counts = {r[0]: r[1] for r in rows}
 
-        # Latest task status per document
+        # Latest task status + graph_status per document
         rows = (
-            db.query(ProcessingTask.document_id, ProcessingTask.status, ProcessingTask.error_message)
+            db.query(
+                ProcessingTask.document_id,
+                ProcessingTask.status,
+                ProcessingTask.error_message,
+                ProcessingTask.graph_status,
+            )
             .filter(ProcessingTask.document_id.in_(doc_ids))
             .order_by(ProcessingTask.id.desc())
             .all()
         )
         for r in rows:
             if r[0] not in task_statuses:  # first = latest due to desc order
-                task_statuses[r[0]] = (r[1], r[2])
+                task_statuses[r[0]] = (r[1], r[2], r[3])
 
     # ── Build file items ──────────────────────────────────────────────
     file_items = []
@@ -177,7 +182,8 @@ def get_folder_contents(
             mtime = None
 
         if doc:
-            status, error_msg = task_statuses.get(doc.id, ("not_ingested", None))
+            task_info = task_statuses.get(doc.id, ("not_ingested", None, None))
+            status, error_msg, graph_status = task_info
             file_items.append({
                 "type": "file",
                 "name": entry.name,
@@ -190,7 +196,8 @@ def get_folder_contents(
                 "is_selected": doc.is_selected,
                 "status": status or "not_ingested",
                 "chunk_count": chunk_counts.get(doc.id, 0),
-                "graph_status": doc.processing_tasks[0].graph_status if doc.processing_tasks else None,
+                "graph_status": graph_status,
+                "conversion_status": doc.conversion_status,
                 "title": doc.title,
                 "error_message": error_msg,
             })
@@ -208,6 +215,7 @@ def get_folder_contents(
                 "status": "not_ingested",
                 "chunk_count": 0,
                 "graph_status": None,
+                "conversion_status": None,
                 "title": None,
                 "error_message": None,
             })

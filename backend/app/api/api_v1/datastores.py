@@ -964,3 +964,304 @@ def select_folder(
     from app.services.datastore.document_management import select_folder as _select_folder
     result = _select_folder(datastore_id, folder_abs, body.selected, body.recursive)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Markdown editor endpoints (3-phase pipeline)
+# ---------------------------------------------------------------------------
+
+def _get_document_or_404(db: Session, document_id: int) -> "Document":
+    from app.models.knowledge import Document
+    doc = db.query(Document).filter(Document.id == document_id).first()
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return doc
+
+
+def _verify_document_in_datastore(db: Session, datastore_id: int, document_id: int):
+    """Ensure the document belongs to the given datastore."""
+    doc = _get_document_or_404(db, document_id)
+    if doc.data_store_id != datastore_id:
+        raise HTTPException(status_code=404, detail="Document not found in this datastore")
+    return doc
+
+
+@router.get("/datastores/{datastore_id}/documents/{document_id}/markdown")
+def get_document_markdown(
+    datastore_id: int,
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Get the converted markdown for a document (editor source)."""
+    admin_org_ids = get_admin_org_ids(db, current_user)
+    _get_datastore_or_404(db, datastore_id)
+    if not _datastore_in_scope(db, datastore_id, admin_org_ids):
+        raise HTTPException(status_code=404, detail="DataStore not found")
+
+    doc = _verify_document_in_datastore(db, datastore_id, document_id)
+
+    if doc.conversion_status == "processing":
+        raise HTTPException(status_code=409, detail="Conversion in progress")
+    if doc.conversion_status == "pending":
+        raise HTTPException(status_code=409, detail="Conversion pending")
+    if not doc.converted_markdown:
+        if doc.conversion_status == "error":
+            raise HTTPException(
+                status_code=422,
+                detail=f"Conversion failed: {doc.conversion_error or 'unknown error'}",
+            )
+        raise HTTPException(
+            status_code=409,
+            detail="Markdown not available — run re-convert first",
+        )
+
+    return {
+        "document_id": doc.id,
+        "markdown": doc.converted_markdown,
+        "conversion_status": doc.conversion_status,
+        "lock_version": doc.lock_version,
+        "title": doc.title,
+    }
+
+
+class UpdateMarkdownRequest(BaseModel):
+    markdown: str = Field(..., min_length=1, description="Edited markdown content")
+    lock_version: int = Field(..., description="Optimistic lock version from GET")
+
+
+@router.put("/datastores/{datastore_id}/documents/{document_id}/markdown")
+def update_document_markdown(
+    datastore_id: int,
+    document_id: int,
+    body: UpdateMarkdownRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Save edited markdown and trigger re-ingest.
+
+    1. Validate non-empty markdown.
+    2. Optimistic lock check.
+    3. Persist new markdown.
+    4. Reset old chunks/vectors/graph (keep document, is_selected, manifest).
+    5. Create a new ProcessingTask.
+    6. Queue async ingest.
+    Returns 202 Accepted with task info.
+    """
+    admin_org_ids = get_admin_org_ids(db, current_user)
+    _get_datastore_or_404(db, datastore_id)
+    if not _datastore_in_scope(db, datastore_id, admin_org_ids):
+        raise HTTPException(status_code=404, detail="DataStore not found")
+
+    doc = _verify_document_in_datastore(db, datastore_id, document_id)
+
+    # Optimistic lock check
+    if doc.lock_version != body.lock_version:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Document was modified by another editor. Expected lock_version={doc.lock_version}, got {body.lock_version}.",
+        )
+
+    # Check conversion is done
+    if not doc.converted_markdown and doc.conversion_status != "completed":
+        raise HTTPException(
+            status_code=409,
+            detail="Document has not been converted yet — run re-convert first",
+        )
+
+    from app.services.ingestion.reingest import reset_document_for_reingest
+    from app.models.knowledge import ProcessingTask
+    from app.services.ingestion.ingestion_dispatcher import run_ingestion_in_thread
+
+    # 1. Reset old data (chunks, vectors, graph, old task)
+    reset_result = reset_document_for_reingest(db, document_id, datastore_id, doc.knowledge_base_id)
+
+    # 2. Persist new markdown + bump lock version
+    doc.converted_markdown = body.markdown
+    doc.conversion_status = "completed"
+    doc.lock_version = doc.lock_version + 1
+    db.commit()
+
+    # 3. Create a new ProcessingTask
+    task = ProcessingTask(
+        document_id=document_id,
+        data_store_id=datastore_id,
+        knowledge_base_id=doc.knowledge_base_id,
+        status="pending",
+        progress=0,
+        progress_message="Queued for re-ingest…",
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+
+    # 4. Queue async ingest — directly, NOT through process_document_full
+    #    which would re-convert and overwrite the edited markdown.
+    #    The editor save skips conversion (phase 1) and goes straight to
+    #    ingest (phase 2) using the saved markdown.
+    _fn = doc.file_name
+    _kb = doc.knowledge_base_id
+
+    import threading
+    import asyncio
+
+    def _do_reingest():
+        from app.db.session import SessionLocal
+        from app.services.ingestion.document_processor import ingest_document
+        from app.services.ingestion.ingestion_dispatcher import (
+            register_ingestion, unregister_ingestion, is_datastore_deleted,
+            _start_graph_build_thread,
+        )
+
+        if datastore_id is not None:
+            register_ingestion(datastore_id, task.id)
+
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            rdb = SessionLocal()
+            try:
+                if datastore_id is not None and is_datastore_deleted(datastore_id):
+                    return
+                graph_request = loop.run_until_complete(
+                    ingest_document(
+                        document_id=document_id,
+                        file_name=_fn,
+                        data_store_id=datastore_id,
+                        kb_id=_kb,
+                        task_id=task.id,
+                        markdown_text=None,  # read from doc.converted_markdown
+                        db=rdb,
+                    )
+                )
+                if graph_request:
+                    _start_graph_build_thread(graph_request)
+            finally:
+                rdb.close()
+        finally:
+            loop.close()
+            if datastore_id is not None:
+                unregister_ingestion(datastore_id, task.id)
+
+    t = threading.Thread(target=_do_reingest, name=f"reingest-{document_id}", daemon=True)
+    t.start()
+
+    return JSONResponse(
+        status_code=202,
+        content={
+            "document_id": document_id,
+            "task_id": task.id,
+            "lock_version": doc.lock_version,
+            "reset": reset_result,
+            "message": "Re-ingest queued",
+        },
+    )
+
+
+@router.post("/datastores/{datastore_id}/documents/{document_id}/reconvert")
+def reconvert_document(
+    datastore_id: int,
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Re-run conversion from the source file. Overwrites current markdown."""
+    admin_org_ids = get_admin_org_ids(db, current_user)
+    _get_datastore_or_404(db, datastore_id)
+    if not _datastore_in_scope(db, datastore_id, admin_org_ids):
+        raise HTTPException(status_code=404, detail="DataStore not found")
+
+    doc = _verify_document_in_datastore(db, datastore_id, document_id)
+
+    if not os.path.isfile(doc.file_path):
+        raise HTTPException(status_code=404, detail="Source file not found on disk")
+
+    # Capture plain strings before starting the thread — the SQLAlchemy
+    # object will be detached once the request session closes.
+    _file_path = doc.file_path
+    _file_name = doc.file_name
+
+    import threading
+
+    def _do_reconvert():
+        import asyncio
+        from app.db.session import SessionLocal
+        from app.services.ingestion.document_processor import convert_document
+
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            rdb = SessionLocal()
+            try:
+                loop.run_until_complete(
+                    convert_document(
+                        document_id=document_id,
+                        file_path=_file_path,
+                        file_name=_file_name,
+                        db=rdb,
+                    )
+                )
+            finally:
+                rdb.close()
+        finally:
+            loop.close()
+
+    doc.conversion_status = "pending"
+    db.commit()
+
+    t = threading.Thread(target=_do_reconvert, name=f"reconvert-{document_id}", daemon=True)
+    t.start()
+
+    return JSONResponse(
+        status_code=202,
+        content={
+            "document_id": document_id,
+            "conversion_status": "pending",
+            "message": "Re-convert queued",
+        },
+    )
+
+
+@router.get("/datastores/{datastore_id}/documents/{document_id}/ingest-status")
+def get_ingest_status(
+    datastore_id: int,
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Get the current ingestion/conversion/graph status for a document."""
+    admin_org_ids = get_admin_org_ids(db, current_user)
+    _get_datastore_or_404(db, datastore_id)
+    if not _datastore_in_scope(db, datastore_id, admin_org_ids):
+        raise HTTPException(status_code=404, detail="DataStore not found")
+
+    doc = _verify_document_in_datastore(db, datastore_id, document_id)
+
+    # Get latest task
+    from app.models.knowledge import ProcessingTask
+    latest_task = (
+        db.query(ProcessingTask)
+        .filter(ProcessingTask.document_id == document_id)
+        .order_by(ProcessingTask.id.desc())
+        .first()
+    )
+
+    from app.models.knowledge import DocumentChunk
+    chunk_count = db.query(DocumentChunk).filter(
+        DocumentChunk.document_id == document_id,
+        DocumentChunk.data_store_id == datastore_id,
+    ).count()
+
+    return {
+        "document_id": doc.id,
+        "conversion_status": doc.conversion_status,
+        "conversion_error": doc.conversion_error,
+        "ingest_status": latest_task.status if latest_task else None,
+        "ingest_progress": latest_task.progress if latest_task else 0,
+        "ingest_message": latest_task.progress_message if latest_task else None,
+        "ingest_error": latest_task.error_message if latest_task else None,
+        "graph_status": latest_task.graph_status if latest_task else None,
+        "graph_error": latest_task.graph_error if latest_task else None,
+        "chunk_count": chunk_count,
+        "lock_version": doc.lock_version,
+    }

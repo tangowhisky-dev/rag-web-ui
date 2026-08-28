@@ -326,6 +326,14 @@ def run_graph_build_in_thread(req: GraphBuildRequest) -> None:
         # Check if the task was already cancelled (e.g. scan stopped while
         # ingestion was finishing and the graph thread hadn't started yet).
         existing_status = _get_graph_status(req.task_id)
+        if existing_status is None:
+            # Task was deleted (e.g. by reset_document_for_reingest during
+            # a manual re-ingest from the markdown editor).  Exit cleanly.
+            logger.info(
+                "graph_build_skipped task_id=%s — task no longer exists",
+                req.task_id,
+            )
+            return
         if existing_status == "failed":
             logger.info(
                 "graph_build_skipped task_id=%s — already cancelled",

@@ -99,6 +99,17 @@ class StartupRecoveryService:
             return
 
         for ds in active:
+            # Backfill conversion_status for legacy documents (pre-pipeline-split).
+            # Runs for every datastore regardless of discovery path. Best-effort —
+            # failures here should not block recovery.
+            try:
+                self._backfill_conversion_status(ds.id)
+            except Exception as e:
+                logger.warning(
+                    "[RECOVERY] conversion_status_backfill_error datastore_id=%s: %s",
+                    ds.id, e,
+                )
+
             should_discover = False
             reason = ""
 
@@ -215,14 +226,76 @@ class StartupRecoveryService:
 
         Used for manual-scan datastores that have no interrupted scan but
         may have graph builds left pending from a previous completed scan.
+        Also backfills conversion_status for legacy documents.
         """
         try:
+            self._backfill_conversion_status(datastore_id)
             self._retry_pending_graph_builds(datastore_id)
         except Exception as e:
             logger.warning(
                 "[RECOVERY] graph_retry_failed datastore_id=%s: %s",
                 datastore_id, e,
             )
+
+    def _backfill_conversion_status(self, datastore_id: int) -> None:
+        """Mark legacy documents (conversion_status=NULL) as 'completed'
+        if they have chunks, 'error' if they have a failed task, else leave NULL.
+
+        This does NOT populate converted_markdown — the admin must click
+        Re-convert in the editor to get the markdown for legacy documents.
+        """
+        db: Session = SessionLocal()
+        try:
+            legacy_docs = (
+                db.query(Document)
+                .filter(
+                    Document.data_store_id == datastore_id,
+                    Document.conversion_status.is_(None),
+                )
+                .all()
+            )
+            if not legacy_docs:
+                return
+
+            backfilled = 0
+            for doc in legacy_docs:
+                chunk_count = (
+                    db.query(DocumentChunk)
+                    .filter(DocumentChunk.document_id == doc.id)
+                    .count()
+                )
+                if chunk_count > 0:
+                    doc.conversion_status = "completed"
+                    backfilled += 1
+                else:
+                    # Check for a failed task
+                    failed_task = (
+                        db.query(ProcessingTask)
+                        .filter(
+                            ProcessingTask.document_id == doc.id,
+                            ProcessingTask.status == "failed",
+                        )
+                        .first()
+                    )
+                    if failed_task:
+                        doc.conversion_status = "error"
+                        doc.conversion_error = failed_task.error_message
+                        backfilled += 1
+
+            if backfilled > 0:
+                db.commit()
+                logger.info(
+                    "[RECOVERY] conversion_status_backfill datastore_id=%s count=%d",
+                    datastore_id, backfilled,
+                )
+        except Exception as e:
+            db.rollback()
+            logger.warning(
+                "[RECOVERY] conversion_status_backfill_failed datastore_id=%s: %s",
+                datastore_id, e,
+            )
+        finally:
+            db.close()
 
     def _update_datastore_scan_fields(
         self, datastore_id: int, total_files: int | None = None,

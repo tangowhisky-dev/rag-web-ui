@@ -1,5 +1,8 @@
 from .document_processor import (
     process_document_background,
+    process_document_full,
+    convert_document,
+    ingest_document,
     upload_document,
     preview_document,
     SUPPORTED_EXTENSIONS,
@@ -23,6 +26,9 @@ from .ingestion_dispatcher import run_ingestion_in_thread, run_graph_build_in_th
 
 __all__ = [
     "process_document_background",
+    "process_document_full",
+    "convert_document",
+    "ingest_document",
     "upload_document",
     "preview_document",
     "SUPPORTED_EXTENSIONS",

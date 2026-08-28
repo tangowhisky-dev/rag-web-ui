@@ -61,6 +61,13 @@ class Document(Base, TimestampMixin):
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     modified_at = Column(DateTime, nullable=True, index=True)  # Source file mtime; COALESCE(modified_at, created_at) in queries
     is_selected = Column(Boolean, nullable=False, default=True, server_default=sa.text('1'))  # Controls ingestion participation; unselect = delete ingested data
+
+    # Three-phase pipeline: converted markdown is persisted so admins can
+    # review and correct OCR/conversion artifacts before re-ingesting.
+    converted_markdown = Column(LONGTEXT, nullable=True)
+    conversion_status = Column(String(20), nullable=True, index=True)  # pending, completed, error, NULL=legacy
+    conversion_error = Column(Text, nullable=True)
+    lock_version = Column(Integer, nullable=False, default=0, server_default='0')  # optimistic locking for editor
     
     # Relationships
     knowledge_base = relationship("KnowledgeBase", back_populates="documents") 

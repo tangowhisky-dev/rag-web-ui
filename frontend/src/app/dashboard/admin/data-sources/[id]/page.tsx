@@ -56,6 +56,7 @@ interface BrowseItem {
   status?: string;
   chunk_count?: number;
   graph_status?: string | null;
+  conversion_status?: string | null;
   title?: string | null;
   error_message?: string | null;
   file_count?: number;
@@ -411,6 +412,7 @@ export default function DatastoreBrowsePage() {
                 <TableHead className="w-32">Status</TableHead>
                 <TableHead className="w-20">Chunks</TableHead>
                 <TableHead className="w-32">Modified</TableHead>
+                <TableHead className="w-16"></TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -483,6 +485,18 @@ export default function DatastoreBrowsePage() {
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground">
                       {item.modified_at ? new Date(item.modified_at).toLocaleDateString() : '—'}
+                    </TableCell>
+                    <TableCell onClick={(e) => e.stopPropagation()}>
+                      {item.document_id && item.conversion_status === 'completed' && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 px-2 text-xs"
+                          onClick={() => router.push(`/dashboard/admin/data-sources/${datastoreId}/documents/${item.document_id}`)}
+                        >
+                          Edit
+                        </Button>
+                      )}
                     </TableCell>
                   </TableRow>
                 );

@@ -166,68 +166,352 @@ async def preview_document(file_path: str, chunk_size: int = None, chunk_overlap
         raise
 
 
-async def process_document_background(
+# ── Phase 1: Convert ──────────────────────────────────────────────────────────
+
+async def convert_document(
+    document_id: int,
+    file_path: str,
+    file_name: str,
+    enable_ocr: Optional[bool] = None,
+    db: Session = None,
+) -> str:
+    """Convert a file to markdown and store it in Document.converted_markdown.
+
+    Phase 1 of the 3-phase pipeline.  Sets conversion_status to 'completed'
+    on success, 'error' on failure.  Returns the markdown text.
+    Does not touch chunks, vectors, or graph.
+
+    Async — uses run_in_executor for the synchronous _convert_to_markdown call.
+    """
+    should_close_db = False
+    if db is None:
+        db = SessionLocal()
+        should_close_db = True
+
+    try:
+        document = db.get(Document, document_id)
+        if not document:
+            raise ValueError(f"Document {document_id} not found")
+
+        document.conversion_status = "processing"
+        db.commit()
+
+        loop = asyncio.get_event_loop()
+        local_path = get_abs_path(file_path)
+
+        # Convert
+        markdown_text = await loop.run_in_executor(
+            None, lambda: _convert_to_markdown(local_path, file_name, enable_ocr=enable_ocr)
+        )
+
+        # Cleanup pass
+        try:
+            markdown_text = clean_markdown(markdown_text)
+        except Exception as _ce:
+            logger.warning("[CLEANUP] fallback to raw markdown. reason=%s file=%s",
+                           str(_ce)[:200], file_name)
+
+        if not markdown_text or not markdown_text.strip():
+            raise ValueError(
+                "Document produced no extractable text. "
+                "The file may be empty, password-protected, or in an unreadable format."
+            )
+
+        # Extract title
+        doc_title = extract_title(markdown_text, file_name, abs_path=local_path)
+
+        # Store markdown + title on the document
+        document.converted_markdown = markdown_text
+        document.title = doc_title
+        document.conversion_status = "completed"
+        document.conversion_error = None
+        db.commit()
+
+        logger.info("[CONVERT] document_id=%s file=%s chars=%d title=%r",
+                    document_id, file_name, len(markdown_text), doc_title)
+        return markdown_text
+
+    except Exception as e:
+        logger.error("[CONVERT] document_id=%s error=%s", document_id, e, exc_info=True)
+        try:
+            db.rollback()
+            doc = db.get(Document, document_id)
+            if doc:
+                doc.conversion_status = "error"
+                doc.conversion_error = str(e)[:2000]
+                db.commit()
+        except Exception:
+            db.rollback()
+        raise
+    finally:
+        if should_close_db and db:
+            db.close()
+
+
+# ── Phase 2: Ingest (chunk + embed + Qdrant) ──────────────────────────────────
+
+async def ingest_document(
+    document_id: int,
+    file_name: str,
+    data_store_id: Optional[int] = None,
+    kb_id: Optional[int] = None,
+    task_id: Optional[int] = None,
+    markdown_text: Optional[str] = None,
+    db: Session = None,
+    progress_cb: Optional[callable] = None,
+    pt: Optional[ProgressTimeout] = None,
+) -> Optional[GraphBuildRequest]:
+    """Chunk a document's markdown, embed, and store in Qdrant.
+
+    Phase 2 of the 3-phase pipeline.  If markdown_text is None, reads from
+    Document.converted_markdown.  Deletes existing chunks (MySQL + Qdrant)
+    for this document before re-chunking.  Returns a GraphBuildRequest
+    for the caller to queue phase 3.
+    """
+    should_close_db = False
+    if db is None:
+        db = SessionLocal()
+        should_close_db = True
+
+    def _prog(pct: int, msg: str) -> None:
+        if progress_cb:
+            progress_cb(pct, msg)
+        if pt:
+            pt.ping()
+
+    try:
+        document = db.get(Document, document_id)
+        if not document:
+            raise ValueError(f"Document {document_id} not found")
+
+        task = db.get(ProcessingTask, task_id) if task_id else None
+
+        # Read markdown from argument or DB
+        if markdown_text is None:
+            markdown_text = document.converted_markdown
+            if not markdown_text:
+                raise ValueError(f"Document {document_id} has no converted_markdown")
+
+        # Check datastore deleted
+        if data_store_id is not None:
+            from app.services.ingestion.ingestion_dispatcher import is_datastore_deleted
+            if is_datastore_deleted(data_store_id):
+                logger.info("[INGEST] document_id=%s — datastore %s deleted, aborting",
+                            document_id, data_store_id)
+                return None
+
+        # Chunk size from settings
+        from app.services.settings_service import get_setting
+        chunk_size = get_setting(db, "CHUNK_SIZE", None)
+        chunk_overlap = int(get_setting(db, "CHUNK_SIZE", None) * get_setting(db, "OVERLAP_PERCENTAGE", None))
+
+        loop = asyncio.get_event_loop()
+
+        # Chunk
+        _prog(20, "Splitting into chunks…")
+        doc = LangchainDocument(page_content=markdown_text, metadata={"source": file_name})
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        chunks = await loop.run_in_executor(None, lambda: text_splitter.split_documents([doc]))
+        logger.info("[INGEST] document_id=%s chunks=%d", document_id, len(chunks))
+
+        if not chunks:
+            raise ValueError("Document produced no chunks after splitting.")
+
+        # Ensure Qdrant collection
+        _prog(25, f"Preparing vector store ({len(chunks)} chunks)…")
+        if data_store_id is not None:
+            collection_name = f"ds_{data_store_id}"
+        elif kb_id is not None:
+            collection_name = f"kb_{kb_id}"
+        else:
+            raise ValueError("Neither data_store_id nor kb_id provided")
+        _ensure_qdrant_collection(get_qdrant_client(), collection_name)
+
+        # Delete old chunks
+        _prog(30, "Cleaning up old chunks…")
+        from sqlalchemy import and_
+        if data_store_id is not None:
+            scope_filter = DocumentChunk.data_store_id == data_store_id
+        else:
+            scope_filter = and_(DocumentChunk.kb_id == kb_id, DocumentChunk.data_store_id.is_(None))
+        old_chunk_ids = db.query(DocumentChunk).filter(
+            DocumentChunk.document_id == document.id, scope_filter,
+        ).with_entities(DocumentChunk.id).all()
+        old_chunk_ids = [cid[0] for cid in old_chunk_ids]
+        if old_chunk_ids:
+            point_ids = [_chunk_id_to_point_id(cid) for cid in old_chunk_ids]
+            try:
+                get_qdrant_client().delete(
+                    collection_name=collection_name,
+                    points_selector=PointIdsList(points=point_ids),
+                )
+            except Exception as e:
+                logger.warning("[INGEST] Qdrant delete old chunks failed: %s", e)
+            # Rebuild scope_filter (single-use)
+            if data_store_id is not None:
+                scope_filter = DocumentChunk.data_store_id == data_store_id
+            else:
+                scope_filter = and_(DocumentChunk.kb_id == kb_id, DocumentChunk.data_store_id.is_(None))
+            db.query(DocumentChunk).filter(
+                DocumentChunk.document_id == document.id, scope_filter,
+            ).delete(synchronize_session="fetch")
+            db.commit()
+
+        # Build chunk records
+        _prog(35, "Building chunk records…")
+        doc_title = document.title or file_name
+
+        def _build_chunk_records():
+            from app.services.abbreviation_service import build_lookup, expand_suffix
+            org_id_for_abbr = None
+            if kb_id:
+                kb = db.query(KnowledgeBase).filter(KnowledgeBase.id == kb_id).first()
+                org_id_for_abbr = kb.org_id if kb else None
+            elif data_store_id:
+                link = db.query(OrganizationDataStore).filter(
+                    OrganizationDataStore.data_store_id == data_store_id,
+                    OrganizationDataStore.is_active == True,  # noqa: E712
+                ).first()
+                org_id_for_abbr = link.org_id if link else None
+            abbr_lookup = build_lookup(db, org_id_for_abbr)
+            payloads = []
+            db_chunks = []
+            for i, chunk in enumerate(chunks):
+                scope_prefix = f"ds:{data_store_id}" if data_store_id else f"kb:{kb_id}"
+                original_text = chunk.page_content
+                expanded_text = expand_suffix(original_text, abbr_lookup) if not abbr_lookup.is_empty else original_text
+                chunk_id = hashlib.sha256(
+                    f"{scope_prefix}:{file_name}:{i}:{original_text}".encode()
+                ).hexdigest()
+                chunk.metadata["source"] = file_name
+                source_metadata = {
+                    k: v for k, v in chunk.metadata.items()
+                    if k not in ("kb_id", "document_id", "chunk_id", "file_name")
+                }
+                if doc_title:
+                    source_metadata["title"] = doc_title
+                if not abbr_lookup.is_empty and expanded_text != original_text:
+                    source_metadata["original_text"] = original_text
+                db_chunks.append(DocumentChunk(
+                    id=chunk_id,
+                    document_id=document.id,
+                    kb_id=kb_id if kb_id else None,
+                    data_store_id=data_store_id if data_store_id else None,
+                    file_name=file_name,
+                    chunk_text=expanded_text,
+                    chunk_index=i,
+                    chunk_metadata=source_metadata,
+                    hash=hashlib.sha256((original_text + str(chunk.metadata)).encode()).hexdigest(),
+                ))
+                payloads.append((chunk_id, expanded_text, source_metadata, i))
+            return payloads, db_chunks
+
+        qdrant_payloads, db_chunks = await loop.run_in_executor(None, _build_chunk_records)
+        for dc in db_chunks:
+            db.add(dc)
+
+        # Upsert to Qdrant
+        _prog(40, f"Embedding {len(qdrant_payloads)} chunks…")
+        await _upsert_to_qdrant(
+            qdrant_payloads, kb_id, document.id, file_name,
+            data_store_id=data_store_id,
+            progress_cb=progress_cb or (lambda *_: None),
+            progress_start=40,
+            progress_end=80,
+            pt=pt,
+        )
+
+        # Commit + mark task complete
+        _prog(82, "Saving to database…")
+        if task:
+            task.status = "completed"
+            task.progress = 90
+            task.progress_message = "Finalising…"
+            task.document_id = document.id
+            upload = task.document_upload
+            if upload:
+                upload.status = "completed"
+        db.commit()
+        logger.info("[INGEST] document_id=%s completed chunks=%d", document_id, len(qdrant_payloads))
+
+        # Return graph build request
+        from app.services.settings_service import get_setting as _gs
+        if _gs(db, "GRAPHRAG_ENABLED", None):
+            return GraphBuildRequest(
+                document_id=document.id,
+                file_name=file_name,
+                chunks=[p[1] for p in qdrant_payloads],
+                chunk_ids=[p[0] for p in qdrant_payloads],
+                kb_id=kb_id,
+                data_store_id=data_store_id,
+                task_id=task_id,
+            )
+        return None
+
+    except Exception as e:
+        logger.error("[INGEST] document_id=%s error=%s", document_id, e, exc_info=True)
+        try:
+            db.rollback()
+            if task_id:
+                fail_task = db.get(ProcessingTask, task_id)
+                if fail_task:
+                    fail_task.status = "failed"
+                    fail_task.error_message = str(e)[:2000]
+                    db.commit()
+        except Exception:
+            db.rollback()
+        raise
+    finally:
+        if should_close_db and db:
+            db.close()
+
+
+# ── Orchestrator: full pipeline (convert → ingest) ────────────────────────────
+
+async def process_document_full(
     temp_path: str,
     file_name: str,
-    kb_id: Optional[int] = None,  # None for DataStore files
+    kb_id: Optional[int] = None,
     task_id: Optional[int] = None,
     db: Session = None,
     user_id: int = None,
     chunk_size: int = None,
     chunk_overlap: int = None,
     enable_ocr: Optional[bool] = None,
-    document_id: Optional[int] = None,  # For updating existing documents
-    data_store_id: Optional[int] = None,  # For linking to datastore
-    file_path: Optional[str] = None,  # Original file path (for in-place processing)
-    file_hash: Optional[str] = None,  # Pre-computed hash
-    file_size: Optional[int] = None,  # Pre-computed size
-    content_type: Optional[str] = None,  # Pre-computed content type
+    document_id: Optional[int] = None,
+    data_store_id: Optional[int] = None,
+    file_path: Optional[str] = None,
+    file_hash: Optional[str] = None,
+    file_size: Optional[int] = None,
+    content_type: Optional[str] = None,
 ) -> Optional[GraphBuildRequest]:
-    """Process document in background.
-
-    enable_ocr: None = global setting, True = force on, False = force off.
-    document_id: If provided, update existing document instead of creating new one.
-    data_store_id: Link document to a datastore.
-    file_path: Original file path (for in-place processing, not copying).
+    """Full pipeline: convert → ingest.  Replaces process_document_background.
 
     Returns a GraphBuildRequest if graph extraction is enabled and the
     document was successfully ingested, so the caller can fire the graph
     build as a separate background task. Returns None if graph is disabled
     or ingestion failed.
     """
-    logger = logging.getLogger(__name__)
     if db is None:
         db = SessionLocal()
         should_close_db = True
     else:
         should_close_db = False
 
-    if chunk_size is None:
-        from app.services.settings_service import get_setting
-        chunk_size = get_setting(db, "CHUNK_SIZE", None)
-    if chunk_overlap is None:
-        from app.services.settings_service import get_setting
-        chunk_overlap = int(get_setting(db, "CHUNK_SIZE", None) * get_setting(db, "OVERLAP_PERCENTAGE", None))
-
     task = db.get(ProcessingTask, task_id)
     if not task:
         logger.error(f"Task {task_id} not found")
         return
 
-    # Track cleanup state so the except block always knows what to delete and
-    # what DB objects to roll back — regardless of how far we got.
-    permanent_path: Optional[str] = None   # set after move_file succeeds
-    document: Optional[Document] = None    # set after Document record committed
+    permanent_path: Optional[str] = None
+    document: Optional[Document] = None
+    document_was_created = False  # track whether we created it (for rollback)
     progress_db = None
 
     try:
-        # Separate session for progress writes so progress commits don't
-        # survive a main-transaction rollback (M5).
         progress_db = SessionLocal()
 
         def _set_progress(pct: int, msg: str) -> None:
-            """Write progress to DB using a separate session so progress
-            commits are independent of the main transaction."""
             try:
                 ptask = progress_db.query(ProcessingTask).filter(
                     ProcessingTask.id == task_id
@@ -253,12 +537,9 @@ async def process_document_background(
 
         def _on_timeout() -> None:
             logger.warning(
-                "[PROGRESS_TIMEOUT] task_id=%s silence_s=%s — "
-                "cancelling ingestion (no progress for %ss)",
+                "[PROGRESS_TIMEOUT] task_id=%s silence_s=%s — cancelling",
                 task_id, silence_s, silence_s,
             )
-            # Mark the task as failed in a separate session so the user
-            # can retry immediately without waiting for an app restart.
             try:
                 fail_db = SessionLocal()
                 try:
@@ -267,9 +548,7 @@ async def process_document_background(
                     ).first()
                     if ptask:
                         ptask.status = "failed"
-                        ptask.error_message = (
-                            f"Processing timed out — no progress for {silence_s}s"
-                        )
+                        ptask.error_message = f"Processing timed out — no progress for {silence_s}s"
                         fail_db.commit()
                 finally:
                     fail_db.close()
@@ -280,119 +559,32 @@ async def process_document_background(
 
             local_temp_path = get_abs_path(temp_path)
             logger.info(f"Task {task_id}: Using file at {local_temp_path}")
-    
-            # ── Step 1: Parse ────────────────────────────────────────────────────
-            _set_progress(5, "Parsing document…")
-            logger.info(f"Task {task_id}: Converting document (enable_ocr={enable_ocr})")
-            # Run in a thread pool — conversion is synchronous and CPU/IO-bound.
-            # Blocking the event loop here starves the poll endpoint for 60-120s on
-            # large PDFs, causing ECONNRESET storms on the frontend.
-            loop = asyncio.get_event_loop()
-            markdown_text = await loop.run_in_executor(
-                None, lambda: _convert_to_markdown(local_temp_path, file_name, enable_ocr=enable_ocr)
-            )
-    
-            # ── Cleanup pass ─────────────────────────────────────────────────────
-            _chars_before = len(markdown_text)
-            try:
-                markdown_text = clean_markdown(markdown_text)
-                logger.info(
-                    "[CLEANUP] chars_before=%d chars_after=%d file=%s",
-                    _chars_before, len(markdown_text), file_name,
-                )
-            except Exception as _ce:
-                logger.warning(
-                    "[CLEANUP] fallback to raw markdown. reason=%s file=%s",
-                    str(_ce)[:200], file_name,
-                )
-    
-            if not markdown_text or not markdown_text.strip():
-                raise ValueError(
-                    f"Document produced no extractable text. "
-                    f"The file may be empty, password-protected, or in an unreadable format."
-                )
 
-            # ── Step 1b: Extract document title ───────────────────────────────
-            doc_title = extract_title(markdown_text, file_name, abs_path=local_temp_path)
-            logger.info(f"Task {task_id}: Extracted title: {doc_title!r}")
-    
-            # ── Step 2: Chunk ────────────────────────────────────────────────────
-            _set_progress(20, "Splitting into chunks…")
-            logger.info(f"Task {task_id}: Splitting document into chunks")
-            doc = LangchainDocument(
-                page_content=markdown_text,
-                metadata={"source": file_name},
-            )
-            text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap,
-            )
-            chunks = await loop.run_in_executor(
-                None, lambda: text_splitter.split_documents([doc])
-            )
-            logger.info(f"Task {task_id}: Document split into {len(chunks)} chunks")
-    
-            if not chunks:
-                raise ValueError(
-                    "Document produced no chunks after splitting. "
-                    "It may contain only whitespace or unsupported content."
-                )
-    
-            # ── Step 3: Ensure Qdrant collection ─────────────────────────────────
-            _set_progress(25, f"Preparing vector store ({len(chunks)} chunks)…")
+            # ── Step 1: Move to permanent storage (DataStore files stay in place) ───
             if data_store_id is not None:
-                collection_name = f"ds_{data_store_id}"
-                logger.info(f"Task {task_id}: Ensuring Qdrant collection {collection_name}")
-            elif kb_id is not None:
-                collection_name = f"kb_{kb_id}"
-                logger.info(f"Task {task_id}: Ensuring Qdrant collection {collection_name}")
-            else:
-                logger.error(f"Task {task_id}: No collection — neither data_store_id nor kb_id provided")
-                return
-            # Check if the datastore was deleted while we were processing.
-            # If so, bail out before writing to Qdrant/Neo4j.
-            if data_store_id is not None:
-                from app.services.ingestion.ingestion_dispatcher import is_datastore_deleted
-                if is_datastore_deleted(data_store_id):
-                    logger.info(f"Task {task_id}: Datastore {data_store_id} deleted during processing — aborting")
-                    return
-
-            _ensure_qdrant_collection(get_qdrant_client(), collection_name)
-    
-            # ── Step 4: Move to permanent storage (DataStore files stay in place) ───
-            if data_store_id is not None:
-                # DataStore: file stays in its original location
                 permanent_path = file_path if file_path else temp_path
                 logger.info(f"Task {task_id}: DataStore file stays in place: {permanent_path}")
             else:
-                # KnowledgeBase: copy to uploads
                 _permanent_path = f"user_{user_id}/kb_{kb_id}/{file_name}"
                 logger.info(f"Task {task_id}: Moving file to permanent storage")
                 move_file(temp_path, _permanent_path)
-                permanent_path = _permanent_path          # mark: file now at permanent location
-                local_perm_path = get_abs_path(permanent_path)
+                permanent_path = _permanent_path
                 logger.info(f"Task {task_id}: File moved to {permanent_path}")
-    
-            # ── Step 5: Create Document record ───────────────────────────────────
-            logger.info(f"Task {task_id}: Creating document record")
-            
-            # Use provided values or fall back to task.upload values
+
+            # ── Step 2: Create or update Document record ──────────────────────
             doc_file_path = file_path if file_path else permanent_path
             if data_store_id is not None:
-                # DataStore: use pre-computed values from watcher
                 doc_file_hash = file_hash if file_hash else None
                 doc_file_size = file_size if file_size else None
                 doc_content_type = content_type if content_type else CONTENT_TYPE_MAP.get(
                     os.path.splitext(file_name)[1].lower(), "application/octet-stream",
                 )
             else:
-                # KnowledgeBase: use task.upload values
                 doc_file_hash = file_hash if file_hash else task.document_upload.file_hash
                 doc_file_size = file_size if file_size else task.document_upload.file_size
                 doc_content_type = content_type if content_type else task.document_upload.content_type
-            
+
             if document_id:
-                # Update existing document
                 document = db.get(Document, document_id)
                 if document:
                     document.file_path = doc_file_path
@@ -401,24 +593,22 @@ async def process_document_background(
                     document.content_type = doc_content_type
                     document.data_store_id = data_store_id
                     document.knowledge_base_id = kb_id if kb_id else None
-                    document.title = doc_title
                     try:
                         document.modified_at = datetime.fromtimestamp(os.stat(doc_file_path).st_mtime, tz=timezone.utc)
                     except (OSError, TypeError):
                         document.modified_at = datetime.now(timezone.utc)
+                    db.commit()
                     logger.info(f"Task {task_id}: Updated document ID {document.id}")
                 else:
-                    logger.error(f"Task {task_id}: Document {document_id} not found for update")
+                    logger.error(f"Task {task_id}: Document {document_id} not found")
                     return
             else:
-                # Create new document
                 try:
                     mtime = datetime.fromtimestamp(os.stat(doc_file_path).st_mtime, tz=timezone.utc)
                 except (OSError, TypeError):
                     mtime = datetime.now(timezone.utc)
                 document = Document(
                     file_name=file_name,
-                    title=doc_title,
                     file_path=doc_file_path,
                     file_hash=doc_file_hash,
                     file_size=doc_file_size,
@@ -430,210 +620,82 @@ async def process_document_background(
                 db.add(document)
                 db.commit()
                 db.refresh(document)
+                document_was_created = True
                 logger.info(f"Task {task_id}: Document record created with ID {document.id}")
-    
-            # ── Step 6: Delete old chunks, then build new ones ───────────────────
-            _set_progress(30, "Cleaning up old chunks…")
-            logger.info(f"Task {task_id}: Deleting old chunks for document_id={document.id}")
-            # Delete old chunks from DB (must happen before new chunks are added,
-            # so that if the Qdrant upsert fails, old chunks are still present)
-            # Build scope filter explicitly (M7: was a Python ternary that
-            # evaluated incorrectly for edge cases).
-            from sqlalchemy import and_
-            if data_store_id is not None:
-                scope_filter = DocumentChunk.data_store_id == data_store_id
-            else:
-                scope_filter = and_(
-                    DocumentChunk.kb_id == kb_id,
-                    DocumentChunk.data_store_id.is_(None),
-                )
-            old_chunk_ids = db.query(DocumentChunk).filter(
-                DocumentChunk.document_id == document.id,
-                scope_filter,
-            ).with_entities(DocumentChunk.id).all()
-            old_chunk_ids = [cid[0] for cid in old_chunk_ids]
-            if old_chunk_ids:
-                logger.info(f"Task {task_id}: Deleting {len(old_chunk_ids)} old chunks")
-                # Delete from Qdrant first (so DB rollback doesn't orphan Qdrant points)
-                point_ids = [_chunk_id_to_point_id(cid) for cid in old_chunk_ids]
-                collection_name = f"ds_{data_store_id}" if data_store_id else f"kb_{kb_id}"
-                get_qdrant_client().delete(
-                    collection_name=collection_name,
-                    points_selector=PointIdsList(points=point_ids),
-                )
-                # Delete from DB — rebuild scope_filter (SQLAlchemy clauses are
-                # single-use after being consumed by a query)
-                if data_store_id is not None:
-                    scope_filter = DocumentChunk.data_store_id == data_store_id
-                else:
-                    scope_filter = and_(
-                        DocumentChunk.kb_id == kb_id,
-                        DocumentChunk.data_store_id.is_(None),
-                    )
-                db.query(DocumentChunk).filter(
-                    DocumentChunk.document_id == document.id,
-                    scope_filter,
-                ).delete(synchronize_session="fetch")
-                db.commit()
-    
-            _set_progress(35, "Building chunk records…")
-            logger.info(f"Task {task_id}: Building {len(chunks)} chunk records")
-    
-            def _build_chunk_records():
-                """CPU-bound: hashing + object construction. Returns payloads only — no db.add here."""
-                from app.services.abbreviation_service import build_lookup, expand_suffix
 
-                # Resolve org_id for abbreviation lookup
-                org_id_for_abbr = None
-                if kb_id:
-                    kb = db.query(KnowledgeBase).filter(KnowledgeBase.id == kb_id).first()
-                    org_id_for_abbr = kb.org_id if kb else None
-                elif data_store_id:
-                    link = (
-                        db.query(OrganizationDataStore)
-                        .filter(
-                            OrganizationDataStore.data_store_id == data_store_id,
-                            OrganizationDataStore.is_active == True,
-                        )
-                        .first()
-                    )
-                    org_id_for_abbr = link.org_id if link else None
+            # ── Phase 1: Convert ──────────────────────────────────────────────
+            _set_progress(5, "Converting document…")
+            markdown_text = await convert_document(
+                document_id=document.id,
+                file_path=permanent_path if data_store_id is None else (file_path or temp_path),
+                file_name=file_name,
+                enable_ocr=enable_ocr,
+                db=db,
+            )
 
-                abbr_lookup = build_lookup(db, org_id_for_abbr)
-
-                payloads = []
-                db_chunks = []
-                for i, chunk in enumerate(chunks):
-                    scope_prefix = f"ds:{data_store_id}" if data_store_id else f"kb:{kb_id}"
-                    original_text = chunk.page_content
-                    expanded_text = expand_suffix(original_text, abbr_lookup) if not abbr_lookup.is_empty else original_text
-                    chunk_id = hashlib.sha256(
-                        f"{scope_prefix}:{file_name}:{i}:{original_text}".encode()
-                    ).hexdigest()
-                    chunk.metadata["source"] = file_name
-                    source_metadata = {
-                        k: v for k, v in chunk.metadata.items()
-                        if k not in ("kb_id", "document_id", "chunk_id", "file_name")
-                    }
-                    if doc_title:
-                        source_metadata["title"] = doc_title
-                    if not abbr_lookup.is_empty and expanded_text != original_text:
-                        source_metadata["original_text"] = original_text
-                    db_chunks.append(DocumentChunk(
-                        id=chunk_id,
-                        document_id=document.id,
-                        kb_id=kb_id if kb_id else None,
-                        data_store_id=data_store_id if data_store_id else None,
-                        file_name=file_name,
-                        chunk_text=expanded_text,
-                        chunk_index=i,
-                        chunk_metadata=source_metadata,
-                        hash=hashlib.sha256(
-                            (original_text + str(chunk.metadata)).encode()
-                        ).hexdigest(),
-                    ))
-                    payloads.append((chunk_id, expanded_text, source_metadata, i))
-                return payloads, db_chunks
-    
-            qdrant_payloads, db_chunks = await loop.run_in_executor(None, _build_chunk_records)
-            # db.add must happen on the event-loop thread — SQLAlchemy sessions are not thread-safe
-            for doc_chunk in db_chunks:
-                db.add(doc_chunk)
-    
-            # ── Step 7: Upsert to Qdrant ─────────────────────────────────────────
-            _set_progress(40, f"Embedding {len(qdrant_payloads)} chunks…")
-            logger.info(f"Task {task_id}: Upserting {len(qdrant_payloads)} chunks to Qdrant")
-            await _upsert_to_qdrant(
-                qdrant_payloads, kb_id, document.id, file_name,
+            # ── Phase 2: Ingest ────────────────────────────────────────────────
+            graph_request = await ingest_document(
+                document_id=document.id,
+                file_name=file_name,
                 data_store_id=data_store_id,
+                kb_id=kb_id,
+                task_id=task_id,
+                markdown_text=markdown_text,
+                db=db,
                 progress_cb=_set_progress,
-                progress_start=40,
-                progress_end=80,
                 pt=pt,
             )
-            logger.info(f"Task {task_id}: Chunks added to Qdrant")
-    
-            # ── Step 8: Commit chunks + mark task complete ───────────────────────
-            _set_progress(82, "Saving to database…")
-            task.status = "completed"
-            task.progress = 90
-            task.progress_message = "Finalising…"
-            # Commit directly — SQLAlchemy sessions are not thread-safe, running
-            # db.commit() in run_in_executor risks concurrent access with the event loop.
-            db.commit()
-            task.document_id = document.id
-            upload = task.document_upload
-            if upload:
-                upload.status = "completed"
-            db.commit()
+
             logger.info("[PROGRESS_TIMEOUT] task_id=%s completed_ok=true", task_id)
             logger.info(f"Task {task_id}: Processing completed successfully")
+            return graph_request
 
-            # ── Step 9: Return graph build request (detached) ───────────────
-            # The caller fires the graph build as a separate background task
-            # so the ingestion future resolves at Qdrant upsert.  Graph build
-            # tracking is via ProcessingTask.graph_status (null/pending/
-            # completed/failed) and is retried by the recovery service.
-            if get_setting(db, "GRAPHRAG_ENABLED", None):
-                return GraphBuildRequest(
-                    document_id=document.id,
-                    file_name=file_name,
-                    chunks=[p[1] for p in qdrant_payloads],
-                    chunk_ids=[p[0] for p in qdrant_payloads],
-                    kb_id=kb_id,
-                    data_store_id=data_store_id,
-                    task_id=task_id,
-                )
-            return None
-    
     except Exception as e:
         logger.error(f"Task {task_id}: Error processing document: {str(e)}")
         logger.error(f"Task {task_id}: Stack trace: {traceback.format_exc()}")
 
-        # ── Rollback uncommitted DB state ────────────────────────────────────
-        # Any chunk records added to the session but not yet committed are
-        # discarded here.  If the Document record was already committed we
-        # delete it explicitly so we don't leave a document with no chunks.
         try:
             db.rollback()
         except Exception:
             pass
 
-        if document is not None:
+        # Only delete the Document if we created it AND conversion hasn't completed.
+        # If converted_markdown exists, keep the document so the admin can retry.
+        if document is not None and document_was_created:
             try:
-                db.delete(document)
-                db.commit()
-                logger.info(f"Task {task_id}: Document record rolled back")
+                db.refresh(document)
+                if not document.converted_markdown:
+                    db.delete(document)
+                    db.commit()
+                    logger.info(f"Task {task_id}: Document record rolled back (no markdown)")
+                else:
+                    logger.info(f"Task {task_id}: Keeping document — markdown exists")
             except Exception as del_err:
                 logger.warning(f"Task {task_id}: Could not delete document record: {del_err}")
 
-        # ── Mark task failed ─────────────────────────────────────────────────
+        # Mark task failed
         try:
-            task.status = "failed"
-            task.error_message = str(e)
-            db.commit()
+            task = db.get(ProcessingTask, task_id)
+            if task:
+                task.status = "failed"
+                task.error_message = str(e)[:2000]
+                db.commit()
         except Exception:
             pass
 
-        # ── Delete the file ──────────────────────────────────────────────────
-        # For DataStore files, the file stays in its original location and should NOT be deleted.
-        # For KB files, delete the file from uploads after processing.
+        # Delete file only for KB uploads that failed
         if data_store_id is None and permanent_path is not None:
-            file_to_delete = permanent_path
             try:
-                logger.info(f"Task {task_id}: Cleaning up file at {file_to_delete}")
-                delete_file(file_to_delete)
-                logger.info(f"Task {task_id}: File cleaned up")
+                delete_file(permanent_path)
+                logger.info(f"Task {task_id}: File cleaned up at {permanent_path}")
             except Exception:
-                logger.warning(f"Task {task_id}: Failed to clean up file at {file_to_delete}")
-
-        # Clean up temp file if move_file failed (permanent_path was never set)
+                logger.warning(f"Task {task_id}: Failed to clean up file at {permanent_path}")
         if data_store_id is None and permanent_path is None and temp_path:
             try:
                 delete_file(temp_path)
                 logger.info(f"Task {task_id}: Temp file cleaned up at {temp_path}")
             except Exception:
-                logger.warning(f"Task {task_id}: Failed to clean up temp file at {temp_path}")
+                pass
 
         # Clean up DocumentUpload record if this was a KB upload
         if task and task.document_upload_id:
@@ -644,11 +706,10 @@ async def process_document_background(
                 if upload:
                     db.delete(upload)
                     db.commit()
-                    logger.info(f"Task {task_id}: DocumentUpload record cleaned up")
             except Exception:
                 db.rollback()
 
-        return None  # ingestion failed — no graph build request
+        return None
 
     finally:
         if progress_db is not None:
@@ -658,3 +719,7 @@ async def process_document_background(
                 pass
         if should_close_db and db:
             db.close()
+
+
+# Backward-compatible alias
+process_document_background = process_document_full
