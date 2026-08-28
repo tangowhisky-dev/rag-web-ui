@@ -225,16 +225,26 @@ def get_folder_contents(
     for entry in folders:
         folder_abs = os.path.join(target, entry.name)
         folder_rel = _relative_path(folder_abs, root)
-        # Count files in manifest under this folder prefix
         prefix = folder_abs + os.sep
-        manifest_count = (
-            db.query(func.count(DataStoreFileManifest.id))
-            .filter(
-                DataStoreFileManifest.datastore_id == datastore_id,
-                DataStoreFileManifest.file_path.like(prefix + "%"),
-            )
-            .scalar()
-        ) or 0
+
+        # Count actual files on disk under this folder (recursive)
+        # — the filesystem is the source of truth for file counts.
+        # The manifest table is only populated after a scan, so using it
+        # here would show 0 files before the first scan.
+        fs_file_count = 0
+        try:
+            for dirpath, _dirs, filenames in os.walk(folder_abs):
+                for fname in filenames:
+                    if _should_skip_name(fname):
+                        continue
+                    ext = os.path.splitext(fname)[1].lower()
+                    if ext not in SUPPORTED_EXTENSIONS:
+                        continue
+                    if not _matches_scan_pattern(fname, ds.scan_pattern):
+                        continue
+                    fs_file_count += 1
+        except OSError:
+            pass
 
         # Count ingested documents under this folder
         ingested_count = (
@@ -262,7 +272,7 @@ def get_folder_contents(
             "type": "folder",
             "name": entry.name,
             "path": folder_rel,
-            "file_count": manifest_count,
+            "file_count": fs_file_count,
             "ingested_count": ingested_count,
             "selected_count": selected_count,
         })
