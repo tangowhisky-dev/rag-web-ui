@@ -183,7 +183,7 @@ def _get_vision_config() -> Optional[VisionConfig]:
             if not api_base:
                 logger.warning("[converter] VISION_MODEL set but no API base — OCR disabled")
                 return None
-            max_tokens = int(get_setting(db, "VISION_MAX_TOKENS", None) or 2000)
+            max_tokens = int(get_setting(db, "VISION_MAX_TOKENS", None) or 4096)
             _vision_config = VisionConfig(
                 model=vision_model,
                 client=SyncOpenAI(api_key=api_key, base_url=api_base),
@@ -226,7 +226,7 @@ def _ocr_image_bytes(image_bytes: bytes, config: VisionConfig) -> str:
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
             ],
         }],
-        max_tokens=config.max_tokens or 2000,
+        max_tokens=config.max_tokens or 4096,
     )
     return (resp.choices[0].message.content or "").strip()
 
