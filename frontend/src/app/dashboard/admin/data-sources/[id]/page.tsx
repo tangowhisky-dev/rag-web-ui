@@ -244,9 +244,10 @@ export default function DatastoreBrowsePage() {
     setDirtyMap(newMap);
   };
 
-  // Toggle all files on current page
-  const toggleAllFiles = (checked: boolean) => {
+  // Toggle all items on current page (files + folders)
+  const toggleAllFiles = async (checked: boolean) => {
     if (!data) return;
+    // Toggle files immediately
     const newMap = new Map(dirtyMap);
     for (const item of data.items) {
       if (item.type === 'file' && item.absolute_path) {
@@ -254,6 +255,12 @@ export default function DatastoreBrowsePage() {
       }
     }
     setDirtyMap(newMap);
+
+    // Toggle folders (async — each fetches its contained files)
+    const folders = data.items.filter(i => i.type === 'folder');
+    for (const folder of folders) {
+      await toggleFolderTo(folder, checked);
+    }
   };
 
   // Toggle a folder's selection — fetches all files under the folder
@@ -261,9 +268,14 @@ export default function DatastoreBrowsePage() {
   const [folderLoading, setFolderLoading] = useState<string | null>(null);
   const toggleFolder = async (item: BrowseItem) => {
     if (item.type !== 'folder') return;
-    // Determine current state to compute the toggle target
     const currentState = getFolderCheckState(item);
-    const targetChecked = currentState !== true; // toggle to checked if not fully checked
+    const targetChecked = currentState !== true;
+    await toggleFolderTo(item, targetChecked);
+  };
+
+  // Core folder toggle logic — sets folder to a specific target state
+  const toggleFolderTo = async (item: BrowseItem, targetChecked: boolean) => {
+    if (item.type !== 'folder') return;
 
     setFolderLoading(item.path);
     try {
@@ -345,14 +357,21 @@ export default function DatastoreBrowsePage() {
     return dirtyMap.get(item.path) ?? original;
   };
 
-  // All-files-on-page checkbox state
+  // All-items-on-page checkbox state (files + folders)
   const pageCheckboxState = (): boolean | 'indeterminate' => {
     if (!data) return false;
-    const files = data.items.filter(i => i.type === 'file');
-    if (files.length === 0) return false;
-    const checkedCount = files.filter(f => getCheckState(f) === true).length;
+    const items = data.items;
+    if (items.length === 0) return false;
+    let checkedCount = 0;
+    for (const item of items) {
+      if (item.type === 'file') {
+        if (getCheckState(item) === true) checkedCount++;
+      } else {
+        if (getFolderCheckState(item) === true) checkedCount++;
+      }
+    }
     if (checkedCount === 0) return false;
-    if (checkedCount === files.length) return true;
+    if (checkedCount === items.length) return true;
     return 'indeterminate';
   };
 
