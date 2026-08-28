@@ -343,7 +343,7 @@ def run_graph_build_in_thread(req: GraphBuildRequest) -> None:
         # Check if the task was already cancelled (e.g. scan stopped while
         # ingestion was finishing and the graph thread hadn't started yet).
         existing_status = _get_graph_status(req.task_id)
-        if existing_status is None:
+        if existing_status == _TASK_NOT_FOUND:
             # Task was deleted (e.g. by reset_document_for_reingest during
             # a manual re-ingest from the markdown editor).  Exit cleanly.
             logger.info(
@@ -448,19 +448,27 @@ def run_graph_build_in_thread(req: GraphBuildRequest) -> None:
                 _graph_builds_by_datastore.get(req.data_store_id, set()).discard(req.task_id)
 
 
-def _get_graph_status(task_id: int) -> Optional[str]:
-    """Read the current graph_status for a task (best-effort)."""
+_TASK_NOT_FOUND = "__task_not_found__"
+
+
+def _get_graph_status(task_id: int) -> str:
+    """Read the current graph_status for a task (best-effort).
+
+    Returns _TASK_NOT_FOUND if the task row doesn't exist, or the
+    actual graph_status value (which may be None, "pending",
+    "completed", or "failed").
+    """
     try:
         db: Session = SessionLocal()
         try:
             task = db.query(ProcessingTask).filter(
                 ProcessingTask.id == task_id
             ).first()
-            return task.graph_status if task else None
+            return task.graph_status if task else _TASK_NOT_FOUND
         finally:
             db.close()
     except Exception:
-        return None
+        return _TASK_NOT_FOUND
 
 
 def _start_graph_build_thread(req: GraphBuildRequest) -> None:

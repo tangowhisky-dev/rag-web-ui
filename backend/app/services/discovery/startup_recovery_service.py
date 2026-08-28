@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from app.db.session import SessionLocal
 from app.models.datastore import DataStore, DataStoreFileManifest
@@ -891,7 +891,12 @@ class StartupRecoveryService:
                 .filter(
                     ProcessingTask.data_store_id == datastore_id,
                     ProcessingTask.status == "completed",
-                    ProcessingTask.graph_status.in_(["pending", "failed"]),
+                    # Pick up tasks where graph build was never started
+                    # (NULL), is pending, or failed.
+                    or_(
+                        ProcessingTask.graph_status.in_(["pending", "failed"]),
+                        ProcessingTask.graph_status.is_(None),
+                    ),
                 )
                 .all()
             )
