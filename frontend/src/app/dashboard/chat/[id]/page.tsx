@@ -405,25 +405,6 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     setMessages((prev) => prev.filter((m) => m.id !== id));
   }, []);
 
-  const markdownParse = (text: string) => {
-    return text
-      .replace(/\[\[([cC])itation/g, "[citation")
-      .replace(/[cC]itation:(\d+)]]/g, "citation:$1]")
-      .replace(/\[\[([cC]itation:\d+)]](?!])/g, `[$1]`)
-      .replace(/\[[cC]itation:(\d+)]/g, "[citation]($1)")
-      // Agentic pipeline emits [KB-N] labels instead of [N](N).
-      .replace(/\[KB-(\d+)\]/g, "[citation]($1)")
-      // Agentic pipeline also emits combined [KB-N, KB-M] labels.
-      // Split into separate [citation](N) links.
-      .replace(/\[KB-([\d,\s]+)\]/g, (_match, ids: string) =>
-        ids.split(",").map((id: string) => `[citation](${id.trim()})`).join("")
-      )
-      // Fallback: plain [N] that the model emits instead of [citation:N].
-      // Only match standalone bracketed numbers (not part of markdown list
-      // syntax "1." or already-converted "[citation](N)").
-      .replace(/(?<!\()\[(\d+)\](?!\()/g, "[citation]($1)");
-  };
-
   const flushToBrowser = async () => {
     await new Promise<void>((resolve) => {
       requestAnimationFrame(() => {
@@ -1211,41 +1192,13 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     setIsLoading(false);
   };
 
-  // Cache parsed markdown per message so non-streaming messages keep stable
-  // object references — prevents re-rendering every Answer on every token.
-  // Keyed by message object identity: if the message object hasn't been
-  // replaced by a setMessages update, ALL its fields are unchanged, so we
-  // can safely reuse the cached result. This correctly handles cases where
-  // citations, lastAnswerObject, or confidence change without content changing.
-  const parsedCacheRef = useRef<Map<Message, Message>>(new Map());
-  const parsedContentCache = useRef<Map<string, string>>(new Map());
-  const processedMessages = useMemo(() => {
-    const objCache = parsedCacheRef.current;
-    const strCache = parsedContentCache.current;
-    return messages.map((message) => {
-      if (message.role !== "assistant" || !message.content) return message;
-      const cached = objCache.get(message);
-      if (cached) return cached;
-      // Only re-run markdownParse if content string changed; reuse parsed string otherwise.
-      const prevParsed = strCache.get(message.id);
-      const parsed = prevParsed !== undefined && message.content === strCache.get(message.id + "_raw")
-        ? prevParsed
-        : markdownParse(message.content);
-      strCache.set(message.id, parsed);
-      strCache.set(message.id + "_raw", message.content);
-      const result = { ...message, content: parsed };
-      objCache.set(message, result);
-      return result;
-    });
-  }, [messages]);
-
   const lastAssistantId = useMemo(() => {
     let last: string | undefined;
-    for (const m of processedMessages) {
+    for (const m of messages) {
       if (m.role === "assistant") last = m.id;
     }
     return last;
-  }, [processedMessages]);
+  }, [messages]);
 
   const handleFollowUp = useCallback((query: string) => {
     handleSubmit(query);
@@ -1288,7 +1241,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
               <LoadingDots size="sm" />
             </div>
           )}
-          {processedMessages.length === 0 && !isLoading && !isInitialLoad ? (
+          {messages.length === 0 && !isLoading && !isInitialLoad ? (
             /* Welcome / empty state */
             <div className="flex flex-col items-center justify-center h-full gap-4 px-4 text-center">
               <img src={APP_LOGO_SRC} alt="logo" className="w-16 h-16 rounded-2xl" />
@@ -1297,7 +1250,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
             </div>
           ) : (
             <div className="max-w-3xl mx-auto px-4 py-6 space-y-6 pb-8">
-              {processedMessages.map((message) =>
+              {messages.map((message) =>
                 message.role === "assistant" ? (
                   <div key={message.clientId} className="flex items-start gap-3">
                     {/* Avatar */}

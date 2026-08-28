@@ -196,3 +196,49 @@ def test_normalize_citations_double_digit_indices():
     normalized, cited = normalize_citations(answer, docs)
     assert normalized == "Cited [1](1), [2](2), and [3](3)."
     assert cited == [10, 11, 12]
+
+
+def test_normalize_citations_bare_kb_label():
+    # Model copies the [KB-N] context label verbatim without parenthetical.
+    from app.services.agentic_rag.utils import normalize_citations
+
+    docs = [{"page_content": "a"}, {"page_content": "b"}]
+    answer = "Revenue grew [KB-2] last quarter."
+    normalized, cited = normalize_citations(answer, docs)
+    assert normalized == "Revenue grew [1](1) last quarter."
+    assert cited == [2]
+
+
+def test_normalize_citations_bare_kb_label_combined():
+    # Model emits [KB-N, KB-M] combined label without parenthetical.
+    from app.services.agentic_rag.utils import normalize_citations
+
+    docs = [{"page_content": f"doc{i}"} for i in range(1, 4)]
+    answer = "Supported by [KB-2, KB-3] in the literature."
+    normalized, cited = normalize_citations(answer, docs)
+    assert normalized == "Supported by [1](1)[2](2) in the literature."
+    assert cited == [2, 3]
+
+
+def test_normalize_citations_bare_kb_label_renumbered():
+    # Bare [KB-N] should be renumbered by first appearance, like [N](N).
+    from app.services.agentic_rag.utils import normalize_citations
+
+    docs = [{"page_content": f"doc{i}"} for i in range(1, 4)]
+    answer = "First [KB-3] then [KB-1]."
+    normalized, cited = normalize_citations(answer, docs)
+    assert normalized == "First [1](1) then [2](2)."
+    assert cited == [3, 1]
+
+
+def test_normalize_citations_bare_numeric_not_converted():
+    # Bare [N] without "KB-" prefix must NOT be converted — it's too common
+    # in code, URLs, and prose (e.g. array[1], reference links).
+    from app.services.agentic_rag.utils import normalize_citations
+
+    docs = [{"page_content": "a"}, {"page_content": "b"}]
+    answer = "Access array[1] for details [1](1)."
+    normalized, cited = normalize_citations(answer, docs)
+    # [1](1) is recognized; bare [1] in "array[1]" is left as plain text.
+    assert "array[1]" in normalized
+    assert cited == [1]

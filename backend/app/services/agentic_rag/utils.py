@@ -138,6 +138,21 @@ def normalize_citations(answer: str, docs: list) -> tuple[str, list[int]]:
     answer = re.sub(r"\[KB-(\d+)\]\(KB-(\d+)\)", r"[\1](\2)", answer, flags=re.IGNORECASE)
     answer = re.sub(r"\[KB-(\d+)\]\((\d+)\)", r"[\1](\2)", answer, flags=re.IGNORECASE)
     answer = re.sub(r"\[(\d+)\]\(KB-(\d+)\)", r"[\1](\2)", answer, flags=re.IGNORECASE)
+    # Bare [KB-N] (no parenthetical) and combined [KB-N, KB-M] — the model
+    # copied the context label verbatim.  The "KB-" prefix is unambiguous
+    # (never appears in prose/code/URLs), so this is safe.  Negative
+    # lookahead (?!\() prevents double-matching the parenthetical variants
+    # already handled above.  Bare [N] without "KB-" is intentionally NOT
+    # handled — it's too common in code, URLs, and prose.
+    answer = re.sub(
+        r"\[(KB-\d+(?:[,\s]+KB-\d+)*)\](?!\()",
+        lambda m: "".join(
+            f"[{int(x)}]({int(x)})"
+            for x in re.findall(r"KB-(\d+)", m.group(1), flags=re.IGNORECASE)
+        ),
+        answer,
+        flags=re.IGNORECASE,
+    )
 
     max_index = len(docs)
     valid_cited: list[int] = []
