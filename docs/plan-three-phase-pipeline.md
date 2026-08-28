@@ -7,7 +7,7 @@ Approved — 2026-02-27
 
 ### Decisions
 1. **Async pipeline functions** — `convert_document()` and `ingest_document()` are `async def`, matching the current `process_document_background` architecture. `run_ingestion_in_thread()` keeps its asyncio loop wrapper.
-2. **Both KB and datastore documents get `converted_markdown`** — the column is populated for all documents during ingestion. The editor and re-convert endpoints are datastore-only (KB files are deleted after processing, making re-convert impossible).
+2. **Both KB and datastore documents get `converted_markdown`** — the column is populated for all documents during ingestion. The editor and re-convert work for both. KB files are moved to permanent storage (`{UPLOAD_DIR}/user_{user_id}/kb_{kb_id}/{file_name}`) on success and are available for re-convert. Files are only deleted on processing failure (cleanup).
 3. **Graph build dispatch stays in `run_ingestion_in_thread`** — `process_document_full` returns `Optional[GraphBuildRequest]` like the current `process_document_background`. `run_ingestion_in_thread` handles the graph build dispatch logic (task status check, datastore-deleted check, graph-paused check).
 
 ### Context
@@ -715,7 +715,7 @@ Next.js client-side navigation. The editor route fetches fresh data on load.
 - File selection/unselection UI (the editor is additive)
 - `run_ingestion_in_thread` graph build dispatch logic (task status check, datastore-deleted check, graph-paused check)
 - `ProgressTimeout` mechanism (stays inside `process_document_full`, passed through to `ingest_document` via `progress_cb`)
-- KB direct upload flow (KB documents get `converted_markdown` stored but cannot be edited or re-converted because the source file is deleted after processing)
+- KB direct upload flow (KB documents get `converted_markdown` stored and can be edited/re-converted — files persist in `{UPLOAD_DIR}/user_{user_id}/kb_{kb_id}/` after successful processing; files are only deleted on failure)
 
 ---
 
