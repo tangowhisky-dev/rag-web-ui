@@ -1110,8 +1110,9 @@ def update_document_markdown(
         from app.services.ingestion.document_processor import ingest_document
         from app.services.ingestion.ingestion_dispatcher import (
             register_ingestion, unregister_ingestion, is_datastore_deleted,
-            _start_graph_build_thread,
+            _start_graph_build_thread, _mark_task_status,
         )
+        from app.services.infrastructure.progress_timeout import ProgressTimeout
 
         if datastore_id is not None:
             register_ingestion(datastore_id, task.id)
@@ -1122,20 +1123,65 @@ def update_document_markdown(
             rdb = SessionLocal()
             try:
                 if datastore_id is not None and is_datastore_deleted(datastore_id):
+                    _mark_task_status(task.id, "failed", 0, "Datastore deleted")
                     return
-                graph_request = loop.run_until_complete(
-                    ingest_document(
-                        document_id=document_id,
-                        file_name=_fn,
-                        data_store_id=datastore_id,
-                        kb_id=_kb,
-                        task_id=task.id,
-                        markdown_text=None,  # read from doc.converted_markdown
-                        db=rdb,
-                    )
-                )
-                if graph_request:
-                    _start_graph_build_thread(graph_request)
+
+                # Progress callback using a separate session
+                progress_db = SessionLocal()
+                _pt_ref = [None]  # filled by ProgressTimeout __aenter__
+                def _set_progress(progress: int, message: str = ""):
+                    try:
+                        from app.models.knowledge import ProcessingTask as _PT
+                        t = progress_db.query(_PT).filter(_PT.id == task.id).first()
+                        if t:
+                            t.progress = progress
+                            t.progress_message = message
+                            if progress < 100:
+                                t.status = "processing"
+                            progress_db.commit()
+                    except Exception:
+                        progress_db.rollback()
+                    if _pt_ref[0]:
+                        _pt_ref[0].ping()
+
+                # Timeout callback
+                def _on_timeout():
+                    try:
+                        _mark_task_status(task.id, "failed", 0, "Progress timeout — no activity")
+                    except Exception:
+                        pass
+
+                async def _run_with_timeout():
+                    async with ProgressTimeout(
+                        silence_seconds=600,
+                        on_timeout=_on_timeout,
+                    ) as _pt:
+                        _pt_ref[0] = _pt
+                        return await ingest_document(
+                            document_id=document_id,
+                            file_name=_fn,
+                            data_store_id=datastore_id,
+                            kb_id=_kb,
+                            task_id=task.id,
+                            markdown_text=None,
+                            db=rdb,
+                            progress_cb=_set_progress,
+                            pt=_pt,
+                        )
+
+                try:
+                    graph_request = loop.run_until_complete(_run_with_timeout())
+
+                    # Mark task completed
+                    _mark_task_status(task.id, "completed", 100, "Re-ingest complete")
+
+                    if graph_request:
+                        _start_graph_build_thread(graph_request)
+                except Exception as e:
+                    logger.error("reingest_failed document_id=%s: %s", document_id, e)
+                    _mark_task_status(task.id, "failed", 0, str(e)[:500])
+                finally:
+                    progress_db.close()
             finally:
                 rdb.close()
         finally:
@@ -1187,20 +1233,49 @@ def reconvert_document(
         import asyncio
         from app.db.session import SessionLocal
         from app.services.ingestion.document_processor import convert_document
+        from app.services.infrastructure.progress_timeout import ProgressTimeout
 
         loop = asyncio.new_event_loop()
         try:
             asyncio.set_event_loop(loop)
             rdb = SessionLocal()
             try:
-                loop.run_until_complete(
-                    convert_document(
-                        document_id=document_id,
-                        file_path=_file_path,
-                        file_name=_file_name,
-                        db=rdb,
-                    )
-                )
+                def _on_timeout():
+                    try:
+                        from app.models.knowledge import Document as _Doc
+                        d = rdb.query(_Doc).filter(_Doc.id == document_id).first()
+                        if d:
+                            d.conversion_status = "error"
+                            d.conversion_error = "Conversion timeout — no activity for 600s"
+                            rdb.commit()
+                    except Exception:
+                        rdb.rollback()
+
+                async def _run_with_timeout():
+                    async with ProgressTimeout(
+                        silence_seconds=600,
+                        on_timeout=_on_timeout,
+                    ):
+                        return await convert_document(
+                            document_id=document_id,
+                            file_path=_file_path,
+                            file_name=_file_name,
+                            db=rdb,
+                        )
+
+                try:
+                    loop.run_until_complete(_run_with_timeout())
+                except Exception as e:
+                    logger.error("reconvert_failed document_id=%s: %s", document_id, e)
+                    try:
+                        from app.models.knowledge import Document as _Doc
+                        d = rdb.query(_Doc).filter(_Doc.id == document_id).first()
+                        if d:
+                            d.conversion_status = "error"
+                            d.conversion_error = str(e)[:500]
+                            rdb.commit()
+                    except Exception:
+                        rdb.rollback()
             finally:
                 rdb.close()
         finally:

@@ -104,7 +104,7 @@ async def preview_document(file_path: str, chunk_size: int = None, chunk_overlap
         from app.db.session import SessionLocal
         _db = SessionLocal()
         try:
-            chunk_size = get_setting(_db, "CHUNK_SIZE", None)
+            chunk_size = int(get_setting(_db, "CHUNK_SIZE", None) or 1000)
         finally:
             _db.close()
     if chunk_overlap is None:
@@ -112,7 +112,9 @@ async def preview_document(file_path: str, chunk_size: int = None, chunk_overlap
         from app.db.session import SessionLocal
         _db = SessionLocal()
         try:
-            chunk_overlap = int(get_setting(_db, "CHUNK_SIZE", None) * get_setting(_db, "OVERLAP_PERCENTAGE", None))
+            _cs = int(get_setting(_db, "CHUNK_SIZE", None) or 1000)
+            _op = float(get_setting(_db, "OVERLAP_PERCENTAGE", None) or 0.1)
+            chunk_overlap = int(_cs * _op)
         finally:
             _db.close()
     _, ext = os.path.splitext(file_path)
@@ -286,6 +288,13 @@ async def ingest_document(
 
         task = db.get(ProcessingTask, task_id) if task_id else None
 
+        # Reset graph_status — a stale "failed" from a previous run
+        # should not persist into the new ingestion cycle.
+        if task and task.graph_status in ("failed", "pending"):
+            task.graph_status = None
+            task.graph_error = None
+            db.commit()
+
         # Read markdown from argument or DB
         if markdown_text is None:
             markdown_text = document.converted_markdown
@@ -300,10 +309,11 @@ async def ingest_document(
                             document_id, data_store_id)
                 return None
 
-        # Chunk size from settings
+        # Chunk size from settings (with defaults to prevent None crash)
         from app.services.settings_service import get_setting
-        chunk_size = get_setting(db, "CHUNK_SIZE", None)
-        chunk_overlap = int(get_setting(db, "CHUNK_SIZE", None) * get_setting(db, "OVERLAP_PERCENTAGE", None))
+        chunk_size = int(get_setting(db, "CHUNK_SIZE", None) or 1000)
+        overlap_pct = float(get_setting(db, "OVERLAP_PERCENTAGE", None) or 0.1)
+        chunk_overlap = int(chunk_size * overlap_pct)
 
         loop = asyncio.get_event_loop()
 

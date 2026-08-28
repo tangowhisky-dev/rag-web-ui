@@ -67,6 +67,17 @@ from sqlalchemy.dialects import mysql as _mysql
 _mysql.LONGTEXT = _Text
 _mysql.JSON = _JSON  # MySQL JSON → generic JSON for SQLite
 
+# Safety net: when DATABASE_USE_MYSQL=true, patch Base.metadata.drop_all
+# to be a no-op so test fixtures can't accidentally destroy the shared
+# MySQL database.  This is a global guard — individual test files that
+# call drop_all(bind=engine) will silently skip the drop.
+if not _USE_SQLITE:
+    from app.models.base import Base as _Base
+    _original_drop_all = _Base.metadata.drop_all
+    def _safe_drop_all(*args, **kwargs):
+        pass  # No-op: never drop tables from the shared MySQL database
+    _Base.metadata.drop_all = _safe_drop_all
+
 if _USE_SQLITE:
     # Stub out app.db.session *before* any app.* import.
     from sqlalchemy import create_engine as _create_engine

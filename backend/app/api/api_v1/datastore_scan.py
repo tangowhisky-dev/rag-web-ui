@@ -365,7 +365,7 @@ def scan_progress_stream(
                 last_status = current_status
 
             # If scan is done, stop streaming
-            if current_status in ("completed", "error", "cancelled", "paused"):
+            if current_status in ("completed", "error", "cancelled", "paused", "idle"):
                 break
 
             await asyncio.sleep(0.5)

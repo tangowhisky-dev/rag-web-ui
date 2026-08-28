@@ -831,6 +831,67 @@ class DataStoreWatcher:
                                 scan_info["error_count"] = summary["errors"]
                                 break
 
+            # Expire all cached objects so we see the latest DB state.
+            # The db session has been open since the start of the scan and
+            # may have stale data from before the discovery/ingestion phase.
+            db.expire_all()
+
+            # Re-queue documents with pending or failed tasks that were not
+            # in the new/modified set.  This handles the pause/resume case:
+            # after a pause, Document records exist but their ProcessingTasks
+            # may be stuck in "pending" (never started) or "failed" (interrupted).
+            # Without this, a resume scan finds 0 new files and exits immediately,
+            # leaving those tasks orphaned.
+            stuck_docs = (
+                db.query(Document, ProcessingTask)
+                .join(ProcessingTask, ProcessingTask.document_id == Document.id)
+                .filter(
+                    Document.data_store_id == datastore_id,
+                    Document.is_selected == True,  # noqa: E712
+                    ProcessingTask.status.in_(("pending", "failed", "processing")),
+                )
+                .all()
+            )
+            requeued = 0
+            seen_paths = {fmeta["file_path"] for fmeta in files_to_process}
+            for doc, task in stuck_docs:
+                if doc.file_path in seen_paths:
+                    continue  # already handled above
+                if self._is_scan_cancelled(datastore_id):
+                    break
+                # Check if chunks already exist (task may have completed
+                # before the pause took effect).  If chunks exist, mark
+                # the task as completed and skip re-ingestion.
+                chunk_count = (
+                    db.query(DocumentChunk)
+                    .filter(DocumentChunk.document_id == doc.id)
+                    .count()
+                )
+                if chunk_count > 0:
+                    task.status = "completed"
+                    task.progress = 100
+                    db.commit()
+                    continue
+                # No chunks — re-ingest using _update_document_in_scan
+                # which reuses the existing Document, resets the task,
+                # and submits to the executor.
+                try:
+                    future = self._update_document_in_scan(
+                        doc.id, doc.file_path, doc.file_hash or "",
+                        datastore_id, scan_id,
+                    )
+                    if future is not None:
+                        ingestion_futures.append(future)
+                        requeued += 1
+                except Exception as e:
+                    logger.error("[WATCHER] requeue error for %s: %s", doc.file_path, e)
+                    summary["errors"] += 1
+            if requeued:
+                logger.info(
+                    "[WATCHER] requeued_stuck_tasks datastore_id=%d count=%d",
+                    datastore_id, requeued,
+                )
+
             # Process deleted files (files on disk that no longer exist)
             for fmeta in result.deleted_files:
                 fpath = fmeta["file_path"]

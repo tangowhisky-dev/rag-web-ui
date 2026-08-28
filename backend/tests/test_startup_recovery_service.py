@@ -66,7 +66,11 @@ def client():
 
 @pytest.fixture(autouse=True)
 def reset_db():
-    """Create all tables before each test, drop them after."""
+    """Create all tables before each test, drop them after.
+
+    When DATABASE_USE_MYSQL=true, conftest.py patches drop_all to a
+    no-op so the shared MySQL database is not destroyed.
+    """
     Base.metadata.create_all(bind=engine)
     yield
     Base.metadata.drop_all(bind=engine)

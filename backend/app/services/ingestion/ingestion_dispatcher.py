@@ -392,7 +392,7 @@ def run_graph_build_in_thread(req: GraphBuildRequest) -> None:
 
             skipped_batches = loop.run_until_complete(_do())
 
-            if skipped_batches > 0:
+            if skipped_batches is not None and skipped_batches > 0:
                 # Some extraction batches were skipped due to cancellation/pause.
                 # Mark as pending (not completed) so resume will retry the full
                 # document — delete_graph_for_document runs first on retry, so
