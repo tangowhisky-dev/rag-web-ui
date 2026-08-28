@@ -84,15 +84,15 @@ def find_forms_in_text(text: str) -> Dict[str, List[str]]:
     return {abbr: FORWARD_MAP[abbr] for abbr in found_abbrs}
 
 def expand_suffix(text: str) -> str:
-    """Ingestion format: text [Expansions: abbr=form1 form2; ...]"""
+    """Ingestion format: text\n\n[Abbreviation Glossary]\nabbr = forms"""
     found = find_abbrs_in_text(text)
     if not found:
         return text
-    parts = [f"{a}={' '.join(f)}" for a, f in found.items()]
-    return f"{text} [Expansions: {'; '.join(parts)}]"
+    lines = [f"{a} = {', '.join(f)}" for a, f in sorted(found.items(), key=lambda x: x[0].lower())]
+    return f"{text}\n\n[Abbreviation Glossary]\n" + "\n".join(lines)
 
 def expand_bidir_glossary(query: str) -> str:
-    """Bidirectional glossary suffix: query [Expansions: abbr=forms; ...]"""
+    """Bidirectional glossary suffix: query\n\n[Abbreviation Glossary]\nabbr = forms"""
     found_abbrs = find_abbrs_in_text(query)
     found_forms = find_forms_in_text(query)
     merged = dict(found_abbrs)
@@ -101,8 +101,8 @@ def expand_bidir_glossary(query: str) -> str:
             merged[abbr] = forms
     if not merged:
         return query
-    parts = [f"{a}={' '.join(f)}" for a, f in merged.items()]
-    return f"{query} [Expansions: {'; '.join(parts)}]"
+    lines = [f"{a} = {', '.join(f)}" for a, f in sorted(merged.items(), key=lambda x: x.lower())]
+    return f"{query}\n\n[Abbreviation Glossary]\n" + "\n".join(lines)
 
 def expand_bidir_space(query: str) -> str:
     """Bidirectional space-join: query form1 form2 abbr1 ..."""

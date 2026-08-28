@@ -167,11 +167,11 @@ def test_3_ingestion_expansion():
             print("SKIP: test_3_ingestion_expansion (no chunks found)")
             return True
 
-        # Check if any chunk has [Expansions: in chunk_text
-        has_expansion = any("[Expansions:" in (c.chunk_text or "") for c in chunks)
+        # Check if any chunk has [Abbreviation Glossary] in chunk_text
+        has_expansion = any("[Abbreviation Glossary]" in (c.chunk_text or "") for c in chunks)
         if has_expansion:
             # Verify original_text is in metadata
-            chunk_with_exp = next(c for c in chunks if "[Expansions:" in (c.chunk_text or ""))
+            chunk_with_exp = next(c for c in chunks if "[Abbreviation Glossary]" in (c.chunk_text or ""))
             meta = chunk_with_exp.chunk_metadata or {}
             if "original_text" in meta:
                 print(f"PASS: test_3_ingestion_expansion (found expanded chunk with original_text)")
@@ -242,14 +242,14 @@ def test_5_generation_glossary():
         # Simulate docs with original_text in metadata
         docs = [
             {
-                "page_content": "The CO ordered the bns to wdr [Expansions: CO=Commanding Officer; bns=Battalions; wdr=Withdraw]",
+                "page_content": "The CO ordered the bns to wdr\n\n[Abbreviation Glossary]\nCO = Commanding Officer\nbns = Battalions\nwdr = Withdraw",
                 "metadata": {
                     "source": "test.pdf",
                     "original_text": "The CO ordered the bns to wdr from the forward position.",
                 },
             },
             {
-                "page_content": "The DA approved resupply [Expansions: DA=Daily Allowance Defence Attache Deputy Assistant]",
+                "page_content": "The DA approved resupply\n\n[Abbreviation Glossary]\nDA = Daily Allowance, Defence Attache, Deputy Assistant",
                 "metadata": {
                     "source": "test2.pdf",
                     "original_text": "The DA approved the medical resupply.",
@@ -259,11 +259,12 @@ def test_5_generation_glossary():
 
         context = format_context_string(docs, db=db, org_id=None)
 
-        # Should use original_text (clean prose), not page_content (with [Expansions:])
+        # Should use original_text (clean prose), not page_content (with suffix)
         assert "The CO ordered the bns to wdr from the forward position." in context, \
             "Context should use original_text"
-        assert "[Expansions:" not in context, \
-            "Context should not contain expansion suffix metadata"
+        # The inline suffix from page_content should NOT leak into context
+        assert "wdr = Withdraw" not in context or "wdr = Withdraw" in context.split("[Abbreviation Glossary]")[-1], \
+            "Context should not contain raw page_content suffix"
 
         # Should contain glossary
         assert "[Abbreviation Glossary]" in context, \

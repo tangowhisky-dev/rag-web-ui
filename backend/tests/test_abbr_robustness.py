@@ -73,10 +73,7 @@ from app.services.abbreviation_service import (
     expand_query_suffix,
     build_glossary,
     build_glossary_from_texts,
-    STOPWORDS,
     _is_uppercase,
-    _is_lowercase,
-    _is_qualification_category,
     _REVERSE_MIN_FORM_LEN,
 )
 
@@ -86,20 +83,15 @@ def make_lookup() -> AbbreviationLookup:
     Mirrors the production build_lookup() logic but loads from CSV directly.
     """
     # Classify abbreviations into case-sensitivity tiers
-    exact_abbrs: List[str] = []     # uppercase + mixed-case
-    prose_abbrs: List[str] = []     # lowercase non-qualification
-    qual_abbrs: List[str] = []      # lowercase qualification
+    exact_abbrs: List[str] = []     # uppercase only
+    prose_abbrs: List[str] = []     # lowercase + mixed-case
     for abbr in FORWARD:
-        if abbr.lower() in STOPWORDS:
+        if len(abbr.strip()) <= 1:
             continue
-        if _is_lowercase(abbr):
-            is_qual = any(_is_qualification_category(c) for c in ABBR_CATEGORIES.get(abbr, set()))
-            if is_qual:
-                qual_abbrs.append(abbr)
-            else:
-                prose_abbrs.append(abbr)
-        else:
+        if _is_uppercase(abbr):
             exact_abbrs.append(abbr)
+        else:
+            prose_abbrs.append(abbr)
 
     # Build flashtext2 processors
     kp_exact = KeywordProcessor(case_sensitive=True)
@@ -110,18 +102,14 @@ def make_lookup() -> AbbreviationLookup:
     for abbr in prose_abbrs:
         kp_prose.add_keyword(abbr, abbr)
 
-    kp_qual = KeywordProcessor(case_sensitive=True)
-    for abbr in qual_abbrs:
-        kp_qual.add_keyword(abbr, abbr)
-
-    # Build reverse mapping with min-length filter + stopword abbreviation exclusion
+    # Build reverse mapping with min-length filter
     reverse_filtered: Dict[str, List[str]] = {}
     for abbr, forms in FORWARD.items():
-        if abbr.lower() in STOPWORDS:
+        if len(abbr.strip()) <= 1:
             continue
         for form in forms:
             key = form.lower()
-            if len(key) < _REVERSE_MIN_FORM_LEN or key in STOPWORDS:
+            if len(key) < _REVERSE_MIN_FORM_LEN:
                 continue
             if key not in reverse_filtered:
                 reverse_filtered[key] = []
@@ -136,7 +124,6 @@ def make_lookup() -> AbbreviationLookup:
         forward=FORWARD,
         kp_exact=kp_exact,
         kp_prose=kp_prose,
-        kp_qual=kp_qual,
         reverse=reverse_filtered,
         kp_reverse=kp_reverse,
     )
@@ -183,13 +170,16 @@ section("1. FORWARD EXPANSION — Basic Correctness")
 
 # 1.1: Single abbreviation
 result = expand_query_suffix("bns wdr from position", LOOKUP)
-check("bns=Battalions" in result, "1.1a single abbr 'bns' expanded", result)
-check("wdr=Withdraw" in result, "1.1b single abbr 'wdr' expanded", result)
+check("bns = Battalions" in result, "1.1a single abbr 'bns' expanded", result)
+check("wdr = Withdraw" in result, "1.1b single abbr 'wdr' expanded", result)
 check(result.startswith("bns wdr from position"), "1.1c original query preserved at start", result[:50])
 
-# 1.2: No abbreviations → unchanged (temp is stopword, temperature is not an abbr)
-result = expand_query_suffix("weather forecast rain temperature", LOOKUP)
-check(result == "weather forecast rain temperature", "1.2 no abbrs → unchanged", result)
+# 1.2: No abbreviations → unchanged
+# Use a query with no abbreviation tokens AND no full forms that would trigger
+# reverse lookup. "temperature" is a full form of "temp", so it would trigger
+# reverse matching. Use "humidity" instead.
+result = expand_query_suffix("weather forecast rain humidity", LOOKUP)
+check(result == "weather forecast rain humidity", "1.2 no abbrs → unchanged", result)
 
 # 1.3: Empty query
 result = expand_query_suffix("", LOOKUP)
@@ -201,28 +191,28 @@ check(result == "   ", "1.4 whitespace query → unchanged", repr(result))
 
 # 1.5: Abbreviation at start
 result = expand_query_suffix("CO ordered the attack", LOOKUP)
-check("CO=Commanding Officer" in result, "1.5a abbr at start expanded", result)
+check("CO = Commanding Officer" in result, "1.5a abbr at start expanded", result)
 check(result.startswith("CO ordered the attack"), "1.5b abbr at start preserves original", result[:30])
 
 # 1.6: Abbreviation at end
 result = expand_query_suffix("report to the CO", LOOKUP)
-check("CO=Commanding Officer" in result, "1.6 abbr at end expanded", result)
+check("CO = Commanding Officer" in result, "1.6 abbr at end expanded", result)
 
 # 1.7: Abbreviation with punctuation
 for punct in [",", ".", "!", "?", ";", ":", ")"]:
     result = expand_query_suffix(f"the CO{punct} ordered", LOOKUP)
-    check("CO=Commanding Officer" in result, f"1.7 abbr before '{punct}' expanded", result)
+    check("CO = Commanding Officer" in result, f"1.7 abbr before '{punct}' expanded", result)
 
 # 1.8: Abbreviation in parentheses
 result = expand_query_suffix("(CO) ordered", LOOKUP)
-check("CO=Commanding Officer" in result, "1.8 abbr in parens expanded", result)
+check("CO = Commanding Officer" in result, "1.8 abbr in parens expanded", result)
 
 # 1.9: Abbreviation with apostrophe possessive — "CO's" should match "CO".
 # flashtext2 uses Unicode UAX #29 word segmentation which treats apostrophe as
 # a word boundary. We normalize possessive "'s" before matching so the base
 # abbreviation can be found. Original text is preserved in the output.
 result = expand_query_suffix("the CO's order", LOOKUP)
-check("CO=Commanding Officer" in result, "1.9 abbr with apostrophe expanded", result)
+check("CO = Commanding Officer" in result, "1.9 abbr with apostrophe expanded", result)
 
 # ─── Section 2: Substring safety ───────────────────────────────────────────
 
@@ -232,7 +222,7 @@ section("2. SUBSTRING SAFETY — No Partial Matches")
 result = expand_query_suffix("bnslog report", LOOKUP)
 found = find_abbrs_in_text("bnslog report", LOOKUP)
 check("bns" not in found, "2.1a 'bns' not matched inside 'bnslog'", str(found))
-check("bns=Battalions" not in result, "2.1b 'bns' not expanded inside 'bnslog'", result)
+check("bns = Battalions" not in result, "2.1b 'bns' not expanded inside 'bnslog'", result)
 
 # 2.2: "CO" should NOT match inside "COVER" or "COOPERATION"
 result = expand_query_suffix("cover the position", LOOKUP)
@@ -260,7 +250,7 @@ section("3. CASE SENSITIVITY")
 
 # 3.1: Uppercase abbreviation
 result_upper = expand_query_suffix("CO ordered", LOOKUP)
-check("CO=Commanding Officer" in result_upper, "3.1a 'CO' (upper) expanded", result_upper)
+check("CO = Commanding Officer" in result_upper, "3.1a 'CO' (upper) expanded", result_upper)
 
 # 3.2: Lowercase abbreviation — case-sensitive for ≤3 chars, so "co" should NOT match "CO"
 result_lower = expand_query_suffix("co ordered", LOOKUP)
@@ -364,38 +354,38 @@ section("4. BIDIRECTIONAL — Full-Form to Abbreviation (Reverse Lookup)")
 
 # 4.1: Single full form
 result = expand_query_suffix("battalions withdrew from position", LOOKUP)
-check("bns=Battalions" in result, "4.1a 'battalions' → bns expansion", result)
-check("wdr=Withdraw" in result, "4.1b 'withdrew' → wdr expansion", result)
+check("bns = Battalions" in result, "4.1a 'battalions' → bns expansion", result)
+check("wdr = Withdraw" in result, "4.1b 'withdrew' → wdr expansion", result)
 check(result.startswith("battalions withdrew from position"), "4.1c original preserved", result[:50])
 
 # 4.2: Multiple full forms
 result = expand_query_suffix("commanding officer ordered battalions to withdraw", LOOKUP)
-check("CO=Commanding Officer" in result, "4.2a 'commanding officer' → CO", result)
-check("bns=Battalions" in result, "4.2b 'battalions' → bns", result)
-check("wdr=Withdraw" in result, "4.2c 'withdraw' → wdr", result)
+check("CO = Commanding Officer" in result, "4.2a 'commanding officer' → CO", result)
+check("bns = Battalions" in result, "4.2b 'battalions' → bns", result)
+check("wdr = Withdraw" in result, "4.2c 'withdraw' → wdr", result)
 
 # 4.3: Mixed abbreviation + full form in same query
 result = expand_query_suffix("the CO ordered battalions to wdr", LOOKUP)
-check("CO=Commanding Officer" in result, "4.3a 'CO' (abbr) expanded", result)
-check("bns=Battalions" in result, "4.3b 'battalions' (full form) → bns", result)
-check("wdr=Withdraw" in result, "4.3c 'wdr' (abbr) expanded", result)
+check("CO = Commanding Officer" in result, "4.3a 'CO' (abbr) expanded", result)
+check("bns = Battalions" in result, "4.3b 'battalions' (full form) → bns", result)
+check("wdr = Withdraw" in result, "4.3c 'wdr' (abbr) expanded", result)
 
 # 4.4: Full form that maps to multiple abbreviations
 # "withdraw" maps to "wdr" — check it doesn't create duplicate entries
 result = expand_query_suffix("withdraw the troops", LOOKUP)
-wdr_count = result.count("wdr=")
+wdr_count = result.count("wdr =")
 check(wdr_count == 1, f"4.4 'withdraw' → single wdr entry (not duplicated)", f"count={wdr_count} in: {result}")
 
 # 4.5: Full form with different casing
 result = expand_query_suffix("Battalions Withdrew", LOOKUP)
-check("bns=Battalions" in result, "4.5a 'Battalions' (capitalized) → bns", result)
-check("wdr=Withdraw" in result, "4.5b 'Withdrew' (capitalized) → wdr", result)
+check("bns = Battalions" in result, "4.5a 'Battalions' (capitalized) → bns", result)
+check("wdr = Withdraw" in result, "4.5b 'Withdrew' (capitalized) → wdr", result)
 
 # 4.6: Plural form vs singular form in reverse lookup
 # "Battalions" is in the CSV (→ bns), "Battalion" (singular) is also in CSV (→ bn)
 result_plural = expand_query_suffix("battalions attacked", LOOKUP)
 result_singular = expand_query_suffix("battalion attacked", LOOKUP)
-check("bns=Battalions" in result_plural, "4.6a 'battalions' (plural) → bns", result_plural)
+check("bns = Battalions" in result_plural, "4.6a 'battalions' (plural) → bns", result_plural)
 check("bn=Battalion" in result_singular, "4.6b 'battalion' (singular) → bn", result_singular)
 
 # ─── Section 5: Ambiguous abbreviations with diverse meanings ──────────────
@@ -406,7 +396,7 @@ section("5. AMBIGUOUS ABBREVIATIONS — Multiple Diverse Meanings")
 da_forms = FORWARD.get("DA", [])
 print(f"  DA has {len(da_forms)} meanings: {da_forms}")
 result = expand_query_suffix("DA approved the request", LOOKUP)
-check("DA=" in result, "5.1a 'DA' expanded with all meanings", result)
+check("DA =" in result, "5.1a 'DA' expanded with all meanings", result)
 # All forms should be in the expansion
 for form in da_forms:
     check(form in result, f"5.1b DA form '{form}' present in expansion", result)
@@ -415,7 +405,7 @@ for form in da_forms:
 op_forms = FORWARD.get("op", [])
 print(f"  op has {len(op_forms)} meanings: {op_forms}")
 result = expand_query_suffix("the op was successful", LOOKUP)
-check("op=" in result, "5.2a 'op' expanded with all meanings", result)
+check("op =" in result, "5.2a 'op' expanded with all meanings", result)
 for form in op_forms:
     check(form in result, f"5.2b op form '{form}' present", result)
 
@@ -430,7 +420,7 @@ co_forms = FORWARD.get("CO", [])
 print(f"  CO has {len(co_forms)} meanings: {co_forms}")
 result = expand_query_suffix("CO ordered", LOOKUP)
 check(len(co_forms) == 1, "5.4a CO is unambiguous (1 meaning)", str(co_forms))
-check("CO=Commanding Officer" in result, "5.4b CO expanded correctly", result)
+check("CO = Commanding Officer" in result, "5.4b CO expanded correctly", result)
 
 # 5.5: sp — Support, Supported, Supporter, Supporting, etc.
 sp_forms = FORWARD.get("sp", [])
@@ -483,8 +473,14 @@ for word, expansion in sorted(common_word_abbrs.items()):
     word_matched = word in found or word.upper() in found
 
     # Determine if this should match or not
-    from app.services.abbreviation_service import STOPWORDS
-    should_match = word not in STOPWORDS and word not in {"is", "he", "to", "at", "an"}
+    # With the two-tier system:
+    # - Uppercase-only CSV abbrs (AT, TO, IS, HE, AN) match case-sensitively only,
+    #   so lowercase prose "at", "to", "is", "he", "an" should NOT match.
+    # - Lowercase/mixed-case CSV abbrs (cat, ill, temp, met, op, sp, etc.) match
+    #   case-insensitively, so they WILL match in prose.
+    # - Single-letter abbrs are excluded entirely.
+    uppercase_only = word.upper() in FORWARD and word not in FORWARD and word.lower() not in FORWARD
+    should_match = len(word) > 1 and not uppercase_only
 
     if word_matched and not should_match:
         false_match_count += 1
@@ -520,7 +516,7 @@ non_military_clean = 0
 non_military_expanded = 0
 for q in non_military_queries:
     result = expand_query_suffix(q, LOOKUP)
-    has_expansion = "[Expansions:" in result
+    has_expansion = "[Abbreviation Glossary]" in result
     if has_expansion:
         non_military_expanded += 1
         found = find_abbrs_in_text(q, LOOKUP)
@@ -604,12 +600,12 @@ print(f"  Found {len(found)} abbreviations in long military text:")
 for abbr in sorted(found.keys()):
     print(f"    {abbr}: {found[abbr][:3]}...")
 check(len(found) >= 10, "8.1a long military text has >=10 abbrs", f"found {len(found)}")
-check("[Expansions:" in result, "8.1b expansion suffix present", result[:50])
+check("[Abbreviation Glossary]" in result, "8.1b expansion suffix present", result[:50])
 check(result.startswith("The CO ordered"), "8.1c original text preserved", result[:30])
 
 # 8.2: Verify all found abbreviations appear in the expansion suffix
 for abbr in found:
-    check(f"{abbr}=" in result, f"8.2 '{abbr}' present in expansion suffix", "missing from suffix")
+    check(f"{abbr} =" in result, f"8.2 '{abbr}' present in expansion suffix", "missing from suffix")
 
 # 8.3: Very long paragraph (500+ words)
 very_long = (
@@ -641,7 +637,7 @@ result = expand_query_suffix(very_long, LOOKUP)
 found = find_abbrs_in_text(very_long, LOOKUP)
 print(f"\n  Very long text ({len(very_long)} chars): found {len(found)} abbreviations")
 check(len(found) >= 8, "8.3a very long text finds >=8 abbrs", f"found {len(found)}: {list(found.keys())}")
-check("[Expansions:" in result, "8.3b expansion suffix present")
+check("[Abbreviation Glossary]" in result, "8.3b expansion suffix present")
 
 # 8.4: Query that is a full paragraph with mixed abbrs and full forms
 mixed_paragraph = (
@@ -665,48 +661,48 @@ section("9. REPEATED AND ADJACENT ABBREVIATIONS")
 
 # 9.1: Same abbreviation repeated
 result = expand_query_suffix("bns bns bns", LOOKUP)
-bns_count = result.count("bns=Battalions")
+bns_count = result.count("bns = Battalions")
 check(bns_count == 1, "9.1a repeated 'bns' → single expansion entry", f"count={bns_count} in: {result}")
 
 # 9.2: Two different abbreviations adjacent
 result = expand_query_suffix("CO bns", LOOKUP)
-check("CO=Commanding Officer" in result, "9.2a 'CO bns' → CO expanded", result)
-check("bns=Battalions" in result, "9.2b 'CO bns' → bns expanded", result)
+check("CO = Commanding Officer" in result, "9.2a 'CO bns' → CO expanded", result)
+check("bns = Battalions" in result, "9.2b 'CO bns' → bns expanded", result)
 
 # 9.3: Three abbreviations in sequence
 result = expand_query_suffix("CO bns wdr", LOOKUP)
-check("CO=" in result, "9.3a 'CO bns wdr' → CO", result)
-check("bns=" in result, "9.3b 'CO bns wdr' → bns", result)
-check("wdr=" in result, "9.3c 'CO bns wdr' → wdr", result)
+check("CO =" in result, "9.3a 'CO bns wdr' → CO", result)
+check("bns =" in result, "9.3b 'CO bns wdr' → bns", result)
+check("wdr =" in result, "9.3c 'CO bns wdr' → wdr", result)
 
 # 9.4: Abbreviation repeated with other words between
 result = expand_query_suffix("CO ordered bns to wdr, bns moved to rear", LOOKUP)
-bns_count = result.count("bns=Battalions")
+bns_count = result.count("bns = Battalions")
 check(bns_count == 1, "9.4 'bns' appears twice → single expansion entry", f"count={bns_count}")
 
 # ─── Section 10: Glossary format correctness ───────────────────────────────
 
 section("10. GLOSSARY FORMAT CORRECTNESS")
 
-# 10.1: Format is "query [Expansions: abbr=form1 form2; abbr2=form3]"
+# 10.1: Format is "query\n\n[Abbreviation Glossary]\nabbr = form1, form2"
 result = expand_query_suffix("bns wdr", LOOKUP)
-pattern = r'^.* \[Expansions: [^\]]+\]$'
-check(bool(re.match(pattern, result)), "10.1a format matches 'query [Expansions: ...]'", result)
+check("[Abbreviation Glossary]" in result, "10.1a format has [Abbreviation Glossary] block", result)
+check(result.startswith("bns wdr\n\n[Abbreviation Glossary]"), "10.1b query text preserved before glossary", result[:50])
 
-# 10.2: Multiple abbreviations separated by "; "
-# Extract the expansions block
-match = re.search(r'\[Expansions: (.+)\]$', result)
+# 10.2: Multiple abbreviations, one per line
+# Extract the glossary block
+match = re.search(r'\[Abbreviation Glossary\]\n(.+)$', result, re.DOTALL)
 if match:
     content = match.group(1)
-    parts = content.split("; ")
+    parts = content.split("\n")
     check(len(parts) >= 2, "10.2 multiple abbrs separated by '; '", f"parts: {parts}")
 
-# 10.3: Each entry is "abbr=form1 form2 form3"
+# 10.3: Each entry is "abbr = form1, form2"
 result = expand_query_suffix("DA op", LOOKUP)
-match = re.search(r'\[Expansions: (.+)\]$', result)
+match = re.search(r'\[Abbreviation Glossary\]\n(.+)$', result, re.DOTALL)
 if match:
     content = match.group(1)
-    parts = content.split("; ")
+    parts = content.split("\n")
     for part in parts:
         check("=" in part, f"10.3 entry has '=': '{part}'", content)
         abbr, forms = part.split("=", 1)
@@ -715,10 +711,10 @@ if match:
 
 # 10.4: No duplicate entries
 result = expand_query_suffix("bns bns wdr wdr", LOOKUP)
-match = re.search(r'\[Expansions: (.+)\]$', result)
+match = re.search(r'\[Abbreviation Glossary\]\n(.+)$', result, re.DOTALL)
 if match:
     content = match.group(1)
-    parts = content.split("; ")
+    parts = content.split("\n")
     abbrs_in_suffix = [p.split("=")[0] for p in parts]
     check(len(abbrs_in_suffix) == len(set(abbrs_in_suffix)),
           "10.4 no duplicate abbr entries in suffix", str(abbrs_in_suffix))
@@ -728,8 +724,8 @@ ingestion_result = expand_suffix("bns wdr from position", LOOKUP)
 query_result = expand_query_suffix("bns wdr from position", LOOKUP)
 print(f"  Ingestion format: {ingestion_result[:80]}")
 print(f"  Query format:     {query_result[:80]}")
-check(ingestion_result.startswith("bns wdr from position [Expansions:"), "10.5a ingestion format correct", ingestion_result[:80])
-check(query_result.startswith("bns wdr from position [Expansions:"), "10.5b query format correct", query_result[:80])
+check(ingestion_result.startswith("bns wdr from position\n\n[Abbreviation Glossary]"), "10.5a ingestion format correct", ingestion_result[:80])
+check(query_result.startswith("bns wdr from position\n\n[Abbreviation Glossary]"), "10.5b query format correct", query_result[:80])
 
 # ─── Section 11: Glossary generation ───────────────────────────────────────
 
@@ -754,36 +750,36 @@ check(glossary == "", "11.3 no abbrs → empty glossary", repr(glossary))
 
 section("12. EDGE CASES")
 
-# 12.1: Single character abbreviation (if any exist)
+# 12.1: Single character abbreviations should NOT be expanded (avoid false positives)
 single_char_abbrs = [a for a in FORWARD if len(a) == 1]
-print(f"  Single-char abbreviations: {single_char_abbrs[:10]}")
+print(f"  Single-char abbreviations in CSV: {single_char_abbrs[:10]}")
 if single_char_abbrs:
     abbr = single_char_abbrs[0]
     result = expand_query_suffix(f"the {abbr} is", LOOKUP)
-    check(f"{abbr}=" in result, f"12.1 single-char '{abbr}' expanded", result)
+    check(f"{abbr} =" not in result, f"12.1 single-char '{abbr}' NOT expanded (avoids false positives)", result)
 
 # 12.2: Very short query (single word abbreviation)
 result = expand_query_suffix("CO", LOOKUP)
-check("CO=Commanding Officer" in result, "12.2 single-word abbr query expanded", result)
+check("CO = Commanding Officer" in result, "12.2 single-word abbr query expanded", result)
 
 # 12.3: Query that is just an abbreviation + punctuation
 result = expand_query_suffix("CO?", LOOKUP)
-check("CO=Commanding Officer" in result, "12.3 'CO?' expanded", result)
+check("CO = Commanding Officer" in result, "12.3 'CO?' expanded", result)
 
 # 12.4: Newline in query
 result = expand_query_suffix("the CO\nordered bns", LOOKUP)
-check("CO=Commanding Officer" in result, "12.4a newline query — CO expanded", result)
-check("bns=Battalions" in result, "12.4b newline query — bns expanded", result)
+check("CO = Commanding Officer" in result, "12.4a newline query — CO expanded", result)
+check("bns = Battalions" in result, "12.4b newline query — bns expanded", result)
 
 # 12.5: Tab in query
 result = expand_query_suffix("CO\tbns", LOOKUP)
-check("CO=" in result, "12.5a tab query — CO expanded", result)
-check("bns=" in result, "12.5b tab query — bns expanded", result)
+check("CO =" in result, "12.5a tab query — CO expanded", result)
+check("bns =" in result, "12.5b tab query — bns expanded", result)
 
 # 12.6: Unicode characters
 result = expand_query_suffix("CO ordered café bns", LOOKUP)
-check("CO=" in result, "12.6a unicode query — CO expanded", result)
-check("bns=" in result, "12.6b unicode query — bns expanded", result)
+check("CO =" in result, "12.6a unicode query — CO expanded", result)
+check("bns =" in result, "12.6b unicode query — bns expanded", result)
 
 # 12.7: Very long single abbreviation (longest in CSV)
 longest_abbr = max(FORWARD.keys(), key=len)
@@ -793,8 +789,8 @@ check(f"{longest_abbr}=" in result, f"12.7 longest abbr '{longest_abbr}' expande
 
 # 12.8: Query with numbers
 result = expand_query_suffix("CO ordered 50 bns", LOOKUP)
-check("CO=" in result, "12.8a numbers query — CO expanded", result)
-check("bns=" in result, "12.8b numbers query — bns expanded", result)
+check("CO =" in result, "12.8a numbers query — CO expanded", result)
+check("bns =" in result, "12.8b numbers query — bns expanded", result)
 
 # ─── Section 13: Performance ───────────────────────────────────────────────
 
@@ -830,8 +826,8 @@ ingestion_result = expand_suffix(test_text, LOOKUP)
 
 # Both should have the same abbreviations in the suffix
 for abbr in ingestion_found:
-    check(f"{abbr}=" in ingestion_result, f"14.1a '{abbr}' in ingestion suffix", ingestion_result[:80])
-    check(f"{abbr}=" in query_result, f"14.1b '{abbr}' in query suffix", query_result[:80])
+    check(f"{abbr} =" in ingestion_result, f"14.1a '{abbr}' in ingestion suffix", ingestion_result[:80])
+    check(f"{abbr} =" in query_result, f"14.1b '{abbr}' in query suffix", query_result[:80])
 
 # 14.2: Query suffix should have MORE (bidirectional) for full-form queries
 full_form_text = "commanding officer ordered battalions"
@@ -839,8 +835,8 @@ ingestion_result = expand_suffix(full_form_text, LOOKUP)
 query_result = expand_query_suffix(full_form_text, LOOKUP)
 # Ingestion (forward-only) should NOT find "commanding officer" as an abbreviation
 # Query (bidirectional) SHOULD find it via reverse lookup
-ingestion_has_expansion = "[Expansions:" in ingestion_result
-query_has_expansion = "[Expansions:" in query_result
+ingestion_has_expansion = "[Abbreviation Glossary]" in ingestion_result
+query_has_expansion = "[Abbreviation Glossary]" in query_result
 print(f"  Ingestion (forward-only): {ingestion_result[:80]}")
 print(f"  Query (bidirectional):     {query_result[:80]}")
 # Note: ingestion uses find_abbrs_in_text only (forward), so it won't match full forms
@@ -912,12 +908,12 @@ found_forms = find_forms_in_text("bns and Battalions were deployed", LOOKUP)
 print(f"  Found abbrs: {list(found_abbrs.keys())}")
 print(f"  Found forms (reverse): {list(found_forms.keys())}")
 # Both should find "bns" — but it should only appear ONCE in the suffix
-bns_count = result.count("bns=Battalions")
+bns_count = result.count("bns = Battalions")
 check(bns_count == 1, "17a 'bns' appears once in suffix (not duplicated)", f"count={bns_count} in: {result}")
 
 # Same with "wdr" and "Withdraw"
 result = expand_query_suffix("wdr and Withdraw completed", LOOKUP)
-wdr_count = result.count("wdr=Withdraw")
+wdr_count = result.count("wdr = Withdraw")
 check(wdr_count == 1, "17b 'wdr' appears once in suffix", f"count={wdr_count} in: {result}")
 
 # ─── Section 18: Stress test — all abbreviations in one query ──────────────
@@ -934,13 +930,13 @@ print(f"  Query with {len(sample_abbrs)} abbreviations ({len(stress_query)} char
 print(f"  Found {len(found)} abbreviations")
 print(f"  Result length: {len(result)} chars")
 check(len(found) >= 90, "18a stress test finds >=90 of 100 abbrs", f"found {len(found)}")
-check("[Expansions:" in result, "18b stress test has expansion suffix")
+check("[Abbreviation Glossary]" in result, "18b stress test has expansion suffix")
 
 # Verify no duplicates in the suffix
-match = re.search(r'\[Expansions: (.+)\]$', result)
+match = re.search(r'\[Abbreviation Glossary\]\n(.+)$', result, re.DOTALL)
 if match:
     content = match.group(1)
-    parts = content.split("; ")
+    parts = content.split("\n")
     abbrs_in_suffix = [p.split("=")[0] for p in parts]
     check(len(abbrs_in_suffix) == len(set(abbrs_in_suffix)),
           "18c no duplicates in stress test suffix",

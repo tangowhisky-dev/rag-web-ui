@@ -5,8 +5,8 @@ Test proposed abbreviation expansion changes BEFORE modifying the codebase.
 Proposed changes:
   1. QUERY EXPANSION: Use glossary suffix format (like ingestion) instead of
      space-joined forms. Make it bidirectional (abbr→forms AND form→abbr).
-     "bns wdr from position" → "bns wdr from position [Expansions: bns=Battalions; wdr=Withdraw...]"
-     "battalions withdrew"    → "battalions withdrew [Expansions: bns=Battalions; wdr=Withdraw...]"
+     "bns wdr from position" → "bns wdr from position\n\n[Abbreviation Glossary]\nbns = Battalions\nwdr = Withdraw..."
+     "battalions withdrew"    → "battalions withdrew\n\n[Abbreviation Glossary]\nbns = Battalions\nwdr = Withdraw..."
 
   2. RERANKER: Use original_query (not rewritten_query) + suffix-expanded chunks.
 
@@ -109,33 +109,32 @@ def expand_query_current(query: str) -> str:
 # --- PROPOSED implementation ---
 
 def expand_query_glossary_suffix(query: str) -> str:
-    """Proposed: glossary suffix format, forward-only (abbr→forms).
+    """Glossary suffix format, forward-only (abbr→forms).
 
-    "bns wdr" → "bns wdr [Expansions: bns=Battalions; wdr=Withdraw Withdrawal...]"
+    "bns wdr" → "bns wdr\n\n[Abbreviation Glossary]\nbns = Battalions\nwdr = Withdraw..."
     """
     found = find_abbrs_in_text(query)
     if not found:
         return query
-    parts = [f"{a}={' '.join(f)}" for a, f in found.items()]
-    return f"{query} [Expansions: {'; '.join(parts)}]"
+    lines = [f"{a} = {', '.join(f)}" for a, f in sorted(found.items(), key=lambda x: x.lower())]
+    return f"{query}\n\n[Abbreviation Glossary]\n" + "\n".join(lines)
 
 def expand_query_bidirectional_glossary(query: str) -> str:
-    """Proposed: glossary suffix format, bidirectional (abbr→forms AND form→abbr).
+    """Glossary suffix format, bidirectional (abbr→forms AND form→abbr).
 
-    "bns wdr"           → "bns wdr [Expansions: bns=Battalions; wdr=Withdraw...]"
-    "battalions withdrew" → "battalions withdrew [Expansions: bns=Battalions; wdr=Withdraw...]"
+    "bns wdr"           → "bns wdr\n\n[Abbreviation Glossary]\nbns = Battalions\nwdr = Withdraw..."
+    "battalions withdrew" → "battalions withdrew\n\n[Abbreviation Glossary]\nbns = Battalions\nwdr = Withdraw..."
     """
     found_abbrs = find_abbrs_in_text(query)
     found_forms = find_forms_in_text(query)
-    # Merge: forms found via reverse lookup may add abbreviations not found by forward
     merged = dict(found_abbrs)
     for abbr, forms in found_forms.items():
         if abbr not in merged:
             merged[abbr] = forms
     if not merged:
         return query
-    parts = [f"{a}={' '.join(f)}" for a, f in merged.items()]
-    return f"{query} [Expansions: {'; '.join(parts)}]"
+    lines = [f"{a} = {', '.join(f)}" for a, f in sorted(merged.items(), key=lambda x: x.lower())]
+    return f"{query}\n\n[Abbreviation Glossary]\n" + "\n".join(lines)
 
 def expand_query_bidirectional_space(query: str) -> str:
     """Bidirectional but space-joined (for comparison with glossary format)."""
@@ -156,12 +155,12 @@ def expand_query_bidirectional_space(query: str) -> str:
 # --- Ingestion expansion (suffix format, same as production) ---
 
 def expand_suffix(text: str) -> str:
-    """Ingestion suffix expansion: text [Expansions: abbr=form1 form2; ...]"""
+    """Ingestion suffix expansion: text\n\n[Abbreviation Glossary]\nabbr = forms"""
     found = find_abbrs_in_text(text)
     if not found:
         return text
-    parts = [f"{a}={' '.join(f)}" for a, f in found.items()]
-    return f"{text} [Expansions: {'; '.join(parts)}]"
+    lines = [f"{a} = {', '.join(f)}" for a, f in sorted(found.items(), key=lambda x: x[0].lower())]
+    return f"{text}\n\n[Abbreviation Glossary]\n" + "\n".join(lines)
 
 def build_glossary_block(text: str) -> str:
     """Build glossary block for generation: text + [Abbreviation Glossary]\nabbr = forms"""

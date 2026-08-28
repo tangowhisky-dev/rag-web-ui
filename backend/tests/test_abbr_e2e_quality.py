@@ -28,6 +28,7 @@ Runs inside the backend container:
   docker exec rag-web-ui-backend-1 pytest tests/test_abbr_e2e_quality.py -v -s
 """
 import os
+import re
 import sys
 import math
 import time
@@ -161,41 +162,31 @@ def get_abbr_lookup():
 
     csv_path = "/app/assets/abbreviations_enhanced.csv"
     forward: Dict[str, List[str]] = {}
-    abbr_categories: Dict[str, set] = {}
 
     import csv as csv_mod
     with open(csv_path, encoding="utf-8") as f:
         for row in csv_mod.DictReader(f):
             abbr = row["abbreviation"].strip()
             form = row["expanded_form"].strip()
-            cat = row.get("category", "").strip()
             if abbr and form:
                 if abbr not in forward:
                     forward[abbr] = []
-                    abbr_categories[abbr] = set()
                 if form not in forward[abbr]:
                     forward[abbr].append(form)
-                if cat:
-                    abbr_categories[abbr].add(cat)
 
     from app.services.abbreviation_service import (
-        STOPWORDS, _REVERSE_MIN_FORM_LEN, _is_lowercase, _is_qualification_category,
+        _REVERSE_MIN_FORM_LEN, _is_uppercase,
     )
 
     exact_abbrs = []
     prose_abbrs = []
-    qual_abbrs = []
     for abbr in forward:
-        if abbr.lower() in STOPWORDS:
+        if len(abbr.strip()) <= 1:
             continue
-        if _is_lowercase(abbr):
-            is_qual = any(_is_qualification_category(c) for c in abbr_categories.get(abbr, set()))
-            if is_qual:
-                qual_abbrs.append(abbr)
-            else:
-                prose_abbrs.append(abbr)
-        else:
+        if _is_uppercase(abbr):
             exact_abbrs.append(abbr)
+        else:
+            prose_abbrs.append(abbr)
 
     kp_exact = KeywordProcessor(case_sensitive=True)
     for a in exact_abbrs:
@@ -203,19 +194,14 @@ def get_abbr_lookup():
     kp_prose = KeywordProcessor(case_sensitive=False)
     for a in prose_abbrs:
         kp_prose.add_keyword(a, a)
-    kp_qual = KeywordProcessor(case_sensitive=True)
-    for a in qual_abbrs:
-        kp_qual.add_keyword(a, a)
 
     reverse: Dict[str, List[str]] = {}
     for abbr, forms in forward.items():
-        if abbr.lower() in STOPWORDS:
+        if len(abbr.strip()) <= 1:
             continue
         for form in forms:
             key = form.lower()
             if len(key) < _REVERSE_MIN_FORM_LEN:
-                continue
-            if key in STOPWORDS:
                 continue
             if key not in reverse:
                 reverse[key] = []
@@ -230,7 +216,6 @@ def get_abbr_lookup():
         forward=forward,
         kp_exact=kp_exact,
         kp_prose=kp_prose,
-        kp_qual=kp_qual,
         reverse=reverse,
         kp_reverse=kp_reverse,
     )
@@ -482,8 +467,12 @@ def test_e2e_abbreviation_pipeline(case, lookup, chunk_embeddings):
     )
 
     # 4. Answer should not be a refusal (unless it's genuinely unrelated)
+    #    Note: some models (Gemma) emit thinking tags like <|channel>thought*
+    #    before the actual answer. Strip those before checking for refusals.
+    clean_answer = re.sub(r"<\|[^|]*\|>", "", result["answer"]).strip()
+    clean_lower = clean_answer.lower()
     refusals = ["cannot answer", "don't have", "no information", "not enough information"]
-    is_refusal = any(r in answer_lower for r in refusals)
+    is_refusal = any(r in clean_lower for r in refusals)
     assert not is_refusal, (
         f"Answer is a refusal but expected chunks were found. "
         f"Answer: {result['answer'][:200]}"
@@ -511,9 +500,9 @@ def test_e2e_abbreviation_pipeline(case, lookup, chunk_embeddings):
         )
 
     # 7. For full-form queries, the expanded_query should contain reverse
-    #    matches (full form → abbreviation appended in [Expansions: ...])
+    #    matches (full form → abbreviation appended in [Abbreviation Glossary] ...])
     if case["name"] == "B_full_form_query_abbr_chunks":
-        assert "[Expansions:" in result["expanded_query"], (
+        assert "[Abbreviation Glossary]" in result["expanded_query"], (
             f"Full-form query should have reverse expansions in suffix: "
             f"{result['expanded_query']!r}"
         )

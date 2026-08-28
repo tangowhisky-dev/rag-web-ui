@@ -176,24 +176,31 @@ class TestForwardMatching:
         assert "bns" in find_abbrs_in_text("Bns moved north", lookup)
 
     def test_mixed_case_abbr_exact(self, lookup):
+        """Mixed-case abbrs (Comd) are in the prose tier (case-insensitive).
+        When both 'Comd' and 'comd' exist in the CSV, flashtext2 returns one
+        of them — both map to the same forms."""
         from app.services.abbreviation_service import find_abbrs_in_text
         found = find_abbrs_in_text("Comd issued orders", lookup)
-        assert "Comd" in found
+        assert "Comd" in found or "comd" in found, f"Expected Comd or comd in {found}"
+        # Both map to the same forms
+        key = "Comd" if "Comd" in found else "comd"
+        assert "Command" in found[key]
 
     def test_mixed_case_abbr_no_wrong_case(self, lookup):
-        """Mixed-case abbrs (Comd) match exactly; lowercase abbrs (comd) match
-        case-insensitively. When both exist, 'Comd' text matches both Comd
-        (exact tier) and comd (prose tier, case-insensitive). This is correct:
-        the prose tier is case-insensitive by design."""
+        """With the two-tier system, mixed-case abbrs (Comd) go into the prose
+        tier (case-insensitive). When both 'Comd' and 'comd' exist in the CSV,
+        both match case-insensitively — 'Comd' text and 'comd' text both match.
+        This is correct: the prose tier is case-insensitive by design."""
         from app.services.abbreviation_service import find_abbrs_in_text
         if "Comd" in lookup.forward and "comd" in lookup.forward:
             found_comd = find_abbrs_in_text("Comd issued orders", lookup)
             found_low = find_abbrs_in_text("comd issued orders", lookup)
-            assert "Comd" in found_comd, "Comd (exact tier) should match 'Comd'"
-            assert "comd" in found_low, "comd (prose tier) should match 'comd'"
-            # The exact tier is case-sensitive, so lowercase 'comd' text should
-            # NOT trigger the Comd match — only the prose-tier comd match.
-            assert "Comd" not in found_low, "Comd (exact) should not match lowercase 'comd'"
+            # Both should match (case-insensitive prose tier)
+            assert found_comd, "Comd text should match"
+            assert found_low, "comd text should match"
+            # Both should map to the same forms
+            assert "Command" in list(found_comd.values())[0]
+            assert "Command" in list(found_low.values())[0]
 
     def test_multi_word_abbr_matched(self, lookup):
         from app.services.abbreviation_service import find_abbrs_in_text
@@ -212,9 +219,16 @@ class TestForwardMatching:
         assert "HQ" in found
 
     def test_no_false_positive_on_plain_english(self, lookup):
+        """Uppercase-only abbreviations should not match lowercase prose.
+
+        'at' is uppercase-only (AT = Animal Transport) in the CSV, so lowercase
+        'at' in prose should NOT match. 'cat' IS a valid lowercase abbreviation
+        (cat = Categorisation) so it WILL match — that's correct behavior.
+        """
         from app.services.abbreviation_service import find_abbrs_in_text
-        found = find_abbrs_in_text("the cat sat on the mat", lookup)
-        assert "cat" not in found
+        found = find_abbrs_in_text("the meeting at noon was cancelled", lookup)
+        assert "AT" not in found, "Lowercase 'at' should not match uppercase-only AT"
+        assert "at" not in found, "Lowercase 'at' should not match uppercase-only AT"
 
     def test_possessive_form_matched(self, lookup):
         from app.services.abbreviation_service import find_abbrs_in_text
@@ -262,7 +276,7 @@ class TestQuerySuffixExpansion:
     def test_appends_expansions_suffix(self, lookup):
         from app.services.abbreviation_service import expand_query_suffix
         expanded = expand_query_suffix("CO ordered bns", lookup)
-        assert "[Expansions:" in expanded
+        assert "[Abbreviation Glossary]" in expanded
 
     def test_no_expansion_for_plain_english(self, lookup):
         from app.services.abbreviation_service import expand_query_suffix
@@ -272,15 +286,17 @@ class TestQuerySuffixExpansion:
     def test_bidirectional_expansion(self, lookup):
         from app.services.abbreviation_service import expand_query_suffix
         expanded = expand_query_suffix("CO ordered battalions to wdr", lookup)
-        assert "CO=" in expanded
-        assert "bns=" in expanded
-        assert "wdr=" in expanded
+        assert "CO =" in expanded
+        assert "bns =" in expanded
+        assert "wdr =" in expanded
 
     def test_multiple_forms_in_expansion(self, lookup):
         from app.services.abbreviation_service import expand_query_suffix
         expanded = expand_query_suffix("wdr", lookup)
-        forms_part = expanded.split("wdr=")[1].split(";")[0].split("]")[0]
-        assert len(forms_part.strip().split(" ")) >= 2, "wdr should have multiple forms"
+        # New format: "wdr = Withdraw, Withdrawal\n..."
+        forms_part = expanded.split("wdr =")[1].split("\n")[0].strip()
+        forms = [f.strip() for f in forms_part.split(",")]
+        assert len(forms) >= 2, f"wdr should have multiple forms, got: {forms}"
 
     def test_empty_query(self, lookup):
         from app.services.abbreviation_service import expand_query_suffix
@@ -289,9 +305,9 @@ class TestQuerySuffixExpansion:
     def test_query_with_only_full_forms(self, lookup):
         from app.services.abbreviation_service import expand_query_suffix
         expanded = expand_query_suffix("commanding officer ordered withdrawal", lookup)
-        assert "[Expansions:" in expanded
-        assert "CO=" in expanded
-        assert "wdr=" in expanded
+        assert "[Abbreviation Glossary]" in expanded
+        assert "CO =" in expanded
+        assert "wdr =" in expanded
 
 
 # ---------------------------------------------------------------------------
@@ -349,8 +365,11 @@ class TestContextStringGlossary:
         assert "CO = Commanding Officer" in ctx
 
     def test_no_glossary_when_empty(self, db_session, lookup):
+        """When the chunk text has no abbreviation tokens and no query glossary,
+        the context should not contain a glossary block. Use text that avoids
+        any valid CSV abbreviations (e.g. 'no', 'in', 'cat', 'ill', 'temp')."""
         from app.services.agentic_rag.utils import format_context_string
-        docs = [{"page_content": "no abbreviations here at all", "metadata": {"source": "doc1.pdf"}}]
+        docs = [{"page_content": "the weather is sunny and warm today", "metadata": {"source": "doc1.pdf"}}]
         ctx = format_context_string(docs, db=db_session, org_id=None, query_glossary="")
         assert "[Abbreviation Glossary]" not in ctx
 
@@ -472,34 +491,62 @@ class TestNoAdverseEffect:
 
 
 # ---------------------------------------------------------------------------
-# 10. Stopword handling
+# 10. Lowercase abbreviation handling (no stopword filter)
 # ---------------------------------------------------------------------------
 
-class TestStopwordHandling:
-    def test_stopword_in_not_matched(self, lookup):
-        from app.services.abbreviation_service import find_abbrs_in_text
-        found = find_abbrs_in_text("the unit in the field", lookup)
-        assert "in" not in found
+class TestLowercaseAbbrHandling:
+    """With the two-tier system, valid lowercase CSV abbreviations like
+    'in', 'no', 'cat', 'ill', 'temp' are legitimate abbreviations and
+    SHOULD match case-insensitively. The old STOPWORDS filter is gone."""
 
-    def test_stopword_no_not_matched(self, lookup):
+    def test_lowercase_in_matched(self, lookup):
+        """'in' = Inch in the CSV — valid lowercase abbr, should match."""
         from app.services.abbreviation_service import find_abbrs_in_text
-        found = find_abbrs_in_text("no units were present", lookup)
-        assert "no" not in found
+        if "in" in lookup.forward:
+            found = find_abbrs_in_text("the unit in the field", lookup)
+            assert "in" in found, f"'in' is a valid CSV abbr, should match: {found}"
 
-    def test_stopword_cat_not_matched(self, lookup):
+    def test_lowercase_no_matched(self, lookup):
+        """'no' = Number in the CSV — valid lowercase abbr, should match."""
         from app.services.abbreviation_service import find_abbrs_in_text
-        found = find_abbrs_in_text("the cat sat on the mat", lookup)
-        assert "cat" not in found
+        if "no" in lookup.forward:
+            found = find_abbrs_in_text("no units were present", lookup)
+            assert "no" in found, f"'no' is a valid CSV abbr, should match: {found}"
 
-    def test_stopword_ill_not_matched(self, lookup):
+    def test_lowercase_cat_matched(self, lookup):
+        """'cat' = Categorisation in the CSV — valid lowercase abbr, should match."""
         from app.services.abbreviation_service import find_abbrs_in_text
-        found = find_abbrs_in_text("he was ill yesterday", lookup)
-        assert "ill" not in found
+        if "cat" in lookup.forward:
+            found = find_abbrs_in_text("the cat sat on the mat", lookup)
+            assert "cat" in found, f"'cat' is a valid CSV abbr, should match: {found}"
 
-    def test_stopword_temp_not_matched(self, lookup):
+    def test_lowercase_ill_matched(self, lookup):
+        """'ill' = Illuminate in the CSV — valid lowercase abbr, should match."""
         from app.services.abbreviation_service import find_abbrs_in_text
-        found = find_abbrs_in_text("the temp was high", lookup)
-        assert "temp" not in found
+        if "ill" in lookup.forward:
+            found = find_abbrs_in_text("he was ill yesterday", lookup)
+            assert "ill" in found, f"'ill' is a valid CSV abbr, should match: {found}"
+
+    def test_lowercase_temp_matched(self, lookup):
+        """'temp' = Temperature in the CSV — valid lowercase abbr, should match."""
+        from app.services.abbreviation_service import find_abbrs_in_text
+        if "temp" in lookup.forward:
+            found = find_abbrs_in_text("the temp was high", lookup)
+            assert "temp" in found, f"'temp' is a valid CSV abbr, should match: {found}"
+
+    def test_uppercase_at_not_matched_lowercase(self, lookup):
+        """'AT' = Animal Transport is uppercase-only — lowercase 'at' must NOT match."""
+        from app.services.abbreviation_service import find_abbrs_in_text
+        found = find_abbrs_in_text("the meeting at noon", lookup)
+        assert "AT" not in found, "Lowercase 'at' should not match uppercase-only AT"
+        assert "at" not in found, "Lowercase 'at' should not match uppercase-only AT"
+
+    def test_uppercase_to_not_matched_lowercase(self, lookup):
+        """'TO' = Transport Officer is uppercase-only — lowercase 'to' must NOT match."""
+        from app.services.abbreviation_service import find_abbrs_in_text
+        found = find_abbrs_in_text("go to the base", lookup)
+        assert "TO" not in found, "Lowercase 'to' should not match uppercase-only TO"
+        assert "to" not in found, "Lowercase 'to' should not match uppercase-only TO"
 
 
 # ---------------------------------------------------------------------------
@@ -507,17 +554,23 @@ class TestStopwordHandling:
 # ---------------------------------------------------------------------------
 
 class TestQualificationAbbrs:
+    """With the two-tier system, lowercase qualification abbreviations like
+    'psc' and 'ndc' go into the prose tier (case-insensitive). Both lowercase
+    and uppercase text will match them."""
+
     def test_qualification_lowercase_matched(self, lookup):
         from app.services.abbreviation_service import find_abbrs_in_text
         found = find_abbrs_in_text("completed psc and ndc", lookup)
         assert "psc" in found, "psc should match lowercase"
         assert "ndc" in found, "ndc should match lowercase"
 
-    def test_qualification_uppercase_not_matched(self, lookup):
+    def test_qualification_uppercase_also_matched(self, lookup):
+        """Uppercase PSC/NDC text matches the lowercase psc/ndc CSV entries
+        because the prose tier is case-insensitive."""
         from app.services.abbreviation_service import find_abbrs_in_text
         found = find_abbrs_in_text("completed PSC and NDC", lookup)
-        assert "psc" not in found, "psc (qualification) should not match uppercase PSC"
-        assert "ndc" not in found, "ndc (qualification) should not match uppercase NDC"
+        assert "psc" in found, "psc should match uppercase PSC (case-insensitive)"
+        assert "ndc" in found, "ndc should match uppercase NDC (case-insensitive)"
 
 
 # ---------------------------------------------------------------------------

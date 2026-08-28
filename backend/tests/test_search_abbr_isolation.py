@@ -141,44 +141,32 @@ class TestExpandQuerySuffixForSearch:
     @pytest.fixture(scope="module")
     def lookup(self):
         """Build lookup directly from CSV (bypasses SQLite test DB)."""
-        from app.services.abbreviation_service import AbbreviationLookup
+        from app.services.abbreviation_service import AbbreviationLookup, _is_uppercase
         from flashtext2 import KeywordProcessor
         import csv as csv_mod
 
         csv_path = "/app/assets/abbreviations_enhanced.csv"
         forward = {}
-        abbr_categories = {}
         with open(csv_path, encoding="utf-8") as f:
             for row in csv_mod.DictReader(f):
                 abbr = row["abbreviation"].strip()
                 form = row["expanded_form"].strip()
-                cat = row.get("category", "").strip()
                 if abbr and form:
                     if abbr not in forward:
                         forward[abbr] = []
-                        abbr_categories[abbr] = set()
                     if form not in forward[abbr]:
                         forward[abbr].append(form)
-                    if cat:
-                        abbr_categories[abbr].add(cat)
 
-        from app.services.abbreviation_service import (
-            STOPWORDS, _REVERSE_MIN_FORM_LEN,
-            _is_lowercase, _is_qualification_category,
-        )
+        from app.services.abbreviation_service import _REVERSE_MIN_FORM_LEN
 
-        exact_abbrs, prose_abbrs, qual_abbrs = [], [], []
+        exact_abbrs, prose_abbrs = [], []
         for abbr in forward:
-            if abbr.lower() in STOPWORDS:
+            if len(abbr.strip()) <= 1:
                 continue
-            if _is_lowercase(abbr):
-                is_qual = any(_is_qualification_category(c) for c in abbr_categories.get(abbr, set()))
-                if is_qual:
-                    qual_abbrs.append(abbr)
-                else:
-                    prose_abbrs.append(abbr)
-            else:
+            if _is_uppercase(abbr):
                 exact_abbrs.append(abbr)
+            else:
+                prose_abbrs.append(abbr)
 
         kp_exact = KeywordProcessor(case_sensitive=True)
         for a in exact_abbrs:
@@ -186,19 +174,14 @@ class TestExpandQuerySuffixForSearch:
         kp_prose = KeywordProcessor(case_sensitive=False)
         for a in prose_abbrs:
             kp_prose.add_keyword(a, a)
-        kp_qual = KeywordProcessor(case_sensitive=True)
-        for a in qual_abbrs:
-            kp_qual.add_keyword(a, a)
 
         reverse = {}
         for abbr, forms in forward.items():
-            if abbr.lower() in STOPWORDS:
+            if len(abbr.strip()) <= 1:
                 continue
             for form in forms:
                 key = form.lower()
                 if len(key) < _REVERSE_MIN_FORM_LEN:
-                    continue
-                if key in STOPWORDS:
                     continue
                 if key not in reverse:
                     reverse[key] = []
@@ -213,20 +196,19 @@ class TestExpandQuerySuffixForSearch:
             forward=forward,
             kp_exact=kp_exact,
             kp_prose=kp_prose,
-            kp_qual=kp_qual,
             reverse=reverse,
             kp_reverse=kp_reverse,
         )
 
     def test_abbr_query_expanded(self, lookup):
-        """Abbreviation query gets [Expansions: ...] suffix."""
+        """Abbreviation query gets [Abbreviation Glossary] block."""
         from app.services.abbreviation_service import expand_query_suffix
         q = "bns wdr from position"
         expanded = expand_query_suffix(q, lookup)
         assert expanded.startswith(q)
-        assert "[Expansions:" in expanded
-        assert "bns=" in expanded
-        assert "wdr=" in expanded
+        assert "[Abbreviation Glossary]" in expanded
+        assert "bns =" in expanded
+        assert "wdr =" in expanded
 
     def test_full_form_query_reverse_expanded(self, lookup):
         """Full-form query gets reverse expansions (full form → abbr)."""
@@ -234,15 +216,20 @@ class TestExpandQuerySuffixForSearch:
         q = "commanding officer ordered battalions to withdraw"
         expanded = expand_query_suffix(q, lookup)
         assert expanded.startswith(q)
-        assert "[Expansions:" in expanded
-        assert "CO=" in expanded, "Reverse match: 'commanding officer' → CO"
-        assert "bns=" in expanded, "Reverse match: 'battalions' → bns"
-        assert "wdr=" in expanded, "Reverse match: 'withdraw' → wdr"
+        assert "[Abbreviation Glossary]" in expanded
+        assert "CO =" in expanded, "Reverse match: 'commanding officer' → CO"
+        assert "bns =" in expanded, "Reverse match: 'battalions' → bns"
+        assert "wdr =" in expanded, "Reverse match: 'withdraw' → wdr"
 
     def test_plain_english_not_expanded(self, lookup):
-        """Plain English query has no expansion (no adverse effect)."""
+        """Plain English query has no expansion (no adverse effect).
+
+        Note: "temperature" is a full form of the abbreviation "temp", so it
+        would trigger reverse lookup. Use a query without any abbreviation
+        full forms to test the no-expansion case.
+        """
         from app.services.abbreviation_service import expand_query_suffix
-        q = "weather forecast rain temperature"
+        q = "what is the weather today"
         expanded = expand_query_suffix(q, lookup)
         assert expanded == q, "Plain English query must not be expanded"
 
@@ -267,10 +254,10 @@ class TestExpandQuerySuffixForSearch:
         q = "CO ordered battalions to wdr"
         expanded = expand_query_suffix(q, lookup)
         # Forward: CO and wdr are abbreviations in the query
-        assert "CO=" in expanded, "Forward match for CO"
-        assert "wdr=" in expanded, "Forward match for wdr"
+        assert "CO =" in expanded, "Forward match for CO"
+        assert "wdr =" in expanded, "Forward match for wdr"
         # Reverse: 'battalions' is a full form in the query → bns
-        assert "bns=" in expanded, "Reverse match for 'battalions' → bns"
+        assert "bns =" in expanded, "Reverse match for 'battalions' → bns"
 
 
 # ---------------------------------------------------------------------------

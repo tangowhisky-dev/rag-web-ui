@@ -69,8 +69,8 @@ def expand_suffix(text: str) -> str:
     found = find_abbrs_in_text(text)
     if not found:
         return text
-    parts = [f"{a}={' '.join(f)}" for a, f in found.items()]
-    return f"{text} [Expansions: {'; '.join(parts)}]"
+    lines = [f"{a} = {', '.join(f)}" for a, f in sorted(found.items(), key=lambda x: x[0].lower())]
+    return f"{text}\n\n[Abbreviation Glossary]\n" + "\n".join(lines)
 
 def expand_replace(text: str) -> str:
     result = text
