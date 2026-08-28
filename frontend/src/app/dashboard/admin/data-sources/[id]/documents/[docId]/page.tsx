@@ -305,8 +305,9 @@ export default function DocumentEditorPage() {
       <div className="border-b px-4 py-3">
         <div className="flex items-center justify-between gap-4">
           <div className="flex items-center gap-3 min-w-0">
-            <Button variant="ghost" size="sm" onClick={handleBack}>
-              <ArrowLeft className="h-4 w-4" />
+            <Button variant="ghost" size="sm" onClick={handleBack} className="h-7 px-2">
+              <ArrowLeft className="mr-1 h-3.5 w-3.5" />
+              Back
             </Button>
             <div className="min-w-0">
               <h1 className="text-sm font-medium truncate">{title || `Document ${docId}`}</h1>
@@ -319,19 +320,20 @@ export default function DocumentEditorPage() {
               size="sm"
               onClick={handleReconvert}
               disabled={isIngestActive || reconverting}
+              className="h-7"
             >
               {reconverting ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
               ) : (
-                <RefreshCw className="mr-2 h-4 w-4" />
+                <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
               )}
               Re-convert
             </Button>
           </div>
         </div>
 
-        {/* Phase status bar */}
-        <div className="mt-3 flex items-center gap-6">
+        {/* Phase status bar — reserve height for action buttons to prevent wobble */}
+        <div className="mt-3 flex items-center gap-6 min-h-[28px]">
           <PhaseDot state={conversionState} label="Convert" />
           <PhaseDot state={ingestState} label="Ingest" />
           <PhaseDot state={graphState} label="Graph" />
@@ -340,31 +342,35 @@ export default function DocumentEditorPage() {
               {status.chunk_count} chunks
             </Badge>
           )}
-          {isDirty && (
-            <div className="flex items-center gap-2 ml-auto">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleDiscard}
-                disabled={saving || isIngestActive}
-              >
-                <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
-                Discard
-              </Button>
-              <Button
-                size="sm"
-                onClick={handleSave}
-                disabled={saving || isIngestActive}
-              >
-                {saving ? (
-                  <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <Save className="mr-1.5 h-3.5 w-3.5" />
-                )}
-                Save
-              </Button>
-            </div>
-          )}
+          <div className="flex items-center gap-2 ml-auto h-7">
+            {isDirty && (
+              <>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleDiscard}
+                  disabled={saving || isIngestActive}
+                  className="h-7 px-2.5"
+                >
+                  <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
+                  Discard
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={handleSave}
+                  disabled={saving || isIngestActive}
+                  className="h-7 px-2.5"
+                >
+                  {saving ? (
+                    <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Save className="mr-1.5 h-3.5 w-3.5" />
+                  )}
+                  Save
+                </Button>
+              </>
+            )}
+          </div>
         </div>
 
         {/* Progress bar */}
