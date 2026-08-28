@@ -330,6 +330,15 @@ export default function DocumentEditorPage() {
 
         {/* Phase status bar — reserve height for action buttons to prevent wobble */}
         <div className="mt-3 flex items-center gap-6 min-h-[28px]">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleBack}
+            className="h-7 px-3"
+          >
+            <ArrowLeft className="mr-1.5 h-3.5 w-3.5" />
+            Back
+          </Button>
           <PhaseDot state={conversionState} label="Convert" />
           <PhaseDot state={ingestState} label="Ingest" />
           <PhaseDot state={graphState} label="Graph" />
@@ -366,15 +375,6 @@ export default function DocumentEditorPage() {
                 </Button>
               </>
             )}
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleBack}
-              className="h-7 px-3"
-            >
-              <ArrowLeft className="mr-1.5 h-3.5 w-3.5" />
-              Back
-            </Button>
           </div>
         </div>
 
