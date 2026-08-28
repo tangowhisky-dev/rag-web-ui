@@ -300,15 +300,11 @@ export default function DocumentEditorPage() {
     ingestState === "processing" || ingestState === "pending";
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-[calc(100vh-4rem)] flex-col">
       {/* Header */}
       <div className="border-b px-4 py-3">
         <div className="flex items-center justify-between gap-4">
           <div className="flex items-center gap-3 min-w-0">
-            <Button variant="outline" size="sm" onClick={handleBack} className="h-7 px-3">
-              <ArrowLeft className="mr-1.5 h-3.5 w-3.5" />
-              Back
-            </Button>
             <div className="min-w-0">
               <h1 className="text-sm font-medium truncate">{title || `Document ${docId}`}</h1>
               <p className="text-xs text-muted-foreground truncate">doc_id={docId}</p>
@@ -370,6 +366,15 @@ export default function DocumentEditorPage() {
                 </Button>
               </>
             )}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleBack}
+              className="h-7 px-3"
+            >
+              <ArrowLeft className="mr-1.5 h-3.5 w-3.5" />
+              Back
+            </Button>
           </div>
         </div>
 
