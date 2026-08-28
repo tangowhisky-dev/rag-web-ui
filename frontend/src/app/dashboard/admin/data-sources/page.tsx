@@ -610,11 +610,11 @@ export default function DataSourcesPage() {
             <TableRow>
               <TableHead>Name</TableHead>
               <TableHead>Folder Path</TableHead>
-              <TableHead>Assigned Orgs</TableHead>
+              <TableHead>Org(s)</TableHead>
               <TableHead>Background Processing</TableHead>
               <TableHead>Status</TableHead>
               <TableHead>Files</TableHead>
-              <TableHead>Recovery Status</TableHead>
+              <TableHead>Recovery </TableHead>
               <TableHead>Actions</TableHead>
             </TableRow>
           </TableHeader>

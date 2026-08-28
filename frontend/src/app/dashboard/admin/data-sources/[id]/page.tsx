@@ -164,6 +164,10 @@ export default function DatastoreBrowsePage() {
   const [dirtyMap, setDirtyMap] = useState<Map<string, boolean>>(new Map());
   // Original states from server (for computing dirty diff)
   const [originalMap, setOriginalMap] = useState<Map<string, boolean>>(new Map());
+  // Folder-level dirty state: folder path -> selected (true/false)
+  const [dirtyFolders, setDirtyFolders] = useState<Map<string, boolean>>(new Map());
+  // Track which folder paths have been expanded into dirtyMap
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
 
   // Confirm dialog
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -204,10 +208,12 @@ export default function DatastoreBrowsePage() {
     return () => clearTimeout(debounce);
   }, [fetchData]);
 
-  // Compute dirty changes
+  // Compute dirty changes — includes both file-level and folder-level
   const dirtyChanges = useMemo(() => {
     const toSelect: string[] = [];
     const toUnselect: string[] = [];
+
+    // File-level changes
     for (const [path, selected] of dirtyMap) {
       const original = originalMap.get(path);
       if (original === undefined) continue;
@@ -216,8 +222,15 @@ export default function DatastoreBrowsePage() {
         else toUnselect.push(path);
       }
     }
+
+    // Folder-level changes (sent as folder paths; backend expands them)
+    for (const [folderPath, selected] of dirtyFolders) {
+      if (selected) toSelect.push(folderPath);
+      else toUnselect.push(folderPath);
+    }
+
     return { toSelect, toUnselect };
-  }, [dirtyMap, originalMap]);
+  }, [dirtyMap, originalMap, dirtyFolders]);
 
   const hasChanges = dirtyChanges.toSelect.length > 0 || dirtyChanges.toUnselect.length > 0;
 
@@ -241,6 +254,88 @@ export default function DatastoreBrowsePage() {
       }
     }
     setDirtyMap(newMap);
+  };
+
+  // Toggle a folder's selection — fetches all files under the folder
+  // and adds them to dirtyMap so navigating into the folder shows state.
+  const [folderLoading, setFolderLoading] = useState<string | null>(null);
+  const toggleFolder = async (item: BrowseItem) => {
+    if (item.type !== 'folder') return;
+    // Determine current state to compute the toggle target
+    const currentState = getFolderCheckState(item);
+    const targetChecked = currentState !== true; // toggle to checked if not fully checked
+
+    setFolderLoading(item.path);
+    try {
+      const resp = await api.get(
+        `/api/admin/datastores/${datastoreId}/folder-files?path=${encodeURIComponent(item.path)}`
+      ) as { files: { path: string; absolute_path: string; is_selected: boolean }[] };
+
+      const newMap = new Map(dirtyMap);
+      const newOriginal = new Map(originalMap);
+      for (const f of resp.files) {
+        newMap.set(f.path, targetChecked);
+        if (!newOriginal.has(f.path)) {
+          newOriginal.set(f.path, f.is_selected);
+        }
+      }
+      setDirtyMap(newMap);
+      setOriginalMap(newOriginal);
+      setExpandedFolders(prev => new Set(prev).add(item.path));
+
+      // Track folder-level intent so save sends the folder path
+      const newFolders = new Map(dirtyFolders);
+      newFolders.set(item.path, targetChecked);
+      setDirtyFolders(newFolders);
+    } catch (e) {
+      const msg = e instanceof ApiError ? e.message : 'Failed to list folder files';
+      toast({ title: 'Error', description: msg, variant: 'destructive' });
+    } finally {
+      setFolderLoading(null);
+    }
+  };
+
+  // Get folder checkbox state: checked / unchecked / indeterminate
+  const getFolderCheckState = (item: BrowseItem): boolean | 'indeterminate' => {
+    // If folder was toggled, use the dirty folder state
+    if (dirtyFolders.has(item.path)) {
+      return dirtyFolders.get(item.path) ?? false;
+    }
+
+    // If files under this folder were individually toggled (expanded),
+    // compute from dirtyMap entries that fall under this folder
+    if (expandedFolders.has(item.path)) {
+      // Count dirty entries under this folder prefix
+      const folderPrefix = item.path + '/';
+      let dirtyCount = 0;
+      let checkedCount = 0;
+      for (const [p, v] of dirtyMap) {
+        if (p.startsWith(folderPrefix) || p === item.path) {
+          dirtyCount++;
+          if (v) checkedCount++;
+        }
+      }
+      if (dirtyCount === 0) {
+        // No dirty entries — fall back to server state
+        const fileCount = item.file_count ?? 0;
+        const selectedCount = item.selected_count ?? 0;
+        if (fileCount === 0) return false;
+        if (selectedCount === 0) return false;
+        if (selectedCount >= fileCount) return true;
+        return 'indeterminate';
+      }
+      if (checkedCount === 0) return false;
+      if (checkedCount === dirtyCount) return true;
+      return 'indeterminate';
+    }
+
+    // No dirty state — use server-provided counts
+    const fileCount = item.file_count ?? 0;
+    const selectedCount = item.selected_count ?? 0;
+    if (fileCount === 0) return false;
+    if (selectedCount === 0) return false;
+    if (selectedCount >= fileCount) return true;
+    return 'indeterminate';
   };
 
   // Get current checkbox state for a file
@@ -272,22 +367,30 @@ export default function DatastoreBrowsePage() {
   const handleSave = async () => {
     setSaving(true);
     try {
+      // For folder paths, send the folder path directly — backend expands.
+      // For file paths, resolve to absolute_path from the current page's items
+      // or from the originalMap entry.
+      const resolvePath = (p: string): string => {
+        const item = data?.items.find(i => i.path === p);
+        if (item?.absolute_path) return item.absolute_path;
+        // If not on current page, it may be from a folder expansion —
+        // the path stored in dirtyMap is a relative path, but save-selection
+        // needs absolute paths. For folder paths, send as-is.
+        if (dirtyFolders.has(p)) return p;
+        return p;
+      };
       const body = {
-        select: dirtyChanges.toSelect.map(p => {
-          const item = data?.items.find(i => i.path === p);
-          return item?.absolute_path || p;
-        }),
-        unselect: dirtyChanges.toUnselect.map(p => {
-          const item = data?.items.find(i => i.path === p);
-          return item?.absolute_path || p;
-        }),
+        select: dirtyChanges.toSelect.map(resolvePath),
+        unselect: dirtyChanges.toUnselect.map(resolvePath),
       };
       await api.post(`/api/admin/datastores/${datastoreId}/save-selection`, body);
       toast({
         title: 'Changes saved',
-        description: `${dirtyChanges.toUnselect.length} file(s) unselected, ${dirtyChanges.toSelect.length} file(s) selected.`,
+        description: `${dirtyChanges.toUnselect.length} item(s) unselected, ${dirtyChanges.toSelect.length} item(s) selected.`,
       });
       setDirtyMap(new Map());
+      setDirtyFolders(new Map());
+      setExpandedFolders(new Set());
       setConfirmOpen(false);
       await fetchData();
     } catch (e) {
@@ -301,6 +404,8 @@ export default function DatastoreBrowsePage() {
   // Discard changes
   const discardChanges = () => {
     setDirtyMap(new Map());
+    setDirtyFolders(new Map());
+    setExpandedFolders(new Set());
   };
 
   // Render
@@ -418,20 +523,33 @@ export default function DatastoreBrowsePage() {
             <TableBody>
               {data.items.map((item) => {
                 if (item.type === 'folder') {
+                  const folderState = getFolderCheckState(item);
                   return (
                     <TableRow
                       key={`folder-${item.path}`}
                       className="cursor-pointer hover:bg-muted/50"
                       onClick={() => navigateTo(item.path)}
                     >
-                      <TableCell />
+                      <TableCell onClick={(e) => e.stopPropagation()}>
+                        <Checkbox
+                          checked={folderState}
+                          disabled={folderLoading === item.path}
+                          onCheckedChange={() => toggleFolder(item)}
+                        />
+                      </TableCell>
                       <TableCell>
                         <div className="flex items-center gap-2">
                           <Folder className="h-4 w-4 text-muted-foreground" />
                           <span className="font-medium">{item.name}</span>
                           <span className="text-xs text-muted-foreground">
                             {item.file_count} files · {item.ingested_count} ingested
+                            {(item.selected_count ?? 0) > 0 && (item.selected_count ?? 0) < (item.file_count ?? 0) && (
+                              <span className="ml-1 text-amber-600 dark:text-amber-400">· {item.selected_count} selected</span>
+                            )}
                           </span>
+                          {folderLoading === item.path && (
+                            <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+                          )}
                         </div>
                       </TableCell>
                       <TableCell />
@@ -548,15 +666,15 @@ export default function DatastoreBrowsePage() {
             <div className="flex items-center gap-3">
               <AlertTriangle className="h-5 w-5 text-amber-500" />
               <div className="text-sm">
-                <span className="font-medium">{dirtyChanges.toSelect.length + dirtyChanges.toUnselect.length} unsaved changes</span>
+                <span className="font-medium">{dirtyChanges.toSelect.length + dirtyChanges.toUnselect.length} unsaved change(s)</span>
                 {dirtyChanges.toUnselect.length > 0 && (
                   <span className="text-red-600 dark:text-red-400 ml-2">
-                    {dirtyChanges.toUnselect.length} file(s) will be DELETED from Qdrant/MySQL/Neo4j
+                    {dirtyChanges.toUnselect.length} item(s) will be DELETED from Qdrant/MySQL/Neo4j
                   </span>
                 )}
                 {dirtyChanges.toSelect.length > 0 && (
                   <span className="text-blue-600 dark:text-blue-400 ml-2">
-                    {dirtyChanges.toSelect.length} file(s) will be marked for ingestion
+                    {dirtyChanges.toSelect.length} item(s) will be marked for ingestion
                   </span>
                 )}
               </div>
@@ -579,8 +697,8 @@ export default function DatastoreBrowsePage() {
         title="Save selection changes?"
         description={
           dirtyChanges.toUnselect.length > 0
-            ? `You are about to DELETE ingested data (vectors, chunks, graph nodes) for ${dirtyChanges.toUnselect.length} file(s) and mark ${dirtyChanges.toSelect.length} file(s) for ingestion. Files on disk will NOT be deleted.`
-            : `You are about to mark ${dirtyChanges.toSelect.length} file(s) for ingestion on next scan.`
+            ? `You are about to DELETE ingested data (vectors, chunks, graph nodes) for ${dirtyChanges.toUnselect.length} item(s) and mark ${dirtyChanges.toSelect.length} item(s) for ingestion. Files on disk will NOT be deleted. Folder selections will apply to all files within.`
+            : `You are about to mark ${dirtyChanges.toSelect.length} item(s) for ingestion on next scan. Folder selections will apply to all files within.`
         }
         confirmText="Confirm"
         destructive={dirtyChanges.toUnselect.length > 0}

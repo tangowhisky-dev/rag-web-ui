@@ -325,6 +325,138 @@ def get_folder_contents(
     }
 
 
+def list_folder_files(
+    db: Session,
+    datastore_id: int,
+    relative_path: str = "",
+) -> dict[str, Any]:
+    """List all files recursively under a folder, with selection state.
+
+    Used by the frontend when a folder checkbox is toggled — it needs
+    the full set of file paths under the folder to update the dirty map.
+    """
+    ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
+    if not ds:
+        return {"error": "datastore_not_found"}
+
+    root = ds.folder_path
+    target = os.path.normpath(os.path.join(root, relative_path)) if relative_path else root
+    if not target.startswith(root):
+        return {"error": "path_outside_datastore"}
+    if not os.path.isdir(target):
+        return {"error": "folder_not_found"}
+
+    prefix = target + os.sep
+
+    # Query manifest for all files under this folder
+    rows = (
+        db.query(DataStoreFileManifest.file_path)
+        .filter(
+            DataStoreFileManifest.datastore_id == datastore_id,
+            DataStoreFileManifest.file_path.like(prefix + "%"),
+        )
+        .all()
+    )
+    manifest_paths = {r[0] for r in rows}
+
+    # Also walk the filesystem in case manifest is incomplete (new files)
+    fs_paths: set[str] = set()
+    for dirpath, _dirs, filenames in os.walk(target):
+        for fname in filenames:
+            if _should_skip_name(fname):
+                continue
+            ext = os.path.splitext(fname)[1].lower()
+            if ext not in SUPPORTED_EXTENSIONS:
+                continue
+            if not _matches_scan_pattern(fname, ds.scan_pattern):
+                continue
+            fs_paths.add(os.path.join(dirpath, fname))
+
+    all_paths = manifest_paths | fs_paths
+
+    # Get selection state from Documents
+    doc_map: dict[str, bool] = {}
+    if all_paths:
+        docs = (
+            db.query(Document.file_path, Document.is_selected)
+            .filter(
+                Document.data_store_id == datastore_id,
+                Document.file_path.in_(list(all_paths)),
+            )
+            .all()
+        )
+        doc_map = {d[0]: d[1] for d in docs}
+
+    files = []
+    for fp in sorted(all_paths):
+        files.append({
+            "path": _relative_path(fp, root),
+            "absolute_path": fp,
+            "is_selected": doc_map.get(fp, False),
+        })
+
+    return {"files": files}
+
+
+def expand_folder_paths(
+    db: Session,
+    datastore_id: int,
+    paths: list[str],
+) -> list[str]:
+    """Expand any folder paths to their contained file paths.
+
+    Given a mix of file and folder absolute paths, returns a flat list
+    of file paths.  Folder paths are expanded recursively using the
+    manifest + filesystem walk.
+    """
+    result: list[str] = []
+    ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
+    if not ds:
+        return paths  # let downstream handle the error
+
+    root = ds.folder_path
+    for p in paths:
+        # Normalise path
+        norm = os.path.normpath(p)
+        if os.path.isdir(norm):
+            prefix = norm + os.sep
+            # Manifest paths
+            rows = (
+                db.query(DataStoreFileManifest.file_path)
+                .filter(
+                    DataStoreFileManifest.datastore_id == datastore_id,
+                    DataStoreFileManifest.file_path.like(prefix + "%"),
+                )
+                .all()
+            )
+            for r in rows:
+                result.append(r[0])
+            # Filesystem walk for new files not yet in manifest
+            for dirpath, _dirs, filenames in os.walk(norm):
+                for fname in filenames:
+                    if _should_skip_name(fname):
+                        continue
+                    ext = os.path.splitext(fname)[1].lower()
+                    if ext not in SUPPORTED_EXTENSIONS:
+                        continue
+                    if not _matches_scan_pattern(fname, ds.scan_pattern):
+                        continue
+                    fp = os.path.join(dirpath, fname)
+                    if fp not in result:
+                        result.append(fp)
+        else:
+            result.append(p)
+
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    unique: list[str] = []
+    for p in result:
+        if p not in seen:
+            seen.add(p)
+            unique.append(p)
+    return unique
+
+
 def _matches_scan_pattern(filename: str, pattern: str) -> bool:
     """Check if filename matches the datastore's scan pattern."""
     import fnmatch

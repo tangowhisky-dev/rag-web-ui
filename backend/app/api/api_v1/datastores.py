@@ -887,9 +887,38 @@ def browse_datastore(
     return result
 
 
+@router.get("/datastores/{datastore_id}/folder-files")
+def list_folder_files(
+    datastore_id: int,
+    path: str = "",
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """List all files recursively under a folder, with selection state.
+
+    Used by the frontend when a folder checkbox is toggled.
+    """
+    admin_org_ids = get_admin_org_ids(db, current_user)
+    _get_datastore_or_404(db, datastore_id)
+    if not _datastore_in_scope(db, datastore_id, admin_org_ids):
+        raise HTTPException(status_code=404, detail="DataStore not found")
+
+    from app.services.datastore.document_management import list_folder_files as _list
+    result = _list(db, datastore_id, relative_path=path)
+    if "error" in result:
+        if result["error"] == "datastore_not_found":
+            raise HTTPException(status_code=404, detail="DataStore not found")
+        if result["error"] == "path_outside_datastore":
+            raise HTTPException(status_code=400, detail="Path is outside the datastore")
+        if result["error"] == "folder_not_found":
+            raise HTTPException(status_code=404, detail="Folder not found")
+        raise HTTPException(status_code=500, detail=result.get("detail", "Failed"))
+    return result
+
+
 class SaveSelectionRequest(BaseModel):
-    select: List[str] = Field(default_factory=list, description="Absolute file paths to select for ingestion")
-    unselect: List[str] = Field(default_factory=list, description="Absolute file paths to unselect (deletes ingested data)")
+    select: List[str] = Field(default_factory=list, description="Absolute file or folder paths to select for ingestion")
+    unselect: List[str] = Field(default_factory=list, description="Absolute file or folder paths to unselect (deletes ingested data)")
 
 
 @router.post("/datastores/{datastore_id}/save-selection")
@@ -901,29 +930,35 @@ def save_selection(
 ):
     """Save document selection changes.
 
-    Files in *unselect* have their ingested data (Qdrant, MySQL chunks,
+    Paths in *unselect* have their ingested data (Qdrant, MySQL chunks,
     Neo4j nodes) deleted and is_selected set to false. Files on disk
-    are never deleted.
+    are never deleted.  Folder paths are expanded to all contained files.
 
-    Files in *select* have is_selected set to true (or a Document
+    Paths in *select* have is_selected set to true (or a Document
     record created if none exists). They will be ingested on the next
-    scan.
+    scan.  Folder paths are expanded to all contained files.
     """
     admin_org_ids = get_admin_org_ids(db, current_user)
     _get_datastore_or_404(db, datastore_id)
     if not _datastore_in_scope(db, datastore_id, admin_org_ids):
         raise HTTPException(status_code=404, detail="DataStore not found")
 
-    from app.services.datastore.document_management import unselect_documents, select_documents
+    from app.services.datastore.document_management import (
+        unselect_documents, select_documents, expand_folder_paths,
+    )
+
+    # Expand any folder paths to their contained file paths
+    select_paths = expand_folder_paths(db, datastore_id, body.select) if body.select else []
+    unselect_paths = expand_folder_paths(db, datastore_id, body.unselect) if body.unselect else []
 
     unselect_result = {"unselected": 0, "deleted_chunks": 0, "deleted_qdrant_points": 0, "deleted_graph_nodes": 0, "errors": []}
     select_result = {"selected": 0, "created": 0, "errors": []}
 
-    if body.unselect:
-        unselect_result = unselect_documents(datastore_id, body.unselect)
+    if unselect_paths:
+        unselect_result = unselect_documents(datastore_id, unselect_paths)
 
-    if body.select:
-        select_result = select_documents(datastore_id, body.select)
+    if select_paths:
+        select_result = select_documents(datastore_id, select_paths)
 
     return {
         "unselect": unselect_result,
