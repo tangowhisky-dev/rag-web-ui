@@ -1,15 +1,15 @@
 "use client";
 
+import "@uiw/react-md-editor/markdown-editor.css";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
+import dynamic from "next/dynamic";
 import { api, ApiError } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { useToast } from "@/components/ui/use-toast";
-import { MarkdownPreview } from "@/components/markdown/markdown-preview";
 import {
   ArrowLeft,
   Save,
@@ -20,6 +20,10 @@ import {
   AlertCircle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+
+// react-md-editor is a client-only component — load it dynamically
+// to avoid SSR issues with Next.js.
+const MDEditor = dynamic(() => import("@uiw/react-md-editor"), { ssr: false });
 
 interface MarkdownResponse {
   document_id: number;
@@ -91,19 +95,6 @@ export default function DocumentEditorPage() {
   const [pendingNavigation, setPendingNavigation] = useState<string | null>(null);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [debouncedMarkdown, setDebouncedMarkdown] = useState("");
-
-  // Debounce preview updates
-  useEffect(() => {
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(() => {
-      setDebouncedMarkdown(markdown);
-    }, 300);
-    return () => {
-      if (debounceRef.current) clearTimeout(debounceRef.current);
-    };
-  }, [markdown]);
 
   const isDirty = markdown !== originalMarkdown;
 
@@ -117,7 +108,6 @@ export default function DocumentEditorPage() {
       )) as MarkdownResponse;
       setMarkdown(resp.markdown);
       setOriginalMarkdown(resp.markdown);
-      setDebouncedMarkdown(resp.markdown);
       setLockVersion(resp.lock_version);
       setTitle(resp.title);
     } catch (e) {
@@ -213,7 +203,7 @@ export default function DocumentEditorPage() {
       )) as any;
       setLockVersion(resp.lock_version);
       setOriginalMarkdown(markdown);
-      toast({ title: "Re-ingest queued", description: "Old data cleared, re-ingesting…" });
+      toast({ title: "Markdown saved", description: "File will be re-ingested on next process cycle." });
       // Start polling
       if (!pollRef.current) {
         pollStatus();
@@ -339,7 +329,7 @@ export default function DocumentEditorPage() {
               ) : (
                 <Save className="mr-2 h-4 w-4" />
               )}
-              Save & Re-ingest
+              Save
             </Button>
           </div>
         </div>
@@ -389,47 +379,16 @@ export default function DocumentEditorPage() {
         )}
       </div>
 
-      {/* Editor + Preview */}
-      <div className="flex flex-1 overflow-hidden">
-        {/* Desktop: split pane. Mobile: tabs. */}
-        <div className="hidden lg:flex flex-1 overflow-hidden">
-          {/* Editor pane */}
-          <div className="w-1/2 border-r overflow-auto">
-            <textarea
-              value={markdown}
-              onChange={(e) => setMarkdown(e.target.value)}
-              className="h-full w-full resize-none border-0 bg-transparent p-4 font-mono text-sm leading-relaxed focus:outline-none"
-              placeholder="Markdown source…"
-              spellCheck={false}
-            />
-          </div>
-          {/* Preview pane */}
-          <div className="w-1/2 overflow-auto p-4">
-            <MarkdownPreview markdown={debouncedMarkdown} />
-          </div>
-        </div>
-
-        {/* Mobile: tabs */}
-        <div className="flex-1 overflow-hidden lg:hidden">
-          <Tabs defaultValue="edit" className="h-full flex flex-col">
-            <TabsList className="grid w-full grid-cols-2">
-              <TabsTrigger value="edit">Edit</TabsTrigger>
-              <TabsTrigger value="preview">Preview</TabsTrigger>
-            </TabsList>
-            <TabsContent value="edit" className="flex-1 overflow-auto mt-0">
-              <textarea
-                value={markdown}
-                onChange={(e) => setMarkdown(e.target.value)}
-                className="h-full w-full resize-none border-0 bg-transparent p-4 font-mono text-sm leading-relaxed focus:outline-none"
-                placeholder="Markdown source…"
-                spellCheck={false}
-              />
-            </TabsContent>
-            <TabsContent value="preview" className="flex-1 overflow-auto mt-0 p-4">
-              <MarkdownPreview markdown={debouncedMarkdown} />
-            </TabsContent>
-          </Tabs>
-        </div>
+      {/* Editor with built-in live preview */}
+      <div className="flex-1 overflow-hidden" data-color-mode="auto">
+        <MDEditor
+          value={markdown}
+          onChange={(val) => setMarkdown(val ?? "")}
+          preview="live"
+          height="100%"
+          style={{ height: "100%", borderRadius: 0 }}
+          hideToolbar={false}
+        />
       </div>
 
       {/* Unsaved changes dialog */}
