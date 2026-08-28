@@ -700,6 +700,13 @@ def select_documents(
                         doc.is_selected = True
                         total_selected += 1
                 else:
+                    # Only create a Document if the file actually exists on disk.
+                    # This prevents duplicate Documents from stale/relative paths.
+                    if not os.path.isfile(fp):
+                        logger.warning("[DOC_MGMT] select skip — file not found: %s", fp)
+                        errors.append({"file_path": fp, "error": "file not found on disk"})
+                        continue
+
                     # Create a minimal Document record
                     fname = os.path.basename(fp)
                     ext = os.path.splitext(fname)[1].lower()

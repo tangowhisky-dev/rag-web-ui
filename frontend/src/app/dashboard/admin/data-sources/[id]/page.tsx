@@ -173,12 +173,17 @@ export default function DatastoreBrowsePage() {
   // Track which folder paths have been expanded into dirtyMap
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const expandedFoldersRef = useRef(expandedFolders);
+  // Map relative path -> absolute path for all files seen (browse + folder expansion)
+  // Used by resolvePath to send absolute paths to save-selection.
+  const [pathToAbsolute, setPathToAbsolute] = useState<Map<string, string>>(new Map());
+  const pathToAbsoluteRef = useRef(pathToAbsolute);
 
   // Sync refs whenever state changes
   useEffect(() => { dirtyMapRef.current = dirtyMap; }, [dirtyMap]);
   useEffect(() => { originalMapRef.current = originalMap; }, [originalMap]);
   useEffect(() => { dirtyFoldersRef.current = dirtyFolders; }, [dirtyFolders]);
   useEffect(() => { expandedFoldersRef.current = expandedFolders; }, [expandedFolders]);
+  useEffect(() => { pathToAbsoluteRef.current = pathToAbsolute; }, [pathToAbsolute]);
 
   // Confirm dialog
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -200,12 +205,17 @@ export default function DatastoreBrowsePage() {
 
       // Update original map with server state
       const newOriginal = new Map(originalMap);
+      const newPathMap = new Map(pathToAbsoluteRef.current);
       for (const item of resp.items) {
         if (item.type === 'file') {
           newOriginal.set(item.path, item.is_selected ?? false);
+          if (item.absolute_path) {
+            newPathMap.set(item.path, item.absolute_path);
+          }
         }
       }
       setOriginalMap(newOriginal);
+      setPathToAbsolute(newPathMap);
     } catch (e) {
       const msg = e instanceof ApiError ? e.message : 'Failed to load datastore contents';
       toast({ title: 'Error', description: msg, variant: 'destructive' });
@@ -265,9 +275,11 @@ export default function DatastoreBrowsePage() {
     const newExpanded = new Set(expandedFoldersRef.current);
 
     // Toggle files on current page immediately
+    const newPathMap = new Map(pathToAbsoluteRef.current);
     for (const item of data.items) {
       if (item.type === 'file' && item.absolute_path) {
         newMap.set(item.path, checked);
+        newPathMap.set(item.path, item.absolute_path);
       }
     }
 
@@ -281,6 +293,7 @@ export default function DatastoreBrowsePage() {
 
         for (const f of resp.files) {
           newMap.set(f.path, checked);
+          newPathMap.set(f.path, f.absolute_path);
           if (!newOriginal.has(f.path)) {
             newOriginal.set(f.path, f.is_selected);
           }
@@ -296,6 +309,7 @@ export default function DatastoreBrowsePage() {
     setOriginalMap(newOriginal);
     setDirtyFolders(newFolders);
     setExpandedFolders(newExpanded);
+    setPathToAbsolute(newPathMap);
   };
 
   // Toggle a folder's selection — fetches all files under the folder
@@ -320,14 +334,17 @@ export default function DatastoreBrowsePage() {
 
       const newMap = new Map(dirtyMapRef.current);
       const newOriginal = new Map(originalMapRef.current);
+      const newPathMap = new Map(pathToAbsoluteRef.current);
       for (const f of resp.files) {
         newMap.set(f.path, targetChecked);
+        newPathMap.set(f.path, f.absolute_path);
         if (!newOriginal.has(f.path)) {
           newOriginal.set(f.path, f.is_selected);
         }
       }
       setDirtyMap(newMap);
       setOriginalMap(newOriginal);
+      setPathToAbsolute(newPathMap);
       setExpandedFolders(prev => new Set(prev).add(item.path));
 
       // Track folder-level intent so save sends the folder path
@@ -422,15 +439,17 @@ export default function DatastoreBrowsePage() {
     setSaving(true);
     try {
       // For folder paths, send the folder path directly — backend expands.
-      // For file paths, resolve to absolute_path from the current page's items
-      // or from the originalMap entry.
+      // For file paths, resolve to absolute_path via pathToAbsolute map.
       const resolvePath = (p: string): string => {
+        // Folder paths are sent as-is (backend expands them)
+        if (dirtyFolders.has(p)) return p;
+        // Look up absolute path from our map (populated from browse + folder expansion)
+        const abs = pathToAbsoluteRef.current.get(p);
+        if (abs) return abs;
+        // Fallback: check current page items
         const item = data?.items.find(i => i.path === p);
         if (item?.absolute_path) return item.absolute_path;
-        // If not on current page, it may be from a folder expansion —
-        // the path stored in dirtyMap is a relative path, but save-selection
-        // needs absolute paths. For folder paths, send as-is.
-        if (dirtyFolders.has(p)) return p;
+        // Last resort: return as-is
         return p;
       };
       const body = {
