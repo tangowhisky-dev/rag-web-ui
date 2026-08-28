@@ -4,6 +4,7 @@ import "@uiw/react-md-editor/markdown-editor.css";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
+import { useTheme } from "next-themes";
 import { api, ApiError } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -13,6 +14,7 @@ import { useToast } from "@/components/ui/use-toast";
 import {
   ArrowLeft,
   Save,
+  RotateCcw,
   RefreshCw,
   Loader2,
   CheckCircle2,
@@ -79,6 +81,7 @@ export default function DocumentEditorPage() {
   const params = useParams();
   const router = useRouter();
   const { toast } = useToast();
+  const { resolvedTheme } = useTheme();
   const datastoreId = params!.id as string;
   const docId = params!.docId as string;
 
@@ -220,6 +223,11 @@ export default function DocumentEditorPage() {
     }
   }, [markdown, lockVersion, datastoreId, docId, toast, pollStatus]);
 
+  // Discard changes — revert to original markdown
+  const handleDiscard = useCallback(() => {
+    setMarkdown(originalMarkdown);
+  }, [originalMarkdown]);
+
   // Re-convert
   const handleReconvert = useCallback(async () => {
     setReconverting(true);
@@ -319,18 +327,6 @@ export default function DocumentEditorPage() {
               )}
               Re-convert
             </Button>
-            <Button
-              size="sm"
-              onClick={handleSave}
-              disabled={!isDirty || saving || isIngestActive}
-            >
-              {saving ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              ) : (
-                <Save className="mr-2 h-4 w-4" />
-              )}
-              Save
-            </Button>
           </div>
         </div>
 
@@ -345,9 +341,29 @@ export default function DocumentEditorPage() {
             </Badge>
           )}
           {isDirty && (
-            <Badge variant="outline" className="text-xs text-yellow-600">
-              Unsaved changes
-            </Badge>
+            <div className="flex items-center gap-2 ml-auto">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleDiscard}
+                disabled={saving || isIngestActive}
+              >
+                <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
+                Discard
+              </Button>
+              <Button
+                size="sm"
+                onClick={handleSave}
+                disabled={saving || isIngestActive}
+              >
+                {saving ? (
+                  <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Save className="mr-1.5 h-3.5 w-3.5" />
+                )}
+                Save
+              </Button>
+            </div>
           )}
         </div>
 
@@ -380,7 +396,7 @@ export default function DocumentEditorPage() {
       </div>
 
       {/* Editor with built-in live preview */}
-      <div className="flex-1 overflow-hidden" data-color-mode="auto">
+      <div className="flex-1 overflow-hidden" data-color-mode={resolvedTheme === "dark" ? "dark" : "light"}>
         <MDEditor
           value={markdown}
           onChange={(val) => setMarkdown(val ?? "")}
