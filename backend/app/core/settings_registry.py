@@ -70,6 +70,11 @@ _APP_ONLY = [
                "str", None, scope="app", reload="ingest",
                description="Multimodal model for OCR during ingestion. Super admin only.",
                model_picker=True, api_base_ref="OPENAI_VISION_API_BASE", api_key_ref="VISION_API_KEY"),
+    SettingDef("VISION_MAX_TOKENS", "Vision / OCR", "Max output tokens per page/image",
+               "int", 2000, scope="app", reload="ingest", min_value=100,
+               description="Caps the vision model's output per OCR call (one page or one image). "
+                           "Prevents runaway generation on hallucinated or verbose responses. "
+                           "A single page typically needs 500-2000 tokens."),
     SettingDef("MARKDOWN_ENGINE", "Ingestion", "Markdown conversion engine",
                "str", "anydoc", scope="app", reload="ingest",
                choices=("anydoc", "markitdown"),
