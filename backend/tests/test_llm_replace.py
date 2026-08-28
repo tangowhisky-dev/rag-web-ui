@@ -27,6 +27,39 @@ from typing import List, Dict
 sys.path.insert(0, "/app")
 os.environ.setdefault("PYTHONPATH", "/app")
 
+import pytest
+
+
+@pytest.fixture(scope="module")
+def llm_replaced_chunks():
+    """Module-scoped fixture: run LLM replacement on all test chunks once.
+
+    test_llm_replacement_quality() was originally designed as a script
+    function that returns a list.  pytest treats its return value as a
+    test failure (PytestReturnNotNoneWarning), and downstream tests
+    (test_dense_retrieval, test_reranker, test_full_pipeline) expect
+    the result as a parameter.  This fixture bridges the gap.
+    """
+    chunks = []
+    for chunk in TEST_CHUNKS:
+        llm_replaced = llm_replace_with_glossary(chunk)
+        chunks.append(llm_replaced)
+    return chunks
+
+
+@pytest.fixture(scope="module")
+def llm_queries():
+    """Module-scoped fixture: run LLM query replacement once."""
+    queries = {}
+    for query in TEST_QUERIES:
+        found = any(
+            re.search(r'\b' + re.escape(a) + r'\b', query, re.IGNORECASE)
+            for a in ALL_ABBRS if len(a) >= 2
+        )
+        if found:
+            queries[query] = llm_replace_query_with_glossary(query)
+    return queries
+
 # ─── Load abbreviation CSV ─────────────────────────────────────────────────
 CSV_PATH = "/app/assets/abbreviations_enhanced.csv"
 

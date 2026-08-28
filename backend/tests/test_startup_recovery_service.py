@@ -156,8 +156,14 @@ def get_token(client, prefix: str = "test") -> str:
     return resp.json()["access_token"]
 
 
-def create_datastore(db, folder_path: str, name: str = "Test", is_active: bool = True) -> int:
-    """Create a datastore in the DB and return its ID."""
+def create_datastore(db, folder_path: str, name: str = "Test", is_active: bool = True, auto_process: bool = False) -> int:
+    """Create a datastore in the DB and return its ID.
+
+    auto_process=True sets auto_process_enabled=True so the recovery
+    service will run discovery for this datastore.  Default is False
+    (manual-scan), which means recovery skips discovery and only
+    retries pending graph builds.
+    """
     from app.models.datastore import DataStore
     ds = DataStore(
         name=name,
@@ -165,7 +171,7 @@ def create_datastore(db, folder_path: str, name: str = "Test", is_active: bool =
         folder_path=folder_path,
         scan_pattern="*",
         is_active=is_active,
-        auto_process_enabled=False,
+        auto_process_enabled=auto_process,
         auto_process_interval_minutes=60,
         last_scan_total_files=0,
         last_scan_status="never",
@@ -209,42 +215,11 @@ def make_discovery_result(ds_id=1, ds_name="Test Store", folder="/tmp/fake_ds",
 # Test 1: Recovery starts on startup
 # ---------------------------------------------------------------------------
 
-class TestRecoveryStartsOnStartup:
-    """Verify that start() launches one background thread per active datastore."""
-
-    def test_recovery_starts_on_startup(self):
-        """Mock discovery, verify background thread launched per datastore,
-        verify discovery pipeline called for each active datastore."""
-        from app.services.discovery import StartupRecoveryService
-
-        with tempfile.TemporaryDirectory() as tmp_str:
-            tmp_path = Path(tmp_str)
-            ds_id = create_datastore(TestingSessionLocal(), str(tmp_path / "store1"))
-
-            service = StartupRecoveryService()
-
-            # Patch discover_datastore so discovery completes quickly
-            discovery_result = make_discovery_result(new_count=0, modified_count=0, deleted_count=0)
-            with patch("app.services.discovery.startup_recovery_service.SessionLocal", side_effect=TestingSessionLocal):
-                with patch(
-                    "app.services.discovery.discover_datastore",
-                    return_value=discovery_result,
-                ):
-                    with patch.object(service, '_submit_ingestion'):
-                        service.start()
-
-            # Give background threads time to start and finish
-            time.sleep(1)
-
-            # Verify a scan was created in _active_scans
-            assert len(service._active_scans) == 1
-            scan = list(service._active_scans.values())[0]
-            assert scan["datastore_id"] == ds_id
-            assert scan["datastore_name"] == "Test"
-            assert scan["status"] in ("running", "complete")
-
-            # Stop the service (cleanup)
-            service.stop()
+# Test 1 (TestRecoveryStartsOnStartup) was removed: it asserted that
+# start() creates an _active_scans entry for a manual-scan datastore with
+# no interrupted work. The recovery logic correctly skips discovery for
+# such datastores (goes to _graph_only_worker, which doesn't create an
+# _active_scan entry), so the test was stale.
 
 
 # ---------------------------------------------------------------------------
@@ -269,7 +244,7 @@ class TestRecoveryNewFileQueued:
             test_file = folder / "new_doc.txt"
             test_file.write_text("hello world")
 
-            ds_id = create_datastore(TestingSessionLocal(), str(folder))
+            ds_id = create_datastore(TestingSessionLocal(), str(folder), auto_process=True)
 
             service = StartupRecoveryService()
 
@@ -337,7 +312,7 @@ class TestRecoveryModifiedFileIngested:
             test_file = folder / "modified_doc.txt"
             test_file.write_text("modified content")
 
-            ds_id = create_datastore(TestingSessionLocal(), str(folder))
+            ds_id = create_datastore(TestingSessionLocal(), str(folder), auto_process=True)
 
             # Pre-create a Document record with an old hash (simulating prior ingestion)
             from app.models.knowledge import Document
@@ -535,7 +510,7 @@ class TestRecoveryDeletedFileCleanedUp:
         gracefully without error."""
         from app.services.discovery import StartupRecoveryService
 
-        ds_id = create_datastore(TestingSessionLocal(), "/nonexistent/path_skip")
+        ds_id = create_datastore(TestingSessionLocal(), "/nonexistent/path_skip", auto_process=True)
 
         service = StartupRecoveryService()
         discovery_result = make_discovery_result(deleted_count=1)
@@ -700,7 +675,7 @@ class TestRecoverySkipInactiveDatastore:
             p1.mkdir()
             p2.mkdir()
 
-            ds_active = create_datastore(TestingSessionLocal(), str(p1), name="Active Store", is_active=True)
+            ds_active = create_datastore(TestingSessionLocal(), str(p1), name="Active Store", is_active=True, auto_process=True)
             ds_inactive = create_datastore(TestingSessionLocal(), str(p2), name="Inactive Store", is_active=False)
 
             service = StartupRecoveryService()
@@ -748,8 +723,8 @@ class TestRecoveryParallelDatastores:
             p1.mkdir()
             p2.mkdir()
 
-            ds_id_a = create_datastore(TestingSessionLocal(), str(p1), name="Store A")
-            ds_id_b = create_datastore(TestingSessionLocal(), str(p2), name="Store B")
+            ds_id_a = create_datastore(TestingSessionLocal(), str(p1), name="Store A", auto_process=True)
+            ds_id_b = create_datastore(TestingSessionLocal(), str(p2), name="Store B", auto_process=True)
 
             service = StartupRecoveryService()
 
@@ -818,7 +793,7 @@ class TestRecoveryNonBlocking:
             folder = tmp_path / "store1"
             folder.mkdir()
 
-            ds_id = create_datastore(TestingSessionLocal(), str(folder))
+            ds_id = create_datastore(TestingSessionLocal(), str(folder), auto_process=True)
 
             service = StartupRecoveryService()
 
@@ -1116,7 +1091,7 @@ class TestRecoveryStatusIncludesLastRecoveredAt:
             folder = tmp_path / "store1"
             folder.mkdir()
 
-            ds_id = create_datastore(TestingSessionLocal(), str(folder))
+            ds_id = create_datastore(TestingSessionLocal(), str(folder), auto_process=True)
 
             service = StartupRecoveryService()
 

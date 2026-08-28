@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """End-to-end test for abbreviation expansion implementation.
 
+These are integration tests that require the real MySQL database with
+pre-loaded abbreviation data. An autouse fixture swaps the SQLite stub
+(installed by conftest.py) for a real MySQL session before each test.
+
 Tests:
   1. Abbreviation list CRUD via API
   2. Lookup building and caching
@@ -14,8 +18,58 @@ import sys
 import time
 import json
 
+import pytest
+
 sys.path.insert(0, "/app")
 os.environ.setdefault("PYTHONPATH", "/app")
+
+
+@pytest.fixture(autouse=True)
+def _force_mysql_db(monkeypatch):
+    """Force these integration tests to use the real MySQL database.
+
+    conftest.py replaces app.db.session with a SQLite stub for unit tests.
+    These tests need pre-loaded abbreviation data that only exists in MySQL,
+    so we swap the stub for a real MySQL engine before each test.
+    """
+    from types import ModuleType
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    mysql_host = os.getenv("MYSQL_SERVER", "127.0.0.1")
+    mysql_port = os.getenv("MYSQL_PORT", "3306")
+    mysql_user = os.getenv("MYSQL_USER", "ragwebui")
+    mysql_password = os.getenv("MYSQL_PASSWORD", "ragwebui")
+    mysql_database = os.getenv("MYSQL_DATABASE", "ragwebui")
+    url = (
+        f"mysql+mysqlconnector://{mysql_user}:{mysql_password}"
+        f"@{mysql_host}:{mysql_port}/{mysql_database}"
+    )
+
+    try:
+        real_engine = create_engine(url)
+        # Test connectivity
+        with real_engine.connect() as conn:
+            conn.execute(__import__("sqlalchemy").text("SELECT 1"))
+    except Exception as e:
+        pytest.skip(f"MySQL not available: {e}")
+
+    RealSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=real_engine)
+
+    real_mod = ModuleType("app.db.session")
+    real_mod.SessionLocal = RealSessionLocal
+    real_mod.engine = real_engine
+
+    def _get_db():
+        db = RealSessionLocal()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    real_mod.get_db = _get_db
+
+    monkeypatch.setitem(sys.modules, "app.db.session", real_mod)
 
 
 def test_1_lookup_and_expansion():
