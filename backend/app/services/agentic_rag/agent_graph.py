@@ -414,7 +414,11 @@ def _observations_metadata_text(observations: list[Observation]) -> str:
         confidence = result.get("confidence", "N/A")
         sufficient = result.get("sufficient")
         sufficient_text = f" sufficient={sufficient}" if sufficient is not None else ""
-        parts.append(f"  doc_count={doc_count} confidence={confidence}{sufficient_text}")
+        missing = result.get("missing", "")
+        missing_text = f" missing={missing}" if not sufficient and missing else ""
+        rewritten = result.get("query_rewritten")
+        rewrite_text = f" query_rewritten=true used={result.get('query_used', '')}" if rewritten else ""
+        parts.append(f"  doc_count={doc_count} confidence={confidence}{sufficient_text}{missing_text}{rewrite_text}")
     return "\n".join(parts)
 
 

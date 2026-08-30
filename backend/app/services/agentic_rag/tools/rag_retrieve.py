@@ -3,12 +3,19 @@
 Implements a graduated relaxation ladder: if the first pass isn't sufficient,
 retry with progressively looser leg/reranker thresholds instead of leaving
 the decision to "try again" entirely to the calling LLM.
+
+Sufficiency is checked via an LLM-based collection-level evaluation after
+each relaxation level. If all levels are exhausted and the result is still
+insufficient, the query is rewritten once and the ladder re-runs with the
+new query.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import re
 import time
 from typing import Any, Optional
 
@@ -16,6 +23,7 @@ from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
 from app.core.config import settings
+from app.services.agentic_rag.llm_factory import build_chat_llm
 from app.services.agentic_rag.nodes import (
     dense_retrieval_node,
     exact_retrieval_node,
@@ -29,6 +37,29 @@ from app.services.agentic_rag.nodes import (
 from app.services.agentic_rag.tool_context import ToolContext, enforce_rbac, write_audit
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_writer():
+    """Return the LangGraph stream writer if available, else None.
+
+    The rag_retrieve tool runs inside a tool_node (graph context), so
+    progress events can be emitted. This helper mirrors the one in
+    nodes.py to avoid a cross-module import for a 4-line function.
+    """
+    try:
+        from langgraph.config import get_stream_writer
+        return get_stream_writer()
+    except (RuntimeError, KeyError, ImportError):
+        return None
+
+
+def _emit_progress(phase: str, message: str, **extra: Any) -> None:
+    """Emit a progress event for the UI, following the existing pattern."""
+    writer = _safe_writer()
+    if writer:
+        payload: dict[str, Any] = {"event": "progress", "phase": phase, "message": message}
+        payload.update(extra)
+        writer(payload)
 
 
 class RagRetrieveInput(BaseModel):
@@ -73,7 +104,151 @@ class _RagRetrieveTool(BaseTool):
 
 
 def _is_sufficient(docs: list, confidence: float, min_confidence: float) -> bool:
+    """Heuristic fallback used when the LLM sufficiency check is unavailable."""
     return len(docs) >= 3 and confidence > min_confidence
+
+
+def _extract_json_block(text: str) -> str | None:
+    """Return the first well-formed JSON object from *text*."""
+    if not text:
+        return None
+    m = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
+    if m:
+        return _extract_balanced(m.group(1), ("{", "}"))
+    return _extract_balanced(text, ("{", "}"))
+
+
+def _extract_balanced(text: str, chars: tuple[str, str]) -> str | None:
+    start_char, end_char = chars
+    start = text.find(start_char)
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for i, ch in enumerate(text[start:], start):
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+        else:
+            if ch == '"':
+                in_string = True
+            elif ch == start_char:
+                depth += 1
+            elif ch == end_char:
+                depth -= 1
+                if depth == 0:
+                    return text[start : i + 1]
+    return None
+
+
+# ── LLM-based sufficiency check ──────────────────────────────────────────────
+
+_SUFFICIENCY_PROMPT = """\
+User question: {query}
+
+Retrieved document excerpts:
+{previews}
+
+Do these documents contain sufficient information to fully answer the user's question?
+Judge by actual content, not topic similarity. A document about the right topic that \
+does not contain the specific answer is NOT sufficient.
+
+Return ONLY a JSON object:
+{{"sufficient": true/false, "missing": "what's missing if not sufficient, or empty string"}}
+
+If the documents are sufficient, set "missing" to an empty string.
+"""
+
+
+async def _llm_sufficiency_check(
+    query: str,
+    docs: list,
+    confidence: float,
+    ctx: ToolContext,
+    min_confidence: float,
+) -> tuple[bool, str]:
+    """LLM-based check: do these docs contain enough to answer the query?
+
+    Returns ``(sufficient, missing_description)``.
+    Falls back to the old heuristic on LLM failure.
+    """
+    if not docs:
+        return False, "No documents were found for this query."
+
+    # Truncate docs to keep the prompt small — top 5 docs × ~500 chars each.
+    previews = []
+    for i, doc in enumerate(docs[:5]):
+        content = str(doc.get("page_content", ""))[:500]
+        previews.append(f"[Doc {i + 1}] {content}")
+    prompt = _SUFFICIENCY_PROMPT.format(query=query, previews="\n".join(previews))
+
+    _emit_progress("sufficiency_check", "Evaluating retrieval sufficiency …")
+
+    try:
+        llm = build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)
+        response = await llm.ainvoke([{"role": "user", "content": prompt}])
+        block = _extract_json_block(str(response.content))
+        if block:
+            result = json.loads(block)
+            sufficient = bool(result.get("sufficient", False))
+            missing = str(result.get("missing", "")).strip()
+            logger.info(
+                "[rag_retrieve] LLM sufficiency: sufficient=%s missing=%s",
+                sufficient, missing[:100] if missing else "(none)",
+            )
+            return sufficient, missing
+    except Exception as exc:
+        logger.warning("[rag_retrieve] sufficiency LLM check failed: %s — falling back to heuristic", exc)
+
+    # Fallback: old heuristic
+    heuristic_ok = _is_sufficient(docs, confidence, min_confidence)
+    return heuristic_ok, "" if heuristic_ok else "Heuristic check could not confirm sufficiency."
+
+
+# ── Query rewriting ──────────────────────────────────────────────────────────
+
+_REWRITE_PROMPT = """\
+The query "{query}" did not retrieve sufficient documents from the knowledge base.
+Missing information: {missing}
+
+Rewrite the query to improve retrieval. Consider:
+- Using different terminology or synonyms
+- Simplifying overly complex phrasing
+- Removing unnecessary qualifiers
+- Breaking a multi-part question into a simpler form
+
+Return ONLY the rewritten query string, no explanation, no quotes.
+"""
+
+
+async def _rewrite_query(
+    original_query: str,
+    missing: str,
+    ctx: ToolContext,
+) -> str:
+    """Rewrite a query that failed to retrieve sufficient docs.
+
+    Returns the rewritten query, or the original if rewriting fails or
+    produces an identical string.
+    """
+    _emit_progress("query_rewrite", "Rewriting query for better retrieval …")
+
+    prompt = _REWRITE_PROMPT.format(query=original_query, missing=missing or "unknown")
+    try:
+        llm = build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)
+        response = await llm.ainvoke([{"role": "user", "content": prompt}])
+        rewritten = str(response.content).strip().strip('"').strip("'").strip()
+        if rewritten and rewritten.lower() != original_query.lower():
+            logger.info("[rag_retrieve] query rewritten: '%s' -> '%s'", original_query, rewritten)
+            return rewritten
+    except Exception as exc:
+        logger.warning("[rag_retrieve] query rewrite failed: %s", exc)
+    return original_query
 
 
 # Graduated relaxation ladder. Level 0 is the normal, tightest pass. Each
@@ -155,6 +330,65 @@ async def _run_retrieval_pass(
     return state
 
 
+async def _run_relaxation_ladder(
+    ctx: ToolContext,
+    query: str,
+    kb_ids: list[int],
+    org_id: Optional[int],
+    file_markdown: Optional[str],
+    legs: list[str],
+    levels: list[dict[str, Any]],
+    min_confidence: float,
+    graph_expand: bool,
+) -> tuple[dict[str, Any], list, float, int, bool, str]:
+    """Run the relaxation ladder for a single query string.
+
+    Returns ``(state, docs, confidence, levels_tried, sufficient, missing)``.
+    """
+    state: dict[str, Any] = {}
+    docs: list = []
+    confidence = 0.0
+    levels_tried = 0
+    sufficient = False
+    missing = ""
+
+    for i, level in enumerate(levels):
+        levels_tried = i + 1
+        state = await _run_retrieval_pass(ctx, query, kb_ids, org_id, file_markdown, legs, level)
+        docs = state.get("retrieved_docs", [])
+        confidence = float(state.get("retrieval_confidence", 0.0))
+
+        # LLM-based sufficiency check (falls back to heuristic on error).
+        if docs:
+            sufficient, missing = await _llm_sufficiency_check(query, docs, confidence, ctx, min_confidence)
+        if sufficient:
+            break
+
+        # Not sufficient from vector/sparse/exact legs alone at this level —
+        # graph expansion is worth its latency cost now. Recheck afterward.
+        if graph_expand:
+            try:
+                neo4j = await neo4j_expansion_node(state, ctx.db, kb_ids, org_id, file_markdown)
+                state.update(neo4j)
+                docs = state.get("retrieved_docs", docs)
+                confidence = float(state.get("retrieval_confidence", confidence))
+            except Exception as exc:
+                logger.warning("[rag_retrieve] graph expansion failed: %s", exc)
+
+            if docs:
+                sufficient, missing = await _llm_sufficiency_check(query, docs, confidence, ctx, min_confidence)
+        if sufficient:
+            break
+
+        logger.info(
+            "[rag_retrieve] level %d insufficient (docs=%d confidence=%.2f missing=%s) — %s",
+            i, len(docs), confidence, missing[:80] if missing else "(none)",
+            "trying next relaxation level" if i < len(levels) - 1 else "no more levels",
+        )
+
+    return state, docs, confidence, levels_tried, sufficient, missing
+
+
 async def _rag_retrieve(ctx: ToolContext, input_obj: RagRetrieveInput) -> dict:
     t0 = time.monotonic()
     rbac = enforce_rbac(ctx, kb_ids=input_obj.kb_ids)
@@ -178,37 +412,30 @@ async def _rag_retrieve(ctx: ToolContext, input_obj: RagRetrieveInput) -> dict:
     adaptive_enabled = get_setting(ctx.db, "ADAPTIVE_RETRIEVAL_ENABLED", ctx.org_id)
     levels = all_levels if adaptive_enabled else all_levels[:1]
 
-    state: dict[str, Any] = {}
-    docs: list = []
-    confidence = 0.0
-    levels_tried = 0
-    for i, level in enumerate(levels):
-        levels_tried = i + 1
-        state = await _run_retrieval_pass(ctx, input_obj.query, kb_ids, org_id, file_markdown, legs, level)
-        docs = state.get("retrieved_docs", [])
-        confidence = float(state.get("retrieval_confidence", 0.0))
-        if _is_sufficient(docs, confidence, min_confidence):
-            break
+    # ── Pass 1: relaxation ladder with the original query ──────────────
+    state, docs, confidence, levels_tried, sufficient, missing = await _run_relaxation_ladder(
+        ctx, input_obj.query, kb_ids, org_id, file_markdown, legs, levels,
+        min_confidence, input_obj.graph_expand,
+    )
 
-        # Not sufficient from vector/sparse/exact legs alone at this level —
-        # graph expansion is worth its latency cost now. Recheck afterward.
-        if input_obj.graph_expand:
-            try:
-                neo4j = await neo4j_expansion_node(state, ctx.db, kb_ids, org_id, file_markdown)
-                state.update(neo4j)
-                docs = state.get("retrieved_docs", docs)
-                confidence = float(state.get("retrieval_confidence", confidence))
-            except Exception as exc:
-                logger.warning("[rag_retrieve] graph expansion failed: %s", exc)
-
-        if _is_sufficient(docs, confidence, min_confidence):
-            break
-
-        logger.info(
-            "[rag_retrieve] level %d insufficient (docs=%d confidence=%.2f) — %s",
-            i, len(docs), confidence,
-            "trying next relaxation level" if i < len(levels) - 1 else "no more levels, giving up",
-        )
+    # ── Pass 2: if still insufficient, rewrite the query and re-run ────
+    query_used = input_obj.query
+    query_rewritten = False
+    if not sufficient and missing:
+        rewritten = await _rewrite_query(input_obj.query, missing, ctx)
+        if rewritten != input_obj.query:
+            query_used = rewritten
+            query_rewritten = True
+            _emit_progress(
+                "query_rewrite",
+                "Retrying with rewritten query …",
+                rewritten_query=rewritten,
+                original_query=input_obj.query,
+            )
+            state, docs, confidence, levels_tried, sufficient, missing = await _run_relaxation_ladder(
+                ctx, rewritten, kb_ids, org_id, file_markdown, legs, levels,
+                min_confidence, input_obj.graph_expand,
+            )
 
     confidence_level = "low"
     if confidence > 0.7:
@@ -222,6 +449,8 @@ async def _rag_retrieve(ctx: ToolContext, input_obj: RagRetrieveInput) -> dict:
         "confidence": confidence,
         "confidence_level": confidence_level,
         "levels_tried": levels_tried,
+        "sufficient": sufficient,
+        "query_rewritten": query_rewritten,
     }
     write_audit(
         ctx,
@@ -240,10 +469,13 @@ async def _rag_retrieve(ctx: ToolContext, input_obj: RagRetrieveInput) -> dict:
             "docs": docs,
             "confidence": confidence,
             "confidence_level": confidence_level,
-            "query_used": input_obj.query,
+            "query_used": query_used,
+            "original_query": input_obj.query,
+            "query_rewritten": query_rewritten,
             "legs_run": legs,
             "levels_tried": levels_tried,
-            "sufficient": _is_sufficient(docs, confidence, min_confidence),
+            "sufficient": sufficient,
+            "missing": missing if not sufficient else "",
         },
         "error": None,
         "tokens": len(str(docs)) // 4,

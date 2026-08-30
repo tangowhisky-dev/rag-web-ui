@@ -78,7 +78,14 @@ def _patch_pipeline(monkeypatch_target, level_outcomes):
     }
 
 
-def _run_rag_retrieve(level_outcomes, graph_expand=True, adaptive_enabled=True):
+def _run_rag_retrieve(level_outcomes, graph_expand=True, adaptive_enabled=True,
+                      llm_sufficient=None, llm_missing=""):
+    """Run _rag_retrieve with mocked pipeline nodes and LLM calls.
+
+    llm_sufficient: if None, the LLM sufficiency check is mocked to use the
+    old heuristic (doc_count >= 3 and confidence > min_confidence). If True
+    or False, it always returns that value.
+    """
     from app.services.agentic_rag.tools import rag_retrieve as mod
 
     patched = _patch_pipeline(mod, level_outcomes)
@@ -104,8 +111,21 @@ def _run_rag_retrieve(level_outcomes, graph_expand=True, adaptive_enabled=True):
         defn = get_def(key)
         return defn.default if defn else None
 
+    async def fake_sufficiency(query, docs, confidence, ctx, min_confidence):
+        if llm_sufficient is not None:
+            return llm_sufficient, "" if llm_sufficient else llm_missing
+        # Fallback: use the old heuristic so tests for the ladder logic
+        # don't depend on LLM availability.
+        ok = len(docs) >= 3 and confidence > min_confidence
+        return ok, "" if ok else llm_missing
+
+    async def fake_rewrite(original_query, missing, ctx):
+        return original_query  # no rewrite in ladder tests
+
     with patch.object(mod, "enforce_rbac", return_value={"kb_ids": [1]}), \
          patch("app.services.settings_service.get_setting", side_effect=_fake_get_setting), \
+         patch.object(mod, "_llm_sufficiency_check", side_effect=fake_sufficiency), \
+         patch.object(mod, "_rewrite_query", side_effect=fake_rewrite), \
          patch.multiple(mod, **patched):
         return asyncio.run(mod._rag_retrieve(ctx, input_obj))
 

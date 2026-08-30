@@ -157,7 +157,7 @@ export const Answer: FC<{
   }>;
   agentSteps?: AgentStepEvent[];
   taskList?: Array<{ id: number; text: string; status: string }>;
-  progressMessages?: Array<{ phase: string; message: string; details?: Record<string, unknown> }>;
+  progressMessages?: Array<{ phase: string; message: string; details?: Record<string, unknown>; rewritten_query?: string; original_query?: string }>;
   synthesisMode?: boolean;
   isStreaming?: boolean;
   onDelete?: (id: string) => void;
@@ -175,7 +175,7 @@ export const Answer: FC<{
   chartOption?: Record<string, unknown>;
   chartOptions?: Array<Record<string, unknown>>;
   onFollowUp?: (query: string) => void;
-}> = React.memo(({ messageId, chatId, markdown, citations = [], rewrittenQuery, confidence, confidenceScore, suggestion, failedLegs, agentSteps, taskList, isStreaming = false, onDelete, finalConfidence, finalConfidenceLevel, faithfulness, completeness, retrievalScore, toolCalls, toolObservations, chartOption, chartOptions, onFollowUp }) => {
+}> = React.memo(({ messageId, chatId, markdown, citations = [], rewrittenQuery, confidence, confidenceScore, suggestion, failedLegs, agentSteps, taskList, progressMessages, isStreaming = false, onDelete, finalConfidence, finalConfidenceLevel, faithfulness, completeness, retrievalScore, toolCalls, toolObservations, chartOption, chartOptions, onFollowUp }) => {
   const [citationInfoMap, setCitationInfoMap] = useState<
     Record<string, CitationInfo>
   >({});
@@ -668,7 +668,7 @@ export const Answer: FC<{
           Single source of truth for status text; raw per-leg progress
           events (dense/sparse/exact/neo4j) are folded into "Gathering
           sources …" here instead of also being shown verbatim. */}
-      <AgenticProgress agentSteps={filteredAgentSteps} isStreaming={isStreaming} toolCalls={toolCalls} toolObservations={toolObservations} />
+      <AgenticProgress agentSteps={filteredAgentSteps} isStreaming={isStreaming} toolCalls={toolCalls} toolObservations={toolObservations} progressMessages={progressMessages} />
 
       {/* Confidence warning (no confidence) */}
       {confidence === "none" && suggestion && (

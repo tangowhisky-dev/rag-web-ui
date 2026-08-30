@@ -629,7 +629,7 @@ Do NOT write the answer text. Emit the next tool call needed to advance the plan
 
 rag_retrieve query rules:
 - Reuse the rewritten query verbatim as the "query" argument. Do NOT add synonyms, related terms, or extra keywords beyond what the user or the rewriter already provided.
-- Do NOT re-call rag_retrieve just because confidence is not perfect. Only re-call it if the previous observation returned zero documents or is clearly irrelevant to the plan.
+- rag_retrieve now evaluates whether retrieved docs actually contain the answer (not just topic similarity). If the observation shows sufficient=false with a "missing" field, the tool already tried rewriting the query internally. Only re-call rag_retrieve with a DIFFERENT query if the missing field suggests a fundamentally different search angle (e.g. a different entity, time period, or concept). Do NOT re-call just because confidence is not perfect.
 - Never repeat a rag_retrieve call with the same "query" argument as a previous observation — it will return identical results.
 
 Chart requests: if the plan includes a chart, call extract_data first to turn retrieved docs / the previous answer into structured {{label, value}} rows, then call chart_generate with that structured data. Do NOT hand-roll the ECharts option yourself via code_execute — chart_generate is the only tool that produces a chart_option the UI can render.

@@ -146,6 +146,8 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     phase: string;
     message: string;
     details?: Record<string, unknown>;
+    rewritten_query?: string;
+    original_query?: string;
   }>>([]);
 
   const [taskList, setTaskList] = useState<Array<{
@@ -589,6 +591,8 @@ function ChatPageInner({ params }: { params: { id: string } }) {
           phase: string;
           message: string;
           details?: Record<string, unknown>;
+          rewritten_query?: string;
+          original_query?: string;
         };
         setProgressMessages((prev) => [...prev, payload]);
       } catch (e) {

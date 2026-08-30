@@ -68,16 +68,25 @@ export interface AgentStepEvent {
   [key: string]: unknown;
 }
 
+export interface ProgressMessage {
+  phase: string;
+  message: string;
+  details?: Record<string, unknown>;
+  rewritten_query?: string;
+  original_query?: string;
+}
+
 export interface AgenticProgressProps {
   agentSteps?: AgentStepEvent[];
   isStreaming: boolean;
   toolCalls?: Array<Record<string, unknown>>;
   toolObservations?: Array<Record<string, unknown>>;
+  progressMessages?: ProgressMessage[];
 }
 
 // ── Component ────────────────────────────────────────────────────────────────
 
-export const AgenticProgress = ({ agentSteps, isStreaming, toolCalls, toolObservations }: AgenticProgressProps) => {
+export const AgenticProgress = ({ agentSteps, isStreaming, toolCalls, toolObservations, progressMessages }: AgenticProgressProps) => {
   const [phases, setPhases] = useState<string[]>([]);
   const dismissRef = useRef<ReturnType<typeof setTimeout>>();
   // Sticky tool label: persists after the tool observation arrives,
@@ -134,14 +143,26 @@ export const AgenticProgress = ({ agentSteps, isStreaming, toolCalls, toolObserv
   // ── Compute display text ──────────────────────────────────────────────────
 
   // 1. If a tool call is in flight, show its label (fresh or updated).
+  //    Progress messages emitted during a tool call (e.g. "Evaluating
+  //    retrieval sufficiency …") override the generic tool label with
+  //    more granular status.
   let activeToolLabel: string | null = null;
   if (isStreaming && toolCalls && toolCalls.length > 0) {
     const obsCount = toolObservations?.length ?? 0;
     if (toolCalls.length > obsCount) {
-      const latest = toolCalls[toolCalls.length - 1];
-      const label = latest?.label as string | undefined;
-      if (label) {
-        activeToolLabel = `${label} …`;
+      // Check for granular progress messages emitted during this tool call.
+      // Progress messages arrive after the tool_call event, so if there are
+      // more progress messages than tool observations, the latest one is
+      // from the currently in-flight tool.
+      const latestProgress = progressMessages?.[progressMessages.length - 1];
+      if (latestProgress && latestProgress.message) {
+        activeToolLabel = `${latestProgress.message}`;
+      } else {
+        const latest = toolCalls[toolCalls.length - 1];
+        const label = latest?.label as string | undefined;
+        if (label) {
+          activeToolLabel = `${label} …`;
+        }
       }
     }
   }
