@@ -203,9 +203,9 @@ def extract_entities_from_query(query: str, db: Any = None, org_id: Any = None) 
 # ── T02: Neo4j Entity Expansion ──────────────────────────────────────────────
 
 def _get_neo4j_driver():
-    """Reuse the Neo4j driver singleton from graph_service."""
-    from app.services import graph_service
-    return graph_service._get_driver()
+    """Reuse the Neo4j driver singleton from the graph setup module."""
+    from app.services.graph.setup import _get_driver
+    return _get_driver()
 
 
 def expand_query_entities(

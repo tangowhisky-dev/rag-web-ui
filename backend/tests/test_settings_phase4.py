@@ -70,7 +70,7 @@ def test_expand_docs_via_graph_accepts_db_and_org_id(db_session):
     clear_cache()
 
     # With no docs, it returns [] immediately
-    from app.services.graph.graph_service import expand_docs_via_graph
+    from app.services.graph.expand import expand_docs_via_graph
     result = expand_docs_via_graph([], [], db_session, org.id)
     assert result == []
 
