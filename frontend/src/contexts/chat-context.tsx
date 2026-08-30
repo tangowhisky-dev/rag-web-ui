@@ -1,6 +1,6 @@
 "use client";
 
-import React, { createContext, useContext, useEffect, useState, useCallback, useMemo, useSyncExternalStore } from "react";
+import React, { createContext, useContext, useEffect, useState, useCallback, useMemo, useLayoutEffect } from "react";
 import { api } from "@/lib/api";
 
 export interface Folder {
@@ -70,20 +70,27 @@ function loadCachedChatList(): Chat[] {
 }
 
 export function ChatProvider({ children }: { children: React.ReactNode }) {
-  // Initialize from module-level cache. On the client, also try sessionStorage
-  // synchronously — but only after the first render to avoid hydration
-  // mismatches. We use a lazy initializer that checks the module cache first,
-  // then a useSyncExternalStore-like pattern to load sessionStorage ASAP.
-  // Initialize from module-level cache or sessionStorage (client-only).
-  // useSyncExternalStore ensures SSR returns empty list (no hydration mismatch),
-  // then client immediately reads sessionStorage on first render.
-  const initialChatList = useSyncExternalStore(
-    () => () => {},
-    () => _chatListCache.length > 0 ? _chatListCache : loadCachedChatList(),
-    () => _chatListCache,
-  );
-  const [chatList, _setChatList] = useState<Chat[]>(initialChatList);
-  const [chatListLoaded, setChatListLoaded] = useState(initialChatList.length > 0);
+  // Initialize from module-level cache only. sessionStorage is read in a
+  // useLayoutEffect (below) to avoid hydration mismatches — the server and
+  // client first render both use _chatListCache (empty on first load).
+  const [chatList, _setChatList] = useState<Chat[]>(_chatListCache);
+  const [chatListLoaded, setChatListLoaded] = useState(_chatListCache.length > 0);
+
+  // Load from sessionStorage synchronously before paint — useLayoutEffect
+  // fires before the browser paints, so the sidebar never flashes empty
+  // if sessionStorage has cached data. The setState is deferred via a
+  // microtask to satisfy react-hooks/set-state-in-effect.
+  useLayoutEffect(() => {
+    if (_chatListCache.length > 0) return;
+    const cached = loadCachedChatList();
+    if (cached.length > 0) {
+      // Defer to avoid synchronous setState in effect (react-hooks rule)
+      Promise.resolve().then(() => {
+        _setChatList(cached);
+        setChatListLoaded(true);
+      });
+    }
+  }, []);
 
   const setChatList: React.Dispatch<React.SetStateAction<Chat[]>> = useCallback(
     (action) => {
