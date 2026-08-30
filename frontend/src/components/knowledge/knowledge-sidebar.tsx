@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
 import {
@@ -8,6 +8,7 @@ import {
   Search, PanelLeftClose, PanelLeftOpen,
 } from "lucide-react";
 import { useKnowledgeContext } from "@/contexts/knowledge-context";
+import type { KnowledgeBase } from "@/contexts/knowledge-context";
 import { useSidebarCollapse } from "@/lib/hooks";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { useToast } from "@/components/ui/use-toast";
@@ -16,6 +17,90 @@ import { ApiError } from "@/lib/api";
 interface KnowledgeSidebarProps {
   isOpen: boolean;
   onClose: () => void;
+}
+
+function filterKbList(kbList: KnowledgeBase[], search: string): KnowledgeBase[] {
+  const q = search.trim().toLowerCase();
+  if (!q) return kbList;
+  return kbList.filter((kb) =>
+    kb.name.toLowerCase().includes(q) ||
+    (kb.description ?? "").toLowerCase().includes(q)
+  );
+}
+
+interface KbListItemProps {
+  kb: KnowledgeBase;
+  isActive: boolean;
+  isEditing: boolean;
+  editingValue: string;
+  inputRef: React.RefObject<HTMLInputElement | null>;
+  onEditingValueChange: (value: string) => void;
+  onCommitEdit: (id: number) => void;
+  onEditKeyDown: (e: React.KeyboardEvent, id: number) => void;
+  onStartEdit: (id: number, name: string) => void;
+  onSetConfirmId: (id: number) => void;
+  onClose: () => void;
+}
+
+function KbListItem({
+  kb, isActive, isEditing, editingValue, inputRef,
+  onEditingValueChange, onCommitEdit, onEditKeyDown,
+  onStartEdit, onSetConfirmId, onClose,
+}: KbListItemProps) {
+  return (
+    <div
+      className={[
+        "group flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm transition-colors",
+        isActive
+          ? "bg-accent text-accent-foreground"
+          : "hover:bg-accent/60 text-foreground",
+      ].join(" ")}
+    >
+      {isEditing ? (
+        <input
+          ref={inputRef}
+          value={editingValue}
+          onChange={(e) => onEditingValueChange(e.target.value)}
+          onBlur={() => onCommitEdit(kb.id)}
+          onKeyDown={(e) => onEditKeyDown(e, kb.id)}
+          className="flex-1 min-w-0 bg-transparent border-b border-primary outline-none text-sm px-0.5"
+        />
+      ) : (
+        <Link
+          href={`/dashboard/knowledge/${kb.id}`}
+          onClick={onClose}
+          className="flex items-center gap-2 flex-1 min-w-0"
+        >
+          <Database className="h-3.5 w-3.5 shrink-0 opacity-50" />
+          <div className="min-w-0">
+            <p className="truncate text-sm font-medium">{kb.name}</p>
+            <p className="text-[10px] text-muted-foreground">
+              {kb.documents?.length ?? 0} doc{(kb.documents?.length ?? 0) !== 1 ? "s" : ""} • {kb.data_source_count ?? 0} data store{(kb.data_source_count ?? 0) !== 1 ? "s" : ""}
+            </p>
+          </div>
+        </Link>
+      )}
+
+      {!isEditing && (
+        <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+          <button
+            onClick={() => onStartEdit(kb.id, kb.name)}
+            className="p-1 rounded hover:bg-muted-foreground/20 transition-colors"
+            aria-label="Rename"
+          >
+            <Pencil className="h-3 w-3" />
+          </button>
+          <button
+            onClick={() => onSetConfirmId(kb.id)}
+            className="p-1 rounded hover:bg-destructive/20 hover:text-destructive transition-colors"
+            aria-label="Delete"
+          >
+            <Trash2 className="h-3 w-3" />
+          </button>
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function KnowledgeSidebar({ isOpen, onClose }: KnowledgeSidebarProps) {
@@ -39,21 +124,21 @@ export default function KnowledgeSidebar({ isOpen, onClose }: KnowledgeSidebarPr
     }
   }, [editingId]);
 
-  const handleDelete = async (id: number) => {
+  const handleDelete = useCallback(async (id: number) => {
     await deleteKb(id).catch((e) => {
       toast({ title: "Delete failed", description: e instanceof ApiError ? e.message : "Please try again", variant: "destructive" });
     });
     if (pathname === `/dashboard/knowledge/${id}`) {
       router.push("/dashboard/knowledge");
     }
-  };
+  }, [deleteKb, toast, pathname, router]);
 
-  const startEdit = (id: number, name: string) => {
+  const startEdit = useCallback((id: number, name: string) => {
     setEditingId(id);
     setEditingValue(name);
-  };
+  }, [setEditingId, setEditingValue]);
 
-  const commitEdit = async (id: number) => {
+  const commitEdit = useCallback(async (id: number) => {
     const trimmed = editingValue.trim();
     if (trimmed && trimmed !== kbList.find((k) => k.id === id)?.name) {
       await renameKb(id, trimmed).catch((e) => {
@@ -61,18 +146,14 @@ export default function KnowledgeSidebar({ isOpen, onClose }: KnowledgeSidebarPr
       });
     }
     setEditingId(null);
-  };
+  }, [editingValue, kbList, renameKb, toast, setEditingId]);
 
-  const handleEditKeyDown = (e: React.KeyboardEvent, id: number) => {
+  const handleEditKeyDown = useCallback((e: React.KeyboardEvent, id: number) => {
     if (e.key === "Enter") commitEdit(id);
     if (e.key === "Escape") setEditingId(null);
-  };
+  }, [commitEdit, setEditingId]);
 
-  const filtered = kbList.filter((kb) =>
-    !searchQuery.trim() ||
-    kb.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    (kb.description ?? "").toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  const filtered = filterKbList(kbList, searchQuery);
 
   return (
     <>
@@ -164,59 +245,20 @@ export default function KnowledgeSidebar({ isOpen, onClose }: KnowledgeSidebarPr
                   pathname.startsWith(`/dashboard/knowledge/${kb.id}/`);
 
                 return (
-                  <div
+                  <KbListItem
                     key={kb.id}
-                    className={[
-                      "group flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm transition-colors",
-                      isActive
-                        ? "bg-accent text-accent-foreground"
-                        : "hover:bg-accent/60 text-foreground",
-                    ].join(" ")}
-                  >
-                    {editingId === kb.id ? (
-                      <input
-                        ref={inputRef}
-                        value={editingValue}
-                        onChange={(e) => setEditingValue(e.target.value)}
-                        onBlur={() => commitEdit(kb.id)}
-                        onKeyDown={(e) => handleEditKeyDown(e, kb.id)}
-                        className="flex-1 min-w-0 bg-transparent border-b border-primary outline-none text-sm px-0.5"
-                      />
-                    ) : (
-                      <Link
-                        href={`/dashboard/knowledge/${kb.id}`}
-                        onClick={onClose}
-                        className="flex items-center gap-2 flex-1 min-w-0"
-                      >
-                        <Database className="h-3.5 w-3.5 shrink-0 opacity-50" />
-                        <div className="min-w-0">
-                          <p className="truncate text-sm font-medium">{kb.name}</p>
-                          <p className="text-[10px] text-muted-foreground">
-                            {kb.documents?.length ?? 0} doc{(kb.documents?.length ?? 0) !== 1 ? "s" : ""} • {kb.data_source_count ?? 0} data store{(kb.data_source_count ?? 0) !== 1 ? "s" : ""}
-                          </p>
-                        </div>
-                      </Link>
-                    )}
-
-                    {editingId !== kb.id && (
-                      <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
-                        <button
-                          onClick={() => startEdit(kb.id, kb.name)}
-                          className="p-1 rounded hover:bg-muted-foreground/20 transition-colors"
-                          aria-label="Rename"
-                        >
-                          <Pencil className="h-3 w-3" />
-                        </button>
-                        <button
-                          onClick={() => setConfirmId(kb.id)}
-                          className="p-1 rounded hover:bg-destructive/20 hover:text-destructive transition-colors"
-                          aria-label="Delete"
-                        >
-                          <Trash2 className="h-3 w-3" />
-                        </button>
-                      </div>
-                    )}
-                  </div>
+                    kb={kb}
+                    isActive={isActive}
+                    isEditing={editingId === kb.id}
+                    editingValue={editingValue}
+                    inputRef={inputRef}
+                    onEditingValueChange={setEditingValue}
+                    onCommitEdit={commitEdit}
+                    onEditKeyDown={handleEditKeyDown}
+                    onStartEdit={startEdit}
+                    onSetConfirmId={setConfirmId}
+                    onClose={onClose}
+                  />
                 );
               })}
             </nav>

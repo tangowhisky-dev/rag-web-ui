@@ -120,19 +120,98 @@ export function groupResultsByDocument(results: SearchResult[]): GroupedSearchRe
   return groupedResults;
 }
 
+const VISIBLE_CHUNKS_BREAKPOINTS = [2, 3, 4] as const;
+
+function getVisibleChunks(width: number): number {
+  return VISIBLE_CHUNKS_BREAKPOINTS[Number(width >= 768) + Number(width >= 1024)];
+}
+
+function useChunkScroll(
+  totalChunks: number,
+  visibleChunks: number,
+  scrollContainerRef: React.RefObject<HTMLDivElement | null>,
+) {
+  const [currentIndex, setCurrentIndex] = useState(0);
+
+  const canScrollLeft = currentIndex > 0;
+  const canScrollRight = currentIndex < totalChunks - visibleChunks;
+
+  const scrollLeft = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    setCurrentIndex((prev) => {
+      if (prev <= 0) return prev;
+      const newIndex = prev - 1;
+      scrollContainerRef.current?.scrollTo({
+        left: newIndex * (scrollContainerRef.current.clientWidth / visibleChunks),
+        behavior: "smooth",
+      });
+      return newIndex;
+    });
+  }, [visibleChunks, scrollContainerRef, setCurrentIndex]);
+
+  const scrollRight = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    setCurrentIndex((prev) => {
+      if (prev >= totalChunks - visibleChunks) return prev;
+      const newIndex = prev + 1;
+      scrollContainerRef.current?.scrollTo({
+        left: newIndex * (scrollContainerRef.current.clientWidth / visibleChunks),
+        behavior: "smooth",
+      });
+      return newIndex;
+    });
+  }, [totalChunks, visibleChunks, scrollContainerRef, setCurrentIndex]);
+
+  return { canScrollLeft, canScrollRight, scrollLeft, scrollRight };
+}
+
+interface ChunkPreviewProps {
+  chunk: SearchResult;
+  index: number;
+  totalChunks: number;
+  visibleChunks: number;
+  query: string;
+}
+
+function ChunkPreview({ chunk, index, totalChunks, visibleChunks, query }: ChunkPreviewProps) {
+  const chunkTier = scoreTier(chunk.reranker_score);
+  return (
+    <div
+      className="flex-shrink-0 w-full snap-start"
+      style={{
+        width: `calc(100% / ${visibleChunks})`,
+      }}
+    >
+      <div className="p-4 border-l border-r border-border/30 first:border-l-0 last:border-r-0 h-full">
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-xs text-muted-foreground/70">
+            Chunk {index + 1} of {totalChunks}
+          </span>
+          <span className={cn(
+            "shrink-0 rounded-full border px-1.5 py-0.5 text-[10px] font-medium tabular-nums",
+            chunkTier.className,
+          )}>
+            {chunk.reranker_score.toFixed(2)}
+          </span>
+        </div>
+        <div className="text-sm text-muted-foreground leading-relaxed prose prose-sm dark:prose-invert max-w-none pointer-events-none line-clamp-4">
+          <Markdown remarkPlugins={[remarkGfm]}>
+            {highlightInMarkdown(snippet(chunk.original_text || chunk.chunk_text), query)}
+          </Markdown>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function GroupedResultCard({ group, query, kbName }: GroupedResultCardProps) {
   const [isExpanded, setIsExpanded] = useState(false);
-  const [currentIndex, setCurrentIndex] = useState(0);
   const [visibleChunks, setVisibleChunks] = useState(3);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   // Responsive: show 2 chunks on mobile, 3 on tablet, 4 on desktop
   useEffect(() => {
-    const updateVisible = () => {
-      if (window.innerWidth < 768) setVisibleChunks(2);
-      else if (window.innerWidth < 1024) setVisibleChunks(3);
-      else setVisibleChunks(4);
-    };
+    const updateVisible = () => setVisibleChunks(getVisibleChunks(window.innerWidth));
     updateVisible();
     window.addEventListener("resize", updateVisible);
     return () => window.removeEventListener("resize", updateVisible);
@@ -142,32 +221,8 @@ export default function GroupedResultCard({ group, query, kbName }: GroupedResul
   const displayTitle = group.title || group.fileName;
   const showFilename = group.title && group.title !== cleanFilename(group.fileName);
 
-  const canScrollLeft = currentIndex > 0;
-  const canScrollRight = currentIndex < group.chunks.length - visibleChunks;
-
-  const scrollLeft = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (currentIndex > 0) {
-      const newIndex = currentIndex - 1;
-      setCurrentIndex(newIndex);
-      scrollContainerRef.current?.scrollTo({
-        left: newIndex * (scrollContainerRef.current.clientWidth / visibleChunks),
-        behavior: "smooth",
-      });
-    }
-  }, [currentIndex, visibleChunks]);
-
-  const scrollRight = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (currentIndex < group.chunks.length - visibleChunks) {
-      const newIndex = currentIndex + 1;
-      setCurrentIndex(newIndex);
-      scrollContainerRef.current?.scrollTo({
-        left: newIndex * (scrollContainerRef.current.clientWidth / visibleChunks),
-        behavior: "smooth",
-      });
-    }
-  }, [currentIndex, visibleChunks, group.chunks.length]);
+  const { canScrollLeft, canScrollRight, scrollLeft, scrollRight } =
+    useChunkScroll(group.chunks.length, visibleChunks, scrollContainerRef);
 
   const handleMouseEnter = () => setIsExpanded(true);
   const handleMouseLeave = () => setIsExpanded(false);
@@ -200,7 +255,7 @@ export default function GroupedResultCard({ group, query, kbName }: GroupedResul
                 </span>
               )}
               <span className="text-xs text-muted-foreground/50">
-                {group.totalChunks} chunk{group.totalChunks !== 1 ? "s" : ""}
+                {group.totalChunks} chunk{["", "s"][Number(group.totalChunks !== 1)]}
               </span>
             </div>
           </div>
@@ -217,7 +272,7 @@ export default function GroupedResultCard({ group, query, kbName }: GroupedResul
       <div
         className={cn(
           "px-4 overflow-hidden transition-all duration-300 ease-in-out",
-          isExpanded ? "max-h-0 opacity-0 pb-0" : "max-h-40 opacity-100 pb-4",
+          ["max-h-40 opacity-100 pb-4", "max-h-0 opacity-0 pb-0"][Number(isExpanded)],
         )}
       >
         <div className="text-sm text-muted-foreground leading-relaxed prose prose-sm dark:prose-invert max-w-none pointer-events-none line-clamp-3">
@@ -231,7 +286,7 @@ export default function GroupedResultCard({ group, query, kbName }: GroupedResul
       <div
         className={cn(
           "overflow-hidden transition-all duration-300 ease-in-out border-t border-border/50",
-          isExpanded ? "max-h-[400px] opacity-100" : "max-h-0 opacity-0 border-t-0",
+          ["max-h-0 opacity-0 border-t-0", "max-h-[400px] opacity-100"][Number(isExpanded)],
         )}
       >
         <div className="relative">
@@ -266,37 +321,16 @@ export default function GroupedResultCard({ group, query, kbName }: GroupedResul
               msOverflowStyle: "none",
             }}
           >
-            {group.chunks.map((chunk, index) => {
-              const chunkTier = scoreTier(chunk.reranker_score);
-              return (
-                <div
-                  key={`${chunk.document_id}-${chunk.chunk_index}-${index}`}
-                  className="flex-shrink-0 w-full snap-start"
-                  style={{
-                    width: `calc(100% / ${visibleChunks})`,
-                  }}
-                >
-                  <div className="p-4 border-l border-r border-border/30 first:border-l-0 last:border-r-0 h-full">
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-xs text-muted-foreground/70">
-                        Chunk {index + 1} of {group.totalChunks}
-                      </span>
-                      <span className={cn(
-                        "shrink-0 rounded-full border px-1.5 py-0.5 text-[10px] font-medium tabular-nums",
-                        chunkTier.className,
-                      )}>
-                        {chunk.reranker_score.toFixed(2)}
-                      </span>
-                    </div>
-                    <div className="text-sm text-muted-foreground leading-relaxed prose prose-sm dark:prose-invert max-w-none pointer-events-none line-clamp-4">
-                      <Markdown remarkPlugins={[remarkGfm]}>
-                        {highlightInMarkdown(snippet(chunk.original_text || chunk.chunk_text), query)}
-                      </Markdown>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
+            {group.chunks.map((chunk, index) => (
+              <ChunkPreview
+                key={`${chunk.document_id}-${chunk.chunk_index}-${index}`}
+                chunk={chunk}
+                index={index}
+                totalChunks={group.totalChunks}
+                visibleChunks={visibleChunks}
+                query={query}
+              />
+            ))}
           </div>
         </div>
       </div>

@@ -50,6 +50,53 @@ interface DocumentListProps {
 const POLL_INTERVAL = 3000;
 const POLL_RETRY_DELAY = 8000;
 
+function isRunningTask(t: ProcessingTask): boolean {
+  return t.status === "pending" || t.status === "processing" || t.graph_status === "pending";
+}
+
+function hasTerminalStatus(info: ProcessingTask): boolean {
+  return info.status === "completed" || info.status === "failed";
+}
+
+function collectPendingTaskIds(
+  docs: Document[],
+  taskProgressRef: { current: Record<number, ProcessingTask> }
+): number[] {
+  const taskIds: number[] = [];
+  for (const doc of docs) {
+    for (const t of doc.processing_tasks) {
+      if (isRunningTask(t)) taskIds.push(t.id);
+    }
+  }
+
+  // Also poll any task we're tracking in taskProgress that's still running
+  // (handles the case where the dialog was closed before the KB list refreshed)
+  for (const [idStr, t] of Object.entries(taskProgressRef.current)) {
+    if (isRunningTask(t)) {
+      const id = parseInt(idStr);
+      if (!taskIds.includes(id)) taskIds.push(id);
+    }
+  }
+  return taskIds;
+}
+
+function processTaskResponse(
+  resp: Record<string, ProcessingTask>,
+  setTaskProgress: (updater: (prev: Record<number, ProcessingTask>) => Record<number, ProcessingTask>) => void
+): { anyRunning: boolean; anyFinished: boolean } {
+  const updates: Record<number, ProcessingTask> = {};
+  let anyRunning = false;
+  let anyFinished = false;
+  for (const [idStr, info] of Object.entries(resp)) {
+    const id = parseInt(idStr);
+    updates[id] = info;
+    if (isRunningTask(info)) anyRunning = true;
+    if (hasTerminalStatus(info)) anyFinished = true;
+  }
+  setTaskProgress((prev) => ({ ...prev, ...updates }));
+  return { anyRunning, anyFinished };
+}
+
 export function DocumentList({ knowledgeBaseId, refreshKey }: DocumentListProps) {
   const [documents, setDocuments] = useState<Document[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -99,41 +146,17 @@ export function DocumentList({ knowledgeBaseId, refreshKey }: DocumentListProps)
 
     const run = async () => {
       const docs = docsRef.current;
-      const taskIds: number[] = [];
-      for (const doc of docs) {
-        for (const t of doc.processing_tasks) {
-          if (t.status === "pending" || t.status === "processing" || t.graph_status === "pending") {
-            taskIds.push(t.id);
-          }
-        }
-      }
-
-      // Also poll any task we're tracking in taskProgress that's still running
-      // (handles the case where the dialog was closed before the KB list refreshed)
-      for (const [idStr, t] of Object.entries(taskProgressRef.current)) {
-        if (t.status === "pending" || t.status === "processing" || t.graph_status === "pending") {
-          const id = parseInt(idStr);
-          if (!taskIds.includes(id)) taskIds.push(id);
-        }
-      }
-
+      const taskIds = collectPendingTaskIds(docs, taskProgressRef);
       if (taskIds.length === 0) return; // nothing in progress, stop polling
 
       try {
         const resp = await api.get(
           `/api/knowledge-base/${knowledgeBaseIdRef.current}/documents/tasks?task_ids=${taskIds.join(",")}`
         );
-        const updates: Record<number, ProcessingTask> = {};
-        let anyRunning = false;
-        let anyFinished = false;
-        for (const [idStr, info] of Object.entries(resp as Record<string, ProcessingTask>)) {
-          const id = parseInt(idStr);
-          updates[id] = info as ProcessingTask;
-          if (info.status === "pending" || info.status === "processing") anyRunning = true;
-          if (info.graph_status === "pending") anyRunning = true;
-          if (info.status === "completed" || info.status === "failed") anyFinished = true;
-        }
-        setTaskProgress((prev) => ({ ...prev, ...updates }));
+        const { anyRunning, anyFinished } = processTaskResponse(
+          resp as Record<string, ProcessingTask>,
+          setTaskProgress
+        );
 
         if (anyFinished) {
           // Refresh the doc list so status badges update; restart poll after
@@ -151,7 +174,7 @@ export function DocumentList({ knowledgeBaseId, refreshKey }: DocumentListProps)
     };
 
     pollTimerRef.current = setTimeout(run, POLL_INTERVAL);
-  }, [fetchDocuments]);
+  }, [fetchDocuments, setTaskProgress]);
 
   // Initial load + reload when refreshKey changes
   useEffect(() => {

@@ -120,17 +120,23 @@ function formatSize(bytes: number): string {
 
 type VisualState = 'excluded' | 'ingested' | 'pending' | 'dirty-unselect' | 'dirty-select';
 
+const VISUAL_STATE_TABLE: Record<string, VisualState> = {
+  'true-true-true': 'ingested',
+  'true-true-false': 'pending',
+  'true-false-true': 'dirty-unselect',
+  'true-false-false': 'excluded',
+  'false-true-true': 'dirty-select',
+  'false-true-false': 'dirty-select',
+  'false-false-true': 'excluded',
+  'false-false-false': 'excluded',
+};
+
 function getVisualState(item: BrowseItem, dirtyMap: Map<string, boolean>): VisualState {
-  if (item.type === 'folder') return 'excluded'; // folders don't have visual state
+  if (item.type === 'folder') return 'excluded';
   const original = item.is_selected ?? false;
   const current = dirtyMap.get(item.path) ?? original;
   const hasChunks = (item.chunk_count ?? 0) > 0;
-
-  if (original && !current && hasChunks) return 'dirty-unselect';
-  if (!original && current) return 'dirty-select';
-  if (current && !hasChunks) return 'pending';
-  if (current && hasChunks) return 'ingested';
-  return 'excluded';
+  return VISUAL_STATE_TABLE[`${original}-${current}-${hasChunks}`];
 }
 
 function statusBadge(status: string | undefined) {
@@ -140,6 +146,245 @@ function statusBadge(status: string | undefined) {
   if (status === 'processing') return <Badge variant="default" className="text-xs"><Loader2 className="h-3 w-3 animate-spin mr-1" />Processing</Badge>;
   if (status === 'pending') return <Badge variant="outline" className="text-xs">Pending</Badge>;
   return <span className="text-xs text-muted-foreground">{status}</span>;
+}
+
+function getStateFromServerCounts(fileCount: number, selectedCount: number): boolean | 'indeterminate' {
+  if (fileCount === 0) return false;
+  if (selectedCount === 0) return false;
+  if (selectedCount >= fileCount) return true;
+  return 'indeterminate';
+}
+
+function getStateFromDirtyEntries(
+  dirtyMap: Map<string, boolean>,
+  folderPath: string,
+  fileCount: number,
+  selectedCount: number,
+): boolean | 'indeterminate' {
+  const folderPrefix = folderPath + '/';
+  let dirtyCount = 0;
+  let checkedCount = 0;
+  for (const [p, v] of dirtyMap) {
+    if (p.startsWith(folderPrefix) || p === folderPath) {
+      dirtyCount++;
+      if (v) checkedCount++;
+    }
+  }
+  if (dirtyCount === 0) return getStateFromServerCounts(fileCount, selectedCount);
+  if (checkedCount === 0) return false;
+  if (checkedCount === dirtyCount) return true;
+  return 'indeterminate';
+}
+
+// ---------------------------------------------------------------------------
+// Sub-components
+// ---------------------------------------------------------------------------
+
+function FolderRow({
+  item,
+  folderState,
+  folderLoading: loading,
+  onToggle,
+  onNavigate,
+}: {
+  item: BrowseItem;
+  folderState: boolean | 'indeterminate';
+  folderLoading: string | null;
+  onToggle: (item: BrowseItem) => void;
+  onNavigate: (path: string) => void;
+}) {
+  const selectedCount = item.selected_count ?? 0;
+  const fileCount = item.file_count ?? 0;
+  return (
+    <TableRow
+      className="cursor-pointer hover:bg-muted/50"
+      onClick={() => onNavigate(item.path)}
+    >
+      <TableCell onClick={(e) => e.stopPropagation()}>
+        <Checkbox
+          checked={folderState}
+          disabled={loading === item.path}
+          onCheckedChange={() => onToggle(item)}
+        />
+      </TableCell>
+      <TableCell>
+        <div className="flex items-center gap-2">
+          <Folder className="h-4 w-4 text-muted-foreground" />
+          <span className="font-medium">{item.name}</span>
+          <span className="text-xs text-muted-foreground">
+            {item.file_count} files · {item.ingested_count} ingested
+            {selectedCount > 0 && selectedCount < fileCount && (
+              <span className="ml-1 text-amber-600 dark:text-amber-400">· {item.selected_count} selected</span>
+            )}
+          </span>
+          {loading === item.path && (
+            <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+          )}
+        </div>
+      </TableCell>
+      <TableCell />
+      <TableCell />
+      <TableCell />
+      <TableCell />
+    </TableRow>
+  );
+}
+
+function FileRow({
+  item,
+  visualState: vs,
+  checkState,
+  onToggle,
+  onEdit,
+}: {
+  item: BrowseItem;
+  visualState: VisualState;
+  checkState: boolean | 'indeterminate';
+  onToggle: (item: BrowseItem) => void;
+  onEdit: (documentId: number) => void;
+}) {
+  return (
+    <TableRow
+      className={vs === 'dirty-unselect' ? 'bg-red-50 dark:bg-red-950/20' : ''}
+      onClick={() => onToggle(item)}
+    >
+      <TableCell onClick={(e) => e.stopPropagation()}>
+        <Checkbox
+          checked={checkState}
+          onCheckedChange={() => onToggle(item)}
+        />
+      </TableCell>
+      <TableCell>
+        <div className="flex items-center gap-2">
+          {getFileIcon(item.name)}
+          <div className="min-w-0">
+            <div className={
+              vs === 'excluded' ? 'text-muted-foreground italic text-sm truncate' :
+              vs === 'dirty-unselect' ? 'text-red-600 dark:text-red-400 text-sm truncate' :
+              vs === 'dirty-select' ? 'text-blue-600 dark:text-blue-400 font-medium text-sm truncate' :
+              vs === 'pending' ? 'font-medium text-sm truncate' :
+              'text-sm truncate'
+            }>
+              {item.title || item.name}
+            </div>
+            {item.title && item.title !== item.name && (
+              <div className="text-xs text-muted-foreground truncate">{item.name}</div>
+            )}
+          </div>
+        </div>
+      </TableCell>
+      <TableCell className="text-sm text-muted-foreground tabular-nums">
+        {formatSize(item.size || 0)}
+      </TableCell>
+      <TableCell>{statusBadge(item.status)}</TableCell>
+      <TableCell className="text-sm text-muted-foreground tabular-nums">
+        {item.chunk_count || 0}
+      </TableCell>
+      <TableCell className="text-xs text-muted-foreground">
+        {item.modified_at ? new Date(item.modified_at).toLocaleDateString() : '—'}
+      </TableCell>
+      <TableCell onClick={(e) => e.stopPropagation()}>
+        {item.document_id && item.conversion_status === 'completed' && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 px-2 text-xs"
+            onClick={() => onEdit(item.document_id!)}
+          >
+            Edit
+          </Button>
+        )}
+      </TableCell>
+    </TableRow>
+  );
+}
+
+function DirtyStateBar({
+  toSelect,
+  toUnselect,
+  saving,
+  onDiscard,
+  onSave,
+}: {
+  toSelect: string[];
+  toUnselect: string[];
+  saving: boolean;
+  onDiscard: () => void;
+  onSave: () => void;
+}) {
+  return (
+    <div className="fixed bottom-0 left-0 right-0 border-t bg-card shadow-lg z-50">
+      <div className="container mx-auto max-w-7xl flex items-center justify-between p-4">
+        <div className="flex items-center gap-3">
+          <AlertTriangle className="h-5 w-5 text-amber-500" />
+          <div className="text-sm">
+            <span className="font-medium">{toSelect.length + toUnselect.length} unsaved change(s)</span>
+            {toUnselect.length > 0 && (
+              <span className="text-red-600 dark:text-red-400 ml-2">
+                {toUnselect.length} item(s) will be DELETED from Qdrant/MySQL/Neo4j
+              </span>
+            )}
+            {toSelect.length > 0 && (
+              <span className="text-blue-600 dark:text-blue-400 ml-2">
+                {toSelect.length} item(s) will be marked for ingestion
+              </span>
+            )}
+          </div>
+        </div>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={onDiscard}>
+            Discard
+          </Button>
+          <Button size="sm" disabled={saving} onClick={onSave}>
+            {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Save Changes'}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Pagination({
+  page,
+  pageSize,
+  totalFiles,
+  onPrev,
+  onNext,
+}: {
+  page: number;
+  pageSize: number;
+  totalFiles: number;
+  onPrev: () => void;
+  onNext: () => void;
+}) {
+  return (
+    <div className="flex items-center justify-between p-3 border-t text-sm">
+      <span className="text-muted-foreground">
+        {page * pageSize + 1}–{Math.min((page + 1) * pageSize, totalFiles)} of {totalFiles}
+      </span>
+      <div className="flex gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={page === 0}
+          onClick={onPrev}
+        >
+          Previous
+        </Button>
+        <span className="flex items-center px-2 text-muted-foreground">
+          {page + 1} / {Math.ceil(totalFiles / pageSize)}
+        </span>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={(page + 1) * pageSize >= totalFiles}
+          onClick={onNext}
+        >
+          Next
+        </Button>
+      </div>
+    </div>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -159,6 +404,7 @@ export default function DatastoreBrowsePage() {
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(0);
   const [saving, setSaving] = useState(false);
+  const [folderLoading, setFolderLoading] = useState<string | null>(null);
 
   // Dirty state: path -> selected (true/false)
   const [dirtyMap, setDirtyMap] = useState<Map<string, boolean>>(new Map());
@@ -255,18 +501,82 @@ export default function DatastoreBrowsePage() {
 
   const hasChanges = dirtyChanges.toSelect.length > 0 || dirtyChanges.toUnselect.length > 0;
 
+  // Get folder checkbox state: checked / unchecked / indeterminate
+  const getFolderCheckState = useCallback((item: BrowseItem): boolean | 'indeterminate' => {
+    if (dirtyFolders.has(item.path)) {
+      return dirtyFolders.get(item.path) ?? false;
+    }
+    if (expandedFolders.has(item.path)) {
+      return getStateFromDirtyEntries(dirtyMap, item.path, item.file_count ?? 0, item.selected_count ?? 0);
+    }
+    return getStateFromServerCounts(item.file_count ?? 0, item.selected_count ?? 0);
+  }, [dirtyFolders, expandedFolders, dirtyMap]);
+
+  // Get current checkbox state for a file
+  const getCheckState = (item: BrowseItem): boolean | 'indeterminate' => {
+    if (item.type !== 'file') return false;
+    const original = item.is_selected ?? false;
+    return dirtyMap.get(item.path) ?? original;
+  };
+
   // Toggle a file's selection
-  const toggleFile = (item: BrowseItem) => {
+  const toggleFile = useCallback((item: BrowseItem) => {
     if (item.type !== 'file' || !item.absolute_path) return;
     const original = item.is_selected ?? false;
     const current = dirtyMap.get(item.path) ?? original;
     const newMap = new Map(dirtyMap);
     newMap.set(item.path, !current);
     setDirtyMap(newMap);
-  };
+  }, [dirtyMap, setDirtyMap]);
+
+  // Core folder toggle logic — sets folder to a specific target state
+  const toggleFolderTo = useCallback(async (item: BrowseItem, targetChecked: boolean) => {
+    if (item.type !== 'folder') return;
+
+    setFolderLoading(item.path);
+    try {
+      const resp = await api.get(
+        `/api/admin/datastores/${datastoreId}/folder-files?path=${encodeURIComponent(item.path)}`
+      ) as { files: { path: string; absolute_path: string; is_selected: boolean }[] };
+
+      const newMap = new Map(dirtyMapRef.current);
+      const newOriginal = new Map(originalMapRef.current);
+      const newPathMap = new Map(pathToAbsoluteRef.current);
+      for (const f of resp.files) {
+        newMap.set(f.path, targetChecked);
+        newPathMap.set(f.path, f.absolute_path);
+        if (!newOriginal.has(f.path)) {
+          newOriginal.set(f.path, f.is_selected);
+        }
+      }
+      setDirtyMap(newMap);
+      setOriginalMap(newOriginal);
+      setPathToAbsolute(newPathMap);
+      setExpandedFolders(prev => new Set(prev).add(item.path));
+
+      // Track folder-level intent so save sends the folder path
+      const newFolders = new Map(dirtyFoldersRef.current);
+      newFolders.set(item.path, targetChecked);
+      setDirtyFolders(newFolders);
+    } catch (e) {
+      const msg = e instanceof ApiError ? e.message : 'Failed to list folder files';
+      toast({ title: 'Error', description: msg, variant: 'destructive' });
+    } finally {
+      setFolderLoading(null);
+    }
+  }, [datastoreId, toast, setFolderLoading, setDirtyMap, setOriginalMap, setPathToAbsolute, setExpandedFolders, setDirtyFolders]);
+
+  // Toggle a folder's selection — fetches all files under the folder
+  // and adds them to dirtyMap so navigating into the folder shows state.
+  const toggleFolder = useCallback(async (item: BrowseItem) => {
+    if (item.type !== 'folder') return;
+    const currentState = getFolderCheckState(item);
+    const targetChecked = currentState !== true;
+    await toggleFolderTo(item, targetChecked);
+  }, [getFolderCheckState, toggleFolderTo]);
 
   // Toggle all items on current page (files + folders)
-  const toggleAllFiles = async (checked: boolean) => {
+  const toggleAllFiles = useCallback(async (checked: boolean) => {
     if (!data) return;
     // Start from the latest dirtyMap (via ref, not stale closure)
     const newMap = new Map(dirtyMapRef.current);
@@ -310,104 +620,7 @@ export default function DatastoreBrowsePage() {
     setDirtyFolders(newFolders);
     setExpandedFolders(newExpanded);
     setPathToAbsolute(newPathMap);
-  };
-
-  // Toggle a folder's selection — fetches all files under the folder
-  // and adds them to dirtyMap so navigating into the folder shows state.
-  const [folderLoading, setFolderLoading] = useState<string | null>(null);
-  const toggleFolder = async (item: BrowseItem) => {
-    if (item.type !== 'folder') return;
-    const currentState = getFolderCheckState(item);
-    const targetChecked = currentState !== true;
-    await toggleFolderTo(item, targetChecked);
-  };
-
-  // Core folder toggle logic — sets folder to a specific target state
-  const toggleFolderTo = async (item: BrowseItem, targetChecked: boolean) => {
-    if (item.type !== 'folder') return;
-
-    setFolderLoading(item.path);
-    try {
-      const resp = await api.get(
-        `/api/admin/datastores/${datastoreId}/folder-files?path=${encodeURIComponent(item.path)}`
-      ) as { files: { path: string; absolute_path: string; is_selected: boolean }[] };
-
-      const newMap = new Map(dirtyMapRef.current);
-      const newOriginal = new Map(originalMapRef.current);
-      const newPathMap = new Map(pathToAbsoluteRef.current);
-      for (const f of resp.files) {
-        newMap.set(f.path, targetChecked);
-        newPathMap.set(f.path, f.absolute_path);
-        if (!newOriginal.has(f.path)) {
-          newOriginal.set(f.path, f.is_selected);
-        }
-      }
-      setDirtyMap(newMap);
-      setOriginalMap(newOriginal);
-      setPathToAbsolute(newPathMap);
-      setExpandedFolders(prev => new Set(prev).add(item.path));
-
-      // Track folder-level intent so save sends the folder path
-      const newFolders = new Map(dirtyFoldersRef.current);
-      newFolders.set(item.path, targetChecked);
-      setDirtyFolders(newFolders);
-    } catch (e) {
-      const msg = e instanceof ApiError ? e.message : 'Failed to list folder files';
-      toast({ title: 'Error', description: msg, variant: 'destructive' });
-    } finally {
-      setFolderLoading(null);
-    }
-  };
-
-  // Get folder checkbox state: checked / unchecked / indeterminate
-  const getFolderCheckState = (item: BrowseItem): boolean | 'indeterminate' => {
-    // If folder was toggled, use the dirty folder state
-    if (dirtyFolders.has(item.path)) {
-      return dirtyFolders.get(item.path) ?? false;
-    }
-
-    // If files under this folder were individually toggled (expanded),
-    // compute from dirtyMap entries that fall under this folder
-    if (expandedFolders.has(item.path)) {
-      // Count dirty entries under this folder prefix
-      const folderPrefix = item.path + '/';
-      let dirtyCount = 0;
-      let checkedCount = 0;
-      for (const [p, v] of dirtyMap) {
-        if (p.startsWith(folderPrefix) || p === item.path) {
-          dirtyCount++;
-          if (v) checkedCount++;
-        }
-      }
-      if (dirtyCount === 0) {
-        // No dirty entries — fall back to server state
-        const fileCount = item.file_count ?? 0;
-        const selectedCount = item.selected_count ?? 0;
-        if (fileCount === 0) return false;
-        if (selectedCount === 0) return false;
-        if (selectedCount >= fileCount) return true;
-        return 'indeterminate';
-      }
-      if (checkedCount === 0) return false;
-      if (checkedCount === dirtyCount) return true;
-      return 'indeterminate';
-    }
-
-    // No dirty state — use server-provided counts
-    const fileCount = item.file_count ?? 0;
-    const selectedCount = item.selected_count ?? 0;
-    if (fileCount === 0) return false;
-    if (selectedCount === 0) return false;
-    if (selectedCount >= fileCount) return true;
-    return 'indeterminate';
-  };
-
-  // Get current checkbox state for a file
-  const getCheckState = (item: BrowseItem): boolean | 'indeterminate' => {
-    if (item.type !== 'file') return false;
-    const original = item.is_selected ?? false;
-    return dirtyMap.get(item.path) ?? original;
-  };
+  }, [data, datastoreId, setDirtyMap, setOriginalMap, setDirtyFolders, setExpandedFolders, setPathToAbsolute]);
 
   // All-items-on-page checkbox state (files + folders)
   const pageCheckboxState = (): boolean | 'indeterminate' => {
@@ -428,14 +641,14 @@ export default function DatastoreBrowsePage() {
   };
 
   // Navigate into a folder
-  const navigateTo = (path: string) => {
+  const navigateTo = useCallback((path: string) => {
     setCurrentPath(path);
     setPage(0);
     setSearch('');
-  };
+  }, [setCurrentPath, setPage, setSearch]);
 
   // Save changes
-  const handleSave = async () => {
+  const handleSave = useCallback(async () => {
     setSaving(true);
     try {
       // For folder paths, send the folder path directly — backend expands.
@@ -472,14 +685,14 @@ export default function DatastoreBrowsePage() {
     } finally {
       setSaving(false);
     }
-  };
+  }, [dirtyFolders, data, dirtyChanges, fetchData, datastoreId, toast, setSaving, setDirtyMap, setDirtyFolders, setExpandedFolders, setConfirmOpen]);
 
   // Discard changes
-  const discardChanges = () => {
+  const discardChanges = useCallback(() => {
     setDirtyMap(new Map());
     setDirtyFolders(new Map());
     setExpandedFolders(new Set());
-  };
+  }, [setDirtyMap, setDirtyFolders, setExpandedFolders]);
 
   // Render
   return (
@@ -596,100 +809,26 @@ export default function DatastoreBrowsePage() {
             <TableBody>
               {data.items.map((item) => {
                 if (item.type === 'folder') {
-                  const folderState = getFolderCheckState(item);
                   return (
-                    <TableRow
+                    <FolderRow
                       key={`folder-${item.path}`}
-                      className="cursor-pointer hover:bg-muted/50"
-                      onClick={() => navigateTo(item.path)}
-                    >
-                      <TableCell onClick={(e) => e.stopPropagation()}>
-                        <Checkbox
-                          checked={folderState}
-                          disabled={folderLoading === item.path}
-                          onCheckedChange={() => toggleFolder(item)}
-                        />
-                      </TableCell>
-                      <TableCell>
-                        <div className="flex items-center gap-2">
-                          <Folder className="h-4 w-4 text-muted-foreground" />
-                          <span className="font-medium">{item.name}</span>
-                          <span className="text-xs text-muted-foreground">
-                            {item.file_count} files · {item.ingested_count} ingested
-                            {(item.selected_count ?? 0) > 0 && (item.selected_count ?? 0) < (item.file_count ?? 0) && (
-                              <span className="ml-1 text-amber-600 dark:text-amber-400">· {item.selected_count} selected</span>
-                            )}
-                          </span>
-                          {folderLoading === item.path && (
-                            <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
-                          )}
-                        </div>
-                      </TableCell>
-                      <TableCell />
-                      <TableCell />
-                      <TableCell />
-                      <TableCell />
-                    </TableRow>
+                      item={item}
+                      folderState={getFolderCheckState(item)}
+                      folderLoading={folderLoading}
+                      onToggle={toggleFolder}
+                      onNavigate={navigateTo}
+                    />
                   );
                 }
-
-                const vs = getVisualState(item, dirtyMap);
-                const checkState = getCheckState(item);
-
                 return (
-                  <TableRow
+                  <FileRow
                     key={`file-${item.path}`}
-                    className={vs === 'dirty-unselect' ? 'bg-red-50 dark:bg-red-950/20' : ''}
-                    onClick={() => toggleFile(item)}
-                  >
-                    <TableCell onClick={(e) => e.stopPropagation()}>
-                      <Checkbox
-                        checked={checkState}
-                        onCheckedChange={() => toggleFile(item)}
-                      />
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex items-center gap-2">
-                        {getFileIcon(item.name)}
-                        <div className="min-w-0">
-                          <div className={
-                            vs === 'excluded' ? 'text-muted-foreground italic text-sm truncate' :
-                            vs === 'dirty-unselect' ? 'text-red-600 dark:text-red-400 text-sm truncate' :
-                            vs === 'dirty-select' ? 'text-blue-600 dark:text-blue-400 font-medium text-sm truncate' :
-                            vs === 'pending' ? 'font-medium text-sm truncate' :
-                            'text-sm truncate'
-                          }>
-                            {item.title || item.name}
-                          </div>
-                          {item.title && item.title !== item.name && (
-                            <div className="text-xs text-muted-foreground truncate">{item.name}</div>
-                          )}
-                        </div>
-                      </div>
-                    </TableCell>
-                    <TableCell className="text-sm text-muted-foreground tabular-nums">
-                      {formatSize(item.size || 0)}
-                    </TableCell>
-                    <TableCell>{statusBadge(item.status)}</TableCell>
-                    <TableCell className="text-sm text-muted-foreground tabular-nums">
-                      {item.chunk_count || 0}
-                    </TableCell>
-                    <TableCell className="text-xs text-muted-foreground">
-                      {item.modified_at ? new Date(item.modified_at).toLocaleDateString() : '—'}
-                    </TableCell>
-                    <TableCell onClick={(e) => e.stopPropagation()}>
-                      {item.document_id && item.conversion_status === 'completed' && (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-7 px-2 text-xs"
-                          onClick={() => router.push(`/dashboard/admin/data-sources/${datastoreId}/documents/${item.document_id}`)}
-                        >
-                          Edit
-                        </Button>
-                      )}
-                    </TableCell>
-                  </TableRow>
+                    item={item}
+                    visualState={getVisualState(item, dirtyMap)}
+                    checkState={getCheckState(item)}
+                    onToggle={toggleFile}
+                    onEdit={(id) => router.push(`/dashboard/admin/data-sources/${datastoreId}/documents/${id}`)}
+                  />
                 );
               })}
             </TableBody>
@@ -703,65 +842,25 @@ export default function DatastoreBrowsePage() {
 
         {/* Pagination */}
         {data && data.total_files > pageSize && (
-          <div className="flex items-center justify-between p-3 border-t text-sm">
-            <span className="text-muted-foreground">
-              {page * pageSize + 1}–{Math.min((page + 1) * pageSize, data.total_files)} of {data.total_files}
-            </span>
-            <div className="flex gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={page === 0}
-                onClick={() => setPage(p => p - 1)}
-              >
-                Previous
-              </Button>
-              <span className="flex items-center px-2 text-muted-foreground">
-                {page + 1} / {Math.ceil(data.total_files / pageSize)}
-              </span>
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={(page + 1) * pageSize >= data.total_files}
-                onClick={() => setPage(p => p + 1)}
-              >
-                Next
-              </Button>
-            </div>
-          </div>
+          <Pagination
+            page={page}
+            pageSize={pageSize}
+            totalFiles={data.total_files}
+            onPrev={() => setPage(p => p - 1)}
+            onNext={() => setPage(p => p + 1)}
+          />
         )}
       </div>
 
       {/* Dirty state bar */}
       {hasChanges && (
-        <div className="fixed bottom-0 left-0 right-0 border-t bg-card shadow-lg z-50">
-          <div className="container mx-auto max-w-7xl flex items-center justify-between p-4">
-            <div className="flex items-center gap-3">
-              <AlertTriangle className="h-5 w-5 text-amber-500" />
-              <div className="text-sm">
-                <span className="font-medium">{dirtyChanges.toSelect.length + dirtyChanges.toUnselect.length} unsaved change(s)</span>
-                {dirtyChanges.toUnselect.length > 0 && (
-                  <span className="text-red-600 dark:text-red-400 ml-2">
-                    {dirtyChanges.toUnselect.length} item(s) will be DELETED from Qdrant/MySQL/Neo4j
-                  </span>
-                )}
-                {dirtyChanges.toSelect.length > 0 && (
-                  <span className="text-blue-600 dark:text-blue-400 ml-2">
-                    {dirtyChanges.toSelect.length} item(s) will be marked for ingestion
-                  </span>
-                )}
-              </div>
-            </div>
-            <div className="flex gap-2">
-              <Button variant="outline" size="sm" onClick={discardChanges}>
-                Discard
-              </Button>
-              <Button size="sm" disabled={saving} onClick={() => setConfirmOpen(true)}>
-                {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Save Changes'}
-              </Button>
-            </div>
-          </div>
-        </div>
+        <DirtyStateBar
+          toSelect={dirtyChanges.toSelect}
+          toUnselect={dirtyChanges.toUnselect}
+          saving={saving}
+          onDiscard={discardChanges}
+          onSave={() => setConfirmOpen(true)}
+        />
       )}
 
       {/* Save confirmation */}

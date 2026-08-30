@@ -5,6 +5,8 @@ import React, {
   useState,
   useRef,
   useCallback,
+  useContext,
+  createContext,
   ClassAttributes,
 } from "react";
 import { AnchorHTMLAttributes } from "react";
@@ -118,6 +120,151 @@ interface GenericDocInfo {
   parent_name: string | null;
 }
 
+function parseThinkContent(markdown: string): {
+  thinkContent: string | null;
+  isThinkingComplete: boolean;
+  answerText: string;
+} {
+  let thinkContent: string | null = null;
+  let isThinkingComplete = false;
+  let answerText = markdown;
+
+  for (const tag of ["think", "reasoning"]) {
+    const completeMatch = markdown.match(
+      new RegExp(
+        `([\\s\\S]*?)<${tag}>([\\s\\S]*?)<\\s*/\\s*${tag}\\s*>([\\s\\S]*)$`,
+      ),
+    );
+    if (completeMatch) {
+      const preamble = completeMatch[1];
+      thinkContent = completeMatch[2].trim();
+      const afterThink = completeMatch[3].trim();
+      answerText = preamble ? `${preamble.trim()}\n\n${afterThink}`.trim() : afterThink;
+      isThinkingComplete = true;
+      break;
+    }
+    const openMatch = markdown.match(
+      new RegExp(`([\\s\\S]*?)<${tag}>([\\s\\S]*)$`),
+    );
+    if (openMatch) {
+      thinkContent = openMatch[2];
+      answerText = openMatch[1].trim();
+      isThinkingComplete = false;
+      break;
+    }
+  }
+
+  if (thinkContent === null) {
+    const channelMatch = markdown.match(
+      new RegExp(
+        `([\\s\\S]*?)<\\s*\\|channel\\s*>thought([\\s\\S]*?)<\\s*channel\\s*\\|>([\\s\\S]*)$`,
+      ),
+    );
+    if (channelMatch) {
+      const preamble = channelMatch[1];
+      thinkContent = channelMatch[2].trim();
+      const afterThink = channelMatch[3].trim();
+      answerText = preamble ? `${preamble.trim()}\n\n${afterThink}`.trim() : afterThink;
+      isThinkingComplete = true;
+    }
+    if (thinkContent === null) {
+      const channelOpenMatch = markdown.match(
+        new RegExp(
+          `([\\s\\S]*?)<\\s*\\|channel\\s*>thought([\\s\\S]*)$`,
+        ),
+      );
+      if (channelOpenMatch) {
+        const preamble = channelOpenMatch[1];
+        thinkContent = channelOpenMatch[2];
+        answerText = preamble.trim();
+        isThinkingComplete = false;
+      }
+    }
+  }
+
+  return { thinkContent, isThinkingComplete, answerText };
+}
+
+function buildFetchPairs(citations: Citation[]) {
+  const seenKb = new Set<string>();
+  const kbPairs: Array<{ key: string; kbId: number; docId: number }> = [];
+  const seenGeneric = new Set<string>();
+  const genericDocIds: Array<{ key: string; docId: number }> = [];
+
+  for (const citation of citations) {
+    const meta = citation.metadata || {};
+    const effectiveKbId = citation.kb_id ?? meta.kb_id;
+    const effectiveDocId = citation.document_id ?? meta.document_id;
+    if (!effectiveDocId) continue;
+
+    if (effectiveKbId) {
+      const key = `${effectiveKbId}-${effectiveDocId}`;
+      if (seenKb.has(key)) continue;
+      seenKb.add(key);
+      kbPairs.push({ key, kbId: effectiveKbId, docId: effectiveDocId });
+    } else {
+      const key = `doc-${effectiveDocId}`;
+      if (seenGeneric.has(key)) continue;
+      seenGeneric.add(key);
+      genericDocIds.push({ key, docId: effectiveDocId });
+    }
+  }
+
+  return { kbPairs, genericDocIds };
+}
+
+async function fetchKbBatch(
+  kbPairs: Array<{ key: string; kbId: number; docId: number }>,
+): Promise<Array<{ key: string; info: CitationInfo } | null>> {
+  return Promise.all(
+    kbPairs.map(async ({ key, kbId, docId }) => {
+      try {
+        const [kb, doc] = await Promise.all([
+          api.get(`/api/knowledge-base/${kbId}`),
+          api.get(`/api/knowledge-base/${kbId}/documents/${docId}`),
+        ]);
+        return {
+          key,
+          info: {
+            knowledge_base: { name: kb.name },
+            document: {
+              file_name: doc.file_name,
+              title: doc.title,
+              knowledge_base: { name: kb.name },
+            },
+          } as CitationInfo,
+        };
+      } catch (error) {
+        console.error("Failed to fetch citation info:", error);
+        return null;
+      }
+    }),
+  );
+}
+
+async function fetchGenericBatch(
+  genericDocIds: Array<{ key: string; docId: number }>,
+): Promise<Array<{ key: string; info: GenericDocInfo } | null>> {
+  return Promise.all(
+    genericDocIds.map(async ({ key, docId }) => {
+      try {
+        const doc = await api.get(`/api/knowledge-base/documents/${docId}`);
+        return {
+          key,
+          info: {
+            file_name: doc.file_name,
+            title: doc.title,
+            parent_name: doc.parent_name,
+          } as GenericDocInfo,
+        };
+      } catch (error) {
+        console.error("Failed to fetch generic doc info:", error);
+        return null;
+      }
+    }),
+  );
+}
+
 // ── CodeBlock: renders mermaid/echarts fences as diagrams, others as <code> ───
 
 const CodeBlock: FC<React.HTMLAttributes<HTMLElement> & { inline?: boolean }> = ({
@@ -144,6 +291,291 @@ const CodeBlock: FC<React.HTMLAttributes<HTMLElement> & { inline?: boolean }> = 
     <code className={className} {...rest}>
       {children}
     </code>
+  );
+};
+
+const DEBUG_KEYS: string[] = ['kb_id', 'data_store_id', 'document_id', 'chunk_index', '_legs', '_reranker_score', 'qdrant_point_id'];
+
+const DebugDetails: FC<{ citation: Citation }> = ({ citation }) => {
+  const hasDebug = DEBUG_KEYS.some(
+    (k) => k in citation && (citation as any)[k] !== undefined && (citation as any)[k] !== null,
+  );
+  if (!hasDebug) return null;
+  return (
+    <details className="text-xs group">
+      <summary className="cursor-pointer select-none list-none flex items-center gap-1 text-muted-foreground hover:text-foreground transition-colors py-0.5">
+        <svg className="h-3 w-3 transition-transform group-open:rotate-90 shrink-0" viewBox="0 0 12 12" fill="currentColor">
+          <path d="M4.5 2 L9 6 L4.5 10" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round"/>
+        </svg>
+        Debug Info
+      </summary>
+      <div className="mt-1.5 bg-muted text-muted-foreground p-2 rounded space-y-1">
+        {DEBUG_KEYS.filter(
+          (k) => k in citation && (citation as any)[k] !== undefined && (citation as any)[k] !== null,
+        ).map((key) => {
+          const legNames: Record<string, string> = {
+            dense: "vector",
+            exact: "keyword",
+            graph: "graph",
+          };
+          const raw = (citation as any)[key];
+          if (key === '_legs' && Array.isArray(raw)) {
+            return (
+              <div key={key} className="flex">
+                <span className="font-medium min-w-[100px] shrink-0">{key}:</span>
+                <span className="text-foreground/80 break-all">{raw.map((l: string) => legNames[l] ?? l).join(", ")}</span>
+              </div>
+            );
+          }
+          return (
+            <div key={key} className="flex">
+              <span className="font-medium min-w-[100px] shrink-0">{key}:</span>
+              <span className="text-foreground/80 break-all">{String(raw)}</span>
+            </div>
+          );
+        })}
+      </div>
+    </details>
+  );
+};
+
+const RETRIEVAL_LEG_COLORS: Record<string, string> = {
+  dense: "bg-blue-100 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300",
+  sparse: "bg-purple-100 dark:bg-purple-950/60 text-purple-700 dark:text-purple-300",
+  exact: "bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300",
+  graph: "bg-orange-100 dark:bg-orange-950/60 text-orange-700 dark:text-orange-300",
+};
+
+const RetrievalLegBadge: FC<{ leg: string }> = ({ leg }) => {
+  const colorClass = RETRIEVAL_LEG_COLORS[leg] ?? "bg-muted text-muted-foreground";
+  return (
+    <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded uppercase tracking-wide ${colorClass}`}>
+      {leg.replace("qdrant_", "")}
+    </span>
+  );
+};
+
+const CitationScoreBar: FC<{ score: number }> = ({ score }) => (
+  <div className="flex items-center gap-1.5 flex-1 min-w-[120px]">
+    <span className="text-xs text-muted-foreground shrink-0">Score:</span>
+    <div className="flex-1 h-1.5 rounded-full bg-muted overflow-hidden">
+      <div
+        className="h-full rounded-full bg-blue-500 transition-all"
+        style={{ width: `${Math.round(score * 100)}%` }}
+      />
+    </div>
+    <span className="text-xs text-foreground shrink-0 font-medium">
+      {Math.round(score * 100)}%
+    </span>
+  </div>
+);
+
+const CitationScoreAndLeg: FC<{ citation: Citation }> = ({ citation }) => {
+  if (citation.score === undefined && !citation.retrieval_leg) return null;
+  return (
+    <div className="flex items-center gap-2 flex-wrap">
+      {citation.score !== undefined && <CitationScoreBar score={citation.score} />}
+      {citation.retrieval_leg && <RetrievalLegBadge leg={citation.retrieval_leg} />}
+    </div>
+  );
+};
+
+const CitationRankBreakdown: FC<{ citation: Citation }> = ({ citation }) => {
+  if (citation.dense_rank === undefined && citation.sparse_rank === undefined && citation.exact_rank === undefined) return null;
+  return (
+    <div className="grid grid-cols-3 gap-1 text-[10px]">
+      {citation.dense_rank !== undefined && (
+        <div className="flex flex-col items-center rounded bg-blue-50 dark:bg-blue-950/40 px-1.5 py-1">
+          <span className="text-blue-600 dark:text-blue-400 font-medium">Dense</span>
+          <span className="text-blue-800 dark:text-blue-200 font-semibold">#{citation.dense_rank}</span>
+        </div>
+      )}
+      {citation.sparse_rank !== undefined && (
+        <div className="flex flex-col items-center rounded bg-purple-50 dark:bg-purple-950/40 px-1.5 py-1">
+          <span className="text-purple-600 dark:text-purple-400 font-medium">Sparse</span>
+          <span className="text-purple-800 dark:text-purple-200 font-semibold">#{citation.sparse_rank}</span>
+        </div>
+      )}
+      {citation.exact_rank !== undefined && (
+        <div className="flex flex-col items-center rounded bg-emerald-50 dark:bg-emerald-950/40 px-1.5 py-1">
+          <span className="text-emerald-600 dark:text-emerald-400 font-medium">Exact</span>
+          <span className="text-emerald-800 dark:text-emerald-200 font-semibold">#{citation.exact_rank}</span>
+        </div>
+      )}
+    </div>
+  );
+};
+
+function buildDownloadUrl(effectiveKbId: number | undefined, effectiveDocId: number | undefined): string | null {
+  if (effectiveKbId && effectiveDocId) {
+    return `/api/knowledge-base/${effectiveKbId}/documents/${effectiveDocId}/download`;
+  }
+  if (effectiveDocId) {
+    return `/api/knowledge-base/documents/${effectiveDocId}/download`;
+  }
+  return null;
+}
+
+function shouldShowFilename(displayTitle: string | null, displayFileName?: string): boolean {
+  if (!displayTitle || !displayFileName) return false;
+  return displayTitle !== displayFileName.replace(/\.[^.]+$/, "").replace(/[_-]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function firstNonNull<T>(...values: (T | null | undefined)[]): T | null {
+  for (const v of values) {
+    if (v !== null && v !== undefined) return v;
+  }
+  return null;
+}
+
+function resolveDisplayFields(
+  citationInfo: CitationInfo | undefined,
+  genericInfo: GenericDocInfo | null | undefined,
+) {
+  const displayTitle = firstNonNull(citationInfo?.document.title, genericInfo?.title);
+  const displayFileName = firstNonNull(citationInfo?.document.file_name, genericInfo?.file_name) ?? undefined;
+  const displayParentName = firstNonNull(citationInfo?.knowledge_base.name, genericInfo?.parent_name) ?? "Unknown";
+  return { displayTitle, displayFileName, displayParentName };
+}
+
+const CitationFileHeader: FC<{
+  citationInfo: CitationInfo | undefined;
+  genericInfo: GenericDocInfo | null | undefined;
+  effectiveKbId: number | undefined;
+  effectiveDocId: number | undefined;
+}> = ({ citationInfo, genericInfo, effectiveKbId, effectiveDocId }) => {
+  const { displayTitle, displayFileName, displayParentName } = resolveDisplayFields(citationInfo, genericInfo);
+  const showFilenameInCitation = shouldShowFilename(displayTitle, displayFileName);
+  const downloadUrl = buildDownloadUrl(effectiveKbId, effectiveDocId);
+  if (!displayTitle && !displayFileName) return null;
+  return (
+    <div className="flex items-center gap-2 text-xs font-medium text-foreground bg-muted p-2 rounded">
+      <div className="w-5 h-5 flex items-center justify-center shrink-0">
+        <FileIcon
+          extension={displayFileName?.split(".").pop() || ""}
+          color="#E2E8F0"
+          labelColor="#94A3B8"
+        />
+      </div>
+      {downloadUrl ? (
+        <a
+          href={downloadUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="truncate hover:underline text-primary"
+          title={`Open ${displayFileName}`}
+        >
+          <span className="font-medium">{displayParentName}</span>
+          {" / "}
+          <span className="font-medium">{displayTitle || displayFileName}</span>
+          {showFilenameInCitation && (
+            <span className="text-muted-foreground/70"> ({displayFileName})</span>
+          )}
+        </a>
+      ) : (
+        <span className="truncate">
+          <span className="font-medium">{displayParentName}</span>
+          {" / "}
+          <span className="font-medium">{displayTitle || displayFileName}</span>
+          {showFilenameInCitation && (
+            <span className="text-muted-foreground/70"> ({displayFileName})</span>
+          )}
+        </span>
+      )}
+    </div>
+  );
+};
+
+const CitationLinkContext = createContext<{
+  citations: Citation[];
+  citationInfoMap: Record<string, CitationInfo>;
+  genericDocMap: Record<string, GenericDocInfo>;
+}>(null as any);
+
+type CitationLinkProps = ClassAttributes<HTMLAnchorElement> &
+  AnchorHTMLAttributes<HTMLAnchorElement>;
+
+const CitationLink: FC<CitationLinkProps> = (props) => {
+  const { citations, citationInfoMap, genericDocMap } = useContext(CitationLinkContext);
+
+  const citationId = props.href?.match(/^(\d+)$/)?.[1];
+  const citation = citationId
+    ? citations.find((c: any) => c.id === parseInt(citationId)) ??
+      citations[parseInt(citationId) - 1]
+    : null;
+
+  if (!citation) {
+    return <a>[{props.href}]</a>;
+  }
+
+  const top = citation as Record<string, any>;
+  const meta = (citation.metadata as Record<string, any>) || {};
+  const effectiveKbId = top.kb_id ?? meta.kb_id;
+  const effectiveDocId = top.document_id ?? meta.document_id;
+  const citationInfo = citationInfoMap[`${effectiveKbId}-${effectiveDocId}`];
+  const genericInfo = effectiveDocId ? genericDocMap[`doc-${effectiveDocId}`] : null;
+
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className="inline-flex items-center px-1 py-0.5 text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/50 rounded hover:bg-blue-100 dark:hover:bg-blue-900/60 transition-colors"
+        >
+          [{props.href}]
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        side="top"
+        align="start"
+        sideOffset={6}
+        collisionPadding={12}
+        className="max-w-2xl w-[calc(100vw-100px)] p-0 rounded-lg shadow-lg overflow-hidden"
+      >
+        <div className="text-sm space-y-3 max-h-[min(70vh,520px)] overflow-y-auto p-4" style={{ scrollbarGutter: "stable" }}>
+          <CitationFileHeader
+            citationInfo={citationInfo}
+            genericInfo={genericInfo}
+            effectiveKbId={effectiveKbId}
+            effectiveDocId={effectiveDocId}
+          />
+          <CitationScoreAndLeg citation={citation} />
+          <CitationRankBreakdown citation={citation} />
+          <Divider />
+          <div className="text-foreground leading-relaxed prose prose-sm dark:prose-invert max-w-none">
+            <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeHighlight, [rehypeKatex, { throwOnError: false }]]}>
+              {cleanChunkText(citation.text)}
+            </Markdown>
+          </div>
+          <Divider />
+          <DebugDetails citation={citation} />
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+};
+
+const TaskStatusIcon: FC<{ status: string }> = ({ status }) => {
+  if (status === "done") {
+    return (
+      <svg className="text-emerald-500" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg" width="12" height="12">
+        <circle cx="6" cy="6" r="5.5" fill="currentColor" fillOpacity="0.15" stroke="currentColor" strokeWidth="1"/>
+        <path d="M3.5 6l1.8 1.8L8.5 4.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
+      </svg>
+    );
+  }
+  if (status === "active") {
+    return (
+      <svg className="text-primary animate-spin" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg" width="12" height="12">
+        <circle cx="6" cy="6" r="4.5" stroke="currentColor" strokeOpacity="0.2" strokeWidth="1.5"/>
+        <path d="M6 1.5A4.5 4.5 0 0 1 10.5 6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+      </svg>
+    );
+  }
+  return (
+    <svg className="text-muted-foreground/40" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg" width="12" height="12">
+      <circle cx="6" cy="6" r="5.5" stroke="currentColor" strokeWidth="1"/>
+    </svg>
   );
 };
 
@@ -199,17 +631,6 @@ export const Answer: FC<{
   // Debounce citations to prevent rapid API calls during streaming
   const debouncedCitations = useDebouncedValue(citations, 300);
 
-  // Keep refs so CitationLink can read the latest data without changing its
-  // identity (avoiding react-markdown remounting all <a> elements every render).
-  const citationsRef = useRef(citations);
-  const citationInfoMapRef = useRef(citationInfoMap);
-  const genericDocMapRef = useRef(genericDocMap);
-  useEffect(() => {
-    citationsRef.current = citations;
-    citationInfoMapRef.current = citationInfoMap;
-    genericDocMapRef.current = genericDocMap;
-  }, [citations, citationInfoMap, genericDocMap]);
-
   // renderKey forces <Markdown> to remount when citations become ready.
   // Only bump on the citations-empty -> citations-present transition itself
   // (already captured by the "with-citations"/"no-citations" key segment
@@ -240,147 +661,17 @@ export const Answer: FC<{
     return agentSteps.filter((s) => s.node !== "generate_answer");
   }, [agentSteps]);
 
-  const parsedContent = useMemo(() => {
-      let thinkContent: string | null = null;
-      let isThinkingComplete = false;
-      let answerText = markdown;
-
-      // 1. OpenAI/DeepSeek/Qwen HTML-style (full block)
-      for (const tag of ["think", "reasoning"]) {
-        const completeMatch = markdown.match(
-          new RegExp(
-            `([\\s\\S]*?)<${tag}>([\\s\\S]*?)<\\s*/\\s*${tag}\\s*>([\\s\\S]*)$`,
-          ),
-        );
-        if (completeMatch) {
-          const preamble = completeMatch[1];
-          thinkContent = completeMatch[2].trim();
-          const afterThink = completeMatch[3].trim();
-          answerText = preamble ? `${preamble.trim()}\n\n${afterThink}`.trim() : afterThink;
-          isThinkingComplete = true;
-          break;
-        }
-        // Open/unclosed
-        const openMatch = markdown.match(
-          new RegExp(`([\\s\\S]*?)<${tag}>([\\s\\S]*)$`),
-        );
-        if (openMatch) {
-          thinkContent = openMatch[2];
-          answerText = openMatch[1].trim();
-          isThinkingComplete = false;
-          break;
-        }
-      }
-
-      // 2. Gemma channel-style
-      if (thinkContent === null) {
-        const channelMatch = markdown.match(
-          new RegExp(
-            `([\\s\\S]*?)<\\s*\\|channel\\s*>thought([\\s\\S]*?)<\\s*channel\\s*\\|>([\\s\\S]*)$`,
-          ),
-        );
-        if (channelMatch) {
-          const preamble = channelMatch[1];
-          thinkContent = channelMatch[2].trim();
-          const afterThink = channelMatch[3].trim();
-          answerText = preamble ? `${preamble.trim()}\n\n${afterThink}`.trim() : afterThink;
-          isThinkingComplete = true;
-        }
-        if (thinkContent === null) {
-          const channelOpenMatch = markdown.match(
-            new RegExp(
-              `([\\s\\S]*?)<\\s*\\|channel\\s*>thought([\\s\\S]*)$`,
-            ),
-          );
-          if (channelOpenMatch) {
-            const preamble = channelOpenMatch[1];
-            thinkContent = channelOpenMatch[2];
-            answerText = preamble.trim();
-            isThinkingComplete = false;
-          }
-        }
-      }
-
-      return { thinkContent, isThinkingComplete, answerText };
-    }, [markdown]);
+  const parsedContent = useMemo(() => parseThinkContent(markdown), [markdown]);
 
   useEffect(() => {
     const controller = new AbortController();
     let cancelled = false;
 
     const fetchCitationInfo = async () => {
-      // Split citations into two groups:
-      // 1. KB documents (have kb_id) — fetch via KB-specific endpoints
-      // 2. Data store / orphan documents (no kb_id) — fetch via generic endpoint
-      const seenKb = new Set<string>();
-      const kbPairs: Array<{ key: string; kbId: number; docId: number }> = [];
-      const seenGeneric = new Set<string>();
-      const genericDocIds: Array<{ key: string; docId: number }> = [];
+      const { kbPairs, genericDocIds } = buildFetchPairs(debouncedCitations);
 
-      for (const citation of debouncedCitations) {
-        const meta = citation.metadata || {};
-        const effectiveKbId = citation.kb_id ?? meta.kb_id;
-        const effectiveDocId = citation.document_id ?? meta.document_id;
-        if (!effectiveDocId) continue;
-
-        if (effectiveKbId) {
-          const key = `${effectiveKbId}-${effectiveDocId}`;
-          if (seenKb.has(key)) continue;
-          seenKb.add(key);
-          kbPairs.push({ key, kbId: effectiveKbId, docId: effectiveDocId });
-        } else {
-          const key = `doc-${effectiveDocId}`;
-          if (seenGeneric.has(key)) continue;
-          seenGeneric.add(key);
-          genericDocIds.push({ key, docId: effectiveDocId });
-        }
-      }
-
-      // Fetch KB citation infos in parallel
-      const kbResults = await Promise.all(
-        kbPairs.map(async ({ key, kbId, docId }) => {
-          try {
-            const [kb, doc] = await Promise.all([
-              api.get(`/api/knowledge-base/${kbId}`),
-              api.get(`/api/knowledge-base/${kbId}/documents/${docId}`),
-            ]);
-            return {
-              key,
-              info: {
-                knowledge_base: { name: kb.name },
-                document: {
-                  file_name: doc.file_name,
-                  title: doc.title,
-                  knowledge_base: { name: kb.name },
-                },
-              } as CitationInfo,
-            };
-          } catch (error) {
-            console.error("Failed to fetch citation info:", error);
-            return null;
-          }
-        })
-      );
-
-      // Fetch generic doc infos in parallel
-      const genericResults = await Promise.all(
-        genericDocIds.map(async ({ key, docId }) => {
-          try {
-            const doc = await api.get(`/api/knowledge-base/documents/${docId}`);
-            return {
-              key,
-              info: {
-                file_name: doc.file_name,
-                title: doc.title,
-                parent_name: doc.parent_name,
-              } as GenericDocInfo,
-            };
-          } catch (error) {
-            console.error("Failed to fetch generic doc info:", error);
-            return null;
-          }
-        })
-      );
+      const kbResults = await fetchKbBatch(kbPairs);
+      const genericResults = await fetchGenericBatch(genericDocIds);
 
       if (cancelled) return;
 
@@ -404,219 +695,13 @@ export const Answer: FC<{
     return () => { cancelled = true; controller.abort(); };
   }, [debouncedCitations]);
 
-  // Stable component reference — never recreated, reads current data from refs.
-  const CitationLink = useCallback(
-    (
-      props: ClassAttributes<HTMLAnchorElement> &
-        AnchorHTMLAttributes<HTMLAnchorElement>
-    ) => {
-      const citationId = props.href?.match(/^(\d+)$/)?.[1];
-      const citation = citationId
-        ? citationsRef.current.find((c: any) => c.id === parseInt(citationId)) ??
-          citationsRef.current[parseInt(citationId) - 1]
-        : null;
+  const citationCtxValue = useMemo(() => ({
+    citations,
+    citationInfoMap,
+    genericDocMap,
+  }), [citations, citationInfoMap, genericDocMap]);
 
-      if (!citation) {
-        return <a>[{props.href}]</a>;
-      }
-
-      // During streaming, kb_id/document_id are nested in metadata.
-      // After reload via API, they are flattened to top level.
-      const top = citation as Record<string, any>;
-      const meta = (citation.metadata as Record<string, any>) || {};
-      const effectiveKbId = top.kb_id ?? meta.kb_id;
-      const effectiveDocId = top.document_id ?? meta.document_id;
-      const citationInfo =
-        citationInfoMapRef.current[
-          `${effectiveKbId}-${effectiveDocId}`
-        ];
-      // For data store docs (no kb_id), look up generic doc info by doc_id
-      const genericInfo = effectiveDocId
-        ? genericDocMapRef.current[`doc-${effectiveDocId}`]
-        : null;
-
-      // Resolve display fields: prefer KB citationInfo, fall back to genericInfo
-      const displayTitle = citationInfo?.document.title ?? genericInfo?.title ?? null;
-      const displayFileName = citationInfo?.document.file_name ?? genericInfo?.file_name;
-      const displayParentName = citationInfo?.knowledge_base.name ?? genericInfo?.parent_name ?? "Unknown";
-      const showFilenameInCitation = displayTitle && displayFileName &&
-        displayTitle !== displayFileName.replace(/\.[^.]+$/, "").replace(/[_-]/g, " ").replace(/\s+/g, " ").trim();
-      // Build download URL: KB docs use kb_id path, data store docs use generic path
-      const downloadUrl = effectiveKbId && effectiveDocId
-        ? `/api/knowledge-base/${effectiveKbId}/documents/${effectiveDocId}/download`
-        : effectiveDocId
-          ? `/api/knowledge-base/documents/${effectiveDocId}/download`
-          : null;
-
-      return (
-        <Popover>
-          <PopoverTrigger asChild>
-            <button
-              type="button"
-              className="inline-flex items-center px-1 py-0.5 text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/50 rounded hover:bg-blue-100 dark:hover:bg-blue-900/60 transition-colors"
-            >
-              [{props.href}]
-            </button>
-          </PopoverTrigger>
-          <PopoverContent
-            side="top"
-            align="start"
-            sideOffset={6}
-            collisionPadding={12}
-            className="max-w-2xl w-[calc(100vw-100px)] p-0 rounded-lg shadow-lg overflow-hidden"
-          >
-            <div className="text-sm space-y-3 max-h-[min(70vh,520px)] overflow-y-auto p-4" style={{ scrollbarGutter: "stable" }}>
-              {(displayTitle || displayFileName) && (
-                <div className="flex items-center gap-2 text-xs font-medium text-foreground bg-muted p-2 rounded">
-                  <div className="w-5 h-5 flex items-center justify-center shrink-0">
-                    <FileIcon
-                      extension={
-                        displayFileName?.split(".").pop() || ""
-                      }
-                      color="#E2E8F0"
-                      labelColor="#94A3B8"
-                    />
-                  </div>
-                  {downloadUrl ? (
-                    <a
-                      href={downloadUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="truncate hover:underline text-primary"
-                      title={`Open ${displayFileName}`}
-                    >
-                      <span className="font-medium">{displayParentName}</span>
-                      {" / "}
-                      <span className="font-medium">{displayTitle || displayFileName}</span>
-                      {showFilenameInCitation && (
-                        <span className="text-muted-foreground/70"> ({displayFileName})</span>
-                      )}
-                    </a>
-                  ) : (
-                    <span className="truncate">
-                      <span className="font-medium">{displayParentName}</span>
-                      {" / "}
-                      <span className="font-medium">{displayTitle || displayFileName}</span>
-                      {showFilenameInCitation && (
-                        <span className="text-muted-foreground/70"> ({displayFileName})</span>
-                      )}
-                    </span>
-                  )}
-                </div>
-              )}
-              {/* Score + retrieval leg */}
-              {(citation.score !== undefined || citation.retrieval_leg) && (
-                <div className="flex items-center gap-2 flex-wrap">
-                  {citation.score !== undefined && (
-                    <div className="flex items-center gap-1.5 flex-1 min-w-[120px]">
-                      <span className="text-xs text-muted-foreground shrink-0">Score:</span>
-                      <div className="flex-1 h-1.5 rounded-full bg-muted overflow-hidden">
-                        <div
-                          className="h-full rounded-full bg-blue-500 transition-all"
-                          style={{ width: `${Math.round(citation.score * 100)}%` }}
-                        />
-                      </div>
-                      <span className="text-xs text-foreground shrink-0 font-medium">
-                        {Math.round(citation.score * 100)}%
-                      </span>
-                    </div>
-                  )}
-                  {citation.retrieval_leg && (
-                    <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded uppercase tracking-wide ${
-                      citation.retrieval_leg === "dense"
-                        ? "bg-blue-100 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300"
-                        : citation.retrieval_leg === "sparse"
-                        ? "bg-purple-100 dark:bg-purple-950/60 text-purple-700 dark:text-purple-300"
-                        : citation.retrieval_leg === "exact"
-                        ? "bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300"
-                        : citation.retrieval_leg === "graph"
-                        ? "bg-orange-100 dark:bg-orange-950/60 text-orange-700 dark:text-orange-300"
-                        : "bg-muted text-muted-foreground"
-                    }`}>
-                      {citation.retrieval_leg.replace("qdrant_", "")}
-                    </span>
-                  )}
-                </div>
-              )}
-              {/* Per-leg rank breakdown */}
-              {(citation.dense_rank !== undefined ||
-                citation.sparse_rank !== undefined ||
-                citation.exact_rank !== undefined) && (
-                <div className="grid grid-cols-3 gap-1 text-[10px]">
-                  {citation.dense_rank !== undefined && (
-                    <div className="flex flex-col items-center rounded bg-blue-50 dark:bg-blue-950/40 px-1.5 py-1">
-                      <span className="text-blue-600 dark:text-blue-400 font-medium">Dense</span>
-                      <span className="text-blue-800 dark:text-blue-200 font-semibold">#{citation.dense_rank}</span>
-                    </div>
-                  )}
-                  {citation.sparse_rank !== undefined && (
-                    <div className="flex flex-col items-center rounded bg-purple-50 dark:bg-purple-950/40 px-1.5 py-1">
-                      <span className="text-purple-600 dark:text-purple-400 font-medium">Sparse</span>
-                      <span className="text-purple-800 dark:text-purple-200 font-semibold">#{citation.sparse_rank}</span>
-                    </div>
-                  )}
-                  {citation.exact_rank !== undefined && (
-                    <div className="flex flex-col items-center rounded bg-emerald-50 dark:bg-emerald-950/40 px-1.5 py-1">
-                      <span className="text-emerald-600 dark:text-emerald-400 font-medium">Exact</span>
-                      <span className="text-emerald-800 dark:text-emerald-200 font-semibold">#{citation.exact_rank}</span>
-                    </div>
-                  )}
-                </div>
-              )}
-              <Divider />
-              <div className="text-foreground leading-relaxed prose prose-sm dark:prose-invert max-w-none">
-                <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeHighlight, [rehypeKatex, { throwOnError: false }]]}>
-                  {cleanChunkText(citation.text)}
-                </Markdown>
-              </div>
-              <Divider />
-              {['kb_id', 'data_store_id', 'document_id', 'chunk_index', '_legs', '_reranker_score', 'qdrant_point_id']
-                .some(k => k in citation && (citation as any)[k] !== undefined && (citation as any)[k] !== null) && (
-                <details className="text-xs group">
-                  <summary className="cursor-pointer select-none list-none flex items-center gap-1 text-muted-foreground hover:text-foreground transition-colors py-0.5">
-                    <svg className="h-3 w-3 transition-transform group-open:rotate-90 shrink-0" viewBox="0 0 12 12" fill="currentColor">
-                      <path d="M4.5 2 L9 6 L4.5 10" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round"/>
-                    </svg>
-                    Debug Info
-                  </summary>
-                  <div className="mt-1.5 bg-muted text-muted-foreground p-2 rounded space-y-1">
-                    {['kb_id', 'data_store_id', 'document_id', 'chunk_index', '_legs', '_reranker_score', 'qdrant_point_id']
-                      .filter(k => k in citation && (citation as any)[k] !== undefined && (citation as any)[k] !== null)
-                      .map(key => {
-                        const legNames: Record<string, string> = {
-                          dense: "vector",
-                          exact: "keyword",
-                          graph: "graph",
-                        };
-                        const raw = (citation as any)[key];
-                        if (key === '_legs' && Array.isArray(raw)) {
-                          return (
-                            <div key={key} className="flex">
-                              <span className="font-medium min-w-[100px] shrink-0">{key}:</span>
-                              <span className="text-foreground/80 break-all">{raw.map(l => legNames[l] ?? l).join(", ")}</span>
-                            </div>
-                          );
-                        }
-                        return (
-                          <div key={key} className="flex">
-                            <span className="font-medium min-w-[100px] shrink-0">{key}:</span>
-                            <span className="text-foreground/80 break-all">{String(raw)}</span>
-                          </div>
-                        );
-                      })}
-                  </div>
-                </details>
-              )}
-            </div>
-          </PopoverContent>
-        </Popover>
-      );
-    },
-    [] // stable — reads from refs
-  );
-
-  // Memoize the components object so react-markdown never sees a new reference
-  const markdownComponents = useMemo(() => ({ a: CitationLink, code: CodeBlock }), [CitationLink]);
+  const markdownComponents = useMemo(() => ({ a: CitationLink, code: CodeBlock }), []);
 
   // ── Action handlers ────────────────────────────────────────────────────────
   const [copied, setCopied] = useState(false);
@@ -689,21 +774,7 @@ export const Answer: FC<{
                 <TaskItem key={task.id}>
                   <div className="flex items-start gap-2">
                     <span className="mt-0.5 shrink-0 w-3.5 h-3.5 flex items-center justify-center">
-                      {task.status === "done" ? (
-                        <svg className="text-emerald-500" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg" width="12" height="12">
-                          <circle cx="6" cy="6" r="5.5" fill="currentColor" fillOpacity="0.15" stroke="currentColor" strokeWidth="1"/>
-                          <path d="M3.5 6l1.8 1.8L8.5 4.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
-                        </svg>
-                      ) : task.status === "active" ? (
-                        <svg className="text-primary animate-spin" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg" width="12" height="12">
-                          <circle cx="6" cy="6" r="4.5" stroke="currentColor" strokeOpacity="0.2" strokeWidth="1.5"/>
-                          <path d="M6 1.5A4.5 4.5 0 0 1 10.5 6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
-                        </svg>
-                      ) : (
-                        <svg className="text-muted-foreground/40" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg" width="12" height="12">
-                          <circle cx="6" cy="6" r="5.5" stroke="currentColor" strokeWidth="1"/>
-                        </svg>
-                      )}
+                      <TaskStatusIcon status={task.status} />
                     </span>
                     <span className={`text-[12px] leading-snug ${
                       task.status === "done"
@@ -747,14 +818,16 @@ export const Answer: FC<{
       )}
       
       {parsedContent.answerText && (
-        <Markdown
-          key={`${citations.length > 0 ? "with-citations" : "no-citations"}-${renderKey}`}
-          remarkPlugins={[remarkGfm, remarkMath]}
-          rehypePlugins={[rehypeHighlight, [rehypeKatex, { throwOnError: false }]]}
-          components={markdownComponents}
-        >
-          {parsedContent.answerText}
-        </Markdown>
+        <CitationLinkContext.Provider value={citationCtxValue}>
+          <Markdown
+            key={`${citations.length > 0 ? "with-citations" : "no-citations"}-${renderKey}`}
+            remarkPlugins={[remarkGfm, remarkMath]}
+            rehypePlugins={[rehypeHighlight, [rehypeKatex, { throwOnError: false }]]}
+            components={markdownComponents}
+          >
+            {parsedContent.answerText}
+          </Markdown>
+        </CitationLinkContext.Provider>
       )}
       
       {isStreaming && (

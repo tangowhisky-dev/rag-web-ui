@@ -40,6 +40,19 @@ interface Org {
 
 type RoleOption = 'user' | 'admin' | 'super_admin';
 
+interface EditForm {
+  role: RoleOption;
+  org_id: string;
+  is_active: boolean;
+}
+
+interface PasswordForm {
+  new_password: string;
+  confirm_password: string;
+}
+
+type SetState<T> = (value: T | ((prev: T) => T)) => void;
+
 const ALL_ROLE_OPTIONS: RoleOption[] = ['user', 'admin', 'super_admin'];
 
 const adminRoleOptions: RoleOption[] = ['user'];
@@ -48,6 +61,350 @@ function roleBadgeVariant(role: string): 'default' | 'secondary' | 'destructive'
   if (role === 'super_admin') return 'destructive';
   if (role === 'admin') return 'secondary';
   return 'default';
+}
+
+function canChangePassword(user: User, currentRole: string): boolean {
+  return currentRole === 'super_admin' || user.role === 'user';
+}
+
+function canEditUser(user: User, currentRole: string): boolean {
+  return currentRole === 'super_admin' || user.role === 'user';
+}
+
+function canDeleteUser(user: User, currentRole: string): boolean {
+  return currentRole === 'super_admin' && user.role !== 'super_admin';
+}
+
+function validateChangePassword(passwords: PasswordForm): string | null {
+  const passwordError = validatePasswordStrength(passwords.new_password);
+  if (passwordError) return passwordError;
+  if (passwords.new_password !== passwords.confirm_password) return 'Passwords do not match';
+  return null;
+}
+
+function getOrgName(orgs: Org[], orgId: number | null): string {
+  return orgId ? (orgs.find((o) => o.id === orgId)?.name ?? String(orgId)) : '—';
+}
+
+function filterUsers(users: User[], search: string, orgs: Org[]): User[] {
+  if (!search.trim()) return users;
+  const q = search.toLowerCase();
+  return users.filter(
+    (u) =>
+      u.username.toLowerCase().includes(q) ||
+      u.email.toLowerCase().includes(q) ||
+      getOrgName(orgs, u.org_id).toLowerCase().includes(q),
+  );
+}
+
+function buildEditForm(user: User, currentRole: string, orgs: Org[]): EditForm {
+  const isSuperAdmin = currentRole === 'super_admin';
+  const orgId = user.org_id || (orgs.length > 0 ? orgs[0].id : null);
+  return {
+    role: isSuperAdmin ? (user.role as RoleOption) : 'user',
+    org_id: orgId ? String(orgId) : '',
+    is_active: user.is_active,
+  };
+}
+
+function isCreateValid(form: { username: string; password: string; org_id: string }): boolean {
+  return !!(form.username.trim() && form.password.length >= 1 && !!form.org_id);
+}
+
+function isEditValid(selectedUser: User | null, editForm: EditForm, orgs: Org[]): boolean {
+  return !!selectedUser && !!editForm.org_id && orgs.length > 0;
+}
+
+interface UserTableProps {
+  loading: boolean;
+  users: User[];
+  search: string;
+  orgs: Org[];
+  currentRole: string;
+  onEdit: (user: User) => void;
+  onDelete: (user: User) => void;
+  onChangePassword: (user: User) => void;
+}
+
+function UserTable({
+  loading,
+  users,
+  search,
+  orgs,
+  currentRole,
+  onEdit,
+  onDelete,
+  onChangePassword,
+}: UserTableProps) {
+  if (loading) {
+    return <p className="text-sm text-muted-foreground">Loading…</p>;
+  }
+  const filtered = filterUsers(users, search, orgs);
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>ID</TableHead>
+          <TableHead>Username</TableHead>
+          <TableHead>Email</TableHead>
+          <TableHead>Role</TableHead>
+          <TableHead>Org</TableHead>
+          <TableHead>Status</TableHead>
+          <TableHead>Actions</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {users.length === 0 ? (
+          <TableRow>
+            <TableCell colSpan={7} className="text-center text-muted-foreground">
+              No users yet.
+            </TableCell>
+          </TableRow>
+        ) : filtered.length === 0 ? (
+          <TableRow>
+            <TableCell colSpan={7} className="text-center text-muted-foreground">
+              No users match &quot;{search}&quot;.
+            </TableCell>
+          </TableRow>
+        ) : (
+          filtered.map((user) => (
+            <TableRow key={user.id}>
+              <TableCell>{user.id}</TableCell>
+              <TableCell className="font-medium">{user.username}</TableCell>
+              <TableCell>{user.email}</TableCell>
+              <TableCell>
+                <Badge variant={roleBadgeVariant(user.role)}>{user.role}</Badge>
+              </TableCell>
+              <TableCell>{getOrgName(orgs, user.org_id)}</TableCell>
+              <TableCell>
+                {user.is_active ? (
+                  <Badge variant="default" className="bg-green-100 text-green-700 hover:bg-green-100">
+                    Active
+                  </Badge>
+                ) : (
+                  <Badge variant="secondary" className="bg-red-100 text-red-700 hover:bg-red-100">
+                    Deactivated
+                  </Badge>
+                )}
+              </TableCell>
+              <TableCell className="space-x-1">
+                {canChangePassword(user, currentRole) && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => onChangePassword(user)}
+                    title="Change password"
+                  >
+                    Password
+                  </Button>
+                )}
+                {canEditUser(user, currentRole) && (
+                  <Button variant="outline" size="sm" onClick={() => onEdit(user)}>
+                    Edit
+                  </Button>
+                )}
+                {canDeleteUser(user, currentRole) && (
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    onClick={() => onDelete(user)}
+                  >
+                    Delete
+                  </Button>
+                )}
+              </TableCell>
+            </TableRow>
+          ))
+        )}
+      </TableBody>
+    </Table>
+  );
+}
+
+interface UserDialogsProps {
+  editOpen: boolean;
+  setEditOpen: (open: boolean) => void;
+  editing: boolean;
+  selectedUser: User | null;
+  editForm: EditForm;
+  setEditForm: SetState<EditForm>;
+  availableRoles: RoleOption[];
+  orgs: Org[];
+  currentRole: string;
+  editValid: boolean;
+  onEdit: () => void;
+  passwordOpen: boolean;
+  setPasswordOpen: (open: boolean) => void;
+  changingPassword: boolean;
+  userForPassword: User | null;
+  passwordForm: PasswordForm;
+  setPasswordForm: SetState<PasswordForm>;
+  onChangePassword: () => void;
+  deleteOpen: boolean;
+  setDeleteOpen: (open: boolean) => void;
+  deleting: boolean;
+  userToDelete: User | null;
+  onDelete: () => void;
+}
+
+function UserDialogs({
+  editOpen,
+  setEditOpen,
+  editing,
+  selectedUser,
+  editForm,
+  setEditForm,
+  availableRoles,
+  orgs,
+  currentRole,
+  editValid,
+  onEdit,
+  passwordOpen,
+  setPasswordOpen,
+  changingPassword,
+  userForPassword,
+  passwordForm,
+  setPasswordForm,
+  onChangePassword,
+  deleteOpen,
+  setDeleteOpen,
+  deleting,
+  userToDelete,
+  onDelete,
+}: UserDialogsProps) {
+  return (
+    <>
+      <Dialog open={editOpen} onOpenChange={setEditOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Edit User — {selectedUser?.username}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <div className="space-y-1">
+              <label className="text-sm font-medium">Role</label>
+              <select
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                value={editForm.role}
+                onChange={(e) => setEditForm((f) => ({ ...f, role: e.target.value as RoleOption }))}
+              >
+                {selectedUser && currentRole !== 'super_admin' && selectedUser.role !== 'user' ? (
+                  <option key={selectedUser.role} value={selectedUser.role} disabled>
+                    {selectedUser.role} (cannot change — requires super admin)
+                  </option>
+                ) : null}
+                {availableRoles.map((r) => (
+                  <option key={r} value={r}>
+                    {r}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="space-y-1">
+              <label className="text-sm font-medium">Organisation *</label>
+              <select
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                value={editForm.org_id}
+                onChange={(e) => setEditForm((f) => ({ ...f, org_id: e.target.value }))}
+              >
+                {orgs.map((o) => (
+                  <option key={o.id} value={String(o.id)}>
+                    {o.name}
+                  </option>
+                ))}
+              </select>
+              {orgs.length === 0 && (
+                <p className="text-xs text-muted-foreground">No organisations available — cannot edit user.</p>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                id="is-active"
+                checked={editForm.is_active}
+                onChange={(e) => setEditForm((f) => ({ ...f, is_active: e.target.checked }))}
+                className="h-4 w-4"
+              />
+              <label htmlFor="is-active" className="text-sm font-medium">Active</label>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditOpen(false)} disabled={editing}>
+              Cancel
+            </Button>
+            <Button onClick={onEdit} disabled={editing || !editValid}>
+              Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={passwordOpen} onOpenChange={setPasswordOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Change Password — {userForPassword?.username}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <div className="space-y-1">
+              <label className="text-sm font-medium">New Password *</label>
+              <Input
+                type="password"
+                placeholder="Minimum 1 character"
+                value={passwordForm.new_password}
+                onChange={(e) => setPasswordForm({ ...passwordForm, new_password: e.target.value })}
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="text-sm font-medium">Confirm Password *</label>
+              <Input
+                type="password"
+                placeholder="Re-enter new password"
+                value={passwordForm.confirm_password}
+                onChange={(e) => setPasswordForm({ ...passwordForm, confirm_password: e.target.value })}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPasswordOpen(false)} disabled={changingPassword}>
+              Cancel
+            </Button>
+            <Button
+              onClick={onChangePassword}
+              disabled={changingPassword || !passwordForm.new_password || passwordForm.new_password !== passwordForm.confirm_password}
+            >
+              {changingPassword ? 'Changing…' : 'Change Password'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="text-destructive">Permanently Delete User</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <p className="text-sm">
+              Are you sure you want to permanently delete <strong>{userToDelete?.username}</strong>? This action:
+            </p>
+            <ul className="list-disc pl-5 text-sm text-muted-foreground space-y-1">
+              <li>Removes the user permanently (cannot be undone)</li>
+              <li>Deletes all knowledge bases owned by this user</li>
+              <li>Deletes all chats owned by this user</li>
+              <li>Deletes all messages, files, and chunks associated with the above</li>
+            </ul>
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setDeleteOpen(false)} disabled={deleting}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={onDelete} disabled={deleting}>
+              {deleting ? 'Deleting…' : 'Delete Permanently'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
 }
 
 export default function AdminUsersPage() {
@@ -61,7 +418,6 @@ export default function AdminUsersPage() {
   const [currentRole, setCurrentRole] = useState<string>('');
   const [search, setSearch] = useState('');
 
-  // Create dialog
   const [createOpen, setCreateOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [createForm, setCreateForm] = useState({
@@ -72,26 +428,23 @@ export default function AdminUsersPage() {
     org_id: '',
   });
 
-  // Edit dialog
   const [editOpen, setEditOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [selectedUser, setSelectedUser] = useState<User | null>(null);
-  const [editForm, setEditForm] = useState({
-    role: 'user' as RoleOption,
+  const [editForm, setEditForm] = useState<EditForm>({
+    role: 'user',
     org_id: '',
     is_active: true,
   });
 
-  // Delete confirmation dialog
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [userToDelete, setUserToDelete] = useState<User | null>(null);
 
-  // Change password dialog
   const [passwordOpen, setPasswordOpen] = useState(false);
   const [changingPassword, setChangingPassword] = useState(false);
   const [userForPassword, setUserForPassword] = useState<User | null>(null);
-  const [passwordForm, setPasswordForm] = useState({
+  const [passwordForm, setPasswordForm] = useState<PasswordForm>({
     new_password: '',
     confirm_password: '',
   });
@@ -120,7 +473,6 @@ export default function AdminUsersPage() {
   }, [toast]);
 
   useEffect(() => {
-    // Auth check is handled by the middleware.
     let cancelled = false;
     (async () => {
       if (!cancelled) await fetchAll();
@@ -154,15 +506,8 @@ export default function AdminUsersPage() {
   }
 
   function openEdit(user: User) {
-    const isSuperAdmin = currentRole === 'super_admin';
     setSelectedUser(user);
-    // Always assign a valid org — first org if none assigned
-    const orgId = user.org_id || (orgs.length > 0 ? orgs[0].id : null);
-    setEditForm({
-      role: isSuperAdmin ? (user.role as RoleOption) : 'user',
-      org_id: orgId ? String(orgId) : '',
-      is_active: user.is_active,
-    });
+    setEditForm(buildEditForm(user, currentRole, orgs));
     setEditOpen(true);
   }
 
@@ -222,19 +567,11 @@ export default function AdminUsersPage() {
 
   async function handleChangePassword() {
     if (!userForPassword) return;
-    const passwordError = validatePasswordStrength(passwordForm.new_password);
-    if (passwordError) {
+    const error = validateChangePassword(passwordForm);
+    if (error) {
       toast({
         title: 'Error',
-        description: passwordError,
-        variant: 'destructive',
-      });
-      return;
-    }
-    if (passwordForm.new_password !== passwordForm.confirm_password) {
-      toast({
-        title: 'Error',
-        description: 'Passwords do not match',
+        description: error,
         variant: 'destructive',
       });
       return;
@@ -258,23 +595,8 @@ export default function AdminUsersPage() {
     }
   }
 
-  const orgName = (orgId: number | null) =>
-    orgId ? (orgs.find((o) => o.id === orgId)?.name ?? String(orgId)) : '—';
-
-  // Filter by search (username, email, org name)
-  const filteredUsers = users.filter((u) => {
-    if (!search.trim()) return true;
-    const q = search.toLowerCase();
-    return (
-      u.username.toLowerCase().includes(q) ||
-      u.email.toLowerCase().includes(q) ||
-      orgName(u.org_id).toLowerCase().includes(q)
-    );
-  });
-
-  const createValid =
-    createForm.username.trim() && createForm.password.length >= 1 && !!createForm.org_id;
-  const editValid = !!selectedUser && !!editForm.org_id && orgs.length > 0;
+  const createValid = isCreateValid(createForm);
+  const editValid = isEditValid(selectedUser, editForm, orgs);
 
   return (
     <div className="px-4 sm:px-6 lg:px-8 py-6 pt-16 space-y-4">
@@ -300,89 +622,17 @@ export default function AdminUsersPage() {
         </div>
       </div>
 
-      {loading ? (
-        <p className="text-sm text-muted-foreground">Loading…</p>
-      ) : (
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>ID</TableHead>
-              <TableHead>Username</TableHead>
-              <TableHead>Email</TableHead>
-              <TableHead>Role</TableHead>
-              <TableHead>Org</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Actions</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {users.length === 0 ? (
-              <TableRow>
-                <TableCell colSpan={7} className="text-center text-muted-foreground">
-                  No users yet.
-                </TableCell>
-              </TableRow>
-            ) : filteredUsers.length === 0 ? (
-              <TableRow>
-                <TableCell colSpan={7} className="text-center text-muted-foreground">
-                  No users match &quot;{search}&quot;.
-                </TableCell>
-              </TableRow>
-            ) : (
-              filteredUsers.map((user) => (
-                <TableRow key={user.id}>
-                  <TableCell>{user.id}</TableCell>
-                  <TableCell className="font-medium">{user.username}</TableCell>
-                  <TableCell>{user.email}</TableCell>
-                  <TableCell>
-                    <Badge variant={roleBadgeVariant(user.role)}>{user.role}</Badge>
-                  </TableCell>
-                  <TableCell>{orgName(user.org_id)}</TableCell>
-                  <TableCell>
-                    {user.is_active ? (
-                      <Badge variant="default" className="bg-green-100 text-green-700 hover:bg-green-100">
-                        Active
-                      </Badge>
-                    ) : (
-                      <Badge variant="secondary" className="bg-red-100 text-red-700 hover:bg-red-100">
-                        Deactivated
-                      </Badge>
-                    )}
-                  </TableCell>
-                  <TableCell className="space-x-1">
-                    {!(currentRole !== 'super_admin' && user.role !== 'user') && (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => openChangePassword(user)}
-                        title="Change password"
-                      >
-                        Password
-                      </Button>
-                    )}
-                    {!(currentRole !== 'super_admin' && user.role !== 'user') && (
-                      <Button variant="outline" size="sm" onClick={() => openEdit(user)}>
-                        Edit
-                      </Button>
-                    )}
-                    {currentRole === 'super_admin' && user.role !== 'super_admin' && (
-                      <Button
-                        variant="destructive"
-                        size="sm"
-                        onClick={() => openDeleteConfirm(user)}
-                      >
-                        Delete
-                      </Button>
-                    )}
-                  </TableCell>
-                </TableRow>
-              ))
-            )}
-          </TableBody>
-        </Table>
-      )}
+      <UserTable
+        loading={loading}
+        users={users}
+        search={search}
+        orgs={orgs}
+        currentRole={currentRole}
+        onEdit={openEdit}
+        onDelete={openDeleteConfirm}
+        onChangePassword={openChangePassword}
+      />
 
-      {/* Create dialog */}
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
         <DialogContent>
           <DialogHeader>
@@ -461,138 +711,31 @@ export default function AdminUsersPage() {
         </DialogContent>
       </Dialog>
 
-      {/* Edit dialog */}
-      <Dialog open={editOpen} onOpenChange={setEditOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Edit User — {selectedUser?.username}</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-3 py-2">
-            <div className="space-y-1">
-              <label className="text-sm font-medium">Role</label>
-              <select
-                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                value={editForm.role}
-                onChange={(e) => setEditForm((f) => ({ ...f, role: e.target.value as RoleOption }))}
-              >
-                {selectedUser && currentRole !== 'super_admin' && selectedUser.role !== 'user' ? (
-                  <option key={selectedUser.role} value={selectedUser.role} disabled>
-                    {selectedUser.role} (cannot change — requires super admin)
-                  </option>
-                ) : null}
-                {availableRoles.map((r) => (
-                  <option key={r} value={r}>
-                    {r}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div className="space-y-1">
-              <label className="text-sm font-medium">Organisation *</label>
-              <select
-                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                value={editForm.org_id}
-                onChange={(e) => setEditForm((f) => ({ ...f, org_id: e.target.value }))}
-              >
-                {orgs.map((o) => (
-                  <option key={o.id} value={String(o.id)}>
-                    {o.name}
-                  </option>
-                ))}
-              </select>
-              {orgs.length === 0 && (
-                <p className="text-xs text-muted-foreground">No organisations available — cannot edit user.</p>
-              )}
-            </div>
-            <div className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                id="is-active"
-                checked={editForm.is_active}
-                onChange={(e) => setEditForm((f) => ({ ...f, is_active: e.target.checked }))}
-                className="h-4 w-4"
-              />
-              <label htmlFor="is-active" className="text-sm font-medium">Active</label>
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setEditOpen(false)} disabled={editing}>
-              Cancel
-            </Button>
-            <Button onClick={handleEdit} disabled={editing || !editValid}>
-              Save
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Change Password dialog */}
-      <Dialog open={passwordOpen} onOpenChange={setPasswordOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Change Password — {userForPassword?.username}</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-3 py-2">
-            <div className="space-y-1">
-              <label className="text-sm font-medium">New Password *</label>
-              <Input
-                type="password"
-                placeholder="Minimum 1 character"
-                value={passwordForm.new_password}
-                onChange={(e) => setPasswordForm({ ...passwordForm, new_password: e.target.value })}
-              />
-            </div>
-            <div className="space-y-1">
-              <label className="text-sm font-medium">Confirm Password *</label>
-              <Input
-                type="password"
-                placeholder="Re-enter new password"
-                value={passwordForm.confirm_password}
-                onChange={(e) => setPasswordForm({ ...passwordForm, confirm_password: e.target.value })}
-              />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setPasswordOpen(false)} disabled={changingPassword}>
-              Cancel
-            </Button>
-            <Button
-              onClick={handleChangePassword}
-              disabled={changingPassword || !passwordForm.new_password || passwordForm.new_password !== passwordForm.confirm_password}
-            >
-              {changingPassword ? 'Changing…' : 'Change Password'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Delete confirmation dialog */}
-      <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle className="text-destructive">Permanently Delete User</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-3 py-2">
-            <p className="text-sm">
-              Are you sure you want to permanently delete <strong>{userToDelete?.username}</strong>? This action:
-            </p>
-            <ul className="list-disc pl-5 text-sm text-muted-foreground space-y-1">
-              <li>Removes the user permanently (cannot be undone)</li>
-              <li>Deletes all knowledge bases owned by this user</li>
-              <li>Deletes all chats owned by this user</li>
-              <li>Deletes all messages, files, and chunks associated with the above</li>
-            </ul>
-          </div>
-          <DialogFooter className="gap-2">
-            <Button variant="outline" onClick={() => setDeleteOpen(false)} disabled={deleting}>
-              Cancel
-            </Button>
-            <Button variant="destructive" onClick={handleDelete} disabled={deleting}>
-              {deleting ? 'Deleting…' : 'Delete Permanently'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <UserDialogs
+        editOpen={editOpen}
+        setEditOpen={setEditOpen}
+        editing={editing}
+        selectedUser={selectedUser}
+        editForm={editForm}
+        setEditForm={setEditForm}
+        availableRoles={availableRoles}
+        orgs={orgs}
+        currentRole={currentRole}
+        editValid={editValid}
+        onEdit={handleEdit}
+        passwordOpen={passwordOpen}
+        setPasswordOpen={setPasswordOpen}
+        changingPassword={changingPassword}
+        userForPassword={userForPassword}
+        passwordForm={passwordForm}
+        setPasswordForm={setPasswordForm}
+        onChangePassword={handleChangePassword}
+        deleteOpen={deleteOpen}
+        setDeleteOpen={setDeleteOpen}
+        deleting={deleting}
+        userToDelete={userToDelete}
+        onDelete={handleDelete}
+      />
     </div>
   );
 }
