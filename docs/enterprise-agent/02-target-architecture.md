@@ -1,6 +1,6 @@
 # 02 — Target Architecture
 
-The agent loop that replaces the rigid pipeline. This doc defines topology, intent routing, the tool registry, memory/context model, and SSE protocol v4. Tool contracts are in `03-tool-specifications.md`; file-level changes are in `04-implementation-plan.md`.
+The agent loop that replaces the rigid pipeline. This doc defines topology, intent routing, the tool registry, memory/context model, and SSE protocol. Tool contracts are in `03-tool-specifications.md`.
 
 **Design principle (from `agentic-architecture-v2.md`, retained): wrap, don't rewrite.** The retrieval, reranking, memory, evaluation, and streaming infrastructure stays. The graph topology is what changes.
 

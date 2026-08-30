@@ -116,37 +116,26 @@ graph TB
 
 ```mermaid
 graph LR
-    A[User Query] --> B[Query Rewriting]
-    B --> C[Query Classification]
-    C --> D{Query Type}
-
-    D -->|FACTUAL| E[Direct Retrieval]
-    D -->|ENTITY_CENTRIC| F[Entity Extraction + Graph Retrieval]
-    D -->|MULTI_PART| G[Subtask Decomposition]
-    D -->|AMBIGUOUS| H[Query Expansion]
-
-    G --> G1[Parallel Subtasks]
-    G1 --> E
-
-    E --> I[Hybrid Retrieval]
-    I --> I1[Dense Search Qdrant + MMR]
-    I --> I2[Sparse Search SPLADE + MMR]
-    I --> I3[Exact Search MySQL]
-    I --> I4[Graph Search Neo4j]
-
-    I1 --> J[Merge + Recency Dedup + Semantic Dedup]
-    I2 --> J
-    I3 --> J
-    I4 --> J
-
-    J --> K[Cross-Encoder Reranking]
-    K --> L[Answer Generation]
-    L --> M[Confidence Scoring]
+    A[User Query] --> B[load_context]
+    B --> C[expand_query + rewrite_query]
+    C --> D[plan]
+    D --> E[think]
+    E --> F{route_think}
+    F -->|tool_calls| G[tool_node]
+    G --> H{route_tool}
+    H -->|reflect| I[reflect]
+    I --> E
+    H -->|finalize| J[reflect_final]
+    F -->|finalize| J
+    J --> K[finalize]
+    K --> L[answer_scoring]
+    L --> M[save_memory]
     M --> N[Streaming Response]
-
-    F --> I4
-    H --> B
 ```
+
+The think node decides which of 11 tools to call. The tool node executes it and returns an observation. The reflect node runs every N iterations for mid-loop replanning. The loop continues until the plan is satisfied, the iteration cap is reached, or the wall-clock budget expires.
+
+**Tool registry:** `rag_retrieve`, `kb_grep`, `kb_outline`, `kb_read`, `file_read`, `file_summarize`, `file_extract_table`, `code_execute`, `chart_generate`, `summarize_answer`, `extract_data`. See `docs/enterprise-agent/03-tool-specifications.md` for contracts.
 
 ## Document Ingestion Pipeline
 
@@ -369,7 +358,7 @@ Cross-Encoder Reranking
 ## Key Architectural Patterns
 
 1. **Multi-Tenancy**: Hierarchical organization structure with path-based tree traversal
-2. **Agentic RAG**: LangGraph-based multi-agent pipeline with parallel subtask execution
+2. **Agentic RAG**: LangGraph-based agent loop with 11 tools, LLM sufficiency checking, query rewriting, and KB exploration (grep/outline/read)
 3. **Hybrid Retrieval**: 3-leg search (dense + sparse + exact) with native Qdrant MMR diversity and recency-aware dedup (exact + semantic)
 4. **GraphRAG**: Entity/relationship extraction with graph-enhanced retrieval
 5. **Streaming**: Server-Sent Events for real-time agent progress updates

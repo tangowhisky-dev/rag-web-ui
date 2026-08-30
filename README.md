@@ -18,13 +18,13 @@ RAG Web UI is a self-hosted knowledge base Q&A system with multi-tenant org mana
 
 **Agentic RAG pipeline:**
 
-The system uses a single LangGraph-based agentic pipeline that automatically adapts to query complexity:
+The system uses a LangGraph-based agent loop with 11 tools that the LLM calls autonomously:
 
-- Query rewriting with chat history context
-- LLM-based query classification (FACTUAL/ENTITY_CENTRIC/MULTI_PART/AMBIGUOUS)
-- Automatic sub-query decomposition for complex queries
-- Parallel retrieval with reinforced scoring
-- Draft-grade-retry loop with widened retrieval and keyword search fallback
+- Query rewriting with chat history context and abbreviation expansion
+- Think → tool → observe → reflect loop with per-turn tool-call budgets
+- LLM-based retrieval sufficiency checking and internal query rewriting
+- Graduated relaxation ladder (dense → sparse → exact → graph expansion)
+- Last-resort KB exploration: `kb_grep`, `kb_outline`, `kb_read` for exact-term search and section-level reading when chunk retrieval is insufficient
 - Confidence scoring and partial-answer transparency
 
 **Retrieval:** 3-leg hybrid search (dense vector via Qdrant, sparse via SPLADE, exact via MySQL FULLTEXT) with native Qdrant MMR diversity and recency-aware dedup (exact + semantic). Optional **GraphRAG** adds entity/relationship extraction into Neo4j for graph-traversal expansion.
@@ -97,15 +97,31 @@ DENSE_EMBEDDING_DIM=1024
 
 ### Agentic Pipeline
 
-The LangGraph-based agentic pipeline automatically adapts to query complexity:
+The LangGraph-based agent loop gives the LLM autonomous control over 11 tools:
 
 ```
-rewrite_query → context_router → decompose_query → parallel_retrieval
-  → extract_file_sections → draft_answer → grade_coverage
-  → [if uncovered, attempt 0] widened_retrieval → draft_answer → grade_coverage
-  → [if still uncovered, attempt 1] keyword_search_loop → draft_answer → grade_coverage
-  → generate_answer
+load_context → expand_query → rewrite_query → plan
+  → think ↔ tool ↔ reflect (loop)
+  → reflect_final → finalize → answer_scoring → save_memory
 ```
+
+The think node decides which tool to call based on the current state. The tool node executes it, emits `tc:`/`to:` SSE events, and returns an observation. The reflect node runs every N iterations for mid-loop replanning. The loop continues until the plan is satisfied, the iteration cap is reached, or the wall-clock budget expires.
+
+**Tool registry (11 tools):**
+
+| Tool | Purpose |
+|------|---------|
+| `rag_retrieve` | 3-leg hybrid retrieval (dense + sparse + exact) with reranking, LLM sufficiency check, query rewriting, and optional Neo4j graph expansion |
+| `kb_grep` | Regex/keyword search across all authorized KB documents — last resort for exact terms vector search missed |
+| `kb_outline` | Heading structure (table of contents) of a KB document |
+| `kb_read` | Read a specific section or character range of a KB document's markdown |
+| `file_read` | Read content from an attached chat file |
+| `file_summarize` | Summarize an attached chat file |
+| `file_extract_table` | Extract tables from an attached chat file |
+| `code_execute` | Execute Python code in a RestrictedPython sandbox |
+| `chart_generate` | Generate an ECharts chart from structured data |
+| `summarize_answer` | Summarize the current answer |
+| `extract_data` | Extract structured data from retrieved docs or previous answers |
 
 All steps are streamed to the UI as collapsible timeline entries in real time.
 
@@ -115,9 +131,11 @@ Beyond the basic retrieval, the pipeline includes:
 
 - **Native Qdrant MMR** — both dense and sparse legs use Qdrant's Maximal Marginal Relevance to diversify candidates and reduce near-duplicate clustering
 - **Confidence scoring** — per-query confidence levels (low/medium/high) based on coverage and chunk quality
-- **Query classification** — FACTUAL, ENTITY_CENTRIC, MULTI_PART, or AMBIGUOUS with confidence and latency metrics
-- **Tool trace** — collapsible timeline of tool calls during the pipeline (search, graph traversal, etc.)
-- **Synthesis mode** — LLM can synthesize across multiple retrieved contexts before answering
+- **LLM sufficiency check** — evaluates whether retrieved chunks collectively answer the query; exposes `missing` field to guide the next tool call
+- **Query rewriting** — when retrieval is insufficient, the query is rewritten internally using the `missing` description before a second retrieval pass
+- **KB exploration tools** — `kb_grep`/`kb_outline`/`kb_read` give the agent fine-grained access to document content when chunk-level retrieval is insufficient
+- **Tool trace** — collapsible timeline of tool calls during the pipeline (search, graph traversal, file read, code execution, etc.)
+- **Per-tool budgets** — configurable caps on retrieval, code execution, grep, and read calls per turn
 
 ### Chunking
 
@@ -187,7 +205,7 @@ MATCH (c:Chunk)-[:FROM_CHUNK]-(e:__Entity__ {name: "Apple"}) RETURN c, e
 
 | Variable | Description | Default |
 |---|---|---|
-| `RETRIEVAL_TOP_K` | Chunks returned per query | `10` |
+| `RETRIEVAL_TOP_K` | Chunks returned per query | `20` |
 | `RETRIEVAL_DENSE_ENABLED` | Enable/disable dense leg | `true` |
 | `RETRIEVAL_QDRANT_SPARSE_ENABLED` | Enable/disable sparse leg | `true` |
 | `RETRIEVAL_EXACT_ENABLED` | Enable/disable MySQL FTS leg | `true` |
@@ -447,11 +465,12 @@ Login: System=MySQL, Server=`db`, User=`ragwebui`, Password=`ragwebui`, Database
 
 - Upload PDF, DOCX, PPTX, XLSX, Markdown, HTML, CSV, JSON, XML, email, EPUB, images (OCR), ZIP archives
 - Optional OCR for scanned PDFs and embedded images via `markitdown-ocr` — enabled by `VISION_MODEL`
-- **Agentic pipeline**: query decomposition → parallel sub-query retrieval with reinforced scoring → LLM draft-grade loop → widened retrieval retry → keyword search fallback → partial-answer transparency
-- **Pipeline extras**: confidence scoring, query classification (FACTUAL/ENTITY_CENTRIC/MULTI_PART/AMBIGUOUS), tool trace, synthesis mode
+- **Agentic pipeline**: LangGraph agent loop with 11 tools, LLM sufficiency checking, query rewriting, and KB exploration tools (grep/outline/read) as last resort
 - **3-leg hybrid retrieval**: dense vector + SPLADE sparse + MySQL FULLTEXT, with native Qdrant MMR diversity and recency-aware dedup (exact + semantic)
 - **GraphRAG**: optional entity/relationship extraction into Neo4j with graph-traversal retrieval expansion
 - **Cross-encoder reranking**: retrieved candidates re-ranked by a local cross-encoder before context assembly
+- **LLM sufficiency check**: evaluates whether retrieved chunks collectively answer the query; rewrites the query and retries if insufficient
+- **KB exploration tools**: `kb_grep` (regex search across documents), `kb_outline` (heading structure), `kb_read` (section-level reading) — last resort when chunk retrieval is insufficient
 - **Chat file upload**: attach any supported document; content injected directly into pipeline (not indexed); 10 MB size limit + 25% context-window token budget; smart section extraction
 - **Chat features**: branching (multiple answer variants), folder organisation, message search, chat export (Markdown), message export (PDF/Word/image), pagination (infinite scroll), collapsible sidebar with localStorage persistence
 - **Streaming responses** with real-time AgentTimeline showing each pipeline step (active → done with detail on click)
