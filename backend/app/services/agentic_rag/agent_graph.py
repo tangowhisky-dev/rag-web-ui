@@ -185,7 +185,7 @@ from app.services.agentic_rag.tool_call_parser import parse_think_response
 from app.services.agentic_rag.tool_context import ToolContext, write_audit
 from app.services.agentic_rag.tools import applicable_tools
 from app.services.agentic_rag.token_budget import count_tokens
-from app.services.agentic_rag.utils import format_context_string, normalize_citations
+from app.services.agentic_rag.utils import format_context_string, group_docs_by_document, normalize_citations
 
 from .graph_state import AgentState
 
@@ -1313,6 +1313,9 @@ async def finalize_node(state: AgentState, ctx: ToolContext) -> dict:
         retrieval_query = state.get("rewritten_query", "") or query
         observations = state.get("observations", [])
         docs = state.get("retrieved_docs", [])
+        # Group chunks by document so the LLM sees contiguous chunks from
+        # the same document together, and citation indices map correctly.
+        docs = group_docs_by_document(docs)
         plan = state.get("plan")
         compaction_updates: dict = {}
         answer_usage: Optional[dict] = None

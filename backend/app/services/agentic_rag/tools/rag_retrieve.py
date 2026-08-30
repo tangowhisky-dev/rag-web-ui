@@ -180,9 +180,12 @@ async def _llm_sufficiency_check(
     if not docs:
         return False, "No documents were found for this query."
 
-    # Truncate docs to keep the prompt small — top 5 docs × ~500 chars each.
+    # Include all retrieved chunks, truncated per-chunk to keep the prompt
+    # bounded. The sufficiency check needs to see the full picture — limiting
+    # to top-5 can miss chunks from a second document that are needed to
+    # answer a multi-document query.
     previews = []
-    for i, doc in enumerate(docs[:5]):
+    for i, doc in enumerate(docs):
         content = str(doc.get("page_content", ""))[:500]
         previews.append(f"[Doc {i + 1}] {content}")
     prompt = _SUFFICIENCY_PROMPT.format(query=query, previews="\n".join(previews))

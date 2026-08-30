@@ -54,6 +54,52 @@ def format_context_string(
     at 20% overlap). Citation indices are unaffected — pruning only
     shortens the content, not the chunk's position in the list.
     """
+
+
+def group_docs_by_document(docs: list[dict]) -> list[dict]:
+    """Reorder docs so chunks from the same document are contiguous.
+
+    Groups are ordered by their highest-scoring chunk (descending
+    ``_reranker_score``). Within a group, chunks are ordered by
+    ``chunk_index`` ascending so the LLM reads them in document order.
+
+    Chunks without a ``document_id`` (e.g. graph-expanded docs with
+    missing metadata) are kept at the end in their original relative order.
+
+    This reordering affects citation indices — the caller must use the
+    returned list for both ``format_context_string`` and
+    ``normalize_citations`` so [KB-N] markers map correctly.
+    """
+    if not docs:
+        return docs
+
+    # Partition into grouped (has document_id) and ungrouped.
+    grouped: dict[Any, list[dict]] = {}
+    ungrouped: list[dict] = []
+    for doc in docs:
+        meta = doc.get("metadata", {}) if isinstance(doc, dict) else {}
+        doc_id = meta.get("document_id")
+        if doc_id is None:
+            ungrouped.append(doc)
+        else:
+            grouped.setdefault(doc_id, []).append(doc)
+
+    # Order groups by their best chunk's reranker score (descending).
+    def _best_score(group: list[dict]) -> float:
+        return max(
+            (d.get("_reranker_score", d.get("score", 0.0)) or 0.0)
+            for d in group
+        )
+
+    ordered_groups = sorted(grouped.values(), key=_best_score, reverse=True)
+
+    # Within each group, sort by chunk_index ascending.
+    result: list[dict] = []
+    for group in ordered_groups:
+        group.sort(key=lambda d: d.get("metadata", {}).get("chunk_index", 0))
+        result.extend(group)
+    result.extend(ungrouped)
+    return result
     from app.services.agentic_rag.agent_graph import _prune_contiguous_overlaps
 
     pruned_docs = _prune_contiguous_overlaps(docs) if docs else docs
