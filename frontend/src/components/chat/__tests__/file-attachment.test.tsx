@@ -1,4 +1,3 @@
-import React from "react";
 import { render, screen, fireEvent } from "@testing-library/react";
 import "@testing-library/jest-dom";
 import { FileChip, MAX_FILE_SIZE, SUPPORTED_TYPES } from "../file-attachment";

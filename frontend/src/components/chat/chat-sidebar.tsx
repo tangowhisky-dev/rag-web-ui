@@ -120,8 +120,10 @@ export default function ChatSidebar({ isOpen, onClose }: ChatSidebarProps) {
     if (searchQuery.length >= 4) {
       searchTimerRef.current = setTimeout(() => runSearch(searchQuery), 300);
     } else {
-      setSearchResults([]);
-      setSearchError(false);
+      Promise.resolve().then(() => {
+        setSearchResults([]);
+        setSearchError(false);
+      });
     }
     return () => {
       if (searchTimerRef.current) clearTimeout(searchTimerRef.current);

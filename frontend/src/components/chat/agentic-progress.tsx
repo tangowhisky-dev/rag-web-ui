@@ -167,7 +167,7 @@ export const AgenticProgress = ({
   toolObservations,
 }: AgenticProgressProps) => {
   const [isOpen, setIsOpen] = useState(true);
-  const dismissRef = useRef<ReturnType<typeof setTimeout>>();
+  const dismissRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   // Build deduplicated phase list
   const phases = useMemo(() => {
@@ -213,7 +213,7 @@ export const AgenticProgress = ({
         clearTimeout(dismissRef.current);
         dismissRef.current = undefined;
       }
-      setIsOpen(true);
+      Promise.resolve().then(() => setIsOpen(true));
     } else if (phases.length > 0 || toolPairs.length > 0) {
       dismissRef.current = setTimeout(() => {
         setIsOpen(false);

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
@@ -68,14 +68,7 @@ export default function OrgSettingsPage() {
   const [confirmClearAll, setConfirmClearAll] = useState(false);
   const [preflightIssues, setPreflightIssues] = useState<PreflightIssue[]>([]);
 
-  useEffect(() => {
-    fetchSettings();
-    api.get('/api/auth/preflight').then((data: any) => {
-      setPreflightIssues(data.issues || []);
-    }).catch(() => {});
-  }, [orgId]);
-
-  async function fetchSettings() {
+  const fetchSettings = useCallback(async () => {
     try {
       const data = await api.get(`/api/admin/orgs/${orgId}/settings`) as OrgSettingsResponse;
       setSettings(data.settings);
@@ -88,7 +81,19 @@ export default function OrgSettingsPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [orgId, toast]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!cancelled) await fetchSettings();
+    })();
+    api.get('/api/auth/preflight').then((data: any) => {
+      if (cancelled) return;
+      setPreflightIssues(data.issues || []);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [orgId, fetchSettings]);
 
   function updateValue(key: string, value: any) {
     setSettings(prev => prev.map(s => s.key === key ? { ...s, value, overridden: true } : s));

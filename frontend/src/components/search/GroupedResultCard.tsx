@@ -49,17 +49,19 @@ function snippet(text: string, maxChars = 500): string {
   return clean.slice(0, maxChars).trimEnd() + "…";
 }
 
-function fileIcon(name: string) {
+const FILE_ICON_MAP: Record<string, typeof File> = {
+  py: FileCode, js: FileCode, ts: FileCode, tsx: FileCode, jsx: FileCode,
+  go: FileCode, rs: FileCode, java: FileCode, c: FileCode, cpp: FileCode,
+  rb: FileCode, sh: FileCode, yaml: FileCode, yml: FileCode, json: FileCode, xml: FileCode,
+  pdf: FileType,
+  xls: FileSpreadsheet, xlsx: FileSpreadsheet, csv: FileSpreadsheet,
+  md: FileText, txt: FileText, rtf: FileText,
+};
+
+function FileIcon({ name, ...props }: { name: string } & React.SVGProps<SVGSVGElement>) {
   const ext = name.split(".").pop()?.toLowerCase() ?? "";
-  if (["py", "js", "ts", "tsx", "jsx", "go", "rs", "java", "c", "cpp", "rb", "sh", "yaml", "yml", "json", "xml"].includes(ext))
-    return FileCode;
-  if (["pdf"].includes(ext))
-    return FileType;
-  if (["xls", "xlsx", "csv"].includes(ext))
-    return FileSpreadsheet;
-  if (["md", "txt", "rtf"].includes(ext))
-    return FileText;
-  return File;
+  const Icon = FILE_ICON_MAP[ext] ?? File;
+  return <Icon {...props} />;
 }
 
 function scoreTier(score: number): { label: string; className: string } {
@@ -136,7 +138,6 @@ export default function GroupedResultCard({ group, query, kbName }: GroupedResul
     return () => window.removeEventListener("resize", updateVisible);
   }, []);
 
-  const Icon = fileIcon(group.fileName);
   const tier = scoreTier(group.bestScore);
   const displayTitle = group.title || group.fileName;
   const showFilename = group.title && group.title !== cleanFilename(group.fileName);
@@ -188,7 +189,7 @@ export default function GroupedResultCard({ group, query, kbName }: GroupedResul
       <div className="p-4">
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-center gap-2 min-w-0">
-            <Icon className="h-4 w-4 text-muted-foreground shrink-0" />
+            <FileIcon name={group.fileName} className="h-4 w-4 text-muted-foreground shrink-0" />
             <div className="min-w-0">
               <span className="text-sm font-medium text-foreground truncate block group-hover:text-primary transition-colors">
                 {displayTitle}

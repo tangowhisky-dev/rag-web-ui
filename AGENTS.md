@@ -152,17 +152,17 @@ Boris Cherny (creator of Claude Code) keeps his team's file around 100 lines. Un
 
 ### Stack
 - Language and version: Python 3.11 (backend), Node.js >=18 (frontend)
-- Framework(s): FastAPI, LangGraph, LangChain, Next.js 14, TypeScript, Tailwind CSS, shadcn/ui
-- Package manager: pip (backend), npm (frontend)
+- Framework(s): FastAPI, LangGraph, LangChain, Next.js 16, React 19, TypeScript, Tailwind CSS 4, shadcn/ui
+- Package manager: pip (backend), pnpm 11 (frontend)
 - Runtime / deployment target: Docker Compose (dev + prod)
 
 ### Commands
-- Install: `pip install -r requirements.txt` (backend), `npm install` (frontend)
-- Build: `docker compose up -d --build` (full stack), `next build` (frontend only)
-- Test (all): `docker exec rag-web-ui-backend-1 pytest` (backend, must run inside container), `docker exec rag-web-ui-frontend-1 npm run test:ci` (frontend, run inside container)
-- Test (single file): `docker exec rag-web-ui-backend-1 pytest tests/test_file.py` (backend), `npm run test -- --testPathPattern=test_file` (frontend)
-- Lint: `next lint` (frontend)
-- Typecheck: TypeScript via `tsc` (frontend, uses `tsconfig.json`)
+- Install: `pip install -r requirements.txt` (backend), `pnpm install` (frontend)
+- Build: `docker compose up -d --build` (full stack), `NODE_ENV=production next build` (frontend only)
+- Test (all): `docker exec rag-web-ui-backend-1 pytest` (backend, must run inside container), `docker exec rag-web-ui-frontend-1 pnpm test:ci` (frontend, run inside container)
+- Test (single file): `docker exec rag-web-ui-backend-1 pytest tests/test_file.py` (backend), `pnpm test -- --testPathPattern=test_file` (frontend)
+- Lint: `eslint .` (frontend, flat config in `eslint.config.mjs`)
+- Typecheck: TypeScript via `tsc --noEmit` (frontend, uses `tsconfig.json`)
 - Run locally: `docker compose up -d` (full stack), or `uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload` (backend dev), `next dev` (frontend dev)
 
 Prefer single-file or single-test runs during iteration. Full suites are for the final verification pass.
@@ -205,7 +205,18 @@ When the user corrects your approach, append a one-line rule here before ending 
 - Always run backend pytest inside the `rag-web-ui-backend-1` container (e.g. `docker exec rag-web-ui-backend-1 pytest`) because the backend requires the container's installed dependencies, database patches, and environment.
 - Always run frontend tests inside the `rag-web-ui-frontend-1` container (e.g. `docker exec rag-web-ui-frontend-1 npm run test:ci`) because the container's node_modules may differ from local.
 - Always run frontend builds inside the `rag-web-ui-frontend-1` container (e.g. `docker exec rag-web-ui-frontend-1 npm run build`) for the same reason.
-- pnpm 11+ requires Node.js 22+; the frontend container runs Node.js 20, so pnpm must stay on 10.x until Node is upgraded.
+- pnpm 11+ requires Node.js 22+; the frontend container now runs Node.js 24 with pnpm 11.
+- Next.js 16 build requires `NODE_ENV=production` — building with `NODE_ENV=development` causes a `useContext` null error on `/_global-error` prerendering (known Next.js 16 bug #86178).
+- Next.js 16 uses Turbopack by default; custom webpack configs must be mirrored in `turbopack` config in `next.config.js`.
+- `next lint` is removed in Next.js 16; use `eslint .` directly with `eslint.config.mjs` flat config.
+- Tailwind 4 uses `@import "tailwindcss"` instead of `@tailwind` directives; PostCSS plugin is `@tailwindcss/postcss`; `tailwindcss-animate` replaced by `tw-animate-css`.
+- pnpm 11 uses `allowBuilds` in `pnpm-workspace.yaml` (not `onlyBuiltDependencies` in `package.json`) to approve native addon build scripts.
+- `eslint-config-next` 16 is incompatible with ESLint 10 (scopeManager API change); use ESLint 9.x.
+- React 19 `react-hooks/set-state-in-effect` rule: use `useSyncExternalStore` for hydration checks, async IIFEs for data-fetching effects, `Promise.resolve().then()` for state-sync effects. Functional updates (`setX(prev => ...)`) do NOT satisfy the rule.
+- React 19 `react-hooks/refs` rule: never write `ref.current = value` during render. Move ref writes into `useEffect`.
+- React 19 `react-hooks/preserve-manual-memoization` rule: add all `setState` functions from `useState` to `useCallback` dependency arrays (the compiler infers them as deps).
+- React 19 `react-hooks/static-components` rule: never assign a function call returning a component to a capitalized variable during render. Use a module-scope wrapper component instead.
+- `tailwind.config.ts` must be `tailwind.config.mts` to avoid Node.js `MODULE_TYPELESS_PACKAGE_JSON` warning.
 
 ---
 

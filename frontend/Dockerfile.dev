@@ -1,19 +1,25 @@
 # syntax=docker/dockerfile:1
-FROM node:20-alpine
+FROM node:24-alpine
 
 WORKDIR /app
 
 # Install pnpm
-RUN npm install -g pnpm@10
+RUN npm install -g pnpm@11
 
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
 
 # Copy package files
-COPY package.json pnpm-lock.yaml ./
+COPY package.json ./
+COPY pnpm-lock.yaml* ./
+COPY pnpm-workspace.yaml* ./
 
 # Cache mount for pnpm content-addressable store
 RUN --mount=type=cache,target=/pnpm/store \
+    pnpm config set fetch-timeout 600000 && \
+    pnpm config set fetch-retries 5 && \
+    pnpm config set fetch-retry-mintimeout 60000 && \
+    pnpm config set fetch-retry-maxtimeout 300000 && \
     pnpm install --force
 
 # Copy the rest of the application

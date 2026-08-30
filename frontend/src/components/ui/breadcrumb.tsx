@@ -2,6 +2,7 @@
 
 import { ChevronRight, Home } from "lucide-react";
 import { APP_NAME, APP_ICON_SRC, APP_VERSION } from "@/lib/app-config";
+import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
@@ -39,7 +40,7 @@ const Breadcrumb = ({ overrideLastLabel }: BreadcrumbProps) => {
         href="/dashboard"
         className="flex items-center gap-2 rounded-lg px-2 py-1 hover:bg-accent hover:text-foreground transition-colors"
       >
-        <img src={APP_ICON_SRC} alt={APP_NAME} className="h-5 w-5 rounded" />
+        <Image src={APP_ICON_SRC} alt={APP_NAME} width={20} height={20} className="h-5 w-5 rounded" />
         <div className="flex flex-col leading-none">
           <span className="font-semibold text-foreground hidden sm:inline">{APP_NAME}</span>
           <span className="text-[9px] text-muted-foreground/60 hidden sm:inline">v{APP_VERSION}</span>

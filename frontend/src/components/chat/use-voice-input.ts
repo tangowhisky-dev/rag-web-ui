@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useCallback, useEffect, useSyncExternalStore } from "react";
 
 const DEBUG = process.env.NEXT_PUBLIC_DEBUG === "true";
 const log = (...args: any[]) => { if (DEBUG) console.log("[voice]", ...args); };
@@ -43,19 +43,20 @@ export function useVoiceInput(onFinal: (text: string) => void) {
   const [isListening, setIsListening] = useState(false);
   const [isModelLoading, setIsModelLoading] = useState(false);
   const [interim, setInterim] = useState("");
-  const [isSupported, setIsSupported] = useState(false);
   const [audioLevel, setAudioLevel] = useState(0);
 
   // Defer browser-capability check to after hydration so SSR and client
   // render the same initial UI (no hydration mismatch).
-  useEffect(() => {
-    setIsSupported(
-      !!window.AudioContext && typeof Worker !== "undefined"
-    );
-  }, []);
+  const isSupported = useSyncExternalStore(
+    () => () => {},
+    () => !!window.AudioContext && typeof Worker !== "undefined",
+    () => false,
+  );
 
   const onFinalRef = useRef(onFinal);
-  onFinalRef.current = onFinal;
+  useEffect(() => {
+    onFinalRef.current = onFinal;
+  }, [onFinal]);
 
   const workerRef = useRef<Worker | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);

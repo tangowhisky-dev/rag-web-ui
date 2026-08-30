@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import DashboardLayout from "@/components/layout/dashboard-layout";
 import { Book, MessageSquare, ArrowRight, Plus, Brain, Sparkles, Shield, Upload, Link2, Search } from "lucide-react";
+import Link from "next/link";
 import { api, ApiError } from "@/lib/api";
 import { useHydrated } from "@/lib/hooks";
 
@@ -52,21 +53,21 @@ export default function DashboardPage() {
               </p>
             </div>
             <div className="flex items-center gap-3">
-              <a
+              <Link
                 href="/dashboard/knowledge/new"
                 className="inline-flex items-center justify-center rounded-md bg-primary px-5 py-2.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
               >
                 <Plus className="mr-2 h-4 w-4" />
                 New Knowledge Base
-              </a>
+              </Link>
               {hydrated && (currentUser?.role === "admin" || currentUser?.role === "super_admin") && (
-                <a
+                <Link
                   href="/dashboard/admin"
                   className="inline-flex items-center justify-center rounded-md border border-input bg-background px-5 py-2.5 text-sm font-medium hover:bg-accent transition-colors"
                 >
                   <Shield className="mr-2 h-4 w-4" />
                   Admin Panel
-                </a>
+                </Link>
               )}
             </div>
           </div>
@@ -85,13 +86,13 @@ export default function DashboardPage() {
                 <p className="text-muted-foreground mt-1">Knowledge Bases</p>
               </div>
             </div>
-            <a
+            <Link
               href="/dashboard/knowledge"
               className="mt-6 flex items-center text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
             >
               View all knowledge bases
               <ArrowRight className="ml-2 h-4 w-4" />
-            </a>
+            </Link>
           </div>
 
           {/* Secondary stat: neutral */}
@@ -105,13 +106,13 @@ export default function DashboardPage() {
                 <p className="text-muted-foreground mt-1">Chat Sessions</p>
               </div>
             </div>
-            <a
+            <Link
               href="/dashboard/chat"
               className="mt-6 flex items-center text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
             >
               View all chat sessions
               <ArrowRight className="ml-2 h-4 w-4" />
-            </a>
+            </Link>
           </div>
 
           {/* Search card */}
@@ -125,13 +126,13 @@ export default function DashboardPage() {
                 <p className="text-muted-foreground mt-1 text-sm">Search files directly</p>
               </div>
             </div>
-            <a
+            <Link
               href="/dashboard/search"
               className="mt-6 flex items-center text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
             >
               Search knowledge bases
               <ArrowRight className="ml-2 h-4 w-4" />
-            </a>
+            </Link>
           </div>
         </div>
 
@@ -140,7 +141,7 @@ export default function DashboardPage() {
           <h2 className="text-2xl font-semibold mb-6">How It Works</h2>
           <div className="grid gap-4 md:grid-cols-3">
             {/* Step 1 */}
-            <a
+            <Link
               href="/dashboard/knowledge/new"
               className="group rounded-lg border bg-card p-5 hover:border-primary/30 transition-colors"
             >
@@ -152,10 +153,10 @@ export default function DashboardPage() {
               <p className="text-xs text-muted-foreground leading-relaxed">
                 Build a new AI-powered knowledge repository
               </p>
-            </a>
+            </Link>
 
             {/* Step 2 */}
-            <a
+            <Link
               href="/dashboard/knowledge"
               className="group rounded-lg border bg-card p-5 hover:border-primary/30 transition-colors"
             >
@@ -170,10 +171,10 @@ export default function DashboardPage() {
               <p className="text-xs text-muted-foreground leading-relaxed">
                 Upload PDFs, docs, images, or link data stores
               </p>
-            </a>
+            </Link>
 
             {/* Step 3 */}
-            <a
+            <Link
               href="/dashboard/chat/new"
               className="group rounded-lg border bg-card p-5 hover:border-primary/30 transition-colors"
             >
@@ -185,7 +186,7 @@ export default function DashboardPage() {
               <p className="text-xs text-muted-foreground leading-relaxed">
                 Get instant answers from your knowledge with AI
               </p>
-            </a>
+            </Link>
           </div>
         </div>
       </div>

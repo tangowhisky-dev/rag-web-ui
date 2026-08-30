@@ -1,6 +1,6 @@
 "use client";
 
-import React, { createContext, useContext, useEffect, useLayoutEffect, useState, useCallback, useMemo } from "react";
+import React, { createContext, useContext, useEffect, useState, useCallback, useMemo, useSyncExternalStore } from "react";
 import { api } from "@/lib/api";
 
 export interface Folder {
@@ -74,24 +74,16 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   // synchronously — but only after the first render to avoid hydration
   // mismatches. We use a lazy initializer that checks the module cache first,
   // then a useSyncExternalStore-like pattern to load sessionStorage ASAP.
-  const [chatList, _setChatList] = useState<Chat[]>(_chatListCache);
-  const [chatListLoaded, setChatListLoaded] = useState(_chatListCache.length > 0);
-  const [hydrated, setHydrated] = useState(false);
-
-  // Load from sessionStorage synchronously before paint — useLayoutEffect
-  // fires before the browser paints, so the sidebar never flashes empty
-  // if sessionStorage has cached data.
-  useLayoutEffect(() => {
-    if (hydrated) return;
-    setHydrated(true);
-    if (_chatListCache.length === 0) {
-      const cached = loadCachedChatList();
-      if (cached.length > 0) {
-        _setChatList(cached);
-        setChatListLoaded(true);
-      }
-    }
-  }, [hydrated]);
+  // Initialize from module-level cache or sessionStorage (client-only).
+  // useSyncExternalStore ensures SSR returns empty list (no hydration mismatch),
+  // then client immediately reads sessionStorage on first render.
+  const initialChatList = useSyncExternalStore(
+    () => () => {},
+    () => _chatListCache.length > 0 ? _chatListCache : loadCachedChatList(),
+    () => _chatListCache,
+  );
+  const [chatList, _setChatList] = useState<Chat[]>(initialChatList);
+  const [chatListLoaded, setChatListLoaded] = useState(initialChatList.length > 0);
 
   const setChatList: React.Dispatch<React.SetStateAction<Chat[]>> = useCallback(
     (action) => {
@@ -139,7 +131,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         // silently ignore; user may not be authenticated yet
         setChatListLoaded(true);
       });
-    fetchFolders();
+    (async () => { await fetchFolders(); })();
   }, [fetchFolders, setChatList]);
 
   const renameChat = useCallback(async (id: number, title: string) => {
@@ -147,24 +139,24 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     setChatList((prev) =>
       prev.map((c) => (c.id === id ? { ...c, title } : c))
     );
-  }, []);
+  }, [setChatList]);
 
   const deleteChat = useCallback(async (id: number) => {
     await api.delete(`/api/chat/${id}`);
     setChatList((prev) => prev.filter((c) => c.id !== id));
-  }, []);
+  }, [setChatList]);
 
   const patchChat = useCallback(async (id: number, patch: Partial<Chat>) => {
     await api.patch(`/api/chat/${id}`, patch);
     setChatList((prev) =>
       prev.map((c) => (c.id === id ? { ...c, ...patch } : c))
     );
-  }, []);
+  }, [setChatList]);
 
   // Prepend a newly created chat to the sorted list
   const addChat = useCallback((chat: Chat) => {
     setChatList((prev) => [chat, ...prev]);
-  }, []);
+  }, [setChatList]);
 
   // Move a chat to the top of the unpinned list (called when a message is sent).
   // Pinned chats stay pinned — only unpinned chats are reordered.
@@ -178,7 +170,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       // Bumped chat goes to top of unpinned
       return [...pinned, updated, ...unpinned];
     });
-  }, []);
+  }, [setChatList]);
 
   const createFolder = useCallback(async (name: string): Promise<Folder> => {
     const folder: Folder = await api.post("/api/folders", { name });
@@ -200,7 +192,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     setChatList((prev) =>
       prev.map((c) => (c.folder_id === id ? { ...c, folder_id: null } : c))
     );
-  }, []);
+  }, [setChatList]);
 
   const assignChatToFolder = useCallback(
     async (chatId: number, folderId: number | null) => {
@@ -209,7 +201,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         prev.map((c) => (c.id === chatId ? { ...c, folder_id: folderId } : c))
       );
     },
-    []
+    [setChatList]
   );
 
   const value = useMemo(() => ({

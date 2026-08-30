@@ -154,10 +154,14 @@ export default function DocumentEditorPage() {
   }, [datastoreId, docId]);
 
   useEffect(() => {
-    loadMarkdown();
-    pollStatus();
-    pollRef.current = setInterval(pollStatus, 2000);
+    let cancelled = false;
+    (async () => {
+      await Promise.all([loadMarkdown(), pollStatus()]);
+      if (cancelled) return;
+      pollRef.current = setInterval(pollStatus, 2000);
+    })();
     return () => {
+      cancelled = true;
       if (pollRef.current) clearInterval(pollRef.current);
     };
   }, [loadMarkdown, pollStatus]);

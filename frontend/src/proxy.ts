@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-export function middleware(request: NextRequest) {
+export function proxy(request: NextRequest) {
   // ── API proxy: inject real client IP for backend rate limiting ──
   if (request.nextUrl.pathname.startsWith('/api/')) {
     const forwarded = request.headers.get('x-forwarded-for');
     const realIP = forwarded
       ? forwarded.split(',')[0].trim()
-      : request.headers.get('x-real-ip') || request.ip || 'unknown';
+      : request.headers.get('x-real-ip') || 'unknown';
 
     const response = NextResponse.next();
     response.headers.set('X-Real-IP', realIP);

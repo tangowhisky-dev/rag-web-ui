@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { api, ApiError } from '@/lib/api';
 import { fetchTokenClaims } from '@/lib/auth';
@@ -50,15 +50,7 @@ export default function AbbreviationsPage() {
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  useEffect(() => {
-    (async () => {
-      const claims = await fetchTokenClaims();
-      setUserRole(claims?.role);
-      loadLists();
-    })();
-  }, []);
-
-  const loadLists = async () => {
+  const loadLists = useCallback(async () => {
     setLoading(true);
     try {
       const data = await api.get('/api/admin/abbreviation-lists');
@@ -68,7 +60,18 @@ export default function AbbreviationsPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [toast]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const claims = await fetchTokenClaims();
+      if (cancelled) return;
+      setUserRole(claims?.role);
+      await loadLists();
+    })();
+    return () => { cancelled = true; };
+  }, [loadLists]);
 
   const handleUpload = async () => {
     if (!fileInputRef.current?.files?.[0]) {

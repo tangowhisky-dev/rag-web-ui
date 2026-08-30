@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import Image from "next/image";
 import { api, ApiError } from "@/lib/api";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 import { APP_NAME, APP_DESCRIPTION, APP_ICON_SRC, APP_VERSION } from "@/lib/app-config";
@@ -96,7 +97,7 @@ export default function Home() {
       <header className="sticky top-0 z-50 w-full border-b bg-card/80 backdrop-blur-sm">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 flex h-14 items-center gap-4">
           <div className="flex items-center gap-2">
-            <img src={APP_ICON_SRC} alt={APP_NAME} className="h-7 w-7 rounded-lg" />
+            <Image src={APP_ICON_SRC} alt={APP_NAME} width={28} height={28} className="h-7 w-7 rounded-lg" />
             <div className="flex flex-col leading-none">
               <Link href="/" className="font-semibold text-sm">{APP_NAME}</Link>
               <span className="text-[10px] text-muted-foreground/60">v{APP_VERSION}</span>
@@ -300,7 +301,7 @@ export default function Home() {
       <footer className="border-t py-8">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-muted-foreground">
           <div className="flex items-center gap-2">
-            <img src={APP_ICON_SRC} alt={APP_NAME} className="h-5 w-5 rounded" />
+            <Image src={APP_ICON_SRC} alt={APP_NAME} width={20} height={20} className="h-5 w-5 rounded" />
             <span>{APP_NAME} — {APP_DESCRIPTION}</span>
           </div>
         </div>

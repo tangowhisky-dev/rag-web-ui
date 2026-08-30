@@ -44,7 +44,7 @@ const LINE_HEIGHT_PX = 24;
 const MIN_HEIGHT_PX = 2 * LINE_HEIGHT_PX;  // 2 lines default
 const MAX_HEIGHT_PX = 10 * LINE_HEIGHT_PX; // 10 lines max
 
-function useAutoResize(ref: React.RefObject<HTMLTextAreaElement>, value: string) {
+function useAutoResize(ref: React.RefObject<HTMLTextAreaElement | null>, value: string) {
   useEffect(() => {
     const ta = ref.current;
     if (!ta) return;

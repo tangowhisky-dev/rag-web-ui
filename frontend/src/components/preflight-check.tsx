@@ -47,13 +47,19 @@ export function PreflightCheck() {
   }, []);
 
   useEffect(() => {
-    checkPreflight();
+    let cancelled = false;
+    (async () => {
+      await checkPreflight();
+      if (cancelled) return;
+    })();
+    return () => { cancelled = true; };
   }, [checkPreflight]);
 
   // Auto-dismiss when navigating to any settings page
   useEffect(() => {
     if (pathname?.includes("/settings")) {
-      setDismissed(true);
+      // Defer to avoid synchronous setState in effect
+      Promise.resolve().then(() => setDismissed(true));
     }
   }, [pathname]);
 

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { validatePasswordStrength } from '@/lib/auth';
@@ -96,12 +96,7 @@ export default function AdminUsersPage() {
     confirm_password: '',
   });
 
-  useEffect(() => {
-    // Auth check is handled by the middleware.
-    fetchAll();
-  }, [router]);
-
-  async function fetchAll() {
+  const fetchAll = useCallback(async () => {
     try {
       const [usersData, orgsData, currentUser] = await Promise.all([
         api.get('/api/admin/users'),
@@ -122,7 +117,16 @@ export default function AdminUsersPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [toast]);
+
+  useEffect(() => {
+    // Auth check is handled by the middleware.
+    let cancelled = false;
+    (async () => {
+      if (!cancelled) await fetchAll();
+    })();
+    return () => { cancelled = true; };
+  }, [router, fetchAll]);
 
   async function handleCreate() {
     setCreating(true);
@@ -321,7 +325,7 @@ export default function AdminUsersPage() {
             ) : filteredUsers.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={7} className="text-center text-muted-foreground">
-                  No users match "{search}".
+                  No users match &quot;{search}&quot;.
                 </TableCell>
               </TableRow>
             ) : (

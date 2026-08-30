@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { api, ApiError } from "@/lib/api";
@@ -26,11 +26,7 @@ export default function NewChatPage() {
   const { toast } = useToast();
   const { addChat } = useChatContext();
 
-  useEffect(() => {
-    fetchKnowledgeBases();
-  }, []);
-
-  const fetchKnowledgeBases = async () => {
+  const fetchKnowledgeBases = useCallback(async () => {
     try {
       const data = await api.get("/api/knowledge-base");
       setKnowledgeBases(data);
@@ -41,7 +37,16 @@ export default function NewChatPage() {
         toast({ title: "Error", description: error.message, variant: "destructive" });
       }
     }
-  };
+  }, [toast]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      await fetchKnowledgeBases();
+      if (cancelled) return;
+    })();
+    return () => { cancelled = true; };
+  }, [fetchKnowledgeBases]);
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();

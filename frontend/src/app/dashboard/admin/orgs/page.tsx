@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
@@ -107,15 +107,7 @@ export default function AdminOrgsPage() {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
-  useEffect(() => {
-    fetchTokenClaims().then((claims) => {
-      setIsSuperAdmin(claims?.role === 'super_admin');
-      setCurrentOrgId(claims?.org_id ?? null);
-    });
-    fetchOrgs();
-  }, [router]);
-
-  async function fetchIngestionStatuses(orgList: Org[]) {
+  const fetchIngestionStatuses = useCallback(async (orgList: Org[]) => {
     const results = await Promise.allSettled(
       orgList.map((org) =>
         api.get(`/api/admin/orgs/${org.id}/ingestion-status`) as Promise<OrgIngestionStatus>
@@ -128,9 +120,9 @@ export default function AdminOrgsPage() {
       }
     });
     setIngestionStatuses(map);
-  }
+  }, []);
 
-  async function fetchOrgs() {
+  const fetchOrgs = useCallback(async () => {
     try {
       const data = await api.get('/api/admin/orgs');
       setOrgs(data);
@@ -144,7 +136,19 @@ export default function AdminOrgsPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [toast, fetchIngestionStatuses]);
+
+  useEffect(() => {
+    fetchTokenClaims().then((claims) => {
+      setIsSuperAdmin(claims?.role === 'super_admin');
+      setCurrentOrgId(claims?.org_id ?? null);
+    });
+    let cancelled = false;
+    (async () => {
+      if (!cancelled) await fetchOrgs();
+    })();
+    return () => { cancelled = true; };
+  }, [router, fetchOrgs]);
 
   async function handleCreate() {
     if (!newOrgName.trim()) return;

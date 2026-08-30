@@ -15,6 +15,7 @@ function generateId(): string {
 import { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback } from "react";
 
 import { useRouter } from "next/navigation";
+import Image from "next/image";
 import { Copy, Trash2, ChevronDown, Info } from "lucide-react";
 import { useChatContext } from "@/contexts/chat-context";
 import { api, ApiError, handleAuthRedirect } from "@/lib/api";
@@ -221,9 +222,10 @@ function ChatPageInner({ params }: { params: { id: string } }) {
   };
 
   useEffect(() => {
+    const refs = pollRefs.current;
     return () => {
-      pollRefs.current.forEach((id) => clearInterval(id));
-      pollRefs.current.clear();
+      refs.forEach((id) => clearInterval(id));
+      refs.clear();
     };
   }, []);
 
@@ -298,13 +300,15 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     } finally {
       setIsInitialLoad(false);
     }
-  }, [params.id, formatMessage, toast, router]);
+  }, [params.id, formatMessage, toast, router, setMessages]);
 
   useEffect(() => {
-    if (isInitialLoad) {
-      fetchChat();
-      // NOTE: do NOT setIsInitialLoad(false) here — fetchChat does it in its finally block
-    }
+    if (!isInitialLoad) return;
+    let cancelled = false;
+    (async () => {
+      if (!cancelled) await fetchChat();
+    })();
+    return () => { cancelled = true; };
   }, [isInitialLoad, fetchChat]);
 
   // Restore scroll position after prepending older messages (must be synchronous pre-paint)
@@ -380,7 +384,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     } finally {
       setIsLoadingMore(false);
     }
-  }, [isLoadingMore, hasMoreMessages, messages, params.id, formatMessage]);
+  }, [isLoadingMore, hasMoreMessages, messages, params.id, formatMessage, setMessages, setHasMoreMessages, setIsLoadingMore]);
 
   // IntersectionObserver: trigger load-more when top sentinel enters view
   useEffect(() => {
@@ -405,7 +409,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
   // Answer when the parent re-renders during streaming.
   const handleDeleteMessage = useCallback((id: string) => {
     setMessages((prev) => prev.filter((m) => m.id !== id));
-  }, []);
+  }, [setMessages]);
 
   const flushToBrowser = async () => {
     await new Promise<void>((resolve) => {
@@ -1204,9 +1208,9 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     return last;
   }, [messages]);
 
-  const handleFollowUp = useCallback((query: string) => {
+  const handleFollowUp = (query: string) => {
     handleSubmit(query);
-  }, [handleSubmit]);
+  };
 
   const [kbToggling, setKbToggling] = useState(false);
   const kbPatchInFlight = useRef<Promise<unknown> | null>(null);
@@ -1248,7 +1252,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
           {messages.length === 0 && !isLoading && !isInitialLoad ? (
             /* Welcome / empty state */
             <div className="flex flex-col items-center justify-center h-full gap-4 px-4 text-center">
-              <img src={APP_LOGO_SRC} alt="logo" className="w-16 h-16 rounded-2xl" />
+              <Image src={APP_LOGO_SRC} alt="logo" width={64} height={64} className="w-16 h-16 rounded-2xl" />
               <h2 className="text-2xl font-semibold">How can I help you today?</h2>
               <p className="text-sm text-muted-foreground">Ask anything about your knowledge base</p>
             </div>
@@ -1258,8 +1262,10 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                 message.role === "assistant" ? (
                   <div key={message.clientId} className="flex items-start gap-3">
                     {/* Avatar */}
-                    <img
+                    <Image
                       src={APP_LOGO_SRC}
+                      width={28}
+                      height={28}
                       className="h-7 w-7 rounded-full shrink-0 mt-0.5"
                       alt="assistant"
                     />

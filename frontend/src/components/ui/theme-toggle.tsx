@@ -2,14 +2,11 @@
 
 import { useTheme } from "next-themes";
 import { Sun, Moon } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useHydrated } from "@/lib/hooks";
 
 export function ThemeToggle() {
   const { setTheme, resolvedTheme } = useTheme();
-  const [mounted, setMounted] = useState(false);
-
-  // Avoid hydration mismatch — only render icon after mount
-  useEffect(() => setMounted(true), []);
+  const mounted = useHydrated();
 
   if (!mounted) {
     return <div className="h-8 w-8" />;

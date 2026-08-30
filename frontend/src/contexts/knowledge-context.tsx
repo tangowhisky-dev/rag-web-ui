@@ -39,14 +39,21 @@ export function KnowledgeProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
-    refreshKbList();
+    let cancelled = false;
+    (async () => {
+      await refreshKbList();
+      if (cancelled) return;
+    })();
+    return () => { cancelled = true; };
   }, [refreshKbList]);
 
   // Keep a ref to kbList so renameKb always reads the freshest data
   // without being re-created on every kbList change (which would break
   // any closures that hold a reference to an older renameKb).
   const kbListRef = useRef(kbList);
-  kbListRef.current = kbList;
+  useEffect(() => {
+    kbListRef.current = kbList;
+  }, [kbList]);
 
   const renameKb = useCallback(async (id: number, name: string) => {
     const current = kbListRef.current.find((k) => k.id === id);

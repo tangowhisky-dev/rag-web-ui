@@ -39,7 +39,7 @@ export function SelectionActions({
   onAction,
   disabled,
 }: {
-  containerRef: React.RefObject<HTMLElement>;
+  containerRef: React.RefObject<HTMLElement | null>;
   onAction: (query: string) => void;
   disabled?: boolean;
 }) {

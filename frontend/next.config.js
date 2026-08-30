@@ -1,11 +1,16 @@
 /** @type {import('next').NextConfig} */
 module.exports = {
   output: "standalone",
-  skipMiddlewareUrlNormalize: true,
+  skipProxyUrlNormalize: true,
   skipTrailingSlashRedirect: true,
   experimental: {
-    outputFileTracingRoot: undefined,
     proxyTimeout: 120000,
+  },
+  turbopack: {
+    resolveAlias: {
+      "@huggingface/transformers":
+        "./node_modules/@huggingface/transformers/dist/transformers.web.js",
+    },
   },
   webpack: (config, { isServer }) => {
     // @huggingface/transformers resolves to the Node.js bundle under the

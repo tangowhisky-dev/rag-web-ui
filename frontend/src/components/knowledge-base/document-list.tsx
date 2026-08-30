@@ -64,7 +64,9 @@ export function DocumentList({ knowledgeBaseId, refreshKey }: DocumentListProps)
   const docsRef = useRef<Document[]>([]);
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const knowledgeBaseIdRef = useRef(knowledgeBaseId);
-  knowledgeBaseIdRef.current = knowledgeBaseId;
+  useEffect(() => {
+    knowledgeBaseIdRef.current = knowledgeBaseId;
+  }, [knowledgeBaseId]);
 
   const clearPoll = () => {
     if (pollTimerRef.current) {
@@ -155,22 +157,26 @@ export function DocumentList({ knowledgeBaseId, refreshKey }: DocumentListProps)
   // Initial load + reload when refreshKey changes
   useEffect(() => {
     clearPoll();
-    setLoading(true);
-    fetchDocuments().then((docs) => {
-      if (docs) {
-        docsRef.current = docs;
-        const hasInProgress = docs.some((d) =>
-          d.processing_tasks.some(
-            (t) =>
-              t.status === "pending" ||
-              t.status === "processing" ||
-              t.graph_status === "pending"
-          )
-        );
-        if (hasInProgress) schedulePoll();
-      }
-    });
-    return clearPoll;
+    let cancelled = false;
+    (async () => {
+      // Set loading before fetch — use a microtask to avoid synchronous setState in effect
+      await Promise.resolve();
+      if (cancelled) return;
+      setLoading(true);
+      const docs = await fetchDocuments();
+      if (cancelled || !docs) return;
+      docsRef.current = docs;
+      const hasInProgress = docs.some((d) =>
+        d.processing_tasks.some(
+          (t) =>
+            t.status === "pending" ||
+            t.status === "processing" ||
+            t.graph_status === "pending"
+        )
+      );
+      if (hasInProgress) schedulePoll();
+    })();
+    return () => { cancelled = true; clearPoll(); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [knowledgeBaseId, refreshKey]);
 

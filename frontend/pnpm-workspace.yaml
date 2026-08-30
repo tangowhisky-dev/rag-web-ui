@@ -1,0 +1,6 @@
+allowBuilds:
+  "@parcel/watcher": true
+  onnxruntime-node: true
+  protobufjs: true
+  sharp: true
+  unrs-resolver: true

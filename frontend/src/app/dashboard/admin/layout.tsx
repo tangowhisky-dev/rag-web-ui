@@ -5,17 +5,17 @@ import Breadcrumb from '@/components/ui/breadcrumb';
 import AdminSidebar from '@/components/admin/admin-sidebar';
 import { NavActions } from '@/components/layout/nav-actions';
 import { api } from '@/lib/api';
+import { useHydrated } from '@/lib/hooks';
 
 // LLM config is managed via the Settings UI (Super Admin + per-org Settings).
 // The standalone /dashboard/admin/llm-config page does not exist.
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const [hydrated, setHydrated] = useState(false);
+  const hydrated = useHydrated();
   const [userRole, setUserRole] = useState<string | undefined>(undefined);
 
   useEffect(() => {
-    setHydrated(true);
     api.get('/api/auth/test-token').then((data: { role?: string }) => {
       setUserRole(data?.role);
     }).catch(() => {});

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { api, ApiError } from '@/lib/api';
 import { fetchTokenClaims } from '@/lib/auth';
 
@@ -186,6 +186,27 @@ export default function DataSourcesPage() {
     });
   }, []);
 
+  const fetchData = useCallback(async () => {
+    try {
+      const [dsData, orgData] = await Promise.all([
+        api.get('/api/admin/datastores?limit=200') as Promise<{ items: DataStore[]; total: number } | DataStore[]>,
+        api.get('/api/admin/orgs') as Promise<Org[]>,
+      ]);
+      // Handle both paginated {items: [...]} and legacy [...] responses
+      const dsList = Array.isArray(dsData) ? dsData : dsData.items;
+      setDatastores(dsList);
+      setOrgs(orgData);
+    } catch (err) {
+      toast({
+        title: 'Error',
+        description: (err as { message?: string }).message ?? 'Failed to load data stores',
+        variant: 'destructive',
+      });
+    } finally {
+      setLoading(false);
+    }
+  }, [toast]);
+
   // Poll for scan progress when ANY datastore is processing or scanning
   // Note: SSE is used for real-time progress during manual scans, but we
   // still poll for event-driven processing and background scans.
@@ -221,7 +242,7 @@ export default function DataSourcesPage() {
       // datastores changes (which happens on every poll), leaving
       // scanProgress stuck at 0/0 until the page is refreshed.
     };
-  }, [triggering, datastores]);
+  }, [triggering, datastores, fetchData]);
 
   // Poll recovery status for all datastores
   useEffect(() => {
@@ -269,32 +290,15 @@ export default function DataSourcesPage() {
       }
     }, 2000);
     return () => clearInterval(interval);
-  }, [recoveryStatuses, datastores.length]);
+  }, [recoveryStatuses, datastores, fetchData]);
 
   useEffect(() => {
-    fetchData();
-  }, []);
-
-  async function fetchData() {
-    try {
-      const [dsData, orgData] = await Promise.all([
-        api.get('/api/admin/datastores?limit=200') as Promise<{ items: DataStore[]; total: number } | DataStore[]>,
-        api.get('/api/admin/orgs') as Promise<Org[]>,
-      ]);
-      // Handle both paginated {items: [...]} and legacy [...] responses
-      const dsList = Array.isArray(dsData) ? dsData : dsData.items;
-      setDatastores(dsList);
-      setOrgs(orgData);
-    } catch (err) {
-      toast({
-        title: 'Error',
-        description: (err as { message?: string }).message ?? 'Failed to load data stores',
-        variant: 'destructive',
-      });
-    } finally {
-      setLoading(false);
-    }
-  }
+    let cancelled = false;
+    (async () => {
+      if (!cancelled) await fetchData();
+    })();
+    return () => { cancelled = true; };
+  }, [fetchData]);
 
   function openCreate() {
     setEditingId(null);

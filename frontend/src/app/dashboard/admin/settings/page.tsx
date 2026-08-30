@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -61,14 +61,7 @@ export default function SuperAdminSettingsPage() {
   const [confirmKey, setConfirmKey] = useState<string | null>(null);
   const [preflightIssues, setPreflightIssues] = useState<PreflightIssue[]>([]);
 
-  useEffect(() => {
-    fetchSettings();
-    api.get('/api/auth/preflight').then((data: any) => {
-      setPreflightIssues(data.issues || []);
-    }).catch(() => {});
-  }, []);
-
-  async function fetchSettings() {
+  const fetchSettings = useCallback(async () => {
     try {
       const data = await api.get('/api/admin/settings') as SettingsResponse;
       setSettings(data.settings);
@@ -81,7 +74,19 @@ export default function SuperAdminSettingsPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [toast]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!cancelled) await fetchSettings();
+    })();
+    api.get('/api/auth/preflight').then((data: any) => {
+      if (cancelled) return;
+      setPreflightIssues(data.issues || []);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [fetchSettings]);
 
   function updateValue(key: string, value: any) {
     setSettings(prev => prev.map(s => s.key === key ? { ...s, value } : s));

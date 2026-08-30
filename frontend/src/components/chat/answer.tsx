@@ -204,9 +204,11 @@ export const Answer: FC<{
   const citationsRef = useRef(citations);
   const citationInfoMapRef = useRef(citationInfoMap);
   const genericDocMapRef = useRef(genericDocMap);
-  citationsRef.current = citations;
-  citationInfoMapRef.current = citationInfoMap;
-  genericDocMapRef.current = genericDocMap;
+  useEffect(() => {
+    citationsRef.current = citations;
+    citationInfoMapRef.current = citationInfoMap;
+    genericDocMapRef.current = genericDocMap;
+  }, [citations, citationInfoMap, genericDocMap]);
 
   // renderKey forces <Markdown> to remount when citations become ready.
   // Only bump on the citations-empty -> citations-present transition itself
@@ -656,6 +658,8 @@ export const Answer: FC<{
     }
   }, [messageId, chatId]);
 
+  const contentRef = useRef<HTMLDivElement>(null);
+
   if (!markdown && !rewrittenQuery) {
     return (
       <div className="flex flex-col gap-2">
@@ -667,8 +671,6 @@ export const Answer: FC<{
       </div>
     );
   }
-
-  const contentRef = useRef<HTMLDivElement>(null);
 
   return (
     <div className="prose prose-sm max-w-full" ref={contentRef}>
@@ -874,6 +876,8 @@ export const Answer: FC<{
     </div>
   );
 });
+
+Answer.displayName = "Answer";
 
 // ── ConfidenceCollapsible: final evaluation metrics ──────────────────────────
 

@@ -151,19 +151,29 @@ export default function SearchPage() {
   // Fetch recent searches + LLM suggestions for empty state
   useEffect(() => {
     if (hasSearched) return;
-    api.get("/api/search/history?limit=3").then((data: any) => {
-      const items = Array.isArray(data) ? data : [];
-      setRecentSearches(items);
-    }).catch(() => {});
+    let cancelled = false;
+    (async () => {
+      api.get("/api/search/history?limit=3").then((data: any) => {
+        if (cancelled) return;
+        const items = Array.isArray(data) ? data : [];
+        setRecentSearches(items);
+      }).catch(() => {});
 
-    setSuggestionsLoading(true);
-    api.post("/api/search/suggestions").then((data: any) => {
-      setSuggestions(data.suggestions ?? []);
-    }).catch(() => {
-      setSuggestions([]);
-    }).finally(() => {
-      setSuggestionsLoading(false);
-    });
+      await Promise.resolve();
+      if (cancelled) return;
+      setSuggestionsLoading(true);
+      api.post("/api/search/suggestions").then((data: any) => {
+        if (cancelled) return;
+        setSuggestions(data.suggestions ?? []);
+      }).catch(() => {
+        if (cancelled) return;
+        setSuggestions([]);
+      }).finally(() => {
+        if (cancelled) return;
+        setSuggestionsLoading(false);
+      });
+    })();
+    return () => { cancelled = true; };
   }, [hasSearched]);
 
   const toggleKb = useCallback((kbId: number) => {

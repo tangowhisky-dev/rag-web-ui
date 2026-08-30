@@ -115,10 +115,14 @@ export default function AbbreviationListDetailPage() {
       }
     }, 300);
     return () => clearTimeout(timer);
-  }, [search]);
+  }, [search, page, loadItems]);
 
   useEffect(() => {
-    loadItems();
+    let cancelled = false;
+    (async () => {
+      if (!cancelled) await loadItems();
+    })();
+    return () => { cancelled = true; };
   }, [page, loadItems]);
 
   const handleSave = async () => {

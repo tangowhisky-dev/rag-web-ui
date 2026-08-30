@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { ChevronLeft, ChevronRight, Pencil, Check, X } from "lucide-react";
 import { api } from "@/lib/api";
 
@@ -57,30 +57,10 @@ export function BranchPicker({
 
   // Keep draft in sync if content prop changes (e.g. after navigation)
   useEffect(() => {
-    setDraft(content);
+    Promise.resolve().then(() => setDraft(content));
   }, [content]);
 
-  // Fetch siblings on mount so navigation arrows appear for branched messages.
-  // Skip while the message ID is still a client-generated UUID placeholder —
-  // the server hasn't persisted the message yet, so it can't have siblings.
-  // Once the SSE "done" event replaces the UUID with the real DB int ID,
-  // this effect re-fires and fetches siblings correctly.
-  useEffect(() => {
-    if (messageId.includes("-")) return;  // UUID placeholder, not yet persisted
-    fetchSiblings(messageId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messageId]);
-
-  // Auto-focus textarea when entering edit mode
-  useEffect(() => {
-    if (isEditing) {
-      textareaRef.current?.focus();
-      const len = draft.length;
-      textareaRef.current?.setSelectionRange(len, len);
-    }
-  }, [isEditing]);
-
-  const fetchSiblings = async (forMessageId: string) => {
+  const fetchSiblings = useCallback(async (forMessageId: string) => {
     try {
       const data: SiblingPair[] = await api.get(
         `/api/chat/${chatId}/messages/${forMessageId}/siblings`
@@ -96,7 +76,30 @@ export function BranchPicker({
     } catch {
       // Silently ignore — siblings are optional UX enhancement
     }
-  };
+  }, [chatId]);
+
+  // Fetch siblings on mount so navigation arrows appear for branched messages.
+  // Skip while the message ID is still a client-generated UUID placeholder —
+  // the server hasn't persisted the message yet, so it can't have siblings.
+  // Once the SSE "done" event replaces the UUID with the real DB int ID,
+  // this effect re-fires and fetches siblings correctly.
+  useEffect(() => {
+    if (messageId.includes("-")) return;  // UUID placeholder, not yet persisted
+    let cancelled = false;
+    (async () => {
+      if (!cancelled) await fetchSiblings(messageId);
+    })();
+    return () => { cancelled = true; };
+  }, [messageId, fetchSiblings]);
+
+  // Auto-focus textarea when entering edit mode
+  useEffect(() => {
+    if (isEditing) {
+      textareaRef.current?.focus();
+      const len = draft.length;
+      textareaRef.current?.setSelectionRange(len, len);
+    }
+  }, [isEditing, draft.length]);
 
   const handleEdit = () => {
     setDraft(content);

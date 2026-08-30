@@ -57,7 +57,6 @@ export default function MermaidDiagram({ code }: MermaidDiagramProps) {
   return (
     <div
       className="mermaid-diagram overflow-auto"
-      // eslint-disable-next-line react/no-danger
       dangerouslySetInnerHTML={{ __html: svg }}
     />
   );

@@ -227,7 +227,7 @@ export default function DatastoreBrowsePage() {
   useEffect(() => {
     const debounce = setTimeout(fetchData, search ? 300 : 0);
     return () => clearTimeout(debounce);
-  }, [fetchData]);
+  }, [fetchData, search]);
 
   // Compute dirty changes — includes both file-level and folder-level
   const dirtyChanges = useMemo(() => {

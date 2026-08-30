@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import { CircuitBoard } from "lucide-react";
 import Breadcrumb from "@/components/ui/breadcrumb";
 import { NavActions } from "./nav-actions";
+import { useHydrated } from "@/lib/hooks";
 
 export default function DashboardLayout({
   children,
@@ -14,11 +14,7 @@ export default function DashboardLayout({
   pageTitle?: string;
   graphRagActive?: boolean;
 }) {
-  const [hydrated, setHydrated] = useState(false);
-
-  useEffect(() => {
-    setHydrated(true);
-  }, []);
+  const hydrated = useHydrated();
 
   // Wait for hydration before showing content
   if (!hydrated) {

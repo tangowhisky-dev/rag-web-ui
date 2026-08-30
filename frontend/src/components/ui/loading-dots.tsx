@@ -19,7 +19,11 @@ export function LoadingDots({
   size?: "sm" | "md";
 }) {
   const [elapsed, setElapsed] = useState(0);
-  const startRef = useRef<number>(Date.now());
+  const startRef = useRef<number>(0);
+
+  useEffect(() => {
+    startRef.current = Date.now();
+  }, []);
 
   useEffect(() => {
     if (!showElapsed) return;

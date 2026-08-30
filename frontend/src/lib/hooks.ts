@@ -1,13 +1,15 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState, useSyncExternalStore } from "react";
 import { api } from "@/lib/api";
 
 export function useHydrated() {
-  const [hydrated, setHydrated] = useState(false);
-  useEffect(() => setHydrated(true), []);
-  return hydrated;
+  return useSyncExternalStore(
+    () => () => {},
+    () => true,
+    () => false,
+  );
 }
 
 export function useLogout() {
@@ -20,11 +22,10 @@ export function useLogout() {
 
 /** Sidebar collapse state synced to localStorage. */
 export function useSidebarCollapse(storageKey: string) {
-  const [collapsed, setCollapsed] = useState(false);
-
-  useEffect(() => {
-    setCollapsed(localStorage.getItem(storageKey) === "true");
-  }, [storageKey]);
+  const [collapsed, setCollapsed] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return localStorage.getItem(storageKey) === "true";
+  });
 
   const toggleCollapse = useCallback(() => {
     setCollapsed((prev) => {
