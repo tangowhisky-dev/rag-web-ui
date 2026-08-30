@@ -11,6 +11,13 @@ import {
   Clock,
   Sparkles,
 } from "lucide-react";
+import DashboardLayout from "@/components/layout/dashboard-layout";
+import { api, ApiError } from "@/lib/api";
+import { useHydrated } from "@/lib/hooks";
+import { cn } from "@/lib/utils";
+import { useToast } from "@/components/ui/use-toast";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import GroupedResultCard, { groupResultsByDocument, type SearchResult } from "@/components/search/GroupedResultCard";
 
 // ── Composite search + AI icon ───────────────────────────────────────────────
 // A magnifying glass with a sparkle inside the lens, conveying AI-powered search.
@@ -59,29 +66,10 @@ function SearchAiIcon({ className }: { className?: string }) {
     </svg>
   );
 }
-import DashboardLayout from "@/components/layout/dashboard-layout";
-import { api, ApiError } from "@/lib/api";
-import { useHydrated } from "@/lib/hooks";
-import { cn } from "@/lib/utils";
-import { useToast } from "@/components/ui/use-toast";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import GroupedResultCard, { groupResultsByDocument } from "@/components/search/GroupedResultCard";
 
 interface KbItem {
   id: number;
   name: string;
-}
-
-interface SearchResult {
-  chunk_text: string;
-  original_text: string | null;
-  title: string | null;
-  file_name: string;
-  document_id: number;
-  kb_id: number | null;
-  data_store_id: number | null;
-  chunk_index: number | null;
-  reranker_score: number;
 }
 
 interface SearchResponse {
@@ -214,6 +202,7 @@ export default function SearchPage() {
         toast({ title: "Search failed", description: "Unexpected error", variant: "destructive" });
       }
       setResults([]);
+      setGroupedResults([]);
     } finally {
       setLoading(false);
     }
@@ -460,7 +449,6 @@ export default function SearchPage() {
                     href={`/api/knowledge-base/documents/${group.documentId}/download`}
                     target="_blank"
                     rel="noopener noreferrer"
-                    onClick={(e) => e.preventDefault()}
                   >
                     <GroupedResultCard group={group} query={query} kbName={kbName ?? undefined} />
                   </a>

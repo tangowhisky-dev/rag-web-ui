@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import {
   ChevronLeft,
   ChevronRight,
@@ -14,7 +14,7 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/utils";
 
-interface SearchResult {
+export interface SearchResult {
   chunk_text: string;
   original_text: string | null;
   title: string | null;
@@ -26,7 +26,7 @@ interface SearchResult {
   reranker_score: number;
 }
 
-interface GroupedSearchResult {
+export interface GroupedSearchResult {
   documentId: number;
   fileName: string;
   title: string | null;
@@ -100,17 +100,14 @@ export function groupResultsByDocument(results: SearchResult[]): GroupedSearchRe
     // Sort chunks by reranker_score (descending) within each group
     chunks.sort((a, b) => b.reranker_score - a.reranker_score);
 
-    const bestScore = Math.max(...chunks.map((c) => c.reranker_score));
-    const firstChunk = chunks[0];
-
     groupedResults.push({
       documentId,
-      fileName: firstChunk.file_name,
-      title: firstChunk.title,
-      kbId: firstChunk.kb_id,
-      dataStoreId: firstChunk.data_store_id,
+      fileName: chunks[0].file_name,
+      title: chunks[0].title,
+      kbId: chunks[0].kb_id,
+      dataStoreId: chunks[0].data_store_id,
       chunks,
-      bestScore,
+      bestScore: chunks[0].reranker_score,
       totalChunks: chunks.length,
     });
   }
@@ -124,28 +121,31 @@ export function groupResultsByDocument(results: SearchResult[]): GroupedSearchRe
 export default function GroupedResultCard({ group, query, kbName }: GroupedResultCardProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [currentIndex, setCurrentIndex] = useState(0);
+  const [visibleChunks, setVisibleChunks] = useState(3);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+
+  // Responsive: show 2 chunks on mobile, 3 on tablet, 4 on desktop
+  useEffect(() => {
+    const updateVisible = () => {
+      if (window.innerWidth < 768) setVisibleChunks(2);
+      else if (window.innerWidth < 1024) setVisibleChunks(3);
+      else setVisibleChunks(4);
+    };
+    updateVisible();
+    window.addEventListener("resize", updateVisible);
+    return () => window.removeEventListener("resize", updateVisible);
+  }, []);
 
   const Icon = fileIcon(group.fileName);
   const tier = scoreTier(group.bestScore);
   const displayTitle = group.title || group.fileName;
   const showFilename = group.title && group.title !== cleanFilename(group.fileName);
 
-  // Responsive: show 2 chunks on mobile, 3 on tablet, 4 on desktop
-  const getVisibleChunks = () => {
-    if (typeof window !== "undefined") {
-      if (window.innerWidth < 768) return 2;
-      if (window.innerWidth < 1024) return 3;
-      return 4;
-    }
-    return 3;
-  };
-
-  const visibleChunks = getVisibleChunks();
   const canScrollLeft = currentIndex > 0;
   const canScrollRight = currentIndex < group.chunks.length - visibleChunks;
 
-  const scrollLeft = useCallback(() => {
+  const scrollLeft = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
     if (currentIndex > 0) {
       const newIndex = currentIndex - 1;
       setCurrentIndex(newIndex);
@@ -156,7 +156,8 @@ export default function GroupedResultCard({ group, query, kbName }: GroupedResul
     }
   }, [currentIndex, visibleChunks]);
 
-  const scrollRight = useCallback(() => {
+  const scrollRight = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
     if (currentIndex < group.chunks.length - visibleChunks) {
       const newIndex = currentIndex + 1;
       setCurrentIndex(newIndex);
@@ -169,12 +170,19 @@ export default function GroupedResultCard({ group, query, kbName }: GroupedResul
 
   const handleMouseEnter = () => setIsExpanded(true);
   const handleMouseLeave = () => setIsExpanded(false);
+  const handleFocus = () => setIsExpanded(true);
+  const handleBlur = (e: React.FocusEvent) => {
+    if (!e.currentTarget.contains(e.relatedTarget)) setIsExpanded(false);
+  };
 
   return (
     <div
       className="rounded-lg border bg-card transition-all duration-300 ease-in-out hover:shadow-lg hover:scale-[1.01] group"
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
+      onFocus={handleFocus}
+      onBlur={handleBlur}
+      tabIndex={0}
     >
       {/* Header - always visible */}
       <div className="p-4">
@@ -205,86 +213,92 @@ export default function GroupedResultCard({ group, query, kbName }: GroupedResul
       </div>
 
       {/* Collapsed: show first chunk preview */}
-      {!isExpanded && group.chunks.length > 0 && (
-        <div className="px-4 pb-4">
-          <div className="text-sm text-muted-foreground leading-relaxed prose prose-sm dark:prose-invert max-w-none pointer-events-none line-clamp-3">
-            <Markdown remarkPlugins={[remarkGfm]}>
-              {highlightInMarkdown(snippet(group.chunks[0].original_text || group.chunks[0].chunk_text), query)}
-            </Markdown>
-          </div>
+      <div
+        className={cn(
+          "px-4 overflow-hidden transition-all duration-300 ease-in-out",
+          isExpanded ? "max-h-0 opacity-0 pb-0" : "max-h-40 opacity-100 pb-4",
+        )}
+      >
+        <div className="text-sm text-muted-foreground leading-relaxed prose prose-sm dark:prose-invert max-w-none pointer-events-none line-clamp-3">
+          <Markdown remarkPlugins={[remarkGfm]}>
+            {highlightInMarkdown(snippet(group.chunks[0].original_text || group.chunks[0].chunk_text), query)}
+          </Markdown>
         </div>
-      )}
+      </div>
 
       {/* Expanded: horizontal carousel of all chunks */}
-      {isExpanded && (
-        <div className="border-t border-border/50">
-          <div className="relative">
-            {/* Navigation buttons */}
-            {group.chunks.length > visibleChunks && (
-              <>
-                <button
-                  onClick={scrollLeft}
-                  disabled={!canScrollLeft}
-                  className="absolute left-2 top-1/2 -translate-y-1/2 z-10 rounded-full bg-background/80 backdrop-blur-sm border p-1.5 text-muted-foreground hover:text-foreground hover:bg-background transition-all disabled:opacity-30 disabled:cursor-not-allowed shadow-sm"
-                  aria-label="Previous chunk"
-                >
-                  <ChevronLeft className="h-4 w-4" />
-                </button>
-                <button
-                  onClick={scrollRight}
-                  disabled={!canScrollRight}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 z-10 rounded-full bg-background/80 backdrop-blur-sm border p-1.5 text-muted-foreground hover:text-foreground hover:bg-background transition-all disabled:opacity-30 disabled:cursor-not-allowed shadow-sm"
-                  aria-label="Next chunk"
-                >
-                  <ChevronRight className="h-4 w-4" />
-                </button>
-              </>
-            )}
+      <div
+        className={cn(
+          "overflow-hidden transition-all duration-300 ease-in-out border-t border-border/50",
+          isExpanded ? "max-h-[400px] opacity-100" : "max-h-0 opacity-0 border-t-0",
+        )}
+      >
+        <div className="relative">
+          {/* Navigation buttons */}
+          {group.chunks.length > visibleChunks && (
+            <>
+              <button
+                onClick={scrollLeft}
+                disabled={!canScrollLeft}
+                className="absolute left-2 top-1/2 -translate-y-1/2 z-10 rounded-full bg-background/80 backdrop-blur-sm border p-1.5 text-muted-foreground hover:text-foreground hover:bg-background transition-all disabled:opacity-30 disabled:cursor-not-allowed shadow-sm"
+                aria-label="Previous chunk"
+              >
+                <ChevronLeft className="h-4 w-4" />
+              </button>
+              <button
+                onClick={scrollRight}
+                disabled={!canScrollRight}
+                className="absolute right-2 top-1/2 -translate-y-1/2 z-10 rounded-full bg-background/80 backdrop-blur-sm border p-1.5 text-muted-foreground hover:text-foreground hover:bg-background transition-all disabled:opacity-30 disabled:cursor-not-allowed shadow-sm"
+                aria-label="Next chunk"
+              >
+                <ChevronRight className="h-4 w-4" />
+              </button>
+            </>
+          )}
 
-            {/* Carousel container */}
-            <div
-              ref={scrollContainerRef}
-              className="flex overflow-x-auto snap-x snap-mandatory scrollbar-hide"
-              style={{
-                scrollbarWidth: "none",
-                msOverflowStyle: "none",
-              }}
-            >
-              {group.chunks.map((chunk, index) => {
-                const chunkTier = scoreTier(chunk.reranker_score);
-                return (
-                  <div
-                    key={`${chunk.document_id}-${chunk.chunk_index}-${index}`}
-                    className="flex-shrink-0 w-full snap-start"
-                    style={{
-                      width: `calc(100% / ${visibleChunks})`,
-                    }}
-                  >
-                    <div className="p-4 border-l border-r border-border/30 first:border-l-0 last:border-r-0 h-full">
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="text-xs text-muted-foreground/70">
-                          Chunk {index + 1} of {group.totalChunks}
-                        </span>
-                        <span className={cn(
-                          "shrink-0 rounded-full border px-1.5 py-0.5 text-[10px] font-medium tabular-nums",
-                          chunkTier.className,
-                        )}>
-                          {chunk.reranker_score.toFixed(2)}
-                        </span>
-                      </div>
-                      <div className="text-sm text-muted-foreground leading-relaxed prose prose-sm dark:prose-invert max-w-none pointer-events-none line-clamp-4">
-                        <Markdown remarkPlugins={[remarkGfm]}>
-                          {highlightInMarkdown(snippet(chunk.original_text || chunk.chunk_text), query)}
-                        </Markdown>
-                      </div>
+          {/* Carousel container */}
+          <div
+            ref={scrollContainerRef}
+            className="flex overflow-x-auto snap-x snap-mandatory scrollbar-hide"
+            style={{
+              scrollbarWidth: "none",
+              msOverflowStyle: "none",
+            }}
+          >
+            {group.chunks.map((chunk, index) => {
+              const chunkTier = scoreTier(chunk.reranker_score);
+              return (
+                <div
+                  key={`${chunk.document_id}-${chunk.chunk_index}-${index}`}
+                  className="flex-shrink-0 w-full snap-start"
+                  style={{
+                    width: `calc(100% / ${visibleChunks})`,
+                  }}
+                >
+                  <div className="p-4 border-l border-r border-border/30 first:border-l-0 last:border-r-0 h-full">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs text-muted-foreground/70">
+                        Chunk {index + 1} of {group.totalChunks}
+                      </span>
+                      <span className={cn(
+                        "shrink-0 rounded-full border px-1.5 py-0.5 text-[10px] font-medium tabular-nums",
+                        chunkTier.className,
+                      )}>
+                        {chunk.reranker_score.toFixed(2)}
+                      </span>
+                    </div>
+                    <div className="text-sm text-muted-foreground leading-relaxed prose prose-sm dark:prose-invert max-w-none pointer-events-none line-clamp-4">
+                      <Markdown remarkPlugins={[remarkGfm]}>
+                        {highlightInMarkdown(snippet(chunk.original_text || chunk.chunk_text), query)}
+                      </Markdown>
                     </div>
                   </div>
-                );
-              })}
-            </div>
+                </div>
+              );
+            })}
           </div>
         </div>
-      )}
+      </div>
 
       {/* Footer - KB name */}
       {kbName && (
