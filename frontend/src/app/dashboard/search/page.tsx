@@ -18,6 +18,7 @@ import { cn } from "@/lib/utils";
 import { useToast } from "@/components/ui/use-toast";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import GroupedResultCard, { groupResultsByDocument, type SearchResult } from "@/components/search/GroupedResultCard";
+import { Suggestion, Suggestions } from "@/components/ai-elements/suggestion";
 
 // ── Composite search + AI icon ───────────────────────────────────────────────
 // A magnifying glass with a sparkle inside the lens, conveying AI-powered search.
@@ -378,23 +379,20 @@ export default function SearchPage() {
               </div>
             )}
             {!suggestionsLoading && suggestions.length > 0 && (
-              <div className="max-w-md mx-auto mb-8 animate-in fade-in duration-500">
-                <div className="flex items-center gap-1.5 mb-2 text-xs text-muted-foreground">
+              <div className="max-w-2xl mx-auto mb-8 animate-in fade-in duration-500">
+                <div className="flex items-center gap-1.5 mb-3 text-xs text-muted-foreground">
                   <Sparkles className="h-3.5 w-3.5" />
                   <span>Suggested searches</span>
                 </div>
-                <div className="space-y-2">
+                <Suggestions>
                   {suggestions.map((s, i) => (
-                    <button
+                    <Suggestion
                       key={i}
-                      type="button"
-                      onClick={() => handleSearch(s)}
-                      className="block w-full text-left rounded-lg border bg-card px-3 py-2 text-sm text-foreground hover:border-primary/30 hover:bg-accent/40 transition-colors"
-                    >
-                      {s}
-                    </button>
+                      suggestion={s}
+                      onClick={handleSearch}
+                    />
                   ))}
-                </div>
+                </Suggestions>
               </div>
             )}
 

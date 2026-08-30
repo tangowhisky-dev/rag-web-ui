@@ -1,63 +1,104 @@
-import { useEffect, useState, useRef } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { useEffect, useState, useRef, useMemo } from "react";
+import {
+  ChainOfThought,
+  ChainOfThoughtContent,
+  ChainOfThoughtHeader,
+  ChainOfThoughtStep,
+} from "@/components/ai-elements/chain-of-thought";
+import { Shimmer } from "@/components/ai-elements/shimmer";
+import {
+  Tool,
+  ToolContent,
+  ToolHeader,
+  ToolInput,
+  ToolOutput,
+  type ToolState,
+} from "@/components/ai-elements/tool";
+import {
+  SearchIcon,
+  BrainIcon,
+  FileTextIcon,
+  CheckCircleIcon,
+  CodeIcon,
+  BarChartIcon,
+  SparklesIcon,
+  WrenchIcon,
+  BookOpenIcon,
+  ScanTextIcon,
+} from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 
 // ── Node → Phase mapping ─────────────────────────────────────────────────────
 
 const NODE_PHASE: Record<string, string> = {
   // Phase 1: Analyzing query
-  rewrite_query: "Analyzing query …",
-  classify_query: "Analyzing query …",
-  load_context: "Analyzing query …",
-  plan: "Analyzing query …",
-  clarify_interrupt: "Analyzing query …",
+  rewrite_query: "Analyzing query",
+  classify_query: "Analyzing query",
+  load_context: "Analyzing query",
+  plan: "Analyzing query",
+  clarify_interrupt: "Analyzing query",
 
   // Phase 2: Gathering sources
-  exact_retrieval: "Gathering sources …",
-  sparse_retrieval: "Gathering sources …",
-  dense_retrieval: "Gathering sources …",
-  neo4j_expansion: "Gathering sources …",
+  exact_retrieval: "Gathering sources",
+  sparse_retrieval: "Gathering sources",
+  dense_retrieval: "Gathering sources",
+  neo4j_expansion: "Gathering sources",
 
   // Phase 3: Removing clutter & synthesizing
-  merge: "Removing clutter & synthesizing …",
-  reranking: "Removing clutter & synthesizing …",
-  filter: "Removing clutter & synthesizing …",
-  collect_context: "Removing clutter & synthesizing …",
-  prepare_final_context: "Removing clutter & synthesizing …",
+  merge: "Synthesizing",
+  reranking: "Synthesizing",
+  filter: "Synthesizing",
+  collect_context: "Synthesizing",
+  prepare_final_context: "Synthesizing",
 
   // Phase 4: Thinking & tools
-  think: "Thinking …",
-  // Note: the "tool" node is intentionally NOT mapped here. Tool call
-  // labels (e.g. "Retrieving from knowledge base") are shown directly
-  // from the toolCalls prop when tools are running — see the render
-  // body below. This avoids a generic "Using tools …" flash before the
-  // specific label arrives.
+  think: "Thinking",
+  // "tool" node is not mapped — tool calls are shown as Tool cards.
 
   // Phase 5: Reflecting
-  reflect: "Reflecting …",
-  reflect_final: "Verifying …",
+  reflect: "Reflecting",
+  reflect_final: "Verifying",
 
   // Phase 6: Generating answer
-  generating: "Generating answer …",
-  generate_answer: "Generating answer …",
+  generating: "Generating answer",
+  generate_answer: "Generating answer",
 
   // Phase 7: Finalizing answer
-  finalize: "Finalizing answer …",
-  answer_scoring: "Finalizing answer …",
-  finalize_answer: "Finalizing answer …",
+  finalize: "Finalizing answer",
+  answer_scoring: "Finalizing answer",
+  finalize_answer: "Finalizing answer",
 
   // Phase 8: Calculating confidence
-  answer_evaluation: "Calculating confidence …",
+  answer_evaluation: "Calculating confidence",
 };
 
-// Major phases that should override a sticky tool label.
-// When one of these becomes the current phase, the tool label is cleared.
-const MAJOR_PHASES = new Set([
-  "Analyzing query …",
-  "Thinking …",
-  "Finalizing answer …",
-  "Generating answer …",
-  "Calculating confidence …",
-]);
+// Map phase labels to icons
+const PHASE_ICONS: Record<string, LucideIcon> = {
+  "Analyzing query": BrainIcon,
+  "Gathering sources": SearchIcon,
+  Synthesizing: FileTextIcon,
+  Thinking: BrainIcon,
+  Reflecting: BrainIcon,
+  Verifying: CheckCircleIcon,
+  "Generating answer": FileTextIcon,
+  "Finalizing answer": CheckCircleIcon,
+  "Calculating confidence": BarChartIcon,
+};
+
+// Map tool names to icons
+const TOOL_ICONS: Record<string, LucideIcon> = {
+  rag_retrieve: SearchIcon,
+  kb_grep: ScanTextIcon,
+  kb_outline: BookOpenIcon,
+  kb_read: FileTextIcon,
+  file_read: FileTextIcon,
+  file_summarize: FileTextIcon,
+  file_extract_table: FileTextIcon,
+  code_execute: CodeIcon,
+  chart_generate: BarChartIcon,
+  summarize_answer: SparklesIcon,
+  extract_data: WrenchIcon,
+};
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -84,24 +125,61 @@ export interface AgenticProgressProps {
   progressMessages?: ProgressMessage[];
 }
 
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+interface ToolCallPair {
+  call: Record<string, unknown>;
+  observation?: Record<string, unknown>;
+}
+
+function pairToolCallsAndObservations(
+  toolCalls: Array<Record<string, unknown>>,
+  toolObservations: Array<Record<string, unknown>>
+): ToolCallPair[] {
+  return toolCalls.map((call, i) => ({
+    call,
+    observation: toolObservations[i],
+  }));
+}
+
+function getToolState(pair: ToolCallPair): ToolState {
+  if (pair.observation) {
+    if (pair.observation.error) return "output-error";
+    return "output-available";
+  }
+  return "input-available";
+}
+
+function getToolLabel(call: Record<string, unknown>): string {
+  return (call.label as string) || (call.tool as string) || "Tool";
+}
+
+function getToolName(call: Record<string, unknown>): string {
+  return (call.tool as string) || "tool";
+}
+
 // ── Component ────────────────────────────────────────────────────────────────
 
-export const AgenticProgress = ({ agentSteps, isStreaming, toolCalls, toolObservations, progressMessages }: AgenticProgressProps) => {
-  const [phases, setPhases] = useState<string[]>([]);
+export const AgenticProgress = ({
+  agentSteps,
+  isStreaming,
+  toolCalls,
+  toolObservations,
+}: AgenticProgressProps) => {
+  const [isOpen, setIsOpen] = useState(true);
   const dismissRef = useRef<ReturnType<typeof setTimeout>>();
-  // Sticky tool label: persists after the tool observation arrives,
-  // until a major phase (Thinking, Finalizing, etc.) takes over.
-  const stickyToolLabelRef = useRef<string | null>(null);
 
-  useEffect(() => {
-    if (!agentSteps?.length) {
-      setPhases([]);
-      stickyToolLabelRef.current = null;
-      setHistory([]);
-      return;
-    }
-
-    const dedupPhases = new Set(["Analyzing query …", "Thinking …", "Reflecting …", "Finalizing answer …", "Generating answer …", "Calculating confidence …"]);
+  // Build deduplicated phase list
+  const phases = useMemo(() => {
+    if (!agentSteps?.length) return [] as string[];
+    const dedupPhases = new Set([
+      "Analyzing query",
+      "Thinking",
+      "Reflecting",
+      "Finalizing answer",
+      "Generating answer",
+      "Calculating confidence",
+    ]);
     const seen = new Set<string>();
     const unique: string[] = [];
     for (const step of agentSteps) {
@@ -116,23 +194,32 @@ export const AgenticProgress = ({ agentSteps, isStreaming, toolCalls, toolObserv
         unique.push(phase);
       }
     }
-    setPhases(unique);
+    return unique;
   }, [agentSteps]);
 
-  // Auto-dismiss after streaming ends
+  // Pair tool calls with their observations
+  const toolPairs = useMemo(() => {
+    if (!toolCalls?.length) return [] as ToolCallPair[];
+    return pairToolCallsAndObservations(
+      toolCalls,
+      toolObservations ?? []
+    );
+  }, [toolCalls, toolObservations]);
+
+  // Auto-collapse after streaming ends
   useEffect(() => {
     if (isStreaming) {
       if (dismissRef.current) {
         clearTimeout(dismissRef.current);
         dismissRef.current = undefined;
       }
-    } else if (phases.length > 0) {
+      setIsOpen(true);
+    } else if (phases.length > 0 || toolPairs.length > 0) {
       dismissRef.current = setTimeout(() => {
-        setPhases([]);
-        setHistory([]);
-      }, 1500);
+        setIsOpen(false);
+      }, 2000);
     }
-  }, [isStreaming, phases.length]);
+  }, [isStreaming, phases.length, toolPairs.length]);
 
   useEffect(() => {
     return () => {
@@ -140,101 +227,94 @@ export const AgenticProgress = ({ agentSteps, isStreaming, toolCalls, toolObserv
     };
   }, []);
 
-  // ── Compute display text ──────────────────────────────────────────────────
+  if (phases.length === 0 && toolPairs.length === 0) return null;
 
-  // 1. If a tool call is in flight, show its label (fresh or updated).
-  //    Progress messages emitted during a tool call (e.g. "Evaluating
-  //    retrieval sufficiency …") override the generic tool label with
-  //    more granular status.
-  let activeToolLabel: string | null = null;
-  if (isStreaming && toolCalls && toolCalls.length > 0) {
-    const obsCount = toolObservations?.length ?? 0;
-    if (toolCalls.length > obsCount) {
-      // Check for granular progress messages emitted during this tool call.
-      // Progress messages arrive after the tool_call event, so if there are
-      // more progress messages than tool observations, the latest one is
-      // from the currently in-flight tool.
-      const latestProgress = progressMessages?.[progressMessages.length - 1];
-      if (latestProgress && latestProgress.message) {
-        activeToolLabel = `${latestProgress.message}`;
-      } else {
-        const latest = toolCalls[toolCalls.length - 1];
-        const label = latest?.label as string | undefined;
-        if (label) {
-          activeToolLabel = `${label} …`;
-        }
-      }
-    }
-  }
-
-  // 2. Update the sticky label.
-  //    - When a tool is in flight, set the sticky label.
-  //    - When no tool is in flight, keep the sticky label UNLESS the
-  //      current phase is a major phase (Thinking, Finalizing, etc.).
-  //      Intermediate phases (Gathering sources, Reflecting, Removing
-  //      clutter) do NOT clear the sticky label — this prevents the
-  //      rapid flash of intermediate text after a tool completes.
-  const currentPhase = phases.length > 0 ? phases[phases.length - 1] : null;
-
-  if (activeToolLabel) {
-    stickyToolLabelRef.current = activeToolLabel;
-  } else if (currentPhase && MAJOR_PHASES.has(currentPhase)) {
-    stickyToolLabelRef.current = null;
-  }
-
-  // 3. Decide what to show: sticky tool label > current phase.
-  const displayText = stickyToolLabelRef.current ?? currentPhase;
-
-  // 4. Track history of display texts (last 3) for the 3-line display.
-  //    Adjusting state during render — React's recommended pattern for
-  //    derived state. Avoids an extra render cycle vs useEffect.
-  const [history, setHistory] = useState<string[]>([]);
-  if (displayText && history[history.length - 1] !== displayText) {
-    setHistory(prev => [...prev, displayText].slice(-3));
-  }
-
-  if (history.length === 0 && !displayText) return null;
-
-  // Show up to 3 lines: oldest two in thin grey, current in bold grey.
-  const lines = displayText
-    ? [...history.slice(0, -1), displayText].slice(-3)
-    : history;
-
-  if (lines.length === 0) return null;
+  // Determine which phase is currently active (last one while streaming)
+  const currentPhaseIdx = isStreaming ? phases.length - 1 : -1;
 
   return (
-    <div className="flex flex-col justify-end gap-0.5 overflow-hidden" style={{ minHeight: `${lines.length * 18}px` }}>
-      <AnimatePresence initial={false} mode="popLayout">
-        {lines.map((line, i) => {
-          const isCurrent = i === lines.length - 1;
-          return (
-            <motion.div
-              key={line}
-              initial={{ opacity: 0, y: 4 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -4 }}
-              transition={{ duration: 0.2, ease: "easeOut" }}
-              className="flex items-center gap-1.5 leading-tight"
-            >
-              {isCurrent && (
-                <span
-                  className="shrink-0 w-1 h-1 rounded-full bg-muted-foreground"
-                  style={{ animation: "loading-dot-pulse 1.4s ease-in-out infinite" }}
-                />
-              )}
-              <span
-                className={
-                  isCurrent
-                    ? "text-[12px] font-medium text-zinc-600 dark:text-zinc-300"
-                    : "text-[11px] font-normal text-zinc-400 dark:text-zinc-500"
+    <div className="not-prose mb-2">
+      <ChainOfThought open={isOpen} onOpenChange={setIsOpen} defaultOpen={true}>
+        <ChainOfThoughtHeader>
+          {isStreaming ? <Shimmer duration={1.5}>Agent working…</Shimmer> : "Agent timeline"}
+        </ChainOfThoughtHeader>
+        <ChainOfThoughtContent>
+          {/* Phase steps */}
+          {phases.map((phase, i) => {
+            const isActive = i === currentPhaseIdx;
+            const isComplete = i < currentPhaseIdx || !isStreaming;
+            const Icon = PHASE_ICONS[phase] ?? BrainIcon;
+            return (
+              <ChainOfThoughtStep
+                key={`${phase}-${i}`}
+                icon={Icon}
+                label={
+                  isActive ? (
+                    <Shimmer duration={1.5}>{`${phase}…`}</Shimmer>
+                  ) : (
+                    phase
+                  )
                 }
+                status={isComplete ? "complete" : isActive ? "active" : "pending"}
+              />
+            );
+          })}
+
+          {/* Tool call cards */}
+          {toolPairs.map((pair, i) => {
+            const toolName = getToolName(pair.call);
+            const label = getToolLabel(pair.call);
+            const state = getToolState(pair);
+            const isRunning = state === "input-available" && isStreaming;
+            const ToolIcon = TOOL_ICONS[toolName] ?? WrenchIcon;
+
+            // Extract a short summary from the observation result
+            const obsResult = pair.observation?.result as Record<string, unknown> | undefined;
+            const obsError = pair.observation?.error as string | undefined;
+            const resultSummary = obsResult
+              ? typeof obsResult === "object" && "matches" in obsResult
+                ? `${(obsResult.matches as unknown[]).length} matches`
+                : typeof obsResult === "object" && "docs" in obsResult
+                  ? `${(obsResult.docs as unknown[]).length} docs retrieved`
+                  : typeof obsResult === "object" && "content" in obsResult
+                    ? `Read ${(obsResult as Record<string, unknown>).total_tokens ?? "?"} tokens`
+                    : typeof obsResult === "object" && "headings" in obsResult
+                      ? `${(obsResult.headings as unknown[]).length} headings`
+                      : undefined
+              : undefined;
+
+            return (
+              <ChainOfThoughtStep
+                key={`tool-${i}`}
+                icon={ToolIcon}
+                label={
+                  isRunning ? (
+                    <Shimmer duration={1.5}>{`${label}…`}</Shimmer>
+                  ) : (
+                    label
+                  )
+                }
+                description={resultSummary}
+                status={isRunning ? "active" : "complete"}
               >
-                {line}
-              </span>
-            </motion.div>
-          );
-        })}
-      </AnimatePresence>
+                <Tool defaultOpen={false}>
+                  <ToolHeader
+                    title={label}
+                    state={state}
+                  />
+                  <ToolContent>
+                    <ToolInput input={pair.call.arguments ?? {}} />
+                    <ToolOutput
+                      output={obsResult ? JSON.stringify(obsResult, null, 2) : undefined}
+                      errorText={obsError}
+                    />
+                  </ToolContent>
+                </Tool>
+              </ChainOfThoughtStep>
+            );
+          })}
+        </ChainOfThoughtContent>
+      </ChainOfThought>
     </div>
   );
 };

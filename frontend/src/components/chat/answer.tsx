@@ -8,10 +8,22 @@ import React, {
   ClassAttributes,
 } from "react";
 import { AnchorHTMLAttributes } from "react";
-import { Copy, Trash2, FileText, FileImage, FileType, Brain } from "lucide-react";
+import { Copy, Trash2, FileText, FileImage, FileType } from "lucide-react";
 import { AgenticProgress, AgentStepEvent } from "./agentic-progress";
 import { AgentLoopPanel } from "./agent-loop-panel";
 import { SelectionActions } from "./selection-actions";
+import {
+  Reasoning,
+  ReasoningTrigger,
+  ReasoningContent,
+} from "@/components/ai-elements/reasoning";
+import {
+  Task as TaskCollapsible,
+  TaskTrigger,
+  TaskContent,
+  TaskItem,
+} from "@/components/ai-elements/task";
+import { Shimmer } from "@/components/ai-elements/shimmer";
 import {
   Popover,
   PopoverContent,
@@ -662,7 +674,49 @@ export const Answer: FC<{
     <div className="prose prose-sm max-w-full" ref={contentRef}>
       {/* Subtask checklist — shown during streaming for complex multi-part queries */}
       {taskList && taskList.length > 1 && (
-        <SubtaskList tasks={taskList as SubtaskItem[]} />
+        <div className="not-prose mb-2">
+          <TaskCollapsible defaultOpen={true}>
+            <TaskTrigger title={
+              taskList.some(t => t.status === "active" || t.status === "pending")
+                ? `Subtasks (${taskList.filter(t => t.status === "done").length}/${taskList.length})`
+                : `Subtasks (${taskList.length} completed)`
+            } />
+            <TaskContent>
+              {taskList.map((task) => (
+                <TaskItem key={task.id}>
+                  <div className="flex items-start gap-2">
+                    <span className="mt-0.5 shrink-0 w-3.5 h-3.5 flex items-center justify-center">
+                      {task.status === "done" ? (
+                        <svg className="text-emerald-500" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg" width="12" height="12">
+                          <circle cx="6" cy="6" r="5.5" fill="currentColor" fillOpacity="0.15" stroke="currentColor" strokeWidth="1"/>
+                          <path d="M3.5 6l1.8 1.8L8.5 4.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
+                        </svg>
+                      ) : task.status === "active" ? (
+                        <svg className="text-primary animate-spin" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg" width="12" height="12">
+                          <circle cx="6" cy="6" r="4.5" stroke="currentColor" strokeOpacity="0.2" strokeWidth="1.5"/>
+                          <path d="M6 1.5A4.5 4.5 0 0 1 10.5 6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+                        </svg>
+                      ) : (
+                        <svg className="text-muted-foreground/40" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg" width="12" height="12">
+                          <circle cx="6" cy="6" r="5.5" stroke="currentColor" strokeWidth="1"/>
+                        </svg>
+                      )}
+                    </span>
+                    <span className={`text-[12px] leading-snug ${
+                      task.status === "done"
+                        ? "text-muted-foreground line-through decoration-muted-foreground/40"
+                        : task.status === "active"
+                        ? "text-foreground font-medium"
+                        : "text-muted-foreground"
+                    }`}>
+                      {task.status === "active" ? <Shimmer duration={2}>{task.text}</Shimmer> : task.text}
+                    </span>
+                  </div>
+                </TaskItem>
+              ))}
+            </TaskContent>
+          </TaskCollapsible>
+        </div>
       )}
       {/* Agentic progress — transient, grey, fades between phases.
           Single source of truth for status text; raw per-leg progress
@@ -678,10 +732,15 @@ export const Answer: FC<{
         </div>
       )}
       {parsedContent.thinkContent !== null && (
-        <ThinkBlock
-          content={parsedContent.thinkContent}
-          isComplete={parsedContent.isThinkingComplete}
-        />
+        <Reasoning
+          isStreaming={!parsedContent.isThinkingComplete}
+          defaultOpen={!parsedContent.isThinkingComplete}
+        >
+          <ReasoningTrigger />
+          <ReasoningContent>
+            {parsedContent.thinkContent}
+          </ReasoningContent>
+        </Reasoning>
       )}
       
       {parsedContent.answerText && (
@@ -815,137 +874,6 @@ export const Answer: FC<{
     </div>
   );
 });
-
-// ── SubtaskList: live TODO checklist for complex multi-subtask queries ────────
-
-interface SubtaskItem {
-  id: number;
-  text: string;
-  status: "pending" | "active" | "done";
-}
-
-const SubtaskList: FC<{ tasks: SubtaskItem[] }> = ({ tasks }) => {
-  if (!tasks.length) return null;
-
-  return (
-    <div className="not-prose mb-0 px-0 space-y-0">
-      <p className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground mb-0">
-        Subtasks
-      </p>
-      {tasks.map((task) => (
-        <div key={task.id} className="flex items-start gap-2">
-          <span className="mt-0.5 shrink-0 w-3.5 h-3.5 flex items-center justify-center">
-            {task.status === "done" ? (
-              <svg className="text-emerald-500" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg" width="12" height="12">
-                <circle cx="6" cy="6" r="5.5" fill="currentColor" fillOpacity="0.15" stroke="currentColor" strokeWidth="1"/>
-                <path d="M3.5 6l1.8 1.8L8.5 4.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
-              </svg>
-            ) : task.status === "active" ? (
-              <svg className="text-primary animate-spin" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg" width="12" height="12">
-                <circle cx="6" cy="6" r="4.5" stroke="currentColor" strokeOpacity="0.2" strokeWidth="1.5"/>
-                <path d="M6 1.5A4.5 4.5 0 0 1 10.5 6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
-              </svg>
-            ) : (
-              <svg className="text-muted-foreground/40" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg" width="12" height="12">
-                <circle cx="6" cy="6" r="5.5" stroke="currentColor" strokeWidth="1"/>
-              </svg>
-            )}
-          </span>
-          <span className={`text-[12px] leading-snug ${
-            task.status === "done"
-              ? "text-muted-foreground line-through decoration-muted-foreground/40"
-              : task.status === "active"
-              ? "text-foreground font-medium"
-              : "text-muted-foreground"
-          }`}>
-            {task.text}
-          </span>
-        </div>
-      ))}
-    </div>
-  );
-};
-
-// ── ThinkBlock: reasoning model chain-of-thought ─────────────────────────────
-
-const ThinkBlock: FC<{ content: string; isComplete: boolean }> = ({
-  content,
-  isComplete,
-}) => {
-  const [isExpanded, setIsExpanded] = useState(!isComplete);
-  const [elapsedMs, setElapsedMs] = useState(0);
-  const startTimeRef = useRef<number>(Date.now());
-  const finalMsRef = useRef<number | null>(null);
-  // If isComplete is true on mount, the thinking was finished before this
-  // component mounted (loaded from API on page refresh) — we have no timing data.
-  const loadedCompleteRef = useRef(isComplete);
-  const contentRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (isComplete) {
-      // Only record timing if we actually tracked the thinking (streaming case).
-      // On page refresh, isComplete is already true on mount, so skip.
-      if (finalMsRef.current === null && !loadedCompleteRef.current) {
-        finalMsRef.current = Date.now() - startTimeRef.current;
-      }
-      const timer = setTimeout(() => setIsExpanded(false), 1500);
-      return () => clearTimeout(timer);
-    }
-    const interval = setInterval(() => {
-      setElapsedMs(Date.now() - startTimeRef.current);
-    }, 100);
-    return () => clearInterval(interval);
-  }, [isComplete]);
-
-  useEffect(() => {
-    if (!isComplete && isExpanded && contentRef.current) {
-      contentRef.current.scrollTop = contentRef.current.scrollHeight;
-    }
-  }, [content, isComplete, isExpanded]);
-
-  const displayMs = finalMsRef.current ?? elapsedMs;
-  const seconds = displayMs / 1000;
-  const label = isComplete
-    ? loadedCompleteRef.current
-      ? "Thoughts"
-      : seconds < 1
-        ? "Thought for less than a second"
-        : `Thought for ${seconds.toFixed(1)} seconds`
-    : `Thinking... (${seconds.toFixed(1)}s)`;
-
-  return (
-    <div className="my-2 rounded-md border border-gray-100 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/40 w-full">
-      <button
-        onClick={() => setIsExpanded(!isExpanded)}
-        className="flex items-center gap-1.5 w-full px-3 py-1.5 text-left rounded-t-md hover:bg-gray-100 dark:hover:bg-gray-700/40 transition-colors group"
-      >
-        {isExpanded ? (
-          <svg className="h-3 w-3 text-gray-400 shrink-0" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-          </svg>
-        ) : (
-          <svg className="h-3 w-3 text-gray-400 shrink-0" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M4.5 3L7.5 6L4.5 9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-          </svg>
-        )}
-        <Brain className={`h-3 w-3 shrink-0 ${isComplete ? "text-gray-400" : "text-blue-400 animate-pulse"}`} />
-        <span className="text-xs text-gray-400 font-medium select-none">
-          {label}
-        </span>
-      </button>
-      {isExpanded && (
-        <div
-          ref={contentRef}
-          className="px-3 pb-2 pt-1 max-h-48 overflow-y-auto overflow-x-hidden border-t border-gray-100 dark:border-gray-700"
-        >
-          <pre className="text-[11px] leading-[1.45] text-gray-400 dark:text-gray-500 whitespace-pre-wrap break-words font-sans m-0">
-            {content}
-          </pre>
-        </div>
-      )}
-    </div>
-  );
-};
 
 // ── ConfidenceCollapsible: final evaluation metrics ──────────────────────────
 
