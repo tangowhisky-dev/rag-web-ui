@@ -318,7 +318,7 @@ class TestSyncWatchersWithoutOrgAssignment:
     def test_sync_includes_unassigned_datastores(self, tmp_path):
         """A datastore without OrganizationDataStore rows is still registered."""
         from app.services.datastore_watcher import DataStoreWatcher
-        from app.services.datastore_watcher.watcher import SessionLocal as OrigSessionLocal
+        from app.services.datastore_watcher.watcher.watcher import SessionLocal as OrigSessionLocal
         from app.models.datastore import OrganizationDataStore, DataStore
         from unittest.mock import patch
 
@@ -357,7 +357,7 @@ class TestSyncWatchersWithoutOrgAssignment:
 
         mock_session.query.side_effect = query_side_effect
 
-        with patch("app.services.datastore_watcher.watcher.SessionLocal", return_value=mock_session):
+        with patch("app.services.datastore_watcher.watcher.watcher.SessionLocal", return_value=mock_session):
             watcher._sync_watchers_with_database()
 
         try:
