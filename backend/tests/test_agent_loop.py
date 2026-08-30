@@ -49,6 +49,9 @@ class TestToolRegistry:
             "chart_generate",
             "summarize_answer",
             "extract_data",
+            "kb_grep",
+            "kb_read",
+            "kb_outline",
         }
         assert names == expected
 

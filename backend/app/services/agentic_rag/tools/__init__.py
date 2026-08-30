@@ -13,6 +13,9 @@ from .extract_data import ExtractDataTool
 from .file_extract_table import FileExtractTableTool
 from .file_read import FileReadTool
 from .file_summarize import FileSummarizeTool
+from .kb_grep import KbGrepTool
+from .kb_outline import KbOutlineTool
+from .kb_read import KbReadTool
 from .rag_retrieve import RagRetrieveTool
 from .summarize_answer import SummarizeAnswerTool
 
@@ -26,6 +29,9 @@ _TOOL_CLASSES = [
     ChartGenerateTool,
     SummarizeAnswerTool,
     ExtractDataTool,
+    KbGrepTool,
+    KbReadTool,
+    KbOutlineTool,
 ]
 
 ALL_TOOLS = _TOOL_CLASSES
@@ -78,5 +84,9 @@ def applicable_tools(ctx: "ToolContext") -> list:
         tools = [t for t in tools if t.name not in ("file_read", "file_summarize", "file_extract_table")]
     if not has_data:
         tools = [t for t in tools if t.name not in ("chart_generate", "extract_data")]
+
+    has_kb = bool(state.get("kb_ids")) if state is not None else False
+    if not has_kb:
+        tools = [t for t in tools if t.name not in ("kb_grep", "kb_read", "kb_outline")]
 
     return tools

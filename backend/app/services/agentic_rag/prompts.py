@@ -632,6 +632,14 @@ rag_retrieve query rules:
 - rag_retrieve now evaluates whether retrieved docs actually contain the answer (not just topic similarity). If the observation shows sufficient=false with a "missing" field, the tool already tried rewriting the query internally. Only re-call rag_retrieve with a DIFFERENT query if the missing field suggests a fundamentally different search angle (e.g. a different entity, time period, or concept). Do NOT re-call just because confidence is not perfect.
 - Never repeat a rag_retrieve call with the same "query" argument as a previous observation — it will return identical results.
 
+KB exploration tools (last resort when rag_retrieve returns sufficient=false):
+- kb_grep: Search for exact terms or regex patterns across all documents in authorized KBs. Use when the missing field suggests specific keywords, names, or codes that vector search may have missed. Returns matching lines with document IDs and line numbers.
+- kb_outline: Get the heading structure (table of contents) of a document. Use after kb_grep to see which sections exist before reading.
+- kb_read: Read a specific section (by heading name) or character range of a document. Use after kb_outline to read the relevant section, or after kb_grep to read context around a matching line.
+- These tools are slower than rag_retrieve and return raw text, not ranked chunks. Only use them when rag_retrieve's sufficiency check fails and the missing field suggests specific terms or sections that might exist in the KB.
+- Do NOT use kb_grep/kb_read as a replacement for rag_retrieve. Use them to find evidence that rag_retrieve missed.
+- Typical flow: rag_retrieve (insufficient) → kb_grep (find matching lines) → kb_outline (see document structure) → kb_read (read the section).
+
 Chart requests: if the plan includes a chart, call extract_data first to turn retrieved docs / the previous answer into structured {{label, value}} rows, then call chart_generate with that structured data. Do NOT hand-roll the ECharts option yourself via code_execute — chart_generate is the only tool that produces a chart_option the UI can render.
 """
 

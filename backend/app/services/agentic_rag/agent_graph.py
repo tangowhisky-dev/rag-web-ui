@@ -54,6 +54,9 @@ def _tool_call_budget(db, org_id) -> dict:
     return {
         "rag_retrieve": get_setting(db, "AGENT_MAX_RETRIEVALS", org_id),
         "code_execute": get_setting(db, "AGENT_MAX_CODE_EXEC", org_id),
+        "kb_grep": get_setting(db, "AGENT_MAX_KB_GREP", org_id),
+        "kb_read": get_setting(db, "AGENT_MAX_KB_READ", org_id),
+        "kb_outline": get_setting(db, "AGENT_MAX_KB_READ", org_id),
     }
 
 # Error patterns that indicate a transient infrastructure failure rather
@@ -406,6 +409,19 @@ def _observations_metadata_text(observations: list[Observation]) -> str:
         result = obs.result if isinstance(obs.result, dict) else {}
         if "docs" not in result:
             # Non-retrieval tool — full result needed for next-step reasoning.
+            # Truncate kb_read content to avoid bloating the think prompt.
+            if obs.tool == "kb_read" and "content" in result:
+                content_preview = str(result.get("content", ""))[:300]
+                parts.append(f"  document_id={result.get('document_id')} section={result.get('section')}")
+                parts.append(f"  content_preview: {content_preview}…")
+                continue
+            if obs.tool == "kb_grep" and "matches" in result:
+                match_count = len(result.get("matches", []))
+                first_matches = result.get("matches", [])[:5]
+                parts.append(f"  total_matches={result.get('total_matches')} documents_searched={result.get('documents_searched')}")
+                for m in first_matches:
+                    parts.append(f"    doc={m.get('document_id')} line={m.get('line_number')}: {m.get('line_text', '')[:80]}")
+                continue
             summary = json.dumps(result, default=str)
             parts.append(f"  result: {summary}")
             continue
