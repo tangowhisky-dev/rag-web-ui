@@ -47,6 +47,33 @@ def build_tools(ctx: "ToolContext") -> list:
     return tools
 
 
+def _has_chart_data(state) -> bool:
+    if state is None:
+        return False
+    lao = state.get("last_answer_object")
+    has_data = (lao is not None and getattr(lao, "data", None)) or bool(state.get("retrieved_docs"))
+    # A successful code_execute or extract_data observation earlier in
+    # this turn produces data that chart_generate can consume. Without
+    # this check, a plan that runs code_execute → chart_generate fails
+    # because chart_generate is filtered out after code_execute succeeds.
+    if not has_data:
+        for raw_obs in state.get("observations") or []:
+            if isinstance(raw_obs, dict):
+                tool = raw_obs.get("tool", "")
+                err = raw_obs.get("error")
+            else:
+                tool = getattr(raw_obs, "tool", "")
+                err = getattr(raw_obs, "error", None)
+            if tool in ("code_execute", "extract_data") and not err:
+                has_data = True
+                break
+    return has_data
+
+
+def _filter_tools_by_name(tools: list, excluded: tuple[str, ...]) -> list:
+    return [t for t in tools if t.name not in excluded]
+
+
 def applicable_tools(ctx: "ToolContext") -> list:
     """Filter tools based on the current turn context.
 
@@ -59,34 +86,15 @@ def applicable_tools(ctx: "ToolContext") -> list:
     state = ctx.state
     # state is a dict (AgentState/MessagesState) at runtime.
     has_file = bool(state.get("file_markdown")) if state is not None else False
-    if state is not None:
-        lao = state.get("last_answer_object")
-        has_data = (lao is not None and getattr(lao, "data", None)) or bool(state.get("retrieved_docs"))
-        # A successful code_execute or extract_data observation earlier in
-        # this turn produces data that chart_generate can consume. Without
-        # this check, a plan that runs code_execute → chart_generate fails
-        # because chart_generate is filtered out after code_execute succeeds.
-        if not has_data:
-            for raw_obs in state.get("observations") or []:
-                if isinstance(raw_obs, dict):
-                    tool = raw_obs.get("tool", "")
-                    err = raw_obs.get("error")
-                else:
-                    tool = getattr(raw_obs, "tool", "")
-                    err = getattr(raw_obs, "error", None)
-                if tool in ("code_execute", "extract_data") and not err:
-                    has_data = True
-                    break
-    else:
-        has_data = False
+    has_data = _has_chart_data(state)
 
     if not has_file:
-        tools = [t for t in tools if t.name not in ("file_read", "file_summarize", "file_extract_table")]
+        tools = _filter_tools_by_name(tools, ("file_read", "file_summarize", "file_extract_table"))
     if not has_data:
-        tools = [t for t in tools if t.name not in ("chart_generate", "extract_data")]
+        tools = _filter_tools_by_name(tools, ("chart_generate", "extract_data"))
 
     has_kb = bool(state.get("kb_ids")) if state is not None else False
     if not has_kb:
-        tools = [t for t in tools if t.name not in ("kb_grep", "kb_read", "kb_outline")]
+        tools = _filter_tools_by_name(tools, ("kb_grep", "kb_read", "kb_outline"))
 
     return tools

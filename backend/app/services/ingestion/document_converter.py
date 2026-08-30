@@ -771,6 +771,60 @@ def _extract_pdf_metadata_title(abs_path: str) -> str | None:
     return None
 
 
+def _collect_pdf_font_spans(blocks: list) -> list[tuple[float, str]]:
+    """Collect text spans with font sizes from PDF page blocks.
+
+    Group consecutive spans on the same line into text fragments,
+    using the max font size of the line.
+    """
+    spans = []
+    for block in blocks:
+        if block.get("type", 0) != 0:  # skip image blocks
+            continue
+        for line in block.get("lines", []):
+            line_spans = []
+            for span in line.get("spans", []):
+                text = span.get("text", "").strip()
+                if not text:
+                    continue
+                line_spans.append((span.get("size", 0), text))
+            if line_spans:
+                # Merge spans on the same line, use max font size
+                max_size = max(s[0] for s in line_spans)
+                line_text = " ".join(s[1] for s in line_spans).strip()
+                if line_text:
+                    spans.append((max_size, line_text))
+    return spans
+
+
+def _filter_title_candidates(spans: list[tuple[float, str]], max_font_size: float) -> list[tuple[float, str]]:
+    """Collect all lines with the largest font size (within 0.5pt tolerance).
+
+    Sort by vertical position (first occurrence = topmost).
+    """
+    return [
+        (size, text) for size, text in spans
+        if abs(size - max_font_size) < 0.5
+    ]
+
+
+def _select_non_repeated_candidates(title_candidates: list[tuple[float, str]]) -> list[tuple[float, str]]:
+    """Filter out repeated text (navigation headers / running elements).
+
+    If the largest-font line appears 2+ times, it's likely a navigation
+    header or running element, not a title. Return None so the cascade
+    falls through to TOC/metadata, which are more reliable for web-to-PDF
+    conversions with repeated nav.
+    """
+    from collections import Counter
+    candidate_texts = [t for _, t in title_candidates]
+    text_counts = Counter(candidate_texts)
+    return [
+        (s, t) for s, t in title_candidates
+        if text_counts[t] == 1
+    ]
+
+
 def _extract_pdf_font_title(abs_path: str) -> str | None:
     """Extract title from PDF by finding the largest text on the first page.
 
@@ -788,55 +842,16 @@ def _extract_pdf_font_title(abs_path: str) -> str | None:
             if not blocks:
                 return None
 
-            # Collect all text spans with their font sizes.
-            # Group consecutive spans on the same line into text fragments.
-            spans = []
-            for block in blocks:
-                if block.get("type", 0) != 0:  # skip image blocks
-                    continue
-                for line in block.get("lines", []):
-                    line_spans = []
-                    for span in line.get("spans", []):
-                        text = span.get("text", "").strip()
-                        if not text:
-                            continue
-                        line_spans.append((span.get("size", 0), text))
-                    if line_spans:
-                        # Merge spans on the same line, use max font size
-                        max_size = max(s[0] for s in line_spans)
-                        line_text = " ".join(s[1] for s in line_spans).strip()
-                        if line_text:
-                            spans.append((max_size, line_text))
-
+            spans = _collect_pdf_font_spans(blocks)
             if not spans:
                 return None
 
-            # Find the maximum font size
             max_font_size = max(s[0] for s in spans)
-
-            # Collect all lines with the largest font size (within 0.5pt tolerance)
-            # that appear in the top third of the page — title is usually at the top.
-            # Sort by vertical position (first occurrence = topmost).
-            title_candidates = [
-                (size, text) for size, text in spans
-                if abs(size - max_font_size) < 0.5
-            ]
-
+            title_candidates = _filter_title_candidates(spans, max_font_size)
             if not title_candidates:
                 return None
 
-            # Detect repeated text: if the largest-font line appears 2+ times,
-            # it's likely a navigation header or running element, not a title.
-            # Return None so the cascade falls through to TOC/metadata, which
-            # are more reliable for web-to-PDF conversions with repeated nav.
-            from collections import Counter
-            candidate_texts = [t for _, t in title_candidates]
-            text_counts = Counter(candidate_texts)
-            non_repeated = [
-                (s, t) for s, t in title_candidates
-                if text_counts[t] == 1
-            ]
-
+            non_repeated = _select_non_repeated_candidates(title_candidates)
             if not non_repeated:
                 # All largest-font lines are repeated (navigation headers).
                 # The font heuristic is unreliable for this page layout.
@@ -941,6 +956,32 @@ def _extract_html_title(abs_path: str) -> str | None:
     return None
 
 
+def _extract_pdf_title_signals(abs_path: str) -> str | None:
+    """Try PDF-specific title signals: font heuristic, TOC, metadata."""
+    font_title = _extract_pdf_font_title(abs_path)
+    if font_title:
+        return font_title
+
+    toc_title = _extract_pdf_toc_title(abs_path)
+    if toc_title:
+        return toc_title
+
+    return _extract_pdf_metadata_title(abs_path)
+
+
+def _extract_markdown_title_for_cascade(markdown_text: str, ext: str, abs_path: str | None) -> str | None:
+    """Try markdown-based title extraction (steps 6-7 of the cascade).
+
+    For PDFs: only try headings, and only if page 1 has extractable text.
+    For non-PDFs: try the full heading + first-line cascade.
+    """
+    if ext in _PDF_TITLE_EXTS:
+        if _pdf_page1_has_text(abs_path):
+            return _extract_title_from_markdown_headings(markdown_text)
+        return None
+    return _extract_title_from_markdown(markdown_text)
+
+
 def extract_title(markdown_text: str, file_name: str, abs_path: str | None = None) -> str:
     """Extract a document title using a multi-signal priority cascade.
 
@@ -964,24 +1005,9 @@ def extract_title(markdown_text: str, file_name: str, abs_path: str | None = Non
     """
     ext = os.path.splitext(abs_path or file_name)[1].lower() if abs_path else ""
 
-    # 1. PDF font-size heuristic (largest text on first page).
-    #    This is the most reliable PDF title signal (~70-78% accuracy,
-    #    SciPlore Xtract / Docear PDF Inspector). Checked before metadata
-    #    because ~33.5% of PDF metadata titles are bogus (Microsoft Research).
+    # 1-3. PDF-specific signals (font heuristic, TOC, metadata)
     if ext in _PDF_TITLE_EXTS:
-        font_title = _extract_pdf_font_title(abs_path)
-        if font_title:
-            return font_title
-
-    # 2. PDF table of contents first level-1 entry
-    if ext in _PDF_TITLE_EXTS:
-        toc_title = _extract_pdf_toc_title(abs_path)
-        if toc_title:
-            return toc_title
-
-    # 3. PDF metadata (filtered for bogus patterns like "Microsoft Word - ...")
-    if ext in _PDF_TITLE_EXTS:
-        pdf_title = _extract_pdf_metadata_title(abs_path)
+        pdf_title = _extract_pdf_title_signals(abs_path)
         if pdf_title:
             return pdf_title
 
@@ -998,20 +1024,9 @@ def extract_title(markdown_text: str, file_name: str, abs_path: str | None = Non
             return html_title
 
     # 6 + 7. Markdown content (H1/H2 heading or first title-like line)
-    # For PDFs where font/TOC/metadata all failed:
-    #   - If page 1 has text: try markdown headings only (strong signal)
-    #   - If page 1 is image-only: skip markdown entirely (OCR text from
-    #     later pages is too noisy — section headings like "Team" are not
-    #     document titles). Fall through to filename.
-    if ext in _PDF_TITLE_EXTS:
-        if _pdf_page1_has_text(abs_path):
-            md_heading = _extract_title_from_markdown_headings(markdown_text)
-            if md_heading:
-                return md_heading
-    else:
-        md_title = _extract_title_from_markdown(markdown_text)
-        if md_title:
-            return md_title
+    md_title = _extract_markdown_title_for_cascade(markdown_text, ext, abs_path)
+    if md_title:
+        return md_title
 
     # 8. Cleaned filename
     return _clean_filename_to_title(file_name)

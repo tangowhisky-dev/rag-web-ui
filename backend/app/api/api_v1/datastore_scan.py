@@ -125,6 +125,47 @@ def _count_files_in_folder(folder_path: str, scan_pattern: str = "*") -> int:
 # ---------------------------------------------------------------------------
 
 
+def _find_active_scan(active_scans, datastore_id):
+    for scan in active_scans:
+        if scan.get("datastore_id") == datastore_id:
+            return scan
+    return None
+
+
+def _scan_progress_from_db(ds):
+    return ScanProgressResponse(
+        datastore_id=ds.id,
+        datastore_name=ds.name,
+        scan_id=None,
+        total_files=ds.last_scan_total_files or 0,
+        processed_files=ds.last_scan_processed or 0,
+        new_files=ds.last_scan_new or 0,
+        modified_files=ds.last_scan_modified or 0,
+        skipped_files=ds.last_scan_skipped or 0,
+        error_files=ds.last_scan_errors or 0,
+        status=ds.last_scan_status if ds.last_scan_status != "running" else "idle",
+        last_scan_at=ds.last_scan_at.strftime("%Y-%m-%dT%H:%M:%SZ") if ds.last_scan_at else None,
+        error_message=ds.last_scan_error,
+    )
+
+
+def _scan_progress_from_active(ds, scan_info, active_scans):
+    return ScanProgressResponse(
+        datastore_id=ds.id,
+        datastore_name=ds.name,
+        scan_id=active_scans.index(scan_info) + 1 if scan_info in active_scans else None,
+        total_files=scan_info.get("total", 0),
+        processed_files=scan_info.get("processed", 0),
+        new_files=scan_info.get("new", 0),
+        modified_files=scan_info.get("modified", 0),
+        skipped_files=scan_info.get("skipped", 0),
+        error_files=scan_info.get("error_count", 0),
+        status=scan_info.get("status", "idle"),
+        last_scan_at=ds.last_scan_at.strftime("%Y-%m-%dT%H:%M:%SZ") if ds.last_scan_at else None,
+        error_message=scan_info.get("error_message"),
+    )
+
+
 @router.get("/datastores/{datastore_id}/scan-progress", response_model=ScanProgressResponse)
 def get_datastore_scan_progress(
     datastore_id: int,
@@ -141,60 +182,39 @@ def get_datastore_scan_progress(
         watcher = _get_watcher()
         status = watcher.get_status()
         active_scans = status.get("active_scans", [])
-
-        # Find the active scan for this datastore
-        scan_info = None
-        for scan in active_scans:
-            if scan.get("datastore_id") == datastore_id:
-                scan_info = scan
-                break
-
-        # If no active scan, check DB for last scan status
+        scan_info = _find_active_scan(active_scans, datastore_id)
         if not scan_info:
-            return ScanProgressResponse(
-                datastore_id=ds.id,
-                datastore_name=ds.name,
-                scan_id=None,
-                total_files=ds.last_scan_total_files or 0,
-                processed_files=ds.last_scan_processed or 0,
-                new_files=ds.last_scan_new or 0,
-                modified_files=ds.last_scan_modified or 0,
-                skipped_files=ds.last_scan_skipped or 0,
-                error_files=ds.last_scan_errors or 0,
-                status=ds.last_scan_status if ds.last_scan_status != "running" else "idle",
-                last_scan_at=ds.last_scan_at.strftime("%Y-%m-%dT%H:%M:%SZ") if ds.last_scan_at else None,
-                error_message=ds.last_scan_error,
-            )
-
-        return ScanProgressResponse(
-            datastore_id=ds.id,
-            datastore_name=ds.name,
-            scan_id=active_scans.index(scan_info) + 1 if scan_info in active_scans else None,
-            total_files=scan_info.get("total", 0),
-            processed_files=scan_info.get("processed", 0),
-            new_files=scan_info.get("new", 0),
-            modified_files=scan_info.get("modified", 0),
-            skipped_files=scan_info.get("skipped", 0),
-            error_files=scan_info.get("error_count", 0),
-            status=scan_info.get("status", "idle"),
-            last_scan_at=ds.last_scan_at.strftime("%Y-%m-%dT%H:%M:%SZ") if ds.last_scan_at else None,
-            error_message=scan_info.get("error_message"),
-        )
+            return _scan_progress_from_db(ds)
+        return _scan_progress_from_active(ds, scan_info, active_scans)
     except HTTPException:
-        return ScanProgressResponse(
-            datastore_id=ds.id,
-            datastore_name=ds.name,
-            scan_id=None,
-            total_files=ds.last_scan_total_files or 0,
-            processed_files=ds.last_scan_processed or 0,
-            new_files=ds.last_scan_new or 0,
-            modified_files=ds.last_scan_modified or 0,
-            skipped_files=ds.last_scan_skipped or 0,
-            error_files=ds.last_scan_errors or 0,
-            status=ds.last_scan_status if ds.last_scan_status != "running" else "idle",
-            last_scan_at=ds.last_scan_at.strftime("%Y-%m-%dT%H:%M:%SZ") if ds.last_scan_at else None,
-            error_message=ds.last_scan_error,
-        )
+        return _scan_progress_from_db(ds)
+
+
+def _find_scan_for_datastore(watcher, datastore_id):
+    scan = None
+    scan_id = None
+    for scan_id in reversed(watcher._active_scans.keys()):
+        scan = watcher._active_scans[scan_id]
+        if scan.get("datastore_id") == datastore_id:
+            break
+    return scan_id, scan
+
+
+def _build_scan_event(scan, default_status="running"):
+    event = {
+        "total_files": scan.get("total", 0),
+        "total_files_on_disk": scan.get("total_files_on_disk", 0),
+        "processed_files": scan.get("processed", 0),
+        "scanned": scan.get("processed", 0),
+        "status": scan.get("status", default_status),
+        "new_files": scan.get("new", 0),
+        "modified_files": scan.get("modified", 0),
+        "skipped_files": scan.get("skipped", 0),
+        "error_files": scan.get("error_count", 0),
+    }
+    if scan.get("error_message"):
+        event["error_message"] = scan["error_message"]
+    return event
 
 
 @router.get("/datastores/{datastore_id}/scan-progress-stream")
@@ -235,11 +255,7 @@ def scan_progress_stream(
             if await request.is_disconnected():
                 logger.info("[SSE] client disconnected (wait phase) datastore_id=%d", datastore_id)
                 return
-            scan = None
-            for scan_id in reversed(watcher._active_scans.keys()):
-                scan = watcher._active_scans[scan_id]
-                if scan.get("datastore_id") == datastore_id:
-                    break
+            scan_id, scan = _find_scan_for_datastore(watcher, datastore_id)
             if scan is not None:
                 logger.info(
                     "[SSE] found scan for datastore_id=%d scan_id=%d status=%s",
@@ -270,25 +286,9 @@ def scan_progress_stream(
         # First emission — always emit the current state so the client
         # never sees undefined values, even for scans that finish before
         # any progress events fire.
-        scan = None
-        for sid in reversed(watcher._active_scans.keys()):
-            scan = watcher._active_scans[sid]
-            if scan.get("datastore_id") == datastore_id:
-                break
+        _, scan = _find_scan_for_datastore(watcher, datastore_id)
         if scan:
-            initial_event = {
-                "total_files": scan.get("total", 0),
-                "total_files_on_disk": scan.get("total_files_on_disk", 0),
-                "processed_files": scan.get("processed", 0),
-                "scanned": scan.get("processed", 0),
-                "status": scan.get("status", "running"),
-                "new_files": scan.get("new", 0),
-                "modified_files": scan.get("modified", 0),
-                "skipped_files": scan.get("skipped", 0),
-                "error_files": scan.get("error_count", 0),
-            }
-            if scan.get("error_message"):
-                initial_event["error_message"] = scan["error_message"]
+            initial_event = _build_scan_event(scan)
             logger.info(
                 "[SSE] emitting_initial_event datastore_id=%d event=%s",
                 datastore_id, json.dumps(initial_event),
@@ -296,75 +296,38 @@ def scan_progress_stream(
             yield f"data: {json.dumps(initial_event)}\n\n"
 
         # Subsequent emissions — only when values change
-        last_scanned = -1
-        last_total = -1
-        last_new = -1
-        last_modified = -1
-        last_skipped = -1
-        last_error_count = -1
-        last_error_message = None
-        last_status = None
+        last_state = (-1, -1, None, -1, None, -1, -1, -1)
 
         while True:
             if await request.is_disconnected():
                 logger.info("[SSE] client disconnected datastore_id=%d", datastore_id)
                 break
 
-            scan = None
-            for scan_id in reversed(watcher._active_scans.keys()):
-                scan = watcher._active_scans[scan_id]
-                if scan.get("datastore_id") == datastore_id:
-                    break
+            _, scan = _find_scan_for_datastore(watcher, datastore_id)
             if scan is None:
                 break  # Scan gone, close connection silently
 
-            scan_status = scan.get("status")
-            current_scanned = scan.get("processed", 0)
-            current_total = scan.get("total", 0)
-            current_status = scan_status
-            current_new = scan.get("new", 0)
-            current_modified = scan.get("modified", 0)
-            current_skipped = scan.get("skipped", 0)
-            current_error_count = scan.get("error_count", 0)
-            current_error_message = scan.get("error_message")
+            current_status = scan.get("status")
+            current_state = (
+                scan.get("processed", 0),
+                scan.get("total", 0),
+                current_status,
+                scan.get("error_count", 0),
+                scan.get("error_message"),
+                scan.get("skipped", 0),
+                scan.get("modified", 0),
+                scan.get("new", 0),
+            )
 
             # Only emit if something changed since last event
-            if (
-                current_scanned != last_scanned
-                or current_total != last_total
-                or current_status != last_status
-                or current_error_count != last_error_count
-                or current_error_message != last_error_message
-                or current_skipped != last_skipped
-                or current_modified != last_modified
-                or current_new != last_new
-            ):
-                event = {
-                    "total_files": current_total,
-                    "total_files_on_disk": scan.get("total_files_on_disk", 0),
-                    "processed_files": current_scanned,
-                    "scanned": current_scanned,
-                    "status": current_status,
-                    "new_files": current_new,
-                    "modified_files": current_modified,
-                    "skipped_files": current_skipped,
-                    "error_files": current_error_count,
-                }
-                if current_error_message:
-                    event["error_message"] = current_error_message
+            if current_state != last_state:
+                event = _build_scan_event(scan, default_status=None)
                 logger.info(
                     "[SSE] emitting_event datastore_id=%d event=%s",
                     datastore_id, json.dumps(event),
                 )
                 yield f"data: {json.dumps(event)}\n\n"
-                last_scanned = current_scanned
-                last_total = current_total
-                last_new = current_new
-                last_modified = current_modified
-                last_skipped = current_skipped
-                last_error_count = current_error_count
-                last_error_message = current_error_message
-                last_status = current_status
+                last_state = current_state
 
             # If scan is done, stop streaming
             if current_status in ("completed", "error", "cancelled", "paused", "idle"):
@@ -537,6 +500,98 @@ def resume_graph_ingestion(
     }
 
 
+def _check_watcher_scan_running(watcher, datastore_id: int) -> None:
+    """Raise 409 if a scan is already running in the watcher's active scans."""
+    try:
+        logger.info(
+            "[DATASTORE] scan_check datastore_id=%d active_scans=%s",
+            datastore_id, list(watcher._active_scans.items()),
+        )
+        for scan in watcher._active_scans.values():
+            if scan.get("datastore_id") == datastore_id and scan.get("status") == "running":
+                raise HTTPException(
+                    status_code=409,
+                    detail="A scan is already running for this datastore",
+                )
+    except HTTPException:
+        raise
+    except Exception:
+        logger.warning(
+            "[DATASTORE] scan_check error for datastore_id=%d",
+            datastore_id,
+        )
+
+
+def _cleanup_stale_scans_for_datastore(watcher, datastore_id: int) -> None:
+    """Remove any stale scan entries for a datastore from the watcher."""
+    stale_scan_id = None
+    with watcher._active_scans_lock:
+        for sid, info in watcher._active_scans.items():
+            if info.get("datastore_id") == datastore_id:
+                stale_scan_id = sid
+                break
+        if stale_scan_id is not None:
+            watcher._active_scans.pop(stale_scan_id, None)
+    if stale_scan_id is not None:
+        logger.info(
+            "[DATASTORE] cleanup_stale_scan scan_id=%d datastore_id=%d",
+            stale_scan_id, datastore_id,
+        )
+    else:
+        logger.info(
+            "[DATASTORE] no_stale_scan_for_datastore datastore_id=%d active_scans=%s",
+            datastore_id, list(watcher._active_scans.keys()),
+        )
+
+
+def _check_db_scan_running(db: Session, datastore_id: int) -> None:
+    """Raise 409 if the DB record shows a scan is already running."""
+    try:
+        ds_local = db.query(DataStore).filter(DataStore.id == datastore_id).first()
+        if ds_local and ds_local.last_scan_status == "running":
+            raise HTTPException(
+                status_code=409,
+                detail="A scan is already running for this datastore",
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+
+def _apply_scan_results_to_db(
+    ds_local, result: dict, latest_file_count: int, db_session: Session,
+) -> None:
+    """Update datastore DB record with scan results."""
+    ds_local.last_scan_at = datetime.now(timezone.utc)
+    ds_local.last_scan_status = "completed" if result.get("errors", 0) == 0 else "error"
+    ds_local.last_scan_total_files = latest_file_count
+    ds_local.last_scan_processed = result.get("scanned", 0)
+    ds_local.last_scan_new = result.get("new", 0)
+    ds_local.last_scan_modified = result.get("modified", 0)
+    ds_local.last_scan_skipped = result.get("skipped", 0)
+    ds_local.last_scan_errors = result.get("errors", 0)
+    if result.get("errors", 0) > 0:
+        ds_local.last_scan_error = f"{result['errors']} errors during scan"
+    else:
+        ds_local.last_scan_error = None
+    db_session.commit()
+
+
+def _handle_scan_thread_error(datastore_id: int, e: Exception) -> None:
+    """Persist scan error status to DB when the scan thread raises."""
+    try:
+        db_local = _SessionLocal()
+        ds_err = db_local.query(DataStore).filter(DataStore.id == datastore_id).first()
+        if ds_err:
+            ds_err.last_scan_status = "error"
+            ds_err.last_scan_error = str(e)
+            db_local.commit()
+        db_local.close()
+    except Exception:
+        pass
+
+
 @router.post("/datastores/{datastore_id}/scan", status_code=202)
 async def trigger_datastore_scan(
     datastore_id: int,
@@ -571,16 +626,6 @@ async def trigger_datastore_scan(
     watcher = None
     try:
         watcher = _get_watcher()
-        logger.info(
-            "[DATASTORE] scan_check datastore_id=%d active_scans=%s",
-            datastore_id, list(watcher._active_scans.items()),
-        )
-        for scan in watcher._active_scans.values():
-            if scan.get("datastore_id") == datastore_id and scan.get("status") == "running":
-                raise HTTPException(
-                    status_code=409,
-                    detail="A scan is already running for this datastore",
-                )
     except HTTPException:
         raise
     except Exception:
@@ -589,39 +634,12 @@ async def trigger_datastore_scan(
             datastore_id,
         )
 
-    # Clean up any stale scans from previous runs
     if watcher is not None:
-        stale_scan_id = None
-        with watcher._active_scans_lock:
-            for sid, info in watcher._active_scans.items():
-                if info.get("datastore_id") == datastore_id:
-                    stale_scan_id = sid
-                    break
-            if stale_scan_id is not None:
-                watcher._active_scans.pop(stale_scan_id, None)
-        if stale_scan_id is not None:
-            logger.info(
-                "[DATASTORE] cleanup_stale_scan scan_id=%d datastore_id=%d",
-                stale_scan_id, datastore_id,
-            )
-        else:
-            logger.info(
-                "[DATASTORE] no_stale_scan_for_datastore datastore_id=%d active_scans=%s",
-                datastore_id, list(watcher._active_scans.keys()),
-            )
+        _check_watcher_scan_running(watcher, datastore_id)
+        _cleanup_stale_scans_for_datastore(watcher, datastore_id)
 
     # Also check the DB record
-    try:
-        ds_local = db.query(DataStore).filter(DataStore.id == datastore_id).first()
-        if ds_local and ds_local.last_scan_status == "running":
-            raise HTTPException(
-                status_code=409,
-                detail="A scan is already running for this datastore",
-            )
-    except HTTPException:
-        raise
-    except Exception:
-        pass
+    _check_db_scan_running(db, datastore_id)
 
     # Start scan in background thread
     db.close()
@@ -683,21 +701,7 @@ async def trigger_datastore_scan(
                     datastore_id, current_status,
                 )
             else:
-                # Update datastore status with scan results
-                ds_local.last_scan_at = datetime.now(timezone.utc)
-                ds_local.last_scan_status = "completed" if result.get("errors", 0) == 0 else "error"
-                ds_local.last_scan_total_files = latest_file_count
-                ds_local.last_scan_processed = result.get("scanned", 0)
-                ds_local.last_scan_new = result.get("new", 0)
-                ds_local.last_scan_modified = result.get("modified", 0)
-                ds_local.last_scan_skipped = result.get("skipped", 0)
-                ds_local.last_scan_errors = result.get("errors", 0)
-                if result.get("errors", 0) > 0:
-                    ds_local.last_scan_error = f"{result['errors']} errors during scan"
-                else:
-                    ds_local.last_scan_error = None
-
-                db_session.commit()
+                _apply_scan_results_to_db(ds_local, result, latest_file_count, db_session)
             logger.info(
                 "[DATASTORE] scan_complete id=%d scanned=%d new=%d modified=%d skipped=%d errors=%d",
                 datastore_id,
@@ -711,16 +715,7 @@ async def trigger_datastore_scan(
             logger.error(
                 "[DATASTORE] scan_error id=%d: %s", datastore_id, e, exc_info=True
             )
-            try:
-                db_local = _SessionLocal()
-                ds_err = db_local.query(DataStore).filter(DataStore.id == datastore_id).first()
-                if ds_err:
-                    ds_err.last_scan_status = "error"
-                    ds_err.last_scan_error = str(e)
-                    db_local.commit()
-                db_local.close()
-            except Exception:
-                pass
+            _handle_scan_thread_error(datastore_id, e)
         finally:
             db_session.close()
 

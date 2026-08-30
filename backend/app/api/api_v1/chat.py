@@ -236,6 +236,122 @@ def get_chat(
     return chat_data
 
 
+def _select_active_branch_messages(
+    all_user_msgs: list[Message],
+    active_branches: dict,
+) -> list[Message]:
+    # Group by branch parent and pick active branch per group
+    # Branch parent = parent_message_id if set, else the message itself
+    branch_groups: dict[int, list[Message]] = {}
+    for um in all_user_msgs:
+        group_key = um.parent_message_id if um.parent_message_id is not None else um.id
+        branch_groups.setdefault(group_key, []).append(um)
+
+    selected_user_msgs: list[Message] = []
+    for group_key, siblings in branch_groups.items():
+        if len(siblings) == 1:
+            # No branching — just use the single message
+            selected_user_msgs.append(siblings[0])
+        else:
+            # Pick the active branch, or default to latest (highest branch_index)
+            active_id = active_branches.get(str(group_key))
+            selected = None
+            if active_id:
+                for s in siblings:
+                    if s.id == active_id:
+                        selected = s
+                        break
+            if selected is None:
+                selected = max(siblings, key=lambda m: m.branch_index)
+            selected_user_msgs.append(selected)
+    return selected_user_msgs
+
+
+def _collect_turn_messages(
+    paged_user_msgs: list[Message],
+    db: Session,
+    chat_id: int,
+) -> list[Message]:
+    result_msgs: list[Message] = []
+    for um in paged_user_msgs:
+        result_msgs.append(um)
+        assistant = (
+            db.query(Message)
+            .filter(
+                Message.parent_message_id == um.id,
+                Message.chat_id == chat_id,
+                Message.role == "assistant",
+            )
+            .order_by(Message.id.desc())
+            .first()
+        )
+        if assistant:
+            result_msgs.append(assistant)
+    return result_msgs
+
+
+def _build_message_file_map(
+    db: Session,
+    chat_id: int,
+    msg_ids: list[int],
+) -> dict[int, tuple[int, str]]:
+    file_map: dict[int, tuple[int, str]] = {}
+    if msg_ids:
+        chat_files = (
+            db.query(ChatFile)
+            .filter(ChatFile.chat_id == chat_id, ChatFile.message_id.in_(msg_ids))
+            .all()
+        )
+        for cf in chat_files:
+            if cf.message_id:
+                file_map[cf.message_id] = (cf.id, cf.file_name)
+    return file_map
+
+
+def _serialize_messages_with_citations(
+    result_msgs: list[Message],
+    db: Session,
+    file_map: dict[int, tuple[int, str]],
+) -> list[dict]:
+    from app.schemas.chat import MessageResponse
+    from app.models.chat import MessageCitation
+    from app.models.knowledge import DocumentChunk
+    result = []
+    for msg in result_msgs:
+        msg_dict = MessageResponse.model_validate(msg).model_dump()
+        info = file_map.get(msg.id)
+        msg_dict["file_name"] = info[1] if info else None
+        msg_dict["file_id"]   = info[0] if info else None
+
+        # Reconstruct citations from message_citations table
+        citations = (
+            db.query(MessageCitation)
+            .filter(MessageCitation.message_id == msg.id)
+            .order_by(MessageCitation.citation_index)
+            .all()
+        )
+        if citations:
+            msg_dict["citations"] = []
+            for cit in citations:
+                chunk = (
+                    db.query(DocumentChunk)
+                    .filter(
+                        DocumentChunk.document_id == cit.document_id,
+                        DocumentChunk.chunk_index == cit.chunk_index,
+                    )
+                    .first()
+                )
+                if chunk:
+                    entry = {**(cit.citation_metadata or {})}  # type: ignore[misc]
+                    entry["text"] = chunk.chunk_text
+                    msg_dict["citations"].append(entry)
+        else:
+            msg_dict["citations"] = []
+
+        result.append(msg_dict)
+    return result
+
+
 @router.get("/{chat_id}/messages/paginated")
 def get_messages_paginated(
     *,
@@ -282,29 +398,7 @@ def get_messages_paginated(
     all_user_msgs = user_msgs_q.order_by(Message.id.asc()).all()
 
     # Step 2: group by branch parent and pick active branch per group
-    # Branch parent = parent_message_id if set, else the message itself
-    branch_groups: dict[int, list[Message]] = {}
-    for um in all_user_msgs:
-        group_key = um.parent_message_id if um.parent_message_id is not None else um.id
-        branch_groups.setdefault(group_key, []).append(um)
-
-    selected_user_msgs: list[Message] = []
-    for group_key, siblings in branch_groups.items():
-        if len(siblings) == 1:
-            # No branching — just use the single message
-            selected_user_msgs.append(siblings[0])
-        else:
-            # Pick the active branch, or default to latest (highest branch_index)
-            active_id = active_branches.get(str(group_key))
-            selected = None
-            if active_id:
-                for s in siblings:
-                    if s.id == active_id:
-                        selected = s
-                        break
-            if selected is None:
-                selected = max(siblings, key=lambda m: m.branch_index)
-            selected_user_msgs.append(selected)
+    selected_user_msgs = _select_active_branch_messages(all_user_msgs, active_branches)
 
     # Step 3: sort by id (chronological) and apply limit
     selected_user_msgs.sort(key=lambda m: m.id)
@@ -315,73 +409,63 @@ def get_messages_paginated(
     has_more = len(selected_user_msgs) > len(paged_user_msgs)
 
     # Step 4: for each selected user message, find its paired assistant reply
-    result_msgs: list[Message] = []
-    for um in paged_user_msgs:
-        result_msgs.append(um)
-        assistant = (
-            db.query(Message)
-            .filter(
-                Message.parent_message_id == um.id,
-                Message.chat_id == chat_id,
-                Message.role == "assistant",
-            )
-            .order_by(Message.id.desc())
-            .first()
-        )
-        if assistant:
-            result_msgs.append(assistant)
+    result_msgs = _collect_turn_messages(paged_user_msgs, db, chat_id)
 
     # Step 5: build file_map and serialize (same as before)
     msg_ids = [m.id for m in result_msgs]
-    file_map: dict[int, tuple[int, str]] = {}
-    if msg_ids:
-        chat_files = (
-            db.query(ChatFile)
-            .filter(ChatFile.chat_id == chat_id, ChatFile.message_id.in_(msg_ids))
-            .all()
-        )
-        for cf in chat_files:
-            if cf.message_id:
-                file_map[cf.message_id] = (cf.id, cf.file_name)
-
-    from app.schemas.chat import MessageResponse
-    from app.models.chat import MessageCitation
-    from app.models.knowledge import DocumentChunk
-    result = []
-    for msg in result_msgs:
-        msg_dict = MessageResponse.model_validate(msg).model_dump()
-        info = file_map.get(msg.id)
-        msg_dict["file_name"] = info[1] if info else None
-        msg_dict["file_id"]   = info[0] if info else None
-
-        # Reconstruct citations from message_citations table
-        citations = (
-            db.query(MessageCitation)
-            .filter(MessageCitation.message_id == msg.id)
-            .order_by(MessageCitation.citation_index)
-            .all()
-        )
-        if citations:
-            msg_dict["citations"] = []
-            for cit in citations:
-                chunk = (
-                    db.query(DocumentChunk)
-                    .filter(
-                        DocumentChunk.document_id == cit.document_id,
-                        DocumentChunk.chunk_index == cit.chunk_index,
-                    )
-                    .first()
-                )
-                if chunk:
-                    entry = {**(cit.citation_metadata or {})}  # type: ignore[misc]
-                    entry["text"] = chunk.chunk_text
-                    msg_dict["citations"].append(entry)
-        else:
-            msg_dict["citations"] = []
-
-        result.append(msg_dict)
+    file_map = _build_message_file_map(db, chat_id, msg_ids)
+    result = _serialize_messages_with_citations(result_msgs, db, file_map)
 
     return {"messages": result, "has_more": has_more}
+
+def _build_message_file_context(
+    db: Session,
+    chat_id: int,
+    file_id: Optional[int],
+    query_text: str,
+) -> tuple[str, Optional[str]]:
+    """Build augmented query with file context from current and prior turns.
+
+    Returns (augmented_query, current_file_markdown).
+    """
+    file_context_parts: list[str] = []
+    current_file_markdown: Optional[str] = None
+
+    if file_id:
+        chat_file = (
+            db.query(ChatFile)
+            .filter(ChatFile.id == file_id, ChatFile.chat_id == chat_id)
+            .first()
+        )
+        if not chat_file:
+            raise HTTPException(status_code=404, detail="File not found")
+        if chat_file.status == "processing":
+            raise HTTPException(status_code=409, detail="File is still processing. Please wait and retry.")
+        if chat_file.status == "error":
+            raise HTTPException(status_code=422, detail=chat_file.error_message or "File processing failed.")
+        if chat_file.markdown_content:
+            current_file_markdown = chat_file.markdown_content
+            file_context_parts.append(f"## Attached File: {chat_file.file_name}\n\n{chat_file.markdown_content}")
+
+    prior_files = (
+        db.query(ChatFile)
+        .filter(
+            ChatFile.chat_id == chat_id,
+            ChatFile.status == "ready",
+            ChatFile.message_id.isnot(None),
+            ChatFile.id != file_id if file_id else True,
+        )
+        .order_by(ChatFile.id.asc())
+        .all()
+    )
+    for pf in prior_files:
+        if pf.markdown_content:
+            file_context_parts.append(f"## Previously Uploaded File: {pf.file_name}\n\n{pf.markdown_content}")
+
+    if file_context_parts:
+        query_text = "\n\n".join(file_context_parts) + "\n\n" + query_text
+    return query_text, current_file_markdown
+
 
 @router.post("/{chat_id}/messages")
 async def create_message(
@@ -419,44 +503,9 @@ async def create_message(
     # prior turns in the same chat (multi-turn context).
     query_text = last_message["content"]
     display_query = query_text          # shown in UI / stored in DB
-    file_context_parts: list[str] = []
-
-    # Current-turn file
-    current_file_markdown: Optional[str] = None
-    if file_id:
-        chat_file = (
-            db.query(ChatFile)
-            .filter(ChatFile.id == file_id, ChatFile.chat_id == chat_id)
-            .first()
-        )
-        if not chat_file:
-            raise HTTPException(status_code=404, detail="File not found")
-        if chat_file.status == "processing":
-            raise HTTPException(status_code=409, detail="File is still processing. Please wait and retry.")
-        if chat_file.status == "error":
-            raise HTTPException(status_code=422, detail=chat_file.error_message or "File processing failed.")
-        if chat_file.markdown_content:
-            current_file_markdown = chat_file.markdown_content
-            file_context_parts.append(f"## Attached File: {chat_file.file_name}\n\n{chat_file.markdown_content}")
-
-    # Prior-turn files in this chat (multi-turn context)
-    prior_files = (
-        db.query(ChatFile)
-        .filter(
-            ChatFile.chat_id == chat_id,
-            ChatFile.status == "ready",
-            ChatFile.message_id.isnot(None),   # already linked to a sent message
-            ChatFile.id != file_id if file_id else True,
-        )
-        .order_by(ChatFile.id.asc())
-        .all()
+    query_text, current_file_markdown = _build_message_file_context(
+        db, chat_id, file_id, query_text
     )
-    for pf in prior_files:
-        if pf.markdown_content:
-            file_context_parts.append(f"## Previously Uploaded File: {pf.file_name}\n\n{pf.markdown_content}")
-
-    if file_context_parts:
-        query_text = "\n\n".join(file_context_parts) + "\n\n" + query_text
 
     knowledge_base_ids = [kb.id for kb in chat.knowledge_bases]
 
@@ -995,6 +1044,31 @@ async def get_pending_clarification(
     )
 
 
+def _extract_final_answer(final_state: dict) -> str:
+    """Extract the final answer string from the LangGraph final state."""
+    fa_raw = final_state.get("final_answer") or final_state.get("answer", "")
+    if isinstance(fa_raw, str):
+        return fa_raw
+    if isinstance(fa_raw, list):
+        return "".join(
+            p.get("text", "") if isinstance(p, dict) and p.get("type") == "text" else str(p)
+            for p in fa_raw
+        )
+    return str(fa_raw)
+
+
+def _extract_token_usage(transformer, final_state: dict) -> tuple[int, int]:
+    """Extract (input_tokens, completion_tokens) from transformer or final state."""
+    input_tokens = getattr(transformer, "_input_tokens", 0)
+    completion_tokens = getattr(transformer, "_output_tokens", 0)
+    if input_tokens == 0 and completion_tokens == 0:
+        answer_usage = final_state.get("answer_usage")
+        if isinstance(answer_usage, dict):
+            input_tokens = answer_usage.get("input_tokens", 0) or 0
+            completion_tokens = answer_usage.get("output_tokens", 0) or 0
+    return input_tokens, completion_tokens
+
+
 @router.post("/clarification")
 async def submit_clarification(
     *,
@@ -1168,20 +1242,10 @@ async def submit_clarification(
         final_output = await resumed_stream.output()
         final_state = final_output if isinstance(final_output, dict) else getattr(final_output, "values", {}) or {}
 
-        fa_raw = final_state.get("final_answer") or final_state.get("answer", "")
-        final_answer = fa_raw if isinstance(fa_raw, str) else "".join(
-            p.get("text", "") if isinstance(p, dict) and p.get("type") == "text" else str(p)
-            for p in fa_raw
-        ) if isinstance(fa_raw, list) else str(fa_raw)
+        final_answer = _extract_final_answer(final_state)
 
         # Collect usage from transformer
-        input_tokens = getattr(transformer, "_input_tokens", 0)
-        completion_tokens = getattr(transformer, "_output_tokens", 0)
-        if input_tokens == 0 and completion_tokens == 0:
-            answer_usage = final_state.get("answer_usage")
-            if isinstance(answer_usage, dict):
-                input_tokens = answer_usage.get("input_tokens", 0) or 0
-                completion_tokens = answer_usage.get("output_tokens", 0) or 0
+        input_tokens, completion_tokens = _extract_token_usage(transformer, final_state)
 
         done_payload = {
             "finishReason": "stop",

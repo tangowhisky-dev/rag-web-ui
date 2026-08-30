@@ -67,6 +67,30 @@ class SearchResponse(BaseModel):
 
 # ── Endpoint ──────────────────────────────────────────────────────────────────
 
+def _run_retrieval_legs(
+    expanded_query: str,
+    kb_ids: list[int],
+    datastore_ids: list[int],
+    db: Session,
+    org_id: int,
+) -> list[dict]:
+    """Run dense, sparse, and exact retrieval legs, returning serialised docs."""
+    all_docs: list[dict] = []
+    for leg_fn in (dense_search_docs, sparse_search_docs, exact_search_docs):
+        try:
+            docs = leg_fn(
+                query=expanded_query,
+                kb_ids=kb_ids,
+                datastore_ids=datastore_ids,
+                db=db,
+                org_id=org_id,
+            )
+            all_docs.extend(_serialise_doc(d) for d in docs)
+        except Exception as exc:
+            logger.warning("[SEARCH] %s failed: %s", leg_fn.__name__, exc)
+    return all_docs
+
+
 @router.post("", response_model=SearchResponse)
 def search(
     *,
@@ -105,19 +129,7 @@ def search(
     datastore_ids = get_effective_datastore_ids(body.kb_ids, org_id, db)
 
     # 3. Run 3 retrieval legs (sync — FastAPI runs sync endpoints in a threadpool)
-    all_docs: list[dict] = []
-    for leg_fn in (dense_search_docs, sparse_search_docs, exact_search_docs):
-        try:
-            docs = leg_fn(
-                query=expanded_query,
-                kb_ids=body.kb_ids,
-                datastore_ids=datastore_ids,
-                db=db,
-                org_id=org_id,
-            )
-            all_docs.extend(_serialise_doc(d) for d in docs)
-        except Exception as exc:
-            logger.warning("[SEARCH] %s failed: %s", leg_fn.__name__, exc)
+    all_docs = _run_retrieval_legs(expanded_query, body.kb_ids, datastore_ids, db, org_id)
 
     # 4. Merge + dedup
     merged = dedup_by_content_hash(all_docs)

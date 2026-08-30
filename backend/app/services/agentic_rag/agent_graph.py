@@ -299,6 +299,33 @@ def _prune_contiguous_overlaps(docs: list[dict]) -> list[dict]:
     return result
 
 
+def _format_retrieval_obs_full(docs, doc_count, confidence, sufficient_text, seen_hashes):
+    from app.services.infrastructure import content_hash as _ch
+
+    unique_docs = []
+    for doc in docs:
+        if not isinstance(doc, dict):
+            continue
+        h = doc.get("metadata", {}).get("content_hash") or _ch(doc.get("page_content", ""))
+        if h not in seen_hashes:
+            seen_hashes.add(h)
+            unique_docs.append(doc)
+    parts = [f"  doc_count={doc_count} unique_so_far={len(seen_hashes)} confidence={confidence}{sufficient_text}"]
+    pruned_docs = _prune_contiguous_overlaps(unique_docs)
+    for j, doc in enumerate(pruned_docs, 1):
+        content = str(doc.get("page_content", ""))
+        parts.append(f"  doc_{j}: {content}")
+    return parts
+
+
+def _format_retrieval_obs_compact(docs, doc_count, confidence, sufficient_text):
+    parts = [f"  doc_count={doc_count} confidence={confidence}{sufficient_text}"]
+    if docs and isinstance(docs[0], dict):
+        preview = str(docs[0].get("page_content", ""))[:300]
+        parts.append(f"  top_doc_preview: {preview}")
+    return parts
+
+
 def _observations_text(observations: list[Observation], full: bool = False) -> str:
     """Format observations for LLM context.
 
@@ -314,8 +341,6 @@ def _observations_text(observations: list[Observation], full: bool = False) -> s
     When full=False, include a compact summary (doc count, confidence, top
     doc preview) to keep reflect/finalize prompts small.
     """
-    from app.services.infrastructure import content_hash as _ch
-
     parts = []
     seen_hashes: set[str] = set()
     for i, raw_obs in enumerate(observations, 1):
@@ -341,26 +366,9 @@ def _observations_text(observations: list[Observation], full: bool = False) -> s
         sufficient = result.get("sufficient")
         sufficient_text = f" sufficient={sufficient}" if sufficient is not None else ""
         if full:
-            unique_docs = []
-            for doc in docs:
-                if not isinstance(doc, dict):
-                    continue
-                h = doc.get("metadata", {}).get("content_hash") or _ch(doc.get("page_content", ""))
-                if h not in seen_hashes:
-                    seen_hashes.add(h)
-                    unique_docs.append(doc)
-            parts.append(f"  doc_count={doc_count} unique_so_far={len(seen_hashes)} confidence={confidence}{sufficient_text}")
-            # Prune overlap from contiguous chunks so the LLM doesn't see
-            # duplicated text (300 chars per adjacent pair at 20% overlap).
-            pruned_docs = _prune_contiguous_overlaps(unique_docs)
-            for j, doc in enumerate(pruned_docs, 1):
-                content = str(doc.get("page_content", ""))
-                parts.append(f"  doc_{j}: {content}")
+            parts.extend(_format_retrieval_obs_full(docs, doc_count, confidence, sufficient_text, seen_hashes))
         else:
-            parts.append(f"  doc_count={doc_count} confidence={confidence}{sufficient_text}")
-            if docs and isinstance(docs[0], dict):
-                preview = str(docs[0].get("page_content", ""))[:300]
-                parts.append(f"  top_doc_preview: {preview}")
+            parts.extend(_format_retrieval_obs_compact(docs, doc_count, confidence, sufficient_text))
     return "\n".join(parts)
 
 
@@ -609,6 +617,54 @@ def _trim_docs_to_budget(docs: list[dict], overflow_tokens: int) -> list[dict]:
     return [d for i, d in enumerate(docs) if i not in drop]
 
 
+def _compact_stage1_observations(state, budget):
+    updates: dict[str, Any] = {}
+    local: dict[str, Any] = {}
+    observations = [_coerce_observation(o) for o in state.get("observations", [])]
+    compacted_obs = _compact_observations(observations)
+    obs_tokens_before = sum(count_tokens(json.dumps(o.result, default=str)) for o in observations)
+    obs_tokens_after = sum(count_tokens(json.dumps(o.result, default=str)) for o in compacted_obs)
+    savings = obs_tokens_before - obs_tokens_after
+    if savings > 0:
+        updates["observations"] = [{"__reset__": True}, *compacted_obs]
+        local["observations"] = compacted_obs
+        budget.used -= savings
+        logger.info("[_compact_if_needed] stage 1 (observations) saved %d tokens", savings)
+    return updates, local
+
+
+def _compact_stage2_docs(state, budget):
+    updates: dict[str, Any] = {}
+    local: dict[str, Any] = {}
+    docs = list(state.get("retrieved_docs", []) or [])
+    overflow = budget.used - budget.compaction_threshold
+    trimmed = _trim_docs_to_budget(docs, overflow)
+    if len(trimmed) < len(docs):
+        freed = count_tokens(format_context_string(docs)) - count_tokens(format_context_string(trimmed))
+        updates["retrieved_docs"] = trimmed
+        local["retrieved_docs"] = trimmed
+        budget.used -= max(freed, 0)
+        logger.info("[_compact_if_needed] stage 2 (evidence) saved %d tokens", freed)
+    return updates, local
+
+
+async def _compact_stage3_messages(state, ctx):
+    updates: dict[str, Any] = {}
+    local: dict[str, Any] = {}
+    messages = list(state.get("messages", []))
+    keep_recent = get_setting(ctx.db, "COMPACTION_KEEP_RECENT", ctx.org_id) if ctx else get_def("COMPACTION_KEEP_RECENT").default
+    if len(messages) > keep_recent:
+        message_updates, resolved, summary = await _compact_messages_llm(messages, ctx=ctx)
+        if summary is not None:
+            updates["messages"] = message_updates
+            updates["compaction_summary"] = summary
+            local["messages"] = resolved
+            local["compaction_summary"] = summary
+            logger.info("[_compact_if_needed] stage 3 (messages) summarized %d old messages",
+                        len(messages) - len(resolved) + 1)
+    return updates, local
+
+
 async def _compact_if_needed(
     state: AgentState,
     prompt_text: str,
@@ -650,50 +706,24 @@ async def _compact_if_needed(
     updates: dict[str, Any] = {"compaction_triggered": True}
     local: dict[str, Any] = {}
 
-    # Stage 1: compact observations (deterministic, no LLM call).
-    # The `observations` channel uses the append-style `accumulate` reducer,
-    # so a replacement must be sent through the `__reset__` marker contract.
-    observations = [_coerce_observation(o) for o in state.get("observations", [])]
-    compacted_obs = _compact_observations(observations)
-    obs_tokens_before = sum(count_tokens(json.dumps(o.result, default=str)) for o in observations)
-    obs_tokens_after = sum(count_tokens(json.dumps(o.result, default=str)) for o in compacted_obs)
-    savings = obs_tokens_before - obs_tokens_after
-    if savings > 0:
-        updates["observations"] = [{"__reset__": True}, *compacted_obs]
-        local["observations"] = compacted_obs
-        budget.used -= savings
-        logger.info("[_compact_if_needed] stage 1 (observations) saved %d tokens", savings)
+    u1, l1 = _compact_stage1_observations(state, budget)
+    updates.update(u1)
+    local.update(l1)
 
     if not budget.needs_compaction():
         return updates, local
 
-    # Stage 2: evidence packing — only meaningful where retrieved_docs are
-    # actually rendered into the prompt (finalize).
     if trim_docs:
-        docs = list(state.get("retrieved_docs", []) or [])
-        overflow = budget.used - budget.compaction_threshold
-        trimmed = _trim_docs_to_budget(docs, overflow)
-        if len(trimmed) < len(docs):
-            freed = count_tokens(format_context_string(docs)) - count_tokens(format_context_string(trimmed))
-            updates["retrieved_docs"] = trimmed
-            local["retrieved_docs"] = trimmed
-            budget.used -= max(freed, 0)
-            logger.info("[_compact_if_needed] stage 2 (evidence) saved %d tokens", freed)
+        u2, l2 = _compact_stage2_docs(state, budget)
+        updates.update(u2)
+        local.update(l2)
 
     if not budget.needs_compaction():
         return updates, local
 
-    # Stage 3: summarise old messages (LLM call).
-    messages = list(state.get("messages", []))
-    if len(messages) > (get_setting(ctx.db, "COMPACTION_KEEP_RECENT", ctx.org_id) if ctx else get_def("COMPACTION_KEEP_RECENT").default):
-        message_updates, resolved, summary = await _compact_messages_llm(messages, ctx=ctx)
-        if summary is not None:
-            updates["messages"] = message_updates
-            updates["compaction_summary"] = summary
-            local["messages"] = resolved
-            local["compaction_summary"] = summary
-            logger.info("[_compact_if_needed] stage 3 (messages) summarized %d old messages",
-                        len(messages) - len(resolved) + 1)
+    u3, l3 = await _compact_stage3_messages(state, ctx)
+    updates.update(u3)
+    local.update(l3)
 
     return updates, local
 
@@ -770,85 +800,96 @@ async def load_context_node(state: AgentState, ctx: ToolContext) -> dict:
         }
     
     
+def _build_plan_user_prompt(original, rewritten, clarification, glossary, last_summary, recalled_text, file_meta):
+    return (
+        f"User message: {original}\n"
+        f"Retrieval query: {rewritten}\n"
+        + (f"User clarification: {clarification}\n" if clarification else "")
+        + (f"[Abbreviation Glossary]\n{glossary}\n\n" if glossary else "")
+        + f"Previous answer summary: {last_summary}\n"
+        f"Recalled long-term memory (context only, not evidence):\n{recalled_text}\n\n"
+        f"Attached files: {json.dumps(file_meta)}\n\n"
+        "Produce a plan JSON matching the schema."
+    )
+
+
+async def _invoke_plan_llm(ctx, system, user, rewritten):
+    try:
+        llm = build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)
+        structured = llm.with_structured_output(Plan, method="json_schema", include_raw=True)
+        resp = await structured.ainvoke([
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ])
+        # include_raw=True returns a dict with 'raw', 'parsed', 'parsing_error'
+        if isinstance(resp, dict):
+            plan = resp.get("parsed")
+            if plan is None or resp.get("parsing_error"):
+                raise resp.get("parsing_error") or ValueError("structured output parsed to None")
+        else:
+            plan = resp.parsed if hasattr(resp, "parsed") else resp
+    except Exception as exc:
+        logger.warning("[plan_node] structured output failed: %s; using JSON parse fallback", exc)
+        llm = build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)
+        resp = await llm.ainvoke([
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ])
+        raw = str(resp.content)
+        block = _extract_json_block(raw)
+        try:
+            plan = Plan.model_validate_json(block) if block else Plan()
+        except Exception as parse_exc:
+            logger.warning("[plan_node] JSON parse failed: %s", parse_exc)
+            plan = Plan(intent="rag", subtasks=[Subtask(id="a", description=rewritten, tool_hint="rag_retrieve")])
+    return plan
+
+
+def _check_clarification_budget(plan, state, ctx):
+    needs_clarification = bool(getattr(plan, "needs_clarification", False))
+    if needs_clarification and state.get("clarification_count", 0) >= get_setting(ctx.db, "AGENT_MAX_CLARIFICATIONS", ctx.org_id):
+        logger.info("[plan_node] clarification budget exhausted — proceeding without asking")
+        needs_clarification = False
+        if isinstance(plan, Plan):
+            plan.needs_clarification = False
+    return needs_clarification
+
+
 async def plan_node(state: AgentState, ctx: ToolContext) -> dict:
     """Produce a structured plan for the current turn."""
     with _agent_step("plan"):
         writer = _writer()
         original = state.get("original_query", "")
         rewritten = state.get("rewritten_query", "") or original
-    
+
         file_meta = []
         if ctx.chat_id:
             files = ctx.db.query(ChatFile).filter(ChatFile.chat_id == ctx.chat_id).all()
             file_meta = [{"id": f.id, "name": f.file_name, "type": f.content_type} for f in files]
-    
+
         last_summary = ""
         lao = state.get("last_answer_object")
         if lao and hasattr(lao, "summary"):
             last_summary = lao.summary
             if getattr(lao, "chart_options", None):
                 last_summary += f" (Previous answer includes {len(lao.chart_options)} chart(s) with structured data.)"
-    
+
         recalled = state.get("recalled_memories", []) or []
         recalled_text = "\n".join(d.get("page_content", "") for d in recalled[:3])
         clarification = (state.get("clarification_response") or "").strip()
-    
+
         system = AGENT_SYSTEM_PROMPT + "\n\n" + PLAN_SYSTEM_PROMPT
 
         # Glossary was built once by expand_query_node — reuse it.
         glossary = state.get("abbreviation_glossary", "")
 
-        user = (
-            f"User message: {original}\n"
-            f"Retrieval query: {rewritten}\n"
-            + (f"User clarification: {clarification}\n" if clarification else "")
-            + (f"[Abbreviation Glossary]\n{glossary}\n\n" if glossary else "")
-            + f"Previous answer summary: {last_summary}\n"
-            f"Recalled long-term memory (context only, not evidence):\n{recalled_text}\n\n"
-            f"Attached files: {json.dumps(file_meta)}\n\n"
-            "Produce a plan JSON matching the schema."
-        )
-    
-        try:
-            llm = build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)
-            structured = llm.with_structured_output(Plan, method="json_schema", include_raw=True)
-            resp = await structured.ainvoke([
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ])
-            # include_raw=True returns a dict with 'raw', 'parsed', 'parsing_error'
-            if isinstance(resp, dict):
-                plan = resp.get("parsed")
-                if plan is None or resp.get("parsing_error"):
-                    raise resp.get("parsing_error") or ValueError("structured output parsed to None")
-            else:
-                plan = resp.parsed if hasattr(resp, "parsed") else resp
-        except Exception as exc:
-            logger.warning("[plan_node] structured output failed: %s; using JSON parse fallback", exc)
-            llm = build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)
-            resp = await llm.ainvoke([
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ])
-            raw = str(resp.content)
-            block = _extract_json_block(raw)
-            try:
-                plan = Plan.model_validate_json(block) if block else Plan()
-            except Exception as parse_exc:
-                logger.warning("[plan_node] JSON parse failed: %s", parse_exc)
-                plan = Plan(intent="rag", subtasks=[Subtask(id="a", description=rewritten, tool_hint="rag_retrieve")])
-    
+        user = _build_plan_user_prompt(original, rewritten, clarification, glossary, last_summary, recalled_text, file_meta)
+
+        plan = await _invoke_plan_llm(ctx, system, user, rewritten)
+
         writer({"event": "plan", "plan": plan.model_dump() if isinstance(plan, Plan) else plan})
 
-        # Clarification budget: without a cap, a model that keeps setting
-        # needs_clarification=true loops plan → clarify → plan until the
-        # recursion limit. Past the cap, answer with the ambiguity stated.
-        needs_clarification = bool(getattr(plan, "needs_clarification", False))
-        if needs_clarification and state.get("clarification_count", 0) >= get_setting(ctx.db, "AGENT_MAX_CLARIFICATIONS", ctx.org_id):
-            logger.info("[plan_node] clarification budget exhausted — proceeding without asking")
-            needs_clarification = False
-            if isinstance(plan, Plan):
-                plan.needs_clarification = False
+        needs_clarification = _check_clarification_budget(plan, state, ctx)
 
         return {
             "plan": plan,
@@ -857,28 +898,117 @@ async def plan_node(state: AgentState, ctx: ToolContext) -> dict:
         }
     
     
+def _build_think_prompt(
+    iteration: int,
+    max_iter: int,
+    original: str,
+    query: str,
+    glossary: str,
+    summary_text: str,
+    history_text: str,
+    lao,
+    reflection,
+    observations: list,
+    plan,
+    tools_text: str,
+) -> str:
+    # Include last_answer_object summary so "summarize it" / "chart it" work.
+    lao_text = ""
+    if lao and hasattr(lao, "summary"):
+        lao_text = f"  Previous answer summary: {lao.summary[:300]}\n"
+        if lao.key_points:
+            lao_text += f"  Key points: {'; '.join(lao.key_points[:5])}\n"
+
+    # If reflect_final sent us back, include its reasoning so the agent
+    # knows exactly what was missing and can act on it.
+    reflection_text = ""
+    if reflection and isinstance(reflection, dict) and not reflection.get("ready", True):
+        reflection_text = (
+            f"  NOTE \u2014 the verification module rejected your previous final_answer because:\n"
+            f"  {reflection.get('reasoning', '')}\n"
+            "  Do NOT reference this feedback in your answer. Use it only as guidance to\n"
+            "  decide which tool to call next, then emit a clean final_answer.\n"
+        )
+
+    tried_queries = _tried_rag_retrieve_queries(observations)
+    tried_queries_text = (
+        f"  Already tried (do NOT resubmit these exact strings to rag_retrieve): {tried_queries}\n"
+        if tried_queries else ""
+    )
+
+    return (
+        f"Iteration: {iteration}/{max_iter}\n"
+        f"User message: {original}\n"
+        f"Retrieval query: {query}\n"
+        + (f"[Abbreviation Glossary]\n{glossary}\n\n" if glossary else "")
+        + (f"Earlier conversation summary:\n{summary_text}\n" if summary_text else "")
+        + f"Conversation history (recent turns):\n{history_text or '  (none)'}\n"
+        f"Previous answer context:\n{lao_text or '  (none)'}\n"
+        f"Verification feedback:\n{reflection_text or '  (none)'}\n"
+        f"{tried_queries_text}"
+        f"Plan: {json.dumps(plan.model_dump() if isinstance(plan, Plan) else plan, default=str)}\n"
+        f"Observations so far:\n{_observations_metadata_text(observations)}\n\n"
+        f"Available tools:\n{tools_text}\n\n"
+        "Emit either {\"tool_calls\": [...]} or {\"final_answer\": true}."
+    )
+
+
+def _parse_tool_calls(resp, mode: str, iteration: int, max_iter: int):
+    parsed = parse_think_response(resp, mode=mode)
+    tool_calls = parsed.tool_calls
+    final_answer = parsed.final_answer
+    if iteration >= max_iter:
+        tool_calls = []
+    # Dependency guard: only allow independent tool calls in one message.
+    allowed = list(tool_calls)
+    return allowed, final_answer
+
+
+def _think_early_exit(state, iteration):
+    if state.get("force_finalize"):
+        return {"iteration": iteration, "tool_calls": [], "precomputed_answer": ""}
+    ready, _reasoning = _verify_execution(_build_execution_summary(state))
+    if ready:
+        return {"iteration": iteration, "tool_calls": [], "precomputed_answer": ""}
+    precomputed = state.get("precomputed_tool_calls", [])
+    if precomputed:
+        return {"iteration": iteration, "tool_calls": list(precomputed), "precomputed_tool_calls": []}
+    return None
+
+
+async def _invoke_think_llm(ctx, system, user, tools, mode):
+    if mode == "json_text":
+        llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=0.0)
+        return await llm.ainvoke([{"role": "system", "content": system}, {"role": "user", "content": user}])
+    llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=0.0)
+    return await llm.bind_tools(tools).ainvoke([{"role": "system", "content": system}, {"role": "user", "content": user}])
+
+
+def _rebuild_think_after_compaction(state, compaction_local, ctx, iteration, max_iter, original, query, glossary, plan, tools_text):
+    state = {**state, **compaction_local}
+    observations = state.get("observations", [])
+    recent = select_recent_history(state.get("messages", []), max_pairs=get_setting(ctx.db, "AGENT_HISTORY_PAIRS", ctx.org_id))
+    history_text = history_to_text(recent)
+    summary_text = state.get("compaction_summary") or ""
+    user = _build_think_prompt(
+        iteration, max_iter, original, query, glossary, summary_text,
+        history_text, state.get("last_answer_object"),
+        state.get("reflection_final"), observations, plan, tools_text,
+    )
+    return state, observations, user
+
+
 async def think_node(state: AgentState, ctx: ToolContext) -> dict:
     """Decide the next action: emit one or more tool calls or a final answer."""
     with _agent_step("think"):
         ctx.state = state
         iteration = state.get("iteration", 0) + 1
         max_iter = get_setting(ctx.db, "AGENT_MAX_ITERATIONS", ctx.org_id)
-    
-        if state.get("force_finalize"):
-            return {"iteration": iteration, "tool_calls": [], "precomputed_answer": ""}
 
-        # Pre-think sufficiency check: if the plan is already deterministically
-        # satisfied, don't spend an LLM call asking the model whether to stop —
-        # it isn't reliable at noticing this on its own (see tool_node's matching
-        # post-round check for the same reasoning).
-        ready, _reasoning = _verify_execution(_build_execution_summary(state))
-        if ready:
-            return {"iteration": iteration, "tool_calls": [], "precomputed_answer": ""}
+        early = _think_early_exit(state, iteration)
+        if early is not None:
+            return early
 
-        precomputed = state.get("precomputed_tool_calls", [])
-        if precomputed:
-            return {"iteration": iteration, "tool_calls": list(precomputed), "precomputed_tool_calls": []}
-    
         query = state.get("rewritten_query", "") or state.get("original_query", "")
         original = state.get("original_query", "") or query
         plan = state.get("plan") or Plan()
@@ -896,54 +1026,15 @@ async def think_node(state: AgentState, ctx: ToolContext) -> dict:
         history_text = history_to_text(recent)
         summary_text = state.get("compaction_summary") or ""
 
-        # Include last_answer_object summary so "summarize it" / "chart it" work.
-        lao = state.get("last_answer_object")
-        lao_text = ""
-        if lao and hasattr(lao, "summary"):
-            lao_text = f"  Previous answer summary: {lao.summary[:300]}\n"
-            if lao.key_points:
-                lao_text += f"  Key points: {'; '.join(lao.key_points[:5])}\n"
-
-        # If reflect_final sent us back, include its reasoning so the agent
-        # knows exactly what was missing and can act on it.
-        reflection = state.get("reflection_final")
-        reflection_text = ""
-        if reflection and isinstance(reflection, dict) and not reflection.get("ready", True):
-            reflection_text = (
-                f"  NOTE — the verification module rejected your previous final_answer because:\n"
-                f"  {reflection.get('reasoning', '')}\n"
-                "  Do NOT reference this feedback in your answer. Use it only as guidance to\n"
-                "  decide which tool to call next, then emit a clean final_answer.\n"
-            )
-
-        system = AGENT_SYSTEM_PROMPT + "\n\n" + THINK_SYSTEM_PROMPT
-        tried_queries = _tried_rag_retrieve_queries(observations)
-        tried_queries_text = (
-            f"  Already tried (do NOT resubmit these exact strings to rag_retrieve): {tried_queries}\n"
-            if tried_queries else ""
-        )
-
         # Glossary was built once by expand_query_node — reuse it.
         glossary = state.get("abbreviation_glossary", "")
 
-        def _build_think_user_prompt() -> str:
-            return (
-                f"Iteration: {iteration}/{max_iter}\n"
-                f"User message: {original}\n"
-                f"Retrieval query: {query}\n"
-                + (f"[Abbreviation Glossary]\n{glossary}\n\n" if glossary else "")
-                + (f"Earlier conversation summary:\n{summary_text}\n" if summary_text else "")
-                + f"Conversation history (recent turns):\n{history_text or '  (none)'}\n"
-                f"Previous answer context:\n{lao_text or '  (none)'}\n"
-                f"Verification feedback:\n{reflection_text or '  (none)'}\n"
-                f"{tried_queries_text}"
-                f"Plan: {json.dumps(plan.model_dump() if isinstance(plan, Plan) else plan, default=str)}\n"
-                f"Observations so far:\n{_observations_metadata_text(observations)}\n\n"
-                f"Available tools:\n{tools_text}\n\n"
-                "Emit either {\"tool_calls\": [...]} or {\"final_answer\": true}."
-            )
-
-        user = _build_think_user_prompt()
+        system = AGENT_SYSTEM_PROMPT + "\n\n" + THINK_SYSTEM_PROMPT
+        user = _build_think_prompt(
+            iteration, max_iter, original, query, glossary, summary_text,
+            history_text, state.get("last_answer_object"),
+            state.get("reflection_final"), observations, plan, tools_text,
+        )
 
         # Runtime compaction: check if the prompt exceeds the context budget.
         # If so, compact observations (deterministic) and/or messages (LLM call),
@@ -952,44 +1043,20 @@ async def think_node(state: AgentState, ctx: ToolContext) -> dict:
             state, user, system_overhead=count_tokens(system), ctx=ctx,
         )
         if compaction_local:
-            state = {**state, **compaction_local}
-            observations = state.get("observations", [])
-            recent = select_recent_history(state.get("messages", []), max_pairs=get_setting(ctx.db, "AGENT_HISTORY_PAIRS", ctx.org_id))
-            history_text = history_to_text(recent)
-            summary_text = state.get("compaction_summary") or ""
-            tried_queries = _tried_rag_retrieve_queries(observations)
-            tried_queries_text = (
-                f"  Already tried (do NOT resubmit these exact strings to rag_retrieve): {tried_queries}\n"
-                if tried_queries else ""
+            state, observations, user = _rebuild_think_after_compaction(
+                state, compaction_local, ctx, iteration, max_iter, original, query, glossary, plan, tools_text,
             )
-            user = _build_think_user_prompt()
-    
+
         mode = get_setting(ctx.db, "TOOL_CALL_MODE", None)
         try:
-            # Tool selection is a classification decision — temperature 0.
-            # Creative sampling belongs in finalize_node's prose, not here.
-            if mode == "json_text":
-                llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=0.0)
-                resp = await llm.ainvoke([{"role": "system", "content": system}, {"role": "user", "content": user}])
-            else:
-                # native or auto: bind tools; parser falls back to JSON-text if native call absent.
-                llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=0.0)
-                resp = await llm.bind_tools(tools).ainvoke([{"role": "system", "content": system}, {"role": "user", "content": user}])
+            resp = await _invoke_think_llm(ctx, system, user, tools, mode)
         except Exception as exc:
             logger.warning("[think_node] LLM call failed: %s", exc)
             return {"iteration": iteration, "tool_calls": [], "precomputed_answer": f"LLM error: {exc}"}
-    
-        parsed = parse_think_response(resp, mode=mode)
-        tool_calls = parsed.tool_calls
-        final_answer = parsed.final_answer
-    
-        if iteration >= max_iter:
-            tool_calls = []
-    
-        # Dependency guard: only allow independent tool calls in one message.
-        allowed = list(tool_calls)
-    
-        if tool_calls and not final_answer:
+
+        allowed, final_answer = _parse_tool_calls(resp, mode, iteration, max_iter)
+
+        if allowed and not final_answer:
             return {**compaction_updates, "iteration": iteration, "tool_calls": allowed}
 
         # final_answer can be:
@@ -1094,190 +1161,233 @@ async def _correct_tool_args(
     return None
 
 
+async def _dispatch_tool_calls(
+    tool_calls: list[dict],
+    tools: dict,
+    prior_observations: list[Observation],
+    counts: dict,
+    ctx: "ToolContext",
+) -> tuple[list[Observation], dict]:
+    """Dispatch tool calls in parallel, returning new observations and updated counts."""
+    writer = _writer()
+    new_observations: list[Observation] = []
+
+    # Idempotency guard: the think LLM sometimes re-emits an identical
+    # tool_call (same tool + same arguments) across iterations even
+    # when instructed not to. Reuse the prior observation instead of
+    # re-running an expensive retrieval/tool call for nothing.
+    def _call_signature(name: str, args: dict) -> tuple[str, str]:
+        return (name, json.dumps(args, sort_keys=True, default=str))
+
+    prior_signatures: dict[tuple[str, str], Observation] = {}
+    for obs in prior_observations:
+        prior_signatures.setdefault(_call_signature(obs.tool, obs.arguments), obs)
+
+    async def _budget_exceeded(name, args, cap):
+        return {"tool": name, "arguments": args, "result": {}, "error": f"Budget exceeded: {name} call cap is {cap}", "tokens": 0}
+
+    async def _reuse_prior(prior: Observation):
+        return {
+            "tool": prior.tool,
+            "arguments": prior.arguments,
+            "result": prior.result,
+            "error": prior.error,
+            "tokens": 0,
+        }
+
+    coros = []
+    for tc in tool_calls:
+        name = tc.get("tool")
+        args = tc.get("arguments", {})
+        tool_obj = tools.get(name)
+        label = getattr(tool_obj, "ui_label", None) if tool_obj else None
+        writer({"event": "tool_call", "tool": name, "arguments": args, "label": label or name})
+        prior = prior_signatures.get(_call_signature(name, args))
+        if prior is not None:
+            logger.info("[tool_node] duplicate call skipped, reusing prior observation: tool=%s args=%s", name, args)
+            coros.append(_reuse_prior(prior))
+            continue
+        cap = _tool_call_budget(ctx.db, ctx.org_id).get(name)
+        current = counts.get(name, 0)
+        if cap is not None and current >= cap:
+            coros.append(_budget_exceeded(name, args, cap))
+            continue
+        tool = tools.get(name)
+        if tool is None:
+            async def _missing(name=name, args=args):
+                return {"tool": name, "arguments": args, "result": {}, "error": f"Tool {name} not available", "tokens": 0}
+            coros.append(_missing())
+        else:
+            coros.append(_run_tool(tool, name, args))
+
+    results = await asyncio.gather(*coros, return_exceptions=True)
+    for i, tc in enumerate(tool_calls):
+        res = results[i]
+        if isinstance(res, Exception):
+            obs = Observation(
+                tool=tc["tool"],
+                arguments=tc.get("arguments", {}),
+                result={},
+                error=str(res),
+                tokens=0,
+            )
+        else:
+            obs = Observation(
+                tool=res["tool"],
+                arguments=res["arguments"],
+                result=res.get("result", {}),
+                error=res.get("error"),
+                tokens=res.get("tokens", 0),
+            )
+        new_observations.append(obs)
+        writer({"event": "tool_observation", **obs.model_dump()})
+        counts[obs.tool] = counts.get(obs.tool, 0) + 1
+
+    return new_observations, counts
+
+
+async def _retry_failed_calls(
+    new_observations: list[Observation],
+    tool_calls: list[dict],
+    tools: dict,
+    max_retries: int,
+    ctx: "ToolContext",
+) -> None:
+    """Retry failed tool calls in place: transient errors retry with backoff;
+    argument errors call the correction LLM for new arguments.
+
+    Retries do NOT count against the per-tool call budget (_TOOL_CALL_BUDGET)
+    \u2014 that budget limits how many times the *think* LLM can choose to call a
+    tool, not how many times a single failed call can be retried.
+    """
+    writer = _writer()
+    if max_retries <= 0:
+        return
+    for idx, obs in enumerate(new_observations):
+        if obs.error is None:
+            continue
+        tool_name = obs.tool
+        tool = tools.get(tool_name)
+        if tool is None:
+            continue
+        for attempt in range(max_retries):
+            if _is_transient_error(obs.error):
+                await asyncio.sleep(get_setting(ctx.db, "AGENT_RETRY_BACKOFF_BASE", ctx.org_id) * (2 ** attempt))
+                retry_args = obs.arguments
+            else:
+                retry_args = await _correct_tool_args(
+                    tool_name, obs.arguments, obs.error, tools, ctx,
+                )
+                if retry_args is None:
+                    break
+            retry_result = await _run_tool(tool, tool_name, retry_args)
+            retry_obs = Observation(
+                tool=retry_result["tool"],
+                arguments=retry_result["arguments"],
+                result=retry_result.get("result", {}),
+                error=retry_result.get("error"),
+                tokens=retry_result.get("tokens", 0),
+            )
+            writer({
+                "event": "tool_retry",
+                "tool": tool_name,
+                "attempt": attempt + 1,
+                "max_retries": max_retries,
+                "success": retry_obs.error is None,
+                "error": retry_obs.error,
+            })
+            if retry_obs.error is None:
+                new_observations[idx] = retry_obs
+                break
+            obs = retry_obs
+
+
+def _seed_existing_docs(existing_docs, seen_hashes, merged_docs):
+    from app.services.infrastructure import content_hash as _ch
+    for doc in existing_docs or []:
+        if not isinstance(doc, dict):
+            continue
+        h = doc.get("metadata", {}).get("content_hash") or _ch(doc.get("page_content", ""))
+        if h not in seen_hashes:
+            seen_hashes.add(h)
+            merged_docs.append(doc)
+
+
+def _merge_observation_docs(all_observations, seen_hashes, merged_docs):
+    from app.services.infrastructure import content_hash as _ch
+    best_confidence = 0.0
+    for obs in all_observations:
+        if obs.tool == "rag_retrieve" and not obs.error:
+            docs = obs.result.get("docs")
+            if isinstance(docs, list):
+                for doc in docs:
+                    if not isinstance(doc, dict):
+                        continue
+                    h = doc.get("metadata", {}).get("content_hash") or _ch(doc.get("page_content", ""))
+                    if h not in seen_hashes:
+                        seen_hashes.add(h)
+                        merged_docs.append(doc)
+                conf = obs.result.get("confidence", 0.0)
+                if conf > best_confidence:
+                    best_confidence = conf
+    return best_confidence
+
+
+def _merge_retrieved_docs(
+    all_observations: list[Observation],
+    existing_docs: list[dict],
+) -> tuple[list[dict], float]:
+    """Promote all rag_retrieve docs into graph state (deduplicated across
+    observations by content_hash).
+
+    `observations` uses the append-style `accumulate` reducer, so tool_node
+    must return ONLY the observations it created. Returning prior + new made
+    the channel grow 1 \u2192 3 \u2192 7 \u2192 15 across tool rounds.
+    """
+    merged_docs: list[dict] = []
+    seen_hashes: set[str] = set()
+    _seed_existing_docs(existing_docs, seen_hashes, merged_docs)
+    best_confidence = _merge_observation_docs(all_observations, seen_hashes, merged_docs)
+    return merged_docs, best_confidence
+
+
 async def tool_node(state: AgentState, ctx: ToolContext) -> dict:
     """Dispatch tool calls, run them (in parallel when independent), record observations."""
     with _agent_step("tool"):
-        writer = _writer()
         tool_calls = state.get("tool_calls", [])
         if not tool_calls:
             return {}
-    
+
         # Expose current state to tools so they can read last_answer_object,
         # retrieved_docs, kb_ids, file_markdown, message_id, iteration, etc.
         ctx.state = state
         tools = {t.name: t for t in applicable_tools(ctx)}
         prior_observations = [_coerce_observation(o) for o in state.get("observations", [])]
-        new_observations: list[Observation] = []
         counts = dict(state.get("tool_call_count", {}))
 
-        # Idempotency guard: the think LLM sometimes re-emits an identical
-        # tool_call (same tool + same arguments) across iterations even
-        # when instructed not to. Reuse the prior observation instead of
-        # re-running an expensive retrieval/tool call for nothing.
-        def _call_signature(name: str, args: dict) -> tuple[str, str]:
-            return (name, json.dumps(args, sort_keys=True, default=str))
+        new_observations, counts = await _dispatch_tool_calls(
+            tool_calls, tools, prior_observations, counts, ctx,
+        )
 
-        prior_signatures: dict[tuple[str, str], Observation] = {}
-        for obs in prior_observations:
-            prior_signatures.setdefault(_call_signature(obs.tool, obs.arguments), obs)
-
-        async def _budget_exceeded(name, args, cap):
-            return {"tool": name, "arguments": args, "result": {}, "error": f"Budget exceeded: {name} call cap is {cap}", "tokens": 0}
-
-        async def _reuse_prior(prior: Observation):
-            return {
-                "tool": prior.tool,
-                "arguments": prior.arguments,
-                "result": prior.result,
-                "error": prior.error,
-                "tokens": 0,
-            }
-
-        coros = []
-        for tc in tool_calls:
-            name = tc.get("tool")
-            args = tc.get("arguments", {})
-            tool_obj = tools.get(name)
-            label = getattr(tool_obj, "ui_label", None) if tool_obj else None
-            writer({"event": "tool_call", "tool": name, "arguments": args, "label": label or name})
-            prior = prior_signatures.get(_call_signature(name, args))
-            if prior is not None:
-                logger.info("[tool_node] duplicate call skipped, reusing prior observation: tool=%s args=%s", name, args)
-                coros.append(_reuse_prior(prior))
-                continue
-            cap = _tool_call_budget(ctx.db, ctx.org_id).get(name)
-            current = counts.get(name, 0)
-            if cap is not None and current >= cap:
-                coros.append(_budget_exceeded(name, args, cap))
-                continue
-            tool = tools.get(name)
-            if tool is None:
-                async def _missing(name=name, args=args):
-                    return {"tool": name, "arguments": args, "result": {}, "error": f"Tool {name} not available", "tokens": 0}
-                coros.append(_missing())
-            else:
-                coros.append(_run_tool(tool, name, args))
-    
-        results = await asyncio.gather(*coros, return_exceptions=True)
-        for i, tc in enumerate(tool_calls):
-            res = results[i]
-            if isinstance(res, Exception):
-                obs = Observation(
-                    tool=tc["tool"],
-                    arguments=tc.get("arguments", {}),
-                    result={},
-                    error=str(res),
-                    tokens=0,
-                )
-            else:
-                obs = Observation(
-                    tool=res["tool"],
-                    arguments=res["arguments"],
-                    result=res.get("result", {}),
-                    error=res.get("error"),
-                    tokens=res.get("tokens", 0),
-                )
-            new_observations.append(obs)
-            writer({"event": "tool_observation", **obs.model_dump()})
-            counts[obs.tool] = counts.get(obs.tool, 0) + 1
-
-        # Retry failed tool calls: transient errors retry with the same
-        # arguments + backoff; argument errors call the correction LLM to
-        # generate new arguments.  Retries do NOT count against the per-tool
-        # call budget (_TOOL_CALL_BUDGET) — that budget limits how many times
-        # the *think* LLM can choose to call a tool, not how many times a
-        # single failed call can be retried.
         max_retries = get_setting(ctx.db, "AGENT_MAX_TOOL_RETRIES", ctx.org_id)
-        if max_retries > 0:
-            for idx, obs in enumerate(new_observations):
-                if obs.error is None:
-                    continue
-                tool_name = obs.tool
-                tool = tools.get(tool_name)
-                if tool is None:
-                    continue
-                for attempt in range(max_retries):
-                    if _is_transient_error(obs.error):
-                        await asyncio.sleep(get_setting(ctx.db, "AGENT_RETRY_BACKOFF_BASE", ctx.org_id) * (2 ** attempt))
-                        retry_args = obs.arguments
-                    else:
-                        retry_args = await _correct_tool_args(
-                            tool_name, obs.arguments, obs.error, tools, ctx,
-                        )
-                        if retry_args is None:
-                            break
-                    retry_result = await _run_tool(tool, tool_name, retry_args)
-                    retry_obs = Observation(
-                        tool=retry_result["tool"],
-                        arguments=retry_result["arguments"],
-                        result=retry_result.get("result", {}),
-                        error=retry_result.get("error"),
-                        tokens=retry_result.get("tokens", 0),
-                    )
-                    writer({
-                        "event": "tool_retry",
-                        "tool": tool_name,
-                        "attempt": attempt + 1,
-                        "max_retries": max_retries,
-                        "success": retry_obs.error is None,
-                        "error": retry_obs.error,
-                    })
-                    if retry_obs.error is None:
-                        new_observations[idx] = retry_obs
-                        break
-                    obs = retry_obs
-    
-        # Promote all rag_retrieve docs into graph state (deduplicated across
-        # observations by content_hash) so finalize_node, answer_evaluation_node,
-        # extract_data(source="retrieved_docs"), and the citations payload in
-        # agent_runner all see the full set of retrieved chunks — not just the
-        # first call's docs.
-        #
-        # `observations` uses the append-style `accumulate` reducer, so this
-        # node must return ONLY the observations it created. Returning
-        # prior + new made the channel grow 1 → 3 → 7 → 15 across tool rounds.
+        await _retry_failed_calls(new_observations, tool_calls, tools, max_retries, ctx)
+
         state_update: dict = {
             "tool_calls": [],
             "observations": new_observations,
             "tool_call_count": counts,
         }
         all_observations = prior_observations + new_observations
-        from app.services.infrastructure import content_hash as _ch
-        merged_docs: list[dict] = []
-        seen_hashes: set[str] = set()
-        best_confidence = 0.0
-        # Seed with docs already promoted this turn so a later rag_retrieve
-        # call doesn't discard earlier ones. Recalled conversational memory is
-        # deliberately NOT seeded here — it lives in `recalled_memories` and
-        # must never become citable evidence.
-        for doc in state.get("retrieved_docs", []) or []:
-            if not isinstance(doc, dict):
-                continue
-            h = doc.get("metadata", {}).get("content_hash") or _ch(doc.get("page_content", ""))
-            if h not in seen_hashes:
-                seen_hashes.add(h)
-                merged_docs.append(doc)
-        for obs in all_observations:
-            if obs.tool == "rag_retrieve" and not obs.error:
-                docs = obs.result.get("docs")
-                if isinstance(docs, list):
-                    for doc in docs:
-                        if not isinstance(doc, dict):
-                            continue
-                        h = doc.get("metadata", {}).get("content_hash") or _ch(doc.get("page_content", ""))
-                        if h not in seen_hashes:
-                            seen_hashes.add(h)
-                            merged_docs.append(doc)
-                    conf = obs.result.get("confidence", 0.0)
-                    if conf > best_confidence:
-                        best_confidence = conf
+        merged_docs, best_confidence = _merge_retrieved_docs(
+            all_observations, state.get("retrieved_docs", []),
+        )
         if merged_docs:
             state_update["retrieved_docs"] = merged_docs
             state_update["retrieval_confidence"] = best_confidence
 
         # Root cause: the acting LLM alone decides when to stop calling tools,
-        # and small/local models don't reliably follow "stop once sufficient"
-        # / "don't repeat calls" prompt rules — they keep re-emitting tool_calls
+        # and small/local models don\u2019t reliably follow "stop once sufficient"
+        # / "don\u2019t repeat calls" prompt rules \u2014 they keep re-emitting tool_calls
         # (often exact duplicates) past the point the plan is already
         # deterministically satisfied. reflect_final already verifies this
         # deterministically, but only once the LLM itself stops requesting
@@ -1287,12 +1397,11 @@ async def tool_node(state: AgentState, ctx: ToolContext) -> dict:
         probe_state = {**state, **state_update, "observations": all_observations}
         ready, reasoning = _verify_execution(_build_execution_summary(probe_state))
         if ready:
-            logger.info("[tool_node] plan deterministically satisfied after this tool round — forcing finalize: %s", reasoning[:200])
+            logger.info("[tool_node] plan deterministically satisfied after this tool round \u2014 forcing finalize: %s", reasoning[:200])
             state_update["force_finalize"] = True
 
         return state_update
-    
-    
+
 async def _run_tool(tool, name: str, args: dict) -> dict:
     try:
         raw = await tool.arun(args)
@@ -1316,6 +1425,168 @@ def route_plan(state: AgentState) -> str:
     if state.get("needs_clarification"):
         return "clarify_interrupt"
     return "think"
+
+
+def _build_finalize_prompt(
+    docs: list[dict],
+    file_markdown,
+    plan,
+    chart_options: list[dict],
+    query: str,
+    retrieval_query: str,
+    summary_text: str,
+    history_text: str,
+    observations: list,
+    glossary: str,
+    ctx: "ToolContext",
+) -> tuple[str, str]:
+    """Build the finalize system+user prompt. Returns (system, user)."""
+    context_text = format_context_string(docs, file_markdown, db=ctx.db, org_id=ctx.org_id, query_glossary=glossary)
+    # Non-retrieval tool results (code_execute, chart_generate, etc.)
+    # are not in retrieved_docs; surface them separately. Retrieval
+    # results are already in context_text — don't duplicate.
+    non_rag_text = _non_retrieval_observations_text(observations)
+
+    # Chart docs are only appended when the plan intent is "chart" or
+    # a chart_generate observation exists.
+    plan_intent = plan.intent if isinstance(plan, Plan) else ""
+    include_charts = plan_intent == "chart" or bool(chart_options)
+
+    answer_prompt = FINALIZE_ANSWER_PROMPT
+    if chart_options:
+        # Valid chart JSON already exists — have the model place a
+        # marker instead of freehand-writing (and risking malformed) JSON.
+        from app.services.prompts.loader import append_chart_placeholder_instructions
+        answer_prompt = append_chart_placeholder_instructions(answer_prompt, len(chart_options))
+    elif include_charts:
+        from app.services.prompts.loader import append_chart_instructions
+        answer_prompt = append_chart_instructions(answer_prompt)
+
+    system = FINALIZE_GUARDRAIL_PROMPT + "\n\n" + answer_prompt
+
+    # Priority order is explicit: retrieved documents are the
+    # evidence, the conversation is the intent. Without this block
+    # conversational instructions ("shorter", "in a table",
+    # "compare with your last answer") are unanswerable.
+    parts = [f"User query: {query}\n\n"]
+    if retrieval_query and retrieval_query != query:
+        parts.append(f"Resolved retrieval query: {retrieval_query}\n\n")
+    if summary_text:
+        parts.append(f"Earlier conversation summary:\n{summary_text}\n\n")
+    if history_text:
+        parts.append(
+            "Conversation so far (intent only — cite nothing from here):\n"
+            f"{history_text}\n\n"
+        )
+    parts.append(f"Retrieved context (the only citable evidence):\n{context_text}\n\n")
+    if non_rag_text:
+        parts.append(f"Tool results:\n{non_rag_text}\n\n")
+    parts.append("Provide a concise, accurate answer.")
+    user = "".join(parts)
+
+    return system, user
+
+
+async def _stream_final_answer(
+    ctx: "ToolContext",
+    system: str,
+    user: str,
+    writer,
+) -> tuple[str, Optional[dict]]:
+    """Stream the final answer from the LLM. Returns (final, answer_usage)."""
+    answer_usage: Optional[dict] = None
+    try:
+        gen_temp = get_setting(ctx.db, "GENERATION_TEMPERATURE", ctx.org_id)
+        llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=gen_temp, streaming=True)
+        final = ""
+        async for chunk in llm.astream([
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]):
+            # Capture provider-reported usage when the backend sends
+            # it, so reported tokens are measured rather than guessed.
+            chunk_usage = getattr(chunk, "usage_metadata", None)
+            if chunk_usage:
+                answer_usage = {
+                    "input_tokens": chunk_usage.get("input_tokens", 0),
+                    "output_tokens": chunk_usage.get("output_tokens", 0),
+                    "total_tokens": chunk_usage.get("total_tokens", 0),
+                }
+                # Calibrate the token estimator using the exact
+                # prompt_tokens reported by the provider.
+                from app.services.agentic_rag.token_budget import record_usage
+                record_usage(system + user, chunk_usage.get("input_tokens", 0))
+            content = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
+            if content:
+                writer({"event": "token", "content": content})
+                final += content
+        if not final:
+            final = "I'm sorry, I couldn't generate a response at this time."
+    except Exception as exc:
+        logger.warning("[finalize_node] generation failed: %s", exc)
+        final = "I'm sorry, I couldn't generate a response at this time."
+    return final, answer_usage
+
+
+async def _build_last_answer_object(
+    raw_final: str,
+    final: str,
+    chart_options: list[dict],
+    ctx: "ToolContext",
+) -> LastAnswerObject:
+    """Extract chart data for raw_for_extraction and construct LastAnswerObject."""
+    # Extraction (Call 4, below) wants the raw marker text — not the
+    # substituted chart JSON — so it isn't fed a large embedded blob.
+    raw_for_extraction = raw_final
+    # Append a readable summary of chart data so the extraction LLM can
+    # see the actual values (the marker text alone says "[[CHART_1]]").
+    if chart_options:
+        chart_parts: list[str] = []
+        for i, opt in enumerate(chart_options, 1):
+            series = opt.get("series", [])
+            xaxis = opt.get("xAxis", {})
+            labels = xaxis.get("data", []) if isinstance(xaxis, dict) else []
+            for s in series:
+                values = s.get("data", [])
+                pairs = ", ".join(
+                    f"{labels[j]}={values[j]}"
+                    for j in range(min(len(labels), len(values)))
+                )
+                chart_parts.append(f"Chart {i} ({s.get('type', 'chart')}): {pairs}")
+        raw_for_extraction += "\n\nChart data:\n" + "\n".join(chart_parts)
+
+    # Build a lightweight LastAnswerObject. Try LLM extraction for data/chart.
+    lao = LastAnswerObject(
+        summary=final[:500],
+        key_points=[s.strip("- ") for s in final.splitlines() if s.strip()][:8],
+        data=None,
+        citations=[],
+        chart_option=None,
+        chart_options=[],
+        followups=[],
+    )
+
+    # Use a structured extraction for data if any numeric content; otherwise cheap.
+    llm_query = build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)
+    extracted: Optional[LastAnswerObject] = None
+    for attempt in range(2):
+        try:
+            raw = await llm_query.ainvoke([
+                {"role": "user", "content": LAST_ANSWER_EXTRACT_PROMPT.format(answer=raw_for_extraction[:3000])},
+            ])
+            block = _extract_json_block(str(raw.content))
+            if block:
+                extracted = LastAnswerObject.model_validate_json(block)
+                break
+        except Exception as exc:
+            logger.debug("[finalize_node] last_answer_object extraction attempt %d failed: %s", attempt + 1, exc)
+    if extracted:
+        lao = extracted
+
+    lao.chart_options = chart_options
+    lao.chart_option = chart_options[0] if chart_options else None
+
+    return lao
 
 
 async def finalize_node(state: AgentState, ctx: ToolContext) -> dict:
@@ -1348,54 +1619,14 @@ async def finalize_node(state: AgentState, ctx: ToolContext) -> dict:
         if precomputed:
             final = precomputed
         else:
-            context_text = format_context_string(docs, state.get("file_markdown"), db=ctx.db, org_id=ctx.org_id, query_glossary=state.get("abbreviation_glossary", ""))
-            # Non-retrieval tool results (code_execute, chart_generate, etc.)
-            # are not in retrieved_docs; surface them separately. Retrieval
-            # results are already in context_text — don't duplicate.
-            non_rag_text = _non_retrieval_observations_text(observations)
-
-            # Chart docs are only appended when the plan intent is "chart" or
-            # a chart_generate observation exists.
-            plan_intent = plan.intent if isinstance(plan, Plan) else ""
-            include_charts = plan_intent == "chart" or bool(chart_options)
-
-            answer_prompt = FINALIZE_ANSWER_PROMPT
-            if chart_options:
-                # Valid chart JSON already exists — have the model place a
-                # marker instead of freehand-writing (and risking malformed) JSON.
-                from app.services.prompts.loader import append_chart_placeholder_instructions
-                answer_prompt = append_chart_placeholder_instructions(answer_prompt, len(chart_options))
-            elif include_charts:
-                from app.services.prompts.loader import append_chart_instructions
-                answer_prompt = append_chart_instructions(answer_prompt)
-
-            system = FINALIZE_GUARDRAIL_PROMPT + "\n\n" + answer_prompt
-
-            def _build_finalize_user_prompt() -> str:
-                # Priority order is explicit: retrieved documents are the
-                # evidence, the conversation is the intent. Without this block
-                # conversational instructions ("shorter", "in a table",
-                # "compare with your last answer") are unanswerable.
-                parts = [f"User query: {query}\n\n"]
-                if retrieval_query and retrieval_query != query:
-                    parts.append(f"Resolved retrieval query: {retrieval_query}\n\n")
-                if summary_text:
-                    parts.append(f"Earlier conversation summary:\n{summary_text}\n\n")
-                if history_text:
-                    parts.append(
-                        "Conversation so far (intent only — cite nothing from here):\n"
-                        f"{history_text}\n\n"
-                    )
-                parts.append(f"Retrieved context (the only citable evidence):\n{context_text}\n\n")
-                if non_rag_text:
-                    parts.append(f"Tool results:\n{non_rag_text}\n\n")
-                parts.append("Provide a concise, accurate answer.")
-                return "".join(parts)
-
             recent = select_recent_history(state.get("messages", []), max_pairs=get_setting(ctx.db, "AGENT_HISTORY_PAIRS", ctx.org_id))
             history_text = history_to_text(recent)
             summary_text = state.get("compaction_summary") or ""
-            user = _build_finalize_user_prompt()
+            system, user = _build_finalize_prompt(
+                docs, state.get("file_markdown"), plan, chart_options,
+                query, retrieval_query, summary_text, history_text,
+                observations, state.get("abbreviation_glossary", ""), ctx,
+            )
 
             # Runtime compaction before the generation LLM call. trim_docs=True
             # because this prompt is dominated by retrieved_docs — summarising
@@ -1407,101 +1638,27 @@ async def finalize_node(state: AgentState, ctx: ToolContext) -> dict:
                 state = {**state, **compaction_local}
                 observations = state.get("observations", [])
                 docs = state.get("retrieved_docs", docs)
-                context_text = format_context_string(docs, state.get("file_markdown"), db=ctx.db, org_id=ctx.org_id, query_glossary=state.get("abbreviation_glossary", ""))
-                non_rag_text = _non_retrieval_observations_text(observations)
                 recent = select_recent_history(state.get("messages", []), max_pairs=get_setting(ctx.db, "AGENT_HISTORY_PAIRS", ctx.org_id))
                 history_text = history_to_text(recent)
                 summary_text = state.get("compaction_summary") or ""
-                user = _build_finalize_user_prompt()
-            try:
-                gen_temp = get_setting(ctx.db, "GENERATION_TEMPERATURE", ctx.org_id)
-                llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=gen_temp, streaming=True)
-                final = ""
-                async for chunk in llm.astream([
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ]):
-                    # Capture provider-reported usage when the backend sends
-                    # it, so reported tokens are measured rather than guessed.
-                    chunk_usage = getattr(chunk, "usage_metadata", None)
-                    if chunk_usage:
-                        answer_usage = {
-                            "input_tokens": chunk_usage.get("input_tokens", 0),
-                            "output_tokens": chunk_usage.get("output_tokens", 0),
-                            "total_tokens": chunk_usage.get("total_tokens", 0),
-                        }
-                        # Calibrate the token estimator using the exact
-                        # prompt_tokens reported by the provider.
-                        from app.services.agentic_rag.token_budget import record_usage
-                        record_usage(system + user, chunk_usage.get("input_tokens", 0))
-                    content = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
-                    if content:
-                        writer({"event": "token", "content": content})
-                        final += content
-                if not final:
-                    final = "I'm sorry, I couldn't generate a response at this time."
-            except Exception as exc:
-                logger.warning("[finalize_node] generation failed: %s", exc)
-                final = "I'm sorry, I couldn't generate a response at this time."
+                system, user = _build_finalize_prompt(
+                    docs, state.get("file_markdown"), plan, chart_options,
+                    query, retrieval_query, summary_text, history_text,
+                    observations, state.get("abbreviation_glossary", ""), ctx,
+                )
 
-        # Extraction (Call 4, below) wants the raw marker text — not the
-        # substituted chart JSON — so it isn't fed a large embedded blob.
+            final, answer_usage = await _stream_final_answer(ctx, system, user, writer)
+
         # Keep that copy before substituting, then rewrite citations and
         # stream the display-ready answer immediately, without waiting on
         # Call 4 (last_answer_object extraction) or Call 5 (confidence score).
-        raw_for_extraction = final
-        # Append a readable summary of chart data so the extraction LLM can
-        # see the actual values (the marker text alone says "[[CHART_1]]").
-        if chart_options:
-            chart_parts: list[str] = []
-            for i, opt in enumerate(chart_options, 1):
-                series = opt.get("series", [])
-                xaxis = opt.get("xAxis", {})
-                labels = xaxis.get("data", []) if isinstance(xaxis, dict) else []
-                for s in series:
-                    values = s.get("data", [])
-                    pairs = ", ".join(
-                        f"{labels[j]}={values[j]}"
-                        for j in range(min(len(labels), len(values)))
-                    )
-                    chart_parts.append(f"Chart {i} ({s.get('type', 'chart')}): {pairs}")
-            raw_for_extraction += "\n\nChart data:\n" + "\n".join(chart_parts)
+        raw_final = final
         final = _substitute_chart_markers(final, chart_options)
         final, cited_doc_indices = normalize_citations(final, docs)
         cited_docs = [docs[i - 1] for i in cited_doc_indices]
         writer({"event": "answer_rewrite", "content": final, "citations": cited_docs})
 
-        # Build a lightweight LastAnswerObject. Try LLM extraction for data/chart.
-        lao = LastAnswerObject(
-            summary=final[:500],
-            key_points=[s.strip("- ") for s in final.splitlines() if s.strip()][:8],
-            data=None,
-            citations=[],
-            chart_option=None,
-            chart_options=[],
-            followups=[],
-        )
-    
-        # Use a structured extraction for data if any numeric content; otherwise cheap.
-        llm_query = build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)
-        extracted: Optional[LastAnswerObject] = None
-        for attempt in range(2):
-            try:
-                raw = await llm_query.ainvoke([
-                    {"role": "user", "content": LAST_ANSWER_EXTRACT_PROMPT.format(answer=raw_for_extraction[:3000])},
-                ])
-                block = _extract_json_block(str(raw.content))
-                if block:
-                    extracted = LastAnswerObject.model_validate_json(block)
-                    break
-            except Exception as exc:
-                logger.debug("[finalize_node] last_answer_object extraction attempt %d failed: %s", attempt + 1, exc)
-        if extracted:
-            lao = extracted
-
-        lao.chart_options = chart_options
-        lao.chart_option = chart_options[0] if chart_options else None
-    
+        lao = await _build_last_answer_object(raw_final, final, chart_options, ctx)
         writer({"event": "last_answer", "last_answer_object": lao.model_dump()})
 
         # Persist the assistant turn into the checkpointed conversation.
@@ -1529,8 +1686,7 @@ async def finalize_node(state: AgentState, ctx: ToolContext) -> dict:
         if answer_usage:
             updates["answer_usage"] = answer_usage
         return updates
-    
-    
+
 async def save_memory_node(state: AgentState, ctx: ToolContext) -> dict:
     """Persist final answer, last_answer_object, and tool calls to the DB message row."""
     with _agent_step("save_memory"):
@@ -1646,32 +1802,21 @@ async def answer_scoring_node(state: AgentState, ctx: "ToolContext") -> dict:
         return await answer_evaluation_node(state, ctx=ctx)
     
     
-def _build_execution_summary(state: AgentState) -> dict:
-    """Build a structured execution summary for deterministic verification."""
-    plan = state.get("plan") or Plan()
-    observations = state.get("observations", [])
-    counts = dict(state.get("tool_call_count", {}))
-    iteration = state.get("iteration", 0)
-
-    # Map subtask tool_hints to whether we have a matching observation.
-    # Matching is by *count*, not by mere presence: three subtasks that all
-    # hint rag_retrieve need three distinct successful retrievals. Matching on
-    # presence alone marked a three-part question complete after one retrieval
-    # and silently capped multi-hop questions at a single hop.
-    coerced = [_coerce_observation(o) for o in observations]
+def _count_successful_by_tool(coerced):
     successful_by_tool: dict[str, int] = {}
     for o in coerced:
         if not o.error:
             successful_by_tool[o.tool] = successful_by_tool.get(o.tool, 0) + 1
-    any_successful = sum(successful_by_tool.values())
+    return successful_by_tool, sum(successful_by_tool.values())
 
+
+def _build_subtask_status(plan, successful_by_tool, any_successful):
     consumed: dict[str, int] = {}
     consumed_any = 0
     subtask_status = []
     for st in plan.subtasks:
         hint = st.tool_hint
         if hint == "none":
-            # The subtask needs no tool call (e.g. pure conversation).
             completed = True
         elif hint == "any":
             completed = consumed_any < any_successful
@@ -1688,21 +1833,40 @@ def _build_execution_summary(state: AgentState) -> dict:
             "tool_hint": hint,
             "completed": completed,
         })
+    return subtask_status
 
-    # Retrieval stats.
-    retrieval_queries = counts.get("rag_retrieve", 0)
+
+def _retrieval_doc_count(coerced):
     total_docs = 0
     for o in coerced:
         if o.tool == "rag_retrieve" and not o.error:
             total_docs += len(o.result.get("docs", []))
+    return total_docs
 
-    # Tool failures.
+
+def _collect_tool_failures(coerced):
     failures = []
     for o in coerced:
         if o.error:
             failures.append({"tool": o.tool, "error": o.error})
+    return failures
 
-    # Remaining retrieval budget.
+
+def _build_execution_summary(state: AgentState) -> dict:
+    """Build a structured execution summary for deterministic verification."""
+    plan = state.get("plan") or Plan()
+    observations = state.get("observations", [])
+    counts = dict(state.get("tool_call_count", {}))
+    iteration = state.get("iteration", 0)
+
+    coerced = [_coerce_observation(o) for o in observations]
+    successful_by_tool, any_successful = _count_successful_by_tool(coerced)
+    subtask_status = _build_subtask_status(plan, successful_by_tool, any_successful)
+
+    retrieval_queries = counts.get("rag_retrieve", 0)
+    total_docs = _retrieval_doc_count(coerced)
+    failures = _collect_tool_failures(coerced)
+
     from app.db.session import SessionLocal
     org_id = state.get("org_id")
     _db = SessionLocal()

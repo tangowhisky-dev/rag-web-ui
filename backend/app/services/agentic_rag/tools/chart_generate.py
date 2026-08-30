@@ -14,6 +14,117 @@ from app.services.agentic_rag.tools.base import BaseAgentTool
 logger = logging.getLogger(__name__)
 
 
+def _normalize_data(data: list[dict]) -> list[dict]:
+    normalized = []
+    for d in data:
+        name = d.get("label") or d.get("name") or d.get("category") or str(d)
+        value = d.get("value")
+        if value is None:
+            # try numeric columns
+            for k, v in d.items():
+                if isinstance(v, (int, float)):
+                    value = v
+                    if name == str(d):
+                        name = str(d.get(k.replace("_", " ").title()))
+                    break
+        try:
+            value = float(value) if not isinstance(value, (int, float)) else value
+        except Exception:
+            continue
+        normalized.append({"name": name, "value": value})
+    return normalized
+
+
+def _build_pie(title: str, normalized: list[dict], **_: Any) -> dict:
+    return {
+        "title": {"text": title, "left": "center"},
+        "tooltip": {"trigger": "item"},
+        "series": [{
+            "type": "pie",
+            "radius": "60%",
+            "data": normalized,
+            "emphasis": {"itemStyle": {"shadowBlur": 10, "shadowOffsetX": 0, "shadowColor": "rgba(0,0,0,0.5)"}},
+        }],
+    }
+
+
+def _build_bar(title: str, names: list, values: list, input_obj: ChartGenerateInput, **_: Any) -> dict:
+    return {
+        "title": {"text": title},
+        "tooltip": {"trigger": "axis"},
+        "xAxis": {"type": "category", "data": names, "name": input_obj.x_label or ""},
+        "yAxis": {"type": "value", "name": input_obj.y_label or ""},
+        "series": [{"type": "bar", "data": values}],
+    }
+
+
+def _build_line(title: str, names: list, values: list, input_obj: ChartGenerateInput, chart_type: str, **_: Any) -> dict:
+    series = {"type": "line", "data": values}
+    if chart_type == "area":
+        series["areaStyle"] = {}
+    return {
+        "title": {"text": title},
+        "tooltip": {"trigger": "axis"},
+        "xAxis": {"type": "category", "data": names, "name": input_obj.x_label or ""},
+        "yAxis": {"type": "value", "name": input_obj.y_label or ""},
+        "series": [series],
+    }
+
+
+def _build_scatter(title: str, values: list, chart_type: str, **_: Any) -> dict:
+    series_type = "effectScatter" if chart_type == "effectscatter" else "scatter"
+    scatter = [[i, v] for i, v in enumerate(values)]
+    return {
+        "title": {"text": title},
+        "xAxis": {"type": "value"},
+        "yAxis": {"type": "value"},
+        "series": [{"type": series_type, "data": scatter}],
+    }
+
+
+def _build_radar(title: str, names: list, values: list, **_: Any) -> dict:
+    max_value = max(values) * 1.2 if values else 100
+    return {
+        "title": {"text": title},
+        "tooltip": {"trigger": "item"},
+        "radar": {"indicator": [{"name": n, "max": max_value} for n in names]},
+        "series": [{"type": "radar", "data": [{"value": values, "name": title}]}],
+    }
+
+
+def _build_gauge(title: str, names: list, values: list, **_: Any) -> dict:
+    # Gauge shows a single value; use the first data point.
+    return {
+        "title": {"text": title},
+        "series": [{
+            "type": "gauge",
+            "data": [{"name": names[0], "value": values[0]}],
+            "detail": {"formatter": "{value}"},
+        }],
+    }
+
+
+def _build_funnel(title: str, normalized: list[dict], **_: Any) -> dict:
+    return {
+        "title": {"text": title, "left": "center"},
+        "tooltip": {"trigger": "item"},
+        "series": [{"type": "funnel", "data": normalized, "sort_": "descending"}],
+    }
+
+
+_CHART_BUILDERS = {
+    "pie": _build_pie,
+    "bar": _build_bar,
+    "line": _build_line,
+    "area": _build_line,
+    "scatter": _build_scatter,
+    "effectscatter": _build_scatter,
+    "radar": _build_radar,
+    "gauge": _build_gauge,
+    "funnel": _build_funnel,
+}
+
+
 class ChartGenerateInput(BaseModel):
     chart_type: str = Field(default="bar", description="pie, bar, line, scatter, area, effectScatter, radar, gauge, funnel")
     data: list[dict] = Field(default_factory=list, description="List of {label, value} or {name, value}.")
@@ -41,24 +152,7 @@ class ChartGenerateTool(BaseAgentTool):
         if not input_obj.data:
             return {"ok": False, "result": {}, "error": "No data provided.", "tokens": 0}
 
-        # Normalize data to {name, value}
-        normalized = []
-        for d in input_obj.data:
-            name = d.get("label") or d.get("name") or d.get("category") or str(d)
-            value = d.get("value")
-            if value is None:
-                # try numeric columns
-                for k, v in d.items():
-                    if isinstance(v, (int, float)):
-                        value = v
-                        if name == str(d):
-                            name = str(d.get(k.replace("_", " ").title()))
-                        break
-            try:
-                value = float(value) if not isinstance(value, (int, float)) else value
-            except Exception:
-                continue
-            normalized.append({"name": name, "value": value})
+        normalized = _normalize_data(input_obj.data)
 
         if not normalized:
             return {"ok": False, "result": {}, "error": "No numeric values found.", "tokens": 0}
@@ -68,72 +162,11 @@ class ChartGenerateTool(BaseAgentTool):
         names = [d["name"] for d in normalized]
         values = [d["value"] for d in normalized]
 
-        option: dict[str, Any]
-        if chart_type == "pie":
-            option = {
-                "title": {"text": title, "left": "center"},
-                "tooltip": {"trigger": "item"},
-                "series": [{
-                    "type": "pie",
-                    "radius": "60%",
-                    "data": normalized,
-                    "emphasis": {"itemStyle": {"shadowBlur": 10, "shadowOffsetX": 0, "shadowColor": "rgba(0,0,0,0.5)"}},
-                }],
-            }
-        elif chart_type == "bar":
-            option = {
-                "title": {"text": title},
-                "tooltip": {"trigger": "axis"},
-                "xAxis": {"type": "category", "data": names, "name": input_obj.x_label or ""},
-                "yAxis": {"type": "value", "name": input_obj.y_label or ""},
-                "series": [{"type": "bar", "data": values}],
-            }
-        elif chart_type in ("line", "area"):
-            series = {"type": "line", "data": values}
-            if chart_type == "area":
-                series["areaStyle"] = {}
-            option = {
-                "title": {"text": title},
-                "tooltip": {"trigger": "axis"},
-                "xAxis": {"type": "category", "data": names, "name": input_obj.x_label or ""},
-                "yAxis": {"type": "value", "name": input_obj.y_label or ""},
-                "series": [series],
-            }
-        elif chart_type in ("scatter", "effectscatter"):
-            series_type = "effectScatter" if chart_type == "effectscatter" else "scatter"
-            scatter = [[i, v] for i, v in enumerate(values)]
-            option = {
-                "title": {"text": title},
-                "xAxis": {"type": "value"},
-                "yAxis": {"type": "value"},
-                "series": [{"type": series_type, "data": scatter}],
-            }
-        elif chart_type == "radar":
-            max_value = max(values) * 1.2 if values else 100
-            option = {
-                "title": {"text": title},
-                "tooltip": {"trigger": "item"},
-                "radar": {"indicator": [{"name": n, "max": max_value} for n in names]},
-                "series": [{"type": "radar", "data": [{"value": values, "name": title}]}],
-            }
-        elif chart_type == "gauge":
-            # Gauge shows a single value; use the first data point.
-            option = {
-                "title": {"text": title},
-                "series": [{
-                    "type": "gauge",
-                    "data": [{"name": names[0], "value": values[0]}],
-                    "detail": {"formatter": "{value}"},
-                }],
-            }
-        elif chart_type == "funnel":
-            option = {
-                "title": {"text": title, "left": "center"},
-                "tooltip": {"trigger": "item"},
-                "series": [{"type": "funnel", "data": normalized, "sort_": "descending"}],
-            }
-        else:
+        builder = _CHART_BUILDERS.get(chart_type)
+        if builder is None:
             return {"ok": False, "result": {}, "error": f"Unsupported chart type: {chart_type}", "tokens": 0}
+
+        option = builder(title=title, names=names, values=values, normalized=normalized, input_obj=input_obj, chart_type=chart_type)
 
         latency_ms = round((time.monotonic() - t0) * 1000)
         write_audit(ctx, "chart_generate", input_obj.model_dump(), {"chart_type": chart_type, "series_count": len(normalized)}, latency_ms=latency_ms, status="ok")

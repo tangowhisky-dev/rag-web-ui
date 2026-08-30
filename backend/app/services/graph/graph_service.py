@@ -435,21 +435,141 @@ async def _extract_with_llm(
         with _graph_progress_lock:
             _graph_batch_progress[task_id] = (0, total_batches)
 
+    def _is_cancelled() -> bool:
+        return cancel_event is not None and cancel_event.is_set()
+
+    def _inject_scope_props(graph):
+        scope_props = {}
+        if kb_id is not None:
+            scope_props["kb_id"] = str(kb_id)
+        if data_store_id is not None:
+            scope_props["data_store_id"] = str(data_store_id)
+        if scope_props:
+            from neo4j_graphrag.experimental.components.types import Neo4jNode as _Neo4jNode
+            scoped_nodes = []
+            for n in graph.nodes:
+                merged_props = {**n.properties, **scope_props}
+                scoped_nodes.append(_Neo4jNode(
+                    id=n.id,
+                    label=n.label,
+                    properties=merged_props,
+                    embedding_properties=n.embedding_properties,
+                ))
+            from neo4j_graphrag.experimental.components.types import Neo4jGraph as _Neo4jGraph
+            graph = _Neo4jGraph(nodes=scoped_nodes, relationships=graph.relationships)
+        return graph, scope_props
+
+    async def _attempt_batch_extraction(
+        batch_idx: int, combined_text: str, batch_point_ids: list[str]
+    ) -> tuple[int, int, bool]:
+        graph = await extractor.run(
+            chunks=TextChunks(chunks=[TextChunk(text=combined_text, index=batch_idx)]),
+            examples="",
+        )
+        if _is_cancelled():
+            logger.info(
+                "GraphService[llm]: doc %d batch %d — cancelled during LLM call, discarding result",
+                document_id, batch_idx,
+            )
+            return 0, 0, True
+        if data_store_id is not None:
+            from app.services.ingestion.ingestion_dispatcher import is_datastore_deleted
+            if is_datastore_deleted(data_store_id):
+                logger.info(
+                    "GraphService[llm]: doc %d batch %d — datastore %s deleted during LLM call, discarding",
+                    document_id, batch_idx, data_store_id,
+                )
+                return 0, 0, False
+        graph, scope_props = _inject_scope_props(graph)
+        writer_result = await writer.run(graph=graph)
+        status = getattr(writer_result, "status", None)
+        if status == "FAILURE":
+            logger.warning(
+                "GraphService[llm]: writer FAILURE for doc %d batch %d — skipping FROM_CHUNK links",
+                document_id, batch_idx,
+            )
+            return 0, 0, False
+        batch_entities = [
+            (n.properties.get("name"), n.label)
+            for n in graph.nodes
+            if n.properties.get("name")
+        ]
+        if not batch_entities:
+            return 0, 0, False
+
+        def _link_batch_chunks(
+            entities=batch_entities, pids=batch_point_ids,
+            scope=scope_props
+        ):
+            linked_total = 0
+            with driver.session() as session:
+                scope_clauses = []
+                if "kb_id" in scope:
+                    scope_clauses.append("e.kb_id = $kb_id")
+                if "data_store_id" in scope:
+                    scope_clauses.append("e.data_store_id = $ds_id")
+                scope_filter = " AND ".join(scope_clauses) if scope_clauses else "true"
+
+                rec = session.run(
+                    f"""
+                    UNWIND $entities AS ent
+                    UNWIND $point_ids AS pid
+                    MATCH (e:__Entity__)
+                    WHERE e.name = ent.name
+                      AND ent.label IN labels(e)
+                      AND {scope_filter}
+                    MATCH (c:Chunk {{qdrant_point_id: pid}})
+                    MERGE (e)-[:FROM_CHUNK]->(c)
+                    RETURN count(*) AS linked
+                    """,
+                    entities=[
+                        {"name": name, "label": label}
+                        for name, label in entities
+                    ],
+                    point_ids=pids,
+                    kb_id=scope.get("kb_id"),
+                    ds_id=scope.get("data_store_id"),
+                ).single()
+                linked_total += rec["linked"] if rec else 0
+            return linked_total
+
+        linked = await loop.run_in_executor(None, _link_batch_chunks)
+        if pt:
+            pt.ping()
+        return linked, 0, False
+
+    async def _run_batch_with_retries(
+        batch_idx: int, combined_text: str, batch_point_ids: list[str]
+    ) -> tuple[int, int, bool]:
+        last_exc = None
+        for attempt in range(1, 4):
+            try:
+                return await _attempt_batch_extraction(batch_idx, combined_text, batch_point_ids)
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    "GraphService[llm]: extraction failed for doc %d batch %d (attempt %d/3): %s",
+                    document_id, batch_idx, attempt, exc,
+                )
+                if attempt < 3:
+                    await asyncio.sleep(1)
+        logger.error(
+            "GraphService[llm]: all 3 attempts failed for doc %d batch %d — giving up: %s",
+            document_id, batch_idx, last_exc,
+        )
+        return 0, 0, False
+
     async def _process_batch(
         batch_idx: int, combined_text: str, batch_point_ids: list[str]
     ) -> tuple[int, int]:
-        nonlocal skipped_batches
-        # Check cancellation before starting this batch.
-        if cancel_event is not None and cancel_event.is_set():
+        nonlocal skipped_batches, completed_batches
+        if _is_cancelled():
             logger.info(
                 "GraphService[llm]: doc %d batch %d — cancelled, skipping",
                 document_id, batch_idx,
             )
             skipped_batches += 1
             return 0, 0
-        # Acquire global LLM semaphore (cancel-aware, non-blocking poll).
-        # This caps total concurrent LLM calls across ALL graph builds at 4,
-        # regardless of how many documents are being processed simultaneously.
         acquired = await _acquire_global_llm_sem(cancel_event)
         if not acquired:
             logger.info(
@@ -459,153 +579,24 @@ async def _extract_with_llm(
             skipped_batches += 1
             return 0, 0
         try:
-            # Re-check cancellation after acquiring the semaphore — the
-            # batch may have been waiting while pause was fired.
-            if cancel_event is not None and cancel_event.is_set():
+            if _is_cancelled():
                 logger.info(
                     "GraphService[llm]: doc %d batch %d — cancelled while waiting for semaphore, skipping",
                     document_id, batch_idx,
                 )
                 skipped_batches += 1
                 return 0, 0
-            last_exc = None
-            for attempt in range(1, 4):  # up to 3 attempts
-                try:
-                    # 1. Extract entities/relationships from the batch text
-                    graph = await extractor.run(
-                        chunks=TextChunks(chunks=[TextChunk(text=combined_text, index=batch_idx)]),
-                        examples="",
-                    )
-
-                    # If the datastore was deleted or graph ingestion was
-                    # paused while the LLM call was in flight, discard the
-                    # result — don't write to Neo4j.
-                    if cancel_event is not None and cancel_event.is_set():
-                        logger.info(
-                            "GraphService[llm]: doc %d batch %d — cancelled during LLM call, discarding result",
-                            document_id, batch_idx,
-                        )
-                        skipped_batches += 1
-                        return 0, 0
-
-                    if data_store_id is not None:
-                        from app.services.ingestion.ingestion_dispatcher import is_datastore_deleted
-                        if is_datastore_deleted(data_store_id):
-                            logger.info(
-                                "GraphService[llm]: doc %d batch %d — datastore %s deleted during LLM call, discarding",
-                                document_id, batch_idx, data_store_id,
-                            )
-                            return 0, 0
-
-                    # 2. Inject kb_id/data_store_id into entity node properties
-                    #    so entities are scoped per-KB/per-datastore. This
-                    #    prevents entity cross-contamination between KBs.
-                    scope_props = {}
-                    if kb_id is not None:
-                        scope_props["kb_id"] = str(kb_id)
-                    if data_store_id is not None:
-                        scope_props["data_store_id"] = str(data_store_id)
-
-                    if scope_props:
-                        from neo4j_graphrag.experimental.components.types import Neo4jNode as _Neo4jNode
-                        scoped_nodes = []
-                        for n in graph.nodes:
-                            merged_props = {**n.properties, **scope_props}
-                            scoped_nodes.append(_Neo4jNode(
-                                id=n.id,
-                                label=n.label,
-                                properties=merged_props,
-                                embedding_properties=n.embedding_properties,
-                            ))
-                        from neo4j_graphrag.experimental.components.types import Neo4jGraph as _Neo4jGraph
-                        graph = _Neo4jGraph(nodes=scoped_nodes, relationships=graph.relationships)
-
-                    # 3. Write the extracted graph to Neo4j
-                    writer_result = await writer.run(graph=graph)
-
-                    status = getattr(writer_result, "status", None)
-                    if status == "FAILURE":
-                        logger.warning(
-                            "GraphService[llm]: writer FAILURE for doc %d batch %d — skipping FROM_CHUNK links",
-                            document_id, batch_idx,
-                        )
-                        return 0, 0
-
-                    # 4. Link ONLY the entities extracted from this batch to
-                    #    the batch's chunk nodes. Collect entity (name, label)
-                    #    pairs from the extracted graph — these are the entities
-                    #    the LLM actually found in this batch's text.
-                    #    Filter by kb_id/data_store_id to ensure scope isolation.
-                    batch_entities = [
-                        (n.properties.get("name"), n.label)
-                        for n in graph.nodes
-                        if n.properties.get("name")
-                    ]
-
-                    if not batch_entities:
-                        return 0, 0
-
-                    def _link_batch_chunks(
-                        entities=batch_entities, pids=batch_point_ids,
-                        scope=scope_props
-                    ):
-                        linked_total = 0
-                        with driver.session() as session:
-                            # Build scope filter dynamically
-                            scope_clauses = []
-                            if "kb_id" in scope:
-                                scope_clauses.append("e.kb_id = $kb_id")
-                            if "data_store_id" in scope:
-                                scope_clauses.append("e.data_store_id = $ds_id")
-                            scope_filter = " AND ".join(scope_clauses) if scope_clauses else "true"
-
-                            rec = session.run(
-                                f"""
-                                UNWIND $entities AS ent
-                                UNWIND $point_ids AS pid
-                                MATCH (e:__Entity__)
-                                WHERE e.name = ent.name
-                                  AND ent.label IN labels(e)
-                                  AND {scope_filter}
-                                MATCH (c:Chunk {{qdrant_point_id: pid}})
-                                MERGE (e)-[:FROM_CHUNK]->(c)
-                                RETURN count(*) AS linked
-                                """,
-                                entities=[
-                                    {"name": name, "label": label}
-                                    for name, label in entities
-                                ],
-                                point_ids=pids,
-                                kb_id=scope.get("kb_id"),
-                                ds_id=scope.get("data_store_id"),
-                            ).single()
-                            linked_total += rec["linked"] if rec else 0
-                        return linked_total
-
-                    linked = await loop.run_in_executor(None, _link_batch_chunks)
-                    if pt:
-                        pt.ping()  # signal progress after LLM extraction batch
-                    if task_id is not None:
-                        nonlocal completed_batches
-                        completed_batches += 1
-                        with _graph_progress_lock:
-                            _graph_batch_progress[task_id] = (completed_batches, total_batches)
-                    return linked, 0
-
-                except Exception as exc:
-                    last_exc = exc
-                    logger.warning(
-                        "GraphService[llm]: extraction failed for doc %d batch %d (attempt %d/3): %s",
-                        document_id, batch_idx, attempt, exc,
-                    )
-                    if attempt < 3:
-                        await asyncio.sleep(1)
-
-            logger.error(
-                "GraphService[llm]: all 3 attempts failed for doc %d batch %d — giving up: %s",
-                document_id, batch_idx, last_exc,
+            linked, rel_count, skip = await _run_batch_with_retries(
+                batch_idx, combined_text, batch_point_ids
             )
-            return 0, 0
+            if skip:
+                skipped_batches += 1
+                return 0, 0
+            if task_id is not None:
+                completed_batches += 1
+                with _graph_progress_lock:
+                    _graph_batch_progress[task_id] = (completed_batches, total_batches)
+            return linked, rel_count
         finally:
             _global_llm_sem.release()
 
@@ -762,6 +753,162 @@ async def build_graph_for_document(
 
 # ── Retrieval: graph expansion ─────────────────────────────────────────────────
 
+def _extract_seen_point_ids(docs: list[LangchainDocument]) -> set[str]:
+    """Extract Qdrant point UUIDs from the retrieved docs' metadata."""
+    seen = set()
+    for doc in docs:
+        pid = doc.metadata.get("qdrant_point_id")
+        if pid:
+            seen.add(pid)
+    return seen
+
+
+def _build_graph_scope_filter(
+    kb_ids: list[int],
+    datastore_ids: Optional[list[int]],
+) -> tuple[list[str], list[str], str]:
+    """Build entity scope filter for graph traversal.
+
+    Ensures graph traversal stays within the queried KB(s)/datastore(s)
+    and doesn't cross-contaminate via shared entity nodes from other KBs.
+    Entities without scope props are from older ingestion runs —
+    include them for backward compatibility.
+    """
+    kb_scope = [str(k) for k in kb_ids] if kb_ids else []
+    ds_scope = [str(d) for d in datastore_ids] if datastore_ids else []
+    scope_clauses = []
+    if kb_scope:
+        scope_clauses.append("e.kb_id IN $kb_scope")
+    if ds_scope:
+        scope_clauses.append("e.data_store_id IN $ds_scope")
+    if scope_clauses:
+        scope_filter = "(" + " OR ".join(scope_clauses) + " OR e.kb_id IS NULL AND e.data_store_id IS NULL)"
+    else:
+        scope_filter = "true"
+    return kb_scope, ds_scope, scope_filter
+
+
+def _build_traversal_patterns(hops_val: int) -> tuple[str, str]:
+    """Build Cypher path pattern and intermediate entity filter for N-hop traversal.
+
+    1 hop: (e)-[:FROM_CHUNK]->(c2)
+    2 hops: (e)-[r1]-(e2)-[:FROM_CHUNK]->(c2)
+    N hops: chain of N entity nodes with N-1 relationships
+    """
+    hops = max(1, hops_val)
+    if hops == 1:
+        rest_pattern = "(e)-[:FROM_CHUNK]->(c2)"
+    else:
+        parts = ["(e)"]
+        for i in range(2, hops + 1):
+            parts.append(f"-[r{i - 1}]-(e{i})")
+        parts.append("-[:FROM_CHUNK]->(c2)")
+        rest_pattern = " ".join(parts)
+
+    if hops > 1:
+        interm_clauses = []
+        for i in range(2, hops + 1):
+            interm_clauses.append(f"(e{i}.kb_id IN $kb_scope OR e{i}.data_store_id IN $ds_scope OR (e{i}.kb_id IS NULL AND e{i}.data_store_id IS NULL))")
+        interm_filter = " AND ".join(interm_clauses)
+    else:
+        interm_filter = "true"
+    return rest_pattern, interm_filter
+
+
+def _traverse_graph_for_expansion(
+    driver: neo4j.Driver,
+    seen_point_ids: set[str],
+    collections: list[str],
+    scope_filter: str,
+    rest_pattern: str,
+    interm_filter: str,
+    fanout_val: int,
+    limit_val: int,
+    kb_scope: list[str],
+    ds_scope: list[str],
+) -> list[tuple[str, str]]:
+    """Traverse from seed chunks via entity relationships to connected chunks.
+
+    The first hop's distinct entities are capped (GRAPHRAG_ENTITY_FANOUT_CAP)
+    before expanding further, so a handful of highly-connected "hub"
+    entities (e.g. generic terms shared by hundreds of chunks) can't blow
+    up the traversal into a combinatorial cross product.
+    Return qdrant_point_id + qdrant_collection of chunks NOT already seen.
+    """
+    with driver.session() as session:
+        result = session.run(
+            f"""
+            MATCH (c:Chunk)
+            WHERE c.qdrant_point_id IN $seen_ids
+              AND c.qdrant_collection IN $collections
+            MATCH (c)<-[:FROM_CHUNK]-(e)
+            WHERE {scope_filter}
+            WITH DISTINCT e LIMIT $entity_cap
+            MATCH {rest_pattern}
+            WHERE c2.qdrant_point_id IS NOT NULL
+              AND NOT c2.qdrant_point_id IN $seen_ids
+              AND c2.qdrant_collection IN $collections
+              AND {interm_filter}
+            RETURN DISTINCT c2.qdrant_point_id AS point_id,
+                            c2.qdrant_collection AS collection
+            LIMIT $limit
+            """,
+            seen_ids=list(seen_point_ids),
+            collections=collections,
+            entity_cap=max(1, fanout_val),
+            limit=max(1, limit_val),
+            kb_scope=kb_scope,
+            ds_scope=ds_scope,
+        )
+        return [
+            (rec["point_id"], rec["collection"]) for rec in result
+        ]
+
+
+def _fetch_expanded_docs_from_qdrant(
+    expansion_targets: list[tuple[str, str]],
+) -> list[LangchainDocument]:
+    """Fetch chunk text from Qdrant by point UUID and build LangchainDocuments.
+
+    Groups targets by collection and fetches text/payload only (no re-embedding).
+    """
+    from collections import defaultdict
+    from qdrant_client import QdrantClient
+
+    by_collection: dict[str, list[str]] = defaultdict(list)
+    for point_id, collection in expansion_targets:
+        by_collection[collection].append(point_id)
+
+    qdrant = QdrantClient(host=settings.QDRANT_HOST, port=settings.QDRANT_PORT)
+    expanded_docs: list[LangchainDocument] = []
+
+    for collection, point_ids in by_collection.items():
+        try:
+            points = qdrant.retrieve(
+                collection_name=collection,
+                ids=point_ids,
+                with_payload=True,
+                with_vectors=False,   # text only — Qdrant is the source of truth
+            )
+            for pt in points:
+                payload = pt.payload or {}
+                chunk_text = payload.get("chunk_text", "")
+                if not chunk_text:
+                    continue
+                meta = {k: v for k, v in payload.items() if k != "chunk_text"}
+                meta["_graph_expanded"] = True
+                meta["qdrant_point_id"] = str(pt.id)
+                expanded_docs.append(
+                    LangchainDocument(page_content=chunk_text, metadata=meta)
+                )
+        except Exception as exc:
+            logger.warning(
+                "GraphService.expand: Qdrant retrieve failed for collection %s: %s",
+                collection, exc,
+            )
+    return expanded_docs
+
+
 @with_retry_sync(max_attempts=3)
 def expand_docs_via_graph(
     docs: list[LangchainDocument],
@@ -803,12 +950,7 @@ def expand_docs_via_graph(
     fanout_val = get_setting(db, "GRAPHRAG_ENTITY_FANOUT_CAP", org_id)
     limit_val = get_setting(db, "GRAPHRAG_RETRIEVAL_LIMIT", org_id)
 
-    # Extract the Qdrant point UUIDs from the retrieved docs
-    seen_point_ids = set()
-    for doc in docs:
-        pid = doc.metadata.get("qdrant_point_id")
-        if pid:
-            seen_point_ids.add(pid)
+    seen_point_ids = _extract_seen_point_ids(docs)
 
     if not seen_point_ids:
         # Docs came from before the qdrant_point_id payload field was added —
@@ -822,81 +964,14 @@ def expand_docs_via_graph(
         if datastore_ids:
             collections += [f"ds_{ds_id}" for ds_id in datastore_ids]
 
-        # Build scope filter for entities — ensures graph traversal stays
-        # within the queried KB(s)/datastore(s) and doesn't cross-contaminate
-        # via shared entity nodes from other KBs.
-        kb_scope = [str(k) for k in kb_ids] if kb_ids else []
-        ds_scope = [str(d) for d in datastore_ids] if datastore_ids else []
-        scope_clauses = []
-        if kb_scope:
-            scope_clauses.append("e.kb_id IN $kb_scope")
-        if ds_scope:
-            scope_clauses.append("e.data_store_id IN $ds_scope")
-        # Entities without scope props are from older ingestion runs —
-        # include them for backward compatibility.
-        if scope_clauses:
-            scope_filter = "(" + " OR ".join(scope_clauses) + " OR e.kb_id IS NULL AND e.data_store_id IS NULL)"
-        else:
-            scope_filter = "true"
+        kb_scope, ds_scope, scope_filter = _build_graph_scope_filter(kb_ids, datastore_ids)
+        rest_pattern, interm_filter = _build_traversal_patterns(hops_val)
 
-        # Build dynamic path pattern for GRAPHRAG_RETRIEVAL_HOPS hops, starting
-        # from the first-hop entity anchor `e` (already bounded below).
-        # 1 hop: (e)-[:FROM_CHUNK]->(c2)
-        # 2 hops: (e)-[r1]-(e2)-[:FROM_CHUNK]->(c2)
-        # N hops: chain of N entity nodes with N-1 relationships
-        hops = max(1, hops_val)
-        if hops == 1:
-            rest_pattern = "(e)-[:FROM_CHUNK]->(c2)"
-        else:
-            parts = ["(e)"]
-            for i in range(2, hops + 1):
-                parts.append(f"-[r{i - 1}]-(e{i})")
-            parts.append("-[:FROM_CHUNK]->(c2)")
-            rest_pattern = " ".join(parts)
-
-        # Build scope filter for intermediate entities (e2, e3, ...) in multi-hop
-        if hops > 1:
-            interm_clauses = []
-            for i in range(2, hops + 1):
-                interm_clauses.append(f"(e{i}.kb_id IN $kb_scope OR e{i}.data_store_id IN $ds_scope OR (e{i}.kb_id IS NULL AND e{i}.data_store_id IS NULL))")
-            interm_filter = " AND ".join(interm_clauses)
-        else:
-            interm_filter = "true"
-
-        # Traverse from seed chunks via entity relationships to connected chunks.
-        # The first hop's distinct entities are capped (GRAPHRAG_ENTITY_FANOUT_CAP)
-        # before expanding further, so a handful of highly-connected "hub"
-        # entities (e.g. generic terms shared by hundreds of chunks) can't blow
-        # up the traversal into a combinatorial cross product.
-        # Return qdrant_point_id + qdrant_collection of chunks NOT already seen.
-        with driver.session() as session:
-            result = session.run(
-                f"""
-                MATCH (c:Chunk)
-                WHERE c.qdrant_point_id IN $seen_ids
-                  AND c.qdrant_collection IN $collections
-                MATCH (c)<-[:FROM_CHUNK]-(e)
-                WHERE {scope_filter}
-                WITH DISTINCT e LIMIT $entity_cap
-                MATCH {rest_pattern}
-                WHERE c2.qdrant_point_id IS NOT NULL
-                  AND NOT c2.qdrant_point_id IN $seen_ids
-                  AND c2.qdrant_collection IN $collections
-                  AND {interm_filter}
-                RETURN DISTINCT c2.qdrant_point_id AS point_id,
-                                c2.qdrant_collection AS collection
-                LIMIT $limit
-                """,
-                seen_ids=list(seen_point_ids),
-                collections=collections,
-                entity_cap=max(1, fanout_val),
-                limit=max(1, limit_val),
-                kb_scope=kb_scope,
-                ds_scope=ds_scope,
-            )
-            expansion_targets = [
-                (rec["point_id"], rec["collection"]) for rec in result
-            ]
+        expansion_targets = _traverse_graph_for_expansion(
+            driver, seen_point_ids, collections, scope_filter,
+            rest_pattern, interm_filter, fanout_val, limit_val,
+            kb_scope, ds_scope,
+        )
         if not expansion_targets:
             logger.debug("GraphService.expand: no graph-connected chunks found beyond current result set")
             return []
@@ -906,39 +981,7 @@ def expand_docs_via_graph(
             len(expansion_targets),
         )
 
-        # Group by collection and fetch from Qdrant (text only, no re-embedding)
-        from collections import defaultdict
-        by_collection: dict[str, list[str]] = defaultdict(list)
-        for point_id, collection in expansion_targets:
-            by_collection[collection].append(point_id)
-
-        qdrant = QdrantClient(host=settings.QDRANT_HOST, port=settings.QDRANT_PORT)
-        expanded_docs: list[LangchainDocument] = []
-
-        for collection, point_ids in by_collection.items():
-            try:
-                points = qdrant.retrieve(
-                    collection_name=collection,
-                    ids=point_ids,
-                    with_payload=True,
-                    with_vectors=False,   # text only — Qdrant is the source of truth
-                )
-                for pt in points:
-                    payload = pt.payload or {}
-                    chunk_text = payload.get("chunk_text", "")
-                    if not chunk_text:
-                        continue
-                    meta = {k: v for k, v in payload.items() if k != "chunk_text"}
-                    meta["_graph_expanded"] = True
-                    meta["qdrant_point_id"] = str(pt.id)
-                    expanded_docs.append(
-                        LangchainDocument(page_content=chunk_text, metadata=meta)
-                    )
-            except Exception as exc:
-                logger.warning(
-                    "GraphService.expand: Qdrant retrieve failed for collection %s: %s",
-                    collection, exc,
-                )
+        expanded_docs = _fetch_expanded_docs_from_qdrant(expansion_targets)
 
         logger.info(
             "GraphService.expand: fetched %d graph-expanded docs from Qdrant",
@@ -1177,6 +1220,49 @@ def delete_graph_for_kb(kb_id: int) -> None:
         )
 
 
+def _batch_delete_chunks(driver: neo4j.Driver, stale_id: str) -> int:
+    total = 0
+    while True:
+        with driver.session() as session:
+            rec = session.run(
+                """
+                MATCH (c:Chunk {kb_id: $kb_id})
+                WITH c LIMIT 100
+                DETACH DELETE c
+                RETURN count(c) AS n
+                """,
+                kb_id=stale_id,
+            ).single()
+            n = rec["n"] if rec else 0
+            total += n
+            if n == 0:
+                break
+    return total
+
+
+def _batch_delete_orphaned_entities(driver: neo4j.Driver, stale_id: str) -> int:
+    total = 0
+    while True:
+        with driver.session() as session:
+            rec = session.run(
+                """
+                MATCH (e)
+                WHERE (e:__KGBuilder__ OR e:Entity OR e:__Entity__)
+                  AND (e.kb_id = $kb_id OR e.kb_id IS NULL)
+                  AND NOT EXISTS { MATCH (e)-[:FROM_CHUNK]->() }
+                WITH e LIMIT 500
+                DETACH DELETE e
+                RETURN count(e) AS n
+                """,
+                kb_id=stale_id,
+            ).single()
+            n = rec["n"] if rec else 0
+            total += n
+            if n == 0:
+                break
+    return total
+
+
 def purge_stale_graph_data(active_kb_ids: list[int]) -> None:
     """
     Delete any Chunk nodes (and their dependent entities) whose kb_id is not
@@ -1226,42 +1312,9 @@ def purge_stale_graph_data(active_kb_ids: list[int]) -> None:
 
         # Chunk nodes in batches — each chunk can have hundreds of FROM_CHUNK
         # relationships, so deleting all at once blows the transaction memory limit.
-        total_chunks = 0
-        while True:
-            with driver.session() as session:
-                rec = session.run(
-                    """
-                    MATCH (c:Chunk {kb_id: $kb_id})
-                    WITH c LIMIT 100
-                    DETACH DELETE c
-                    RETURN count(c) AS n
-                    """,
-                    kb_id=stale_id,
-                ).single()
-                n = rec["n"] if rec else 0
-                total_chunks += n
-                if n == 0:
-                    break
+        total_chunks = _batch_delete_chunks(driver, stale_id)
         logger.info("GraphService: purged %d chunks for stale kb_%s", total_chunks, stale_id)
 
         # Entity nodes scoped to this KB now orphaned — batch delete
-        total_entities = 0
-        while True:
-            with driver.session() as session:
-                rec = session.run(
-                    """
-                    MATCH (e)
-                    WHERE (e:__KGBuilder__ OR e:Entity OR e:__Entity__)
-                      AND (e.kb_id = $kb_id OR e.kb_id IS NULL)
-                      AND NOT EXISTS { MATCH (e)-[:FROM_CHUNK]->() }
-                    WITH e LIMIT 500
-                    DETACH DELETE e
-                    RETURN count(e) AS n
-                    """,
-                    kb_id=stale_id,
-                ).single()
-                n = rec["n"] if rec else 0
-                total_entities += n
-                if n == 0:
-                    break
+        total_entities = _batch_delete_orphaned_entities(driver, stale_id)
         logger.info("GraphService: purged %d orphaned entities for stale kb_%s", total_entities, stale_id)

@@ -132,6 +132,43 @@ def _reconcile_mysql(summary: dict) -> None:
 # ── Qdrant ───────────────────────────────────────────────────────────
 
 
+def _drop_stale_collections(
+    qdrant,
+    collections: list,
+    active_ids: list,
+    prefix: str,
+    label: str,
+    summary: dict,
+) -> None:
+    active_names = {f"{prefix}{id}" for id in active_ids}
+    stale = [c for c in collections if c.startswith(prefix) and c not in active_names]
+    logger.info("[RECONCILE] Qdrant: active_%s_names=%s stale_%s_collections=%s", label, active_names, label, stale)
+    for cname in stale:
+        try:
+            logger.info("[RECONCILE] Qdrant: dropping stale collection %s", cname)
+            qdrant.delete_collection(cname)
+            logger.info("[RECONCILE] Qdrant: dropped stale collection %s", cname)
+        except Exception as e:
+            logger.warning("[RECONCILE] Qdrant: failed to drop %s: %s", cname, e)
+    summary["qdrant"]["dropped_collections"] += len(stale)
+
+
+def _delete_orphan_points_for_active(
+    qdrant,
+    db: Session,
+    collections: list,
+    active_ids: list,
+    prefix: str,
+    scope_kwarg: str,
+    summary: dict,
+) -> None:
+    for id in active_ids:
+        cname = f"{prefix}{id}"
+        if cname not in collections:
+            continue
+        _delete_orphan_points(qdrant, db, cname, summary=summary, **{scope_kwarg: id})
+
+
 def _reconcile_qdrant(summary: dict, active_kb_ids: List[int], active_ds_ids: List[int]) -> None:
     """Drop Qdrant collections for deleted KBs/DataStores and delete
     orphaned points within active collections."""
@@ -140,7 +177,6 @@ def _reconcile_qdrant(summary: dict, active_kb_ids: List[int], active_ds_ids: Li
 
     qdrant = get_qdrant_client()
 
-    # Get all existing collections
     try:
         collections = [c.name for c in qdrant.get_collections().collections]
     except Exception as e:
@@ -149,48 +185,13 @@ def _reconcile_qdrant(summary: dict, active_kb_ids: List[int], active_ds_ids: Li
 
     logger.info("[RECONCILE] Qdrant: collections=%s", collections)
 
-    # ── Drop stale kb_ collections ────────────────────────────────
-    active_kb_names = {f"kb_{kid}" for kid in active_kb_ids}
-    stale_kb_collections = [c for c in collections if c.startswith("kb_") and c not in active_kb_names]
-    logger.info("[RECONCILE] Qdrant: active_kb_names=%s stale_kb_collections=%s", active_kb_names, stale_kb_collections)
-    for cname in stale_kb_collections:
-        try:
-            logger.info("[RECONCILE] Qdrant: dropping stale collection %s", cname)
-            qdrant.delete_collection(cname)
-            logger.info("[RECONCILE] Qdrant: dropped stale collection %s", cname)
-        except Exception as e:
-            logger.warning("[RECONCILE] Qdrant: failed to drop %s: %s", cname, e)
-    summary["qdrant"]["dropped_collections"] += len(stale_kb_collections)
+    _drop_stale_collections(qdrant, collections, active_kb_ids, "kb_", "kb", summary)
+    _drop_stale_collections(qdrant, collections, active_ds_ids, "ds_", "ds", summary)
 
-    # ── Drop stale ds_ collections ────────────────────────────────
-    active_ds_names = {f"ds_{did}" for did in active_ds_ids}
-    stale_ds_collections = [c for c in collections if c.startswith("ds_") and c not in active_ds_names]
-    logger.info("[RECONCILE] Qdrant: active_ds_names=%s stale_ds_collections=%s", active_ds_names, stale_ds_collections)
-    for cname in stale_ds_collections:
-        try:
-            logger.info("[RECONCILE] Qdrant: dropping stale collection %s", cname)
-            qdrant.delete_collection(cname)
-            logger.info("[RECONCILE] Qdrant: dropped stale collection %s", cname)
-        except Exception as e:
-            logger.warning("[RECONCILE] Qdrant: failed to drop %s: %s", cname, e)
-    summary["qdrant"]["dropped_collections"] += len(stale_ds_collections)
-
-    # ── Delete orphan points within active collections ────────────
-    # For each active kb_ collection, check if Qdrant points have
-    # corresponding DocumentChunk rows in MySQL.  Delete orphans.
     db = SessionLocal()
     try:
-        for kid in active_kb_ids:
-            cname = f"kb_{kid}"
-            if cname not in collections:
-                continue
-            _delete_orphan_points(qdrant, db, cname, kb_id=kid, summary=summary)
-
-        for did in active_ds_ids:
-            cname = f"ds_{did}"
-            if cname not in collections:
-                continue
-            _delete_orphan_points(qdrant, db, cname, data_store_id=did, summary=summary)
+        _delete_orphan_points_for_active(qdrant, db, collections, active_kb_ids, "kb_", "kb_id", summary)
+        _delete_orphan_points_for_active(qdrant, db, collections, active_ds_ids, "ds_", "data_store_id", summary)
     finally:
         db.close()
 
@@ -256,6 +257,65 @@ def _delete_orphan_points(
 # ── Neo4j ────────────────────────────────────────────────────────────
 
 
+def _purge_stale_datastore_nodes(driver, active_ds_ids: List[int], summary: dict) -> None:
+    active_ds_str = [str(did) for did in active_ds_ids]
+
+    with driver.session() as session:
+        try:
+            stale_rec = session.run(
+                """
+                MATCH (c:Chunk)
+                WHERE c.data_store_id IS NOT NULL
+                  AND NOT c.data_store_id IN $active_ids
+                RETURN DISTINCT c.data_store_id AS stale_ds_id
+                """,
+                active_ids=active_ds_str,
+            )
+            stale_ds_ids = [r["stale_ds_id"] for r in stale_rec if r["stale_ds_id"] is not None]
+        except Exception:
+            stale_ds_ids = []
+
+    if stale_ds_ids:
+        logger.info("[RECONCILE] Neo4j: found stale data_store_ids: %s", stale_ds_ids)
+        total_chunks = 0
+        for stale_ds_id in stale_ds_ids:
+            while True:
+                with driver.session() as session:
+                    rec = session.run(
+                        """
+                        MATCH (c:Chunk {data_store_id: $ds_id})
+                        WITH c LIMIT 100
+                        DETACH DELETE c
+                        RETURN count(c) AS n
+                        """,
+                        ds_id=stale_ds_id,
+                    ).single()
+                    n = rec["n"] if rec else 0
+                    total_chunks += n
+                    if n == 0:
+                        break
+
+            with driver.session() as session:
+                rec = session.run(
+                    """
+                    MATCH (e)
+                    WHERE (e:__KGBuilder__ OR e:Entity OR e:__Entity__)
+                      AND e.data_store_id = $ds_id
+                    DETACH DELETE e
+                    RETURN count(e) AS n
+                    """,
+                    ds_id=stale_ds_id,
+                ).single()
+                if rec and rec["n"]:
+                    logger.info(
+                        "[RECONCILE] Neo4j: cleaned %d entities for stale ds_%s",
+                        rec["n"], stale_ds_id,
+                    )
+
+        summary["neo4j"]["purged_datastores"] = len(stale_ds_ids)
+        logger.info("[RECONCILE] Neo4j: purged %d chunks across %d stale datastores", total_chunks, len(stale_ds_ids))
+
+
 def _reconcile_neo4j(summary: dict, active_kb_ids: List[int], active_ds_ids: List[int]) -> None:
     """Purge stale Neo4j Chunk/Entity nodes for deleted KBs and DataStores."""
     from app.core.config import settings
@@ -265,84 +325,14 @@ def _reconcile_neo4j(summary: dict, active_kb_ids: List[int], active_ds_ids: Lis
 
     from app.services.graph import purge_stale_graph_data, _get_driver
 
-    # ── KB-level purge (existing function) ────────────────────────
     try:
         purge_stale_graph_data(active_kb_ids=active_kb_ids)
-        # purge_stale_graph_data logs its own summary, but we can't easily
-        # get the count back.  Mark as run.
-        summary["neo4j"]["purged_kbs"] = -1  # sentinel: ran but count unknown
+        summary["neo4j"]["purged_kbs"] = -1
     except Exception as e:
         logger.warning("[RECONCILE] Neo4j: purge_stale_graph_data failed: %s", e)
 
-    # ── DataStore-level purge ─────────────────────────────────────
-    # purge_stale_graph_data only handles KB-scoped chunks (data_store_id IS NULL).
-    # We also need to sweep Chunk nodes whose data_store_id is no longer active.
     try:
         driver = _get_driver()
-        active_ds_str = [str(did) for did in active_ds_ids]
-
-        with driver.session() as session:
-            # Find stale data_store_ids in Neo4j
-            try:
-                stale_rec = session.run(
-                    """
-                    MATCH (c:Chunk)
-                    WHERE c.data_store_id IS NOT NULL
-                      AND NOT c.data_store_id IN $active_ids
-                    RETURN DISTINCT c.data_store_id AS stale_ds_id
-                    """,
-                    active_ids=active_ds_str,
-                )
-                stale_ds_ids = [r["stale_ds_id"] for r in stale_rec if r["stale_ds_id"] is not None]
-            except Exception:
-                stale_ds_ids = []
-
-        if stale_ds_ids:
-            logger.info("[RECONCILE] Neo4j: found stale data_store_ids: %s", stale_ds_ids)
-            total_chunks = 0
-            for stale_ds_id in stale_ds_ids:
-                # Delete Chunk nodes in batches
-                while True:
-                    with driver.session() as session:
-                        rec = session.run(
-                            """
-                            MATCH (c:Chunk {data_store_id: $ds_id})
-                            WITH c LIMIT 100
-                            DETACH DELETE c
-                            RETURN count(c) AS n
-                            """,
-                            ds_id=stale_ds_id,
-                        ).single()
-                        n = rec["n"] if rec else 0
-                        total_chunks += n
-                        if n == 0:
-                            break
-
-                # Delete ALL entities scoped to this stale datastore.
-                # Entities carry data_store_id as a property. We delete all
-                # entities for the stale datastore, not just orphaned ones,
-                # because graph builds that completed after the datastore
-                # was deleted may have written entities WITH FROM_CHUNK
-                # edges to newly written (and also stale) chunk nodes.
-                with driver.session() as session:
-                    rec = session.run(
-                        """
-                        MATCH (e)
-                        WHERE (e:__KGBuilder__ OR e:Entity OR e:__Entity__)
-                          AND e.data_store_id = $ds_id
-                        DETACH DELETE e
-                        RETURN count(e) AS n
-                        """,
-                        ds_id=stale_ds_id,
-                    ).single()
-                    if rec and rec["n"]:
-                        logger.info(
-                            "[RECONCILE] Neo4j: cleaned %d entities for stale ds_%s",
-                            rec["n"], stale_ds_id,
-                        )
-
-            summary["neo4j"]["purged_datastores"] = len(stale_ds_ids)
-            logger.info("[RECONCILE] Neo4j: purged %d chunks across %d stale datastores", total_chunks, len(stale_ds_ids))
-
+        _purge_stale_datastore_nodes(driver, active_ds_ids, summary)
     except Exception as e:
         logger.warning("[RECONCILE] Neo4j: datastore purge failed: %s", e)

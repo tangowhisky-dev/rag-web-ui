@@ -95,6 +95,367 @@ def _strip_think(text: str) -> str:
 
 # ── SSE event formatter ───────────────────────────────────────────────────────
 
+# ── Stream context ────────────────────────────────────────────────────────────
+
+class _StreamContext:
+    def __init__(self, query, bot_message, user_message, db, chat_id,
+                 bot_message_id, user_message_id):
+        self.query = query
+        self.bot_message = bot_message
+        self.user_message = user_message
+        self.db = db
+        self.chat_id = chat_id
+        self.bot_message_id = bot_message_id
+        self.user_message_id = user_message_id
+        self.full_response = ""
+        self.rewritten_q = None
+        self.buffered_citations: list[tuple[int, int, int, int, dict]] = []
+        self.confidence_level: str | None = None
+        self.confidence_score: int | None = None
+        self.confidence_breakdown: dict | None = None
+        self.confidence_suggestion: str | None = None
+        self.confidence_failed_legs = None
+        self.final_confidence: float | None = None
+        self.final_confidence_level: str | None = None
+        self.faithfulness: int | None = None
+        self.completeness: int | None = None
+        self.retrieval_score: int | None = None
+        self.interrupt = False
+
+
+# ── Event handlers ─────────────────────────────────────────────────────────────
+
+async def _handle_agent_step(event, ctx):
+    yield f'4:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
+    await stream_flush()
+
+
+async def _handle_rewritten_query(event, ctx):
+    ctx.rewritten_q = event.get("query", ctx.query)
+    ctx.bot_message.rewritten_query = ctx.rewritten_q
+    yield f'1:{json.dumps({"rewritten_query": ctx.rewritten_q})}\n'
+    await asyncio.sleep(0)
+
+
+async def _handle_expanded_query(event, ctx):
+    expanded_q = event.get("query", "")
+    ctx.user_message.expanded_query = expanded_q
+    ctx.db.commit()
+    yield f'eq:{json.dumps({"expanded_query": expanded_q})}\n'
+    await asyncio.sleep(0)
+
+
+async def _handle_context(event, ctx):
+    ctx.confidence_level = event.get("confidence")
+    ctx.confidence_score = event.get("score")
+    ctx.confidence_breakdown = event.get("breakdown")
+    ctx.confidence_suggestion = event.get("suggestion")
+    ctx.confidence_failed_legs = event.get("failed_legs")
+    context_payload = {k: v for k, v in event.items() if k != "event"}
+    yield f'2:{json.dumps(context_payload)}\n'
+    yield ':\n'
+
+
+async def _handle_token(event, ctx):
+    content = event.get("content", "")
+    if isinstance(content, str):
+        ctx.full_response += content
+    elif isinstance(content, list):
+        for chunk in content:
+            if isinstance(chunk, str):
+                ctx.full_response += chunk
+            elif isinstance(chunk, dict) and "text" in chunk:
+                ctx.full_response += chunk["text"]
+    # logger.debug("[CHAT SSE] yield token %r", content)
+    yield f'0:{json.dumps(content)}\n'
+    yield ':\n'  # SSE flush comment — force chunk to leave backend buffer
+
+
+async def _handle_answer_rewrite(event, ctx):
+    ctx.full_response = event.get("content", ctx.full_response)
+    ctx.buffered_citations = []
+    citation_idx = 0
+    for doc in event.get("citations", []):
+        document_id = doc.get("metadata", {}).get("document_id")
+        chunk_index = doc.get("metadata", {}).get("chunk_index")
+        if document_id is not None and chunk_index is not None:
+            citation_idx += 1
+            meta = {**(doc.get("metadata", {}) or {})}
+            for rk in ("score", "dense_rank", "sparse_rank", "exact_rank", "retrieval_leg"):
+                v = doc.get(rk)
+                if v is not None:
+                    meta[rk] = v
+            ctx.buffered_citations.append((
+                ctx.bot_message.id, document_id, chunk_index, citation_idx, meta,
+            ))
+    rewrite_payload = {
+        "content": ctx.full_response,
+        "citations": event.get("citations", []),
+    }
+    yield f'r:{json.dumps(rewrite_payload)}\n'
+    await asyncio.sleep(0)
+
+
+async def _handle_done(event, ctx):
+    usage = event.get("usage", {"promptTokens": 0, "completionTokens": 0})
+    ctx.final_confidence = usage.get("final_confidence")
+    ctx.final_confidence_level = usage.get("confidence_level")
+    ctx.faithfulness = usage.get("faithfulness")
+    ctx.completeness = usage.get("completeness")
+    ctx.retrieval_score = usage.get("retrieval_score")
+    yield f'd:{json.dumps({"finishReason": "stop", "usage": usage, "messageId": ctx.bot_message_id, "userMessageId": ctx.user_message_id})}\n'
+    await asyncio.sleep(0)
+
+
+async def _handle_plan(event, ctx):
+    yield f'pl:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
+    await asyncio.sleep(0)
+
+
+async def _handle_tool_call(event, ctx):
+    yield f'tc:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
+    await asyncio.sleep(0)
+
+
+async def _handle_tool_observation(event, ctx):
+    yield f'to:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
+    await asyncio.sleep(0)
+
+
+async def _handle_tool_retry(event, ctx):
+    yield f'tr:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
+    await asyncio.sleep(0)
+
+
+async def _handle_last_answer(event, ctx):
+    yield f'la:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
+    await asyncio.sleep(0)
+
+
+async def _handle_progress(event, ctx):
+    yield f'p:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
+    await asyncio.sleep(0)
+
+
+async def _handle_task_list(event, ctx):
+    yield f't:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
+    await asyncio.sleep(0)
+
+
+async def _handle_thinking(event, ctx):
+    yield f'th:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
+    await asyncio.sleep(0)
+
+
+async def _handle_interrupt(event, ctx):
+    question = event.get("question", "")
+    thread_id = event.get("thread_id", "")
+    logger.info(
+        "[CHAT] clarification interrupt | chat_id=%d thread_id=%s",
+        ctx.chat_id, thread_id,
+    )
+    from app.models.clarification import ClarificationRequest as ClarificationRequestModel
+    clar_req = ClarificationRequestModel(
+        chat_id=ctx.chat_id,
+        assistant_message_id=ctx.bot_message.id,
+        question=question,
+        rationale="Query needs clarification from user",
+        status="pending",
+        attempt=1,
+    )
+    ctx.db.add(clar_req)
+    ctx.db.commit()
+    ctx.db.refresh(clar_req)
+    interrupt_payload = {
+        "question": question,
+        "clarification_id": clar_req.id,
+        "attempt": 1,
+        "max_attempts": 2,
+    }
+    yield f'c:{json.dumps(interrupt_payload)}\n'
+    await asyncio.sleep(0)
+    ctx.interrupt = True
+
+
+EVENT_HANDLERS = {
+    "agent_step": _handle_agent_step,
+    "rewritten_query": _handle_rewritten_query,
+    "expanded_query": _handle_expanded_query,
+    "context": _handle_context,
+    "token": _handle_token,
+    "answer_rewrite": _handle_answer_rewrite,
+    "done": _handle_done,
+    "plan": _handle_plan,
+    "tool_call": _handle_tool_call,
+    "tool_observation": _handle_tool_observation,
+    "tool_retry": _handle_tool_retry,
+    "last_answer": _handle_last_answer,
+    "progress": _handle_progress,
+    "task_list": _handle_task_list,
+    "thinking": _handle_thinking,
+    "interrupt": _handle_interrupt,
+}
+
+
+def _link_file_to_chat(db: Session, file_id: int, user_message_id: int) -> None:
+    from app.models.chat import ChatFile
+    chat_file = db.query(ChatFile).filter(ChatFile.id == file_id).first()
+    if chat_file:
+        chat_file.message_id = user_message_id
+        db.commit()
+
+
+def _create_user_message(
+    db: Session,
+    chat_id: int,
+    query: str,
+    display_query: Optional[str],
+    parent_message_id: Optional[int],
+    file_id: Optional[int],
+) -> tuple:
+    if parent_message_id is not None:
+        user_message = db.query(Message).filter(Message.id == parent_message_id).first()
+        if not user_message:
+            return None, f'3:{json.dumps({"error": "parent_message_id not found"})}\n'
+        return user_message, None
+    user_message = Message(content=display_query or query, role="user", chat_id=chat_id)
+    db.add(user_message)
+    chat = db.query(Chat).filter(Chat.id == chat_id).first()
+    if chat:
+        from datetime import datetime, timezone
+        chat.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    if file_id:
+        _link_file_to_chat(db, file_id, user_message.id)
+    return user_message, None
+
+
+async def _handle_identity_question(
+    bot_message: Message, user_message_id: int, db: Session,
+) -> AsyncGenerator[str, None]:
+    logger.info("[CHAT] identity shortcut — skipping RAG")
+    yield f'0:{json.dumps(_IDENTITY_RESPONSE)}\n'
+    yield f'd:{{"finishReason":"stop","usage":{{"promptTokens":0,"completionTokens":0}},"messageId":{bot_message.id},"userMessageId":{user_message_id}}}\n'
+    bot_message.content = _IDENTITY_RESPONSE
+    db.commit()
+
+
+def _persist_response_metadata(
+    bot_message: Message, db: Session, chat_id: int, ctx: "_StreamContext",
+) -> None:
+    bot_message.content = ctx.full_response
+    _chat = db.query(Chat).filter(Chat.id == chat_id).first()
+    if _chat:
+        from datetime import datetime, timezone
+        _chat.updated_at = datetime.now(timezone.utc)
+    if ctx.confidence_level is not None:
+        bot_message.confidence_level = ctx.confidence_level
+    if ctx.confidence_score is not None:
+        bot_message.confidence_score = ctx.confidence_score
+    if ctx.confidence_breakdown is not None:
+        bot_message.confidence_breakdown = json.dumps(ctx.confidence_breakdown)
+    if ctx.final_confidence is not None:
+        bot_message.final_confidence = ctx.final_confidence
+    if ctx.final_confidence_level is not None:
+        bot_message.final_confidence_level = ctx.final_confidence_level
+    if ctx.faithfulness is not None:
+        bot_message.faithfulness = ctx.faithfulness
+    if ctx.completeness is not None:
+        bot_message.completeness = ctx.completeness
+    if ctx.retrieval_score is not None:
+        bot_message.retrieval_score = ctx.retrieval_score
+    try:
+        db.commit()
+        logger.info(
+            "[CHAT] confidence persisted | chat_id=%d | level=%s score=%s final=%.3f",
+            chat_id, ctx.confidence_level, ctx.confidence_score, ctx.final_confidence or 0,
+        )
+    except Exception as commit_err:
+        logger.warning("[CHAT] failed to persist confidence: %s", commit_err)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
+def _persist_citations(db: Session, chat_id: int, buffered_citations: list) -> None:
+    if not buffered_citations:
+        return
+    try:
+        for msg_id, document_id, chunk_index, citation_index, metadata in buffered_citations:
+            db.add(
+                MessageCitation(
+                    message_id=msg_id,
+                    document_id=document_id,
+                    chunk_index=chunk_index,
+                    citation_index=citation_index,
+                    citation_metadata=metadata,
+                )
+            )
+        db.commit()
+        logger.info(
+            "[CHAT] citations persisted | chat_id=%d | count=%d",
+            chat_id, len(buffered_citations),
+        )
+    except Exception as cit_err:
+        logger.warning("[CHAT] failed to persist citations: %s", cit_err)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
+async def _process_stream_events(
+    stream_iter: AsyncGenerator, ctx: "_StreamContext", chat_id: int,
+) -> AsyncGenerator[str, None]:
+    async for event in stream_iter:
+        if get_cancel_token(chat_id).is_set():
+            logger.info("[CHAT] cancelled | chat_id=%d | response_length=%d chars", chat_id, len(ctx.full_response))
+            break
+        event_type = event.get("event")
+        handler = EVENT_HANDLERS.get(event_type)
+        if handler:
+            async for chunk in handler(event, ctx):
+                yield chunk
+            if ctx.interrupt:
+                break
+
+
+def _finalize_stream(
+    bot_message: Message, db: Session, chat_id: int, ctx: "_StreamContext",
+) -> None:
+    if get_cancel_token(chat_id).is_set():
+        bot_message.content = ctx.full_response or "(generation stopped)"
+        db.commit()
+        logger.info("[CHAT] partial response saved | chat_id=%d | chars=%d", chat_id, len(bot_message.content))
+        clear_cancel_token(chat_id)
+        return
+    _persist_response_metadata(bot_message, db, chat_id, ctx)
+    clear_cancel_token(chat_id)
+    _persist_citations(db, chat_id, ctx.buffered_citations)
+
+
+async def _emit_response_error(
+    exc: Exception, db: Session, chat_id: int,
+    bot_message_id: int, user_message_id: int, bot_message: Optional[Message],
+) -> AsyncGenerator[str, None]:
+    error_message = f"Error generating response: {str(exc)}"
+    logger.error(error_message, exc_info=True)
+    yield f'3:{json.dumps(error_message)}\n'
+    yield f'd:{{"finishReason":"error","messageId":{bot_message_id},"userMessageId":{user_message_id}}}\n'
+    if bot_message is not None and db.is_active:
+        try:
+            bot_message.content = error_message
+            db.commit()
+        except Exception as commit_err:
+            logger.warning("[CHAT] failed to persist error message: %s", commit_err)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+    clear_cancel_token(chat_id)
+
+
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 async def generate_response(
@@ -130,38 +491,18 @@ async def generate_response(
     logger.info("=" * 70)
     logger.info("[CHAT] chat_id=%s | kb_ids=%s | query=%r", chat_id, knowledge_base_ids, query)
 
+    _bot_message_id: int = 0
+    _user_message_id: int = 0
+    bot_message = None
+
     try:
-        _bot_message_id: int = 0  # cached before db.close() so error handler can use it
-        # ── Persist user message ───────────────────────────────────────────
-        # When branching (parent_message_id provided), the user message already
-        # exists — it was created by edit_message. Skip creation and link the
-        # assistant reply to it directly.
-        if parent_message_id is not None:
-            user_message = db.query(Message).filter(Message.id == parent_message_id).first()
-            if not user_message:
-                yield f'3:{json.dumps({"error": "parent_message_id not found"})}\n'
-                return
-        else:
-            user_message = Message(content=display_query or query, role="user", chat_id=chat_id)
-            db.add(user_message)
-            # Bump chat.updated_at so the sidebar can sort by last activity
-            chat = db.query(Chat).filter(Chat.id == chat_id).first()
-            if chat:
-                from datetime import datetime, timezone
-                chat.updated_at = datetime.now(timezone.utc)
-            db.commit()
+        user_message, error_frame = _create_user_message(
+            db, chat_id, query, display_query, parent_message_id, file_id,
+        )
+        if error_frame is not None:
+            yield error_frame
+            return
 
-            # Link chat_file to the user message so UI can show the filename
-            if file_id:
-                from app.models.chat import ChatFile
-                chat_file = db.query(ChatFile).filter(ChatFile.id == file_id).first()
-                if chat_file:
-                    chat_file.message_id = user_message.id
-                    db.commit()
-
-        # ── Persist bot placeholder ────────────────────────────────────────
-        # Link assistant reply to the user message via parent_message_id so
-        # branch navigation can find the correct reply for each user branch.
         bot_message = Message(
             content="", role="assistant", chat_id=chat_id,
             parent_message_id=user_message.id,
@@ -169,16 +510,11 @@ async def generate_response(
         db.add(bot_message)
         db.commit()
 
-        # ── Identity shortcut ──────────────────────────────────────────────
         if _is_identity_question(query):
-            logger.info("[CHAT] identity shortcut — skipping RAG")
-            yield f'0:{json.dumps(_IDENTITY_RESPONSE)}\n'
-            yield f'd:{{"finishReason":"stop","usage":{{"promptTokens":0,"completionTokens":0}},"messageId":{bot_message.id},"userMessageId":{_user_message_id}}}\n'
-            bot_message.content = _IDENTITY_RESPONSE
-            db.commit()
+            async for chunk in _handle_identity_question(bot_message, user_message.id, db):
+                yield chunk
             return
 
-        # ── Knowledge base check ────────────────────────────────────────────
         # NOTE: we intentionally do NOT hard-fail here when no KB is attached.
         # The agentic loop supports plenty of intents that need no documents at
         # all (code_execute, chart_generate on inline data, plain conversation,
@@ -196,27 +532,19 @@ async def generate_response(
         logger.info("[CHAT] prior_messages=%d | delegating history to Redis checkpoint",
                     len(prior_messages))
 
-        full_response = ""
-        rewritten_q = display_query or query
-
-        # Confidence capture from the context event
-        _confidence_level: str | None = None
-        _confidence_score: int | None = None
-        _confidence_breakdown: dict | None = None
-        _confidence_suggestion: str | None = None
-        # Final answer evaluation from the done event
-        _final_confidence: float | None = None
-        _final_confidence_level: str | None = None
-        _faithfulness: int | None = None
-        _completeness: int | None = None
-        _retrieval_score: int | None = None
-
-        # Cache the message ID so the error handler can reference it even if
-        # the bot_message instance becomes detached.
         _bot_message_id = getattr(bot_message, "id", 0) or 0
         _user_message_id = getattr(user_message, "id", 0) or 0
-        buffered_citations: list[tuple[int, int, int, int, dict]] = []
-        # (message_id, document_id, chunk_index, citation_index, metadata)
+
+        ctx = _StreamContext(
+            query=query,
+            bot_message=bot_message,
+            user_message=user_message,
+            db=db,
+            chat_id=chat_id,
+            bot_message_id=_bot_message_id,
+            user_message_id=_user_message_id,
+        )
+        ctx.rewritten_q = display_query or query
 
         # ── Agentic pipeline: single autonomous agent ───────────────────────
         # New agentic agent: rewrite -> search -> stream in real-time
@@ -233,277 +561,17 @@ async def generate_response(
             message_id=_bot_message_id,
         )
 
-        async for event in stream_iter:
-            # Check for cancellation before processing each event
-            if get_cancel_token(chat_id).is_set():
-                logger.info("[CHAT] cancelled | chat_id=%d | response_length=%d chars", chat_id, len(full_response))
-                break
+        async for chunk in _process_stream_events(stream_iter, ctx, chat_id):
+            yield chunk
 
-            event_type = event.get("event")
+        logger.info("[CHAT] stream complete | response_length=%d chars", len(ctx.full_response))
 
-            if event_type == "agent_step":
-                # Forward graph-node events for AgentTimeline rendering
-                yield f'4:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
-                await stream_flush()
-
-            elif event_type == "rewritten_query":
-                rewritten_q = event.get("query", query)
-                bot_message.rewritten_query = rewritten_q
-                yield f'1:{json.dumps({"rewritten_query": rewritten_q})}\n'
-                await asyncio.sleep(0)
-
-            elif event_type == "expanded_query":
-                expanded_q = event.get("query", "")
-                user_message.expanded_query = expanded_q
-                db.commit()
-                yield f'eq:{json.dumps({"expanded_query": expanded_q})}\n'
-                await asyncio.sleep(0)
-
-            elif event_type == "context":
-                # Capture confidence data for persistence (written after stream)
-                _confidence_level = event.get("confidence")
-                _confidence_score = event.get("score")
-                _confidence_breakdown = event.get("breakdown")
-                _confidence_suggestion = event.get("suggestion")
-                _confidence_failed_legs = event.get("failed_legs")
-
-                # Stream confidence metadata only; docs/citations are now supplied
-                # by the answer_rewrite event after the final answer is normalized.
-                context_payload = {k: v for k, v in event.items() if k != "event"}
-                yield f'2:{json.dumps(context_payload)}\n'
-                yield ':\n'
-
-            elif event_type == "token":
-                content = event.get("content", "")
-                if isinstance(content, str):
-                    full_response += content
-                elif isinstance(content, list):
-                    for chunk in content:
-                        if isinstance(chunk, str):
-                            full_response += chunk
-                        elif isinstance(chunk, dict) and "text" in chunk:
-                            full_response += chunk["text"]
-                # logger.debug("[CHAT SSE] yield token %r", content)
-                yield f'0:{json.dumps(content)}\n'
-                yield ':\n'  # SSE flush comment — force chunk to leave backend buffer
-            elif event_type == "answer_rewrite":
-                # Citation normalisation: replace accumulated streamed text with
-                # the citation-linked version. Frontend handles this via event type 'r'.
-                full_response = event.get("content", full_response)
-
-                # Buffer only the citations actually used by the normalized answer,
-                # in display order (1..M).  Each item already carries the doc's
-                # metadata from graph_runner.
-                # Use a separate counter (not enumerate) so that docs without
-                # document_id/chunk_index are skipped without creating gaps
-                # in the citation_index sequence.
-                buffered_citations = []
-                citation_idx = 0
-                for doc in event.get("citations", []):
-                    document_id = doc.get("metadata", {}).get("document_id")
-                    chunk_index = doc.get("metadata", {}).get("chunk_index")
-                    if document_id is not None and chunk_index is not None:
-                        citation_idx += 1
-                        meta = {**(doc.get("metadata", {}) or {})}
-                        for rk in ("score", "dense_rank", "sparse_rank", "exact_rank", "retrieval_leg"):
-                            v = doc.get(rk)
-                            if v is not None:
-                                meta[rk] = v
-                        buffered_citations.append((
-                            bot_message.id, document_id, chunk_index, citation_idx, meta,
-                        ))
-
-                # Forward normalized content + cited docs to the frontend so the
-                # citation list matches the [1], [2], ... markers exactly.
-                rewrite_payload = {
-                    "content": full_response,
-                    "citations": event.get("citations", []),
-                }
-                yield f'r:{json.dumps(rewrite_payload)}\n'
-                await asyncio.sleep(0)
-
-            elif event_type == "done":
-                usage = event.get("usage", {"promptTokens": 0, "completionTokens": 0})
-                # Capture final answer evaluation metrics for persistence
-                _final_confidence = usage.get("final_confidence")
-                _final_confidence_level = usage.get("confidence_level")
-                _faithfulness = usage.get("faithfulness")
-                _completeness = usage.get("completeness")
-                _retrieval_score = usage.get("retrieval_score")
-                yield f'd:{json.dumps({"finishReason": "stop", "usage": usage, "messageId": _bot_message_id, "userMessageId": _user_message_id})}\n'
-                await asyncio.sleep(0)
-
-            # ── Enterprise agent loop SSE events ──────────────────────────────
-            elif event_type == "plan":
-                yield f'pl:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
-                await asyncio.sleep(0)
-
-            elif event_type == "tool_call":
-                yield f'tc:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
-                await asyncio.sleep(0)
-
-            elif event_type == "tool_observation":
-                yield f'to:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
-                await asyncio.sleep(0)
-
-            elif event_type == "tool_retry":
-                yield f'tr:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
-                await asyncio.sleep(0)
-
-            elif event_type == "last_answer":
-                yield f'la:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
-                await asyncio.sleep(0)
-
-            # ── New agentic agent SSE events ──────────────────────────────────
-            elif event_type == "progress":
-                # Transient progress/status messages — forwarded as 'p:' event
-                yield f'p:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
-                await asyncio.sleep(0)
-
-            elif event_type == "task_list":
-                # Subtask list with status — forwarded as 't:' event
-                yield f't:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
-                await asyncio.sleep(0)
-
-            elif event_type == "thinking":
-                # Thinking model chain-of-thought — forwarded as 'th:' event
-                yield f'th:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
-                await asyncio.sleep(0)
-
-            elif event_type == "interrupt":
-                # Human-in-the-loop clarification — pause streaming, create
-                # ClarificationRequest in DB, and signal the frontend to poll.
-                question = event.get("question", "")
-                thread_id = event.get("thread_id", "")
-
-                logger.info(
-                    "[CHAT] clarification interrupt | chat_id=%d thread_id=%s",
-                    chat_id, thread_id,
-                )
-
-                # Create ClarificationRequest in DB so frontend can poll
-                from app.models.clarification import ClarificationRequest as ClarificationRequestModel
-                clar_req = ClarificationRequestModel(
-                    chat_id=chat_id,
-                    assistant_message_id=bot_message.id,
-                    question=question,
-                    rationale="Query needs clarification from user",
-                    status="pending",
-                    attempt=1,
-                )
-                db.add(clar_req)
-                db.commit()
-                db.refresh(clar_req)
-
-                # Forward interrupt event to frontend
-                interrupt_payload = {
-                    "question": question,
-                    "clarification_id": clar_req.id,
-                    "attempt": 1,
-                    "max_attempts": 2,
-                }
-                yield f'c:{json.dumps(interrupt_payload)}\n'
-                await asyncio.sleep(0)
-
-                # Break the stream — the agent will resume after user responds
-                break
-
-        logger.info("[CHAT] stream complete | response_length=%d chars", len(full_response))
-
-        # ── Handle cancellation after stream ends ──────────────────────────
-        if get_cancel_token(chat_id).is_set():
-            # Save partial response (stream was cancelled)
-            bot_message.content = full_response or "(generation stopped)"
-            db.commit()
-            logger.info("[CHAT] partial response saved | chat_id=%d | chars=%d", chat_id, len(bot_message.content))
-            clear_cancel_token(chat_id)
-            return
-
-        # ── Persist final answer ───────────────────────────────────────────
-        bot_message.content = full_response
-
-        # Bump chat.updated_at so sidebar sorts by last activity
-        _chat = db.query(Chat).filter(Chat.id == chat_id).first()
-        if _chat:
-            from datetime import datetime, timezone
-            _chat.updated_at = datetime.now(timezone.utc)
-
-        # Persist retrieval confidence for this message
-        if _confidence_level is not None:
-            bot_message.confidence_level = _confidence_level
-        if _confidence_score is not None:
-            bot_message.confidence_score = _confidence_score
-        if _confidence_breakdown is not None:
-            bot_message.confidence_breakdown = json.dumps(_confidence_breakdown)
-
-        # Persist final answer evaluation metrics
-        if _final_confidence is not None:
-            bot_message.final_confidence = _final_confidence
-        if _final_confidence_level is not None:
-            bot_message.final_confidence_level = _final_confidence_level
-        if _faithfulness is not None:
-            bot_message.faithfulness = _faithfulness
-        if _completeness is not None:
-            bot_message.completeness = _completeness
-        if _retrieval_score is not None:
-            bot_message.retrieval_score = _retrieval_score
-
-        try:
-            db.commit()
-            logger.info(
-                "[CHAT] confidence persisted | chat_id=%d | level=%s score=%s final=%.3f",
-                chat_id, _confidence_level, _confidence_score, _final_confidence or 0,
-            )
-        except Exception as commit_err:
-            logger.warning("[CHAT] failed to persist confidence: %s", commit_err)
-            try:
-                db.rollback()
-            except Exception:
-                pass
-        clear_cancel_token(chat_id)
-
-        # ── Persist buffered citations to message_citations table ──────────
-        if buffered_citations:
-            try:
-                for msg_id, document_id, chunk_index, citation_index, metadata in buffered_citations:
-                    db.add(
-                        MessageCitation(
-                            message_id=msg_id,
-                            document_id=document_id,
-                            chunk_index=chunk_index,
-                            citation_index=citation_index,
-                            citation_metadata=metadata,
-                        )
-                    )
-                db.commit()
-                logger.info(
-                    "[CHAT] citations persisted | chat_id=%d | count=%d",
-                    chat_id, len(buffered_citations),
-                )
-            except Exception as cit_err:
-                logger.warning("[CHAT] failed to persist citations: %s", cit_err)
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
+        _finalize_stream(bot_message, db, chat_id, ctx)
 
         # ── Post-turn: schedule summary update (fire-and-forget) ──────────
     except Exception as e:
-        error_message = f"Error generating response: {str(e)}"
-        logger.error(error_message, exc_info=True)
-        yield f'3:{json.dumps(error_message)}\n'
-        yield f'd:{{"finishReason":"error","messageId":{_bot_message_id},"userMessageId":{_user_message_id}}}\n'
-        if 'bot_message' in locals() and db.is_active:
-            try:
-                bot_message.content = error_message
-                db.commit()
-            except Exception as commit_err:
-                logger.warning("[CHAT] failed to persist error message: %s", commit_err)
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
-        clear_cancel_token(chat_id)
+        async for chunk in _emit_response_error(e, db, chat_id, _bot_message_id, _user_message_id, bot_message):
+            yield chunk
 # ── SSE flush helpers ─────────────────────────────────────────────────────────
 # Uvicorn buffers SSE responses by default. These helpers force the HTTP
 # server to flush buffered data to the client so events arrive progressively.

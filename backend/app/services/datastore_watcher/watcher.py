@@ -732,6 +732,47 @@ class DataStoreWatcher:
     # Scan endpoints
     # ------------------------------------------------------------------
 
+    def _run_discovery_and_update_sse(
+        self,
+        datastore_id: int,
+        force_full_hash: bool,
+        summary: Dict[str, Any],
+    ) -> Optional[Any]:
+        """Run discovery engine and update SSE state with counts.
+
+        Returns the discovery result, or None if discovery failed
+        (in which case summary['errors'] is set and the scan is marked
+        as failed via _complete_scan).
+        """
+        try:
+            result = discover_datastore(datastore_id, force_full_hash=force_full_hash)
+        except Exception as e:
+            logger.error(
+                "[WATCHER] discovery_failed datastore_id=%d: %s", datastore_id, e,
+                exc_info=True,
+            )
+            self._complete_scan(datastore_id, False, str(e))
+            summary["errors"] = 1
+            return None
+
+        summary["scanned"] = result.total_files_discovered
+        summary["skipped"] = result.skipped_files
+        summary["new"] = len(result.new_files)
+        summary["modified"] = len(result.modified_files)
+        summary["deleted"] = len(result.deleted_files)
+
+        with self._active_scans_lock:
+            for sid, scan_info in self._active_scans.items():
+                if scan_info["datastore_id"] == datastore_id:
+                    scan_info["new"] = summary["new"]
+                    scan_info["modified"] = summary["modified"]
+                    scan_info["skipped"] = summary["skipped"]
+                    scan_info["deleted"] = summary["deleted"]
+                    scan_info["error_count"] = summary["errors"]
+                    break
+
+        return result
+
     def scan_single_datastore(
         self,
         datastore_id: int,
@@ -769,87 +810,28 @@ class DataStoreWatcher:
             total_files = self._count_files_in_folder(ds.folder_path, ds.scan_pattern)
 
             # Use the discovery engine for accurate new/modified/deleted classification
-            try:
-                result = discover_datastore(datastore_id, force_full_hash=force_full_hash)
-            except Exception as e:
-                logger.error(
-                    "[WATCHER] discovery_failed datastore_id=%d: %s", datastore_id, e,
-                    exc_info=True,
-                )
-                self._complete_scan(datastore_id, False, str(e))
-                summary["errors"] = 1
+            result = self._run_discovery_and_update_sse(
+                datastore_id, force_full_hash, summary,
+            )
+            if result is None:
                 return summary
-
-            summary["scanned"] = result.total_files_discovered
-            summary["skipped"] = result.skipped_files
-            summary["new"] = len(result.new_files)
-            summary["modified"] = len(result.modified_files)
-            summary["deleted"] = len(result.deleted_files)
-
-            # Reflect discovery counts in SSE state
-            with self._active_scans_lock:
-                for sid, scan_info in self._active_scans.items():
-                    if scan_info["datastore_id"] == datastore_id:
-                        scan_info["new"] = summary["new"]
-                        scan_info["modified"] = summary["modified"]
-                        scan_info["skipped"] = summary["skipped"]
-                        scan_info["deleted"] = summary["deleted"]
-                        scan_info["error_count"] = summary["errors"]
-                        # Don't overwrite "total" — it's locked at scan start
-                        # to the count of selected files for a stable progress bar.
-                        break
 
             # Collect futures from ingestion tasks
             ingestion_futures: List[Future] = []
 
             # Process new/modified files
             files_to_process = result.new_files + result.modified_files
-            for idx, fmeta in enumerate(files_to_process):
-                if self._is_scan_cancelled(datastore_id):
-                    logger.info("[WATCHER] scan_cancelled mid-scan datastore_id=%d", datastore_id)
-                    self._complete_scan(datastore_id, False, "Scan cancelled by admin")
-                    summary["errors"] = 1
-                    return summary
-
-                fpath = fmeta["file_path"]
-                try:
-                    future = self._handle_file_in_scan(
-                        fpath, datastore_id, scan_id,
-                        file_hash=fmeta.get("file_hash"),
-                    )
-                    if future is not None:
-                        ingestion_futures.append(future)
-                        # Progress is incremented when the ingestion future
-                        # completes (via _on_scan_ingestion_done callback),
-                        # not when it's submitted. This gives the UI real-time
-                        # progress that reflects actual completion.
-                    else:
-                        # File was skipped (unsupported extension, duplicate,
-                        # or already ingested) — count it as processed now.
-                        self._update_scan_progress(datastore_id, 1)
-
-                    with self._active_scans_lock:
-                        for sid, scan_info in self._active_scans.items():
-                            if scan_info["datastore_id"] == datastore_id:
-                                scan_info["new"] = summary["new"]
-                                scan_info["modified"] = summary["modified"]
-                                scan_info["skipped"] = summary["skipped"]
-                                scan_info["error_count"] = summary["errors"]
-                                break
-
-                except Exception as e:
-                    logger.error("[WATCHER] scan error for %s: %s", fpath, e)
-                    summary["errors"] += 1
-                    with self._active_scans_lock:
-                        for sid, scan_info in self._active_scans.items():
-                            if scan_info["datastore_id"] == datastore_id:
-                                scan_info["error_count"] = summary["errors"]
-                                break
+            if self._ingest_new_and_modified(
+                datastore_id, files_to_process, scan_id, summary, ingestion_futures,
+            ):
+                return summary
 
             # Expire all cached objects so we see the latest DB state.
             # The db session has been open since the start of the scan and
             # may have stale data from before the discovery/ingestion phase.
             db.expire_all()
+
+            seen_paths = {fmeta["file_path"] for fmeta in files_to_process}
 
             # Re-queue documents with pending or failed tasks that were not
             # in the new/modified set.  This handles the pause/resume case:
@@ -867,45 +849,9 @@ class DataStoreWatcher:
                 )
                 .all()
             )
-            requeued = 0
-            seen_paths = {fmeta["file_path"] for fmeta in files_to_process}
-            for doc, task in stuck_docs:
-                if doc.file_path in seen_paths:
-                    continue  # already handled above
-                if self._is_scan_cancelled(datastore_id):
-                    break
-                # Check if chunks already exist (task may have completed
-                # before the pause took effect).  If chunks exist, mark
-                # the task as completed and skip re-ingestion.
-                chunk_count = (
-                    db.query(DocumentChunk)
-                    .filter(DocumentChunk.document_id == doc.id)
-                    .count()
-                )
-                if chunk_count > 0:
-                    task.status = "completed"
-                    task.progress = 100
-                    db.commit()
-                    continue
-                # No chunks — re-ingest using _update_document_in_scan
-                # which reuses the existing Document, resets the task,
-                # and submits to the executor.
-                try:
-                    future = self._update_document_in_scan(
-                        doc.id, doc.file_path, doc.file_hash or "",
-                        datastore_id, scan_id,
-                    )
-                    if future is not None:
-                        ingestion_futures.append(future)
-                        requeued += 1
-                except Exception as e:
-                    logger.error("[WATCHER] requeue error for %s: %s", doc.file_path, e)
-                    summary["errors"] += 1
-            if requeued:
-                logger.info(
-                    "[WATCHER] requeued_stuck_tasks datastore_id=%d count=%d",
-                    datastore_id, requeued,
-                )
+            self._requeue_stuck_documents(
+                db, datastore_id, stuck_docs, seen_paths, scan_id, summary, ingestion_futures,
+            )
 
             # Re-queue selected documents that have NO ProcessingTask and NO
             # chunks.  This happens when a file was previously unselected
@@ -924,28 +870,9 @@ class DataStoreWatcher:
                 )
                 .all()
             )
-            orphan_queued = 0
-            for doc in orphan_selected:
-                if doc.file_path in seen_paths:
-                    continue  # already handled above
-                if self._is_scan_cancelled(datastore_id):
-                    break
-                try:
-                    future = self._update_document_in_scan(
-                        doc.id, doc.file_path, doc.file_hash or "",
-                        datastore_id, scan_id,
-                    )
-                    if future is not None:
-                        ingestion_futures.append(future)
-                        orphan_queued += 1
-                except Exception as e:
-                    logger.error("[WATCHER] orphan_queue error for %s: %s", doc.file_path, e)
-                    summary["errors"] += 1
-            if orphan_queued:
-                logger.info(
-                    "[WATCHER] queued_orphan_selected datastore_id=%d count=%d",
-                    datastore_id, orphan_queued,
-                )
+            self._requeue_orphan_documents(
+                db, datastore_id, orphan_selected, seen_paths, scan_id, summary, ingestion_futures,
+            )
 
             # Re-queue selected documents with needs_reprocess=True.
             # This happens when an admin edited the markdown in the editor
@@ -962,74 +889,19 @@ class DataStoreWatcher:
                 )
                 .all()
             )
-            reprocess_queued = 0
-            for doc in reprocess_docs:
-                if doc.file_path in seen_paths:
-                    continue  # already handled above
-                if self._is_scan_cancelled(datastore_id):
-                    break
-                try:
-                    # Clear flag before re-ingesting
-                    doc.needs_reprocess = False
-                    db.commit()
-                    # Re-ingest using existing markdown (skip conversion)
-                    future = self._update_document_in_scan(
-                        doc.id, doc.file_path, doc.file_hash or "",
-                        datastore_id, scan_id,
-                        skip_conversion=True,
-                    )
-                    if future is not None:
-                        ingestion_futures.append(future)
-                        reprocess_queued += 1
-                except Exception as e:
-                    logger.error("[WATCHER] reprocess_queue error for %s: %s", doc.file_path, e)
-                    summary["errors"] += 1
-            if reprocess_queued:
-                logger.info(
-                    "[WATCHER] queued_needs_reprocess datastore_id=%d count=%d",
-                    datastore_id, reprocess_queued,
-                )
+            self._requeue_reprocess_documents(
+                db, datastore_id, reprocess_docs, seen_paths, scan_id, summary, ingestion_futures,
+            )
 
             # Process deleted files (files on disk that no longer exist)
-            for fmeta in result.deleted_files:
-                fpath = fmeta["file_path"]
-                try:
-                    self._handler._handle_deletion(fpath, datastore_id)
-                except Exception as e:
-                    logger.error("[WATCHER] deletion error for %s: %s", fpath, e)
-                    summary["errors"] += 1
-                    with self._active_scans_lock:
-                        for sid, scan_info in self._active_scans.items():
-                            if scan_info["datastore_id"] == datastore_id:
-                                scan_info["error_count"] = summary["errors"]
-                                break
+            self._process_deletions(datastore_id, result.deleted_files, scan_id, summary)
 
             # Wait for all ingestion tasks to complete before marking scan done.
             # Each task covers: parse → embed → Qdrant upsert.  Graph build runs
             # in a separate daemon thread and does not block the scan.  10 minutes
             # per file covers large PDFs with OCR; a timeout is a real hang (API
             # down, DB locked), not a slow graph build.
-            if ingestion_futures:
-                logger.info(
-                    "[WATCHER] waiting_for_ingestion scan_id=%d datastore_id=%d tasks=%d",
-                    scan_id, datastore_id, len(ingestion_futures),
-                )
-                for future in ingestion_futures:
-                    try:
-                        future.result(timeout=600)  # 10 minutes per task
-                    except TimeoutError:
-                        logger.error(
-                            "[WATCHER] ingestion_task_timeout scan_id=%d — cancelling future",
-                            scan_id,
-                        )
-                        future.cancel()
-                        summary["errors"] += 1
-                    except Exception as e:
-                        logger.error(
-                            "[WATCHER] ingestion_task_failed scan_id=%d: %s",
-                            scan_id, e,
-                        )
-                        summary["errors"] += 1
+            self._wait_for_ingestion(ingestion_futures, scan_id, datastore_id, summary)
 
             # Clean up futures tracking
             with self._scan_futures_lock:
@@ -1052,6 +924,243 @@ class DataStoreWatcher:
             return summary
         finally:
             db.close()
+
+    def _ingest_new_and_modified(
+        self,
+        datastore_id: int,
+        files_to_process: List[Dict[str, Any]],
+        scan_id: int,
+        summary: Dict[str, Any],
+        ingestion_futures: List[Future],
+    ) -> bool:
+        """Process new/modified files during a scan.
+
+        Returns True if the scan was cancelled mid-phase (caller should
+        return immediately), False otherwise.
+        """
+        for idx, fmeta in enumerate(files_to_process):
+            if self._is_scan_cancelled(datastore_id):
+                logger.info("[WATCHER] scan_cancelled mid-scan datastore_id=%d", datastore_id)
+                self._complete_scan(datastore_id, False, "Scan cancelled by admin")
+                summary["errors"] = 1
+                return True
+
+            fpath = fmeta["file_path"]
+            try:
+                future = self._handle_file_in_scan(
+                    fpath, datastore_id, scan_id,
+                    file_hash=fmeta.get("file_hash"),
+                )
+                if future is not None:
+                    ingestion_futures.append(future)
+                    # Progress is incremented when the ingestion future
+                    # completes (via _on_scan_ingestion_done callback),
+                    # not when it's submitted. This gives the UI real-time
+                    # progress that reflects actual completion.
+                else:
+                    # File was skipped (unsupported extension, duplicate,
+                    # or already ingested) — count it as processed now.
+                    self._update_scan_progress(datastore_id, 1)
+
+                with self._active_scans_lock:
+                    for sid, scan_info in self._active_scans.items():
+                        if scan_info["datastore_id"] == datastore_id:
+                            scan_info["new"] = summary["new"]
+                            scan_info["modified"] = summary["modified"]
+                            scan_info["skipped"] = summary["skipped"]
+                            scan_info["error_count"] = summary["errors"]
+                            break
+
+            except Exception as e:
+                logger.error("[WATCHER] scan error for %s: %s", fpath, e)
+                summary["errors"] += 1
+                with self._active_scans_lock:
+                    for sid, scan_info in self._active_scans.items():
+                        if scan_info["datastore_id"] == datastore_id:
+                            scan_info["error_count"] = summary["errors"]
+                            break
+
+        return False
+
+    def _requeue_stuck_documents(
+        self,
+        db: Session,
+        datastore_id: int,
+        stuck_docs: List[Any],
+        seen_paths: set,
+        scan_id: int,
+        summary: Dict[str, Any],
+        ingestion_futures: List[Future],
+    ) -> None:
+        """Re-queue documents with pending/failed/processing tasks."""
+        requeued = 0
+        for doc, task in stuck_docs:
+            if doc.file_path in seen_paths:
+                continue  # already handled above
+            if self._is_scan_cancelled(datastore_id):
+                break
+            # Check if chunks already exist (task may have completed
+            # before the pause took effect).  If chunks exist, mark
+            # the task as completed and skip re-ingestion.
+            chunk_count = (
+                db.query(DocumentChunk)
+                .filter(DocumentChunk.document_id == doc.id)
+                .count()
+            )
+            if chunk_count > 0:
+                task.status = "completed"
+                task.progress = 100
+                db.commit()
+                continue
+            # No chunks — re-ingest using _update_document_in_scan
+            # which reuses the existing Document, resets the task,
+            # and submits to the executor.
+            try:
+                future = self._update_document_in_scan(
+                    doc.id, doc.file_path, doc.file_hash or "",
+                    datastore_id, scan_id,
+                )
+                if future is not None:
+                    ingestion_futures.append(future)
+                    requeued += 1
+            except Exception as e:
+                logger.error("[WATCHER] requeue error for %s: %s", doc.file_path, e)
+                summary["errors"] += 1
+        if requeued:
+            logger.info(
+                "[WATCHER] requeued_stuck_tasks datastore_id=%d count=%d",
+                datastore_id, requeued,
+            )
+
+    def _requeue_orphan_documents(
+        self,
+        db: Session,
+        datastore_id: int,
+        orphan_selected: List[Document],
+        seen_paths: set,
+        scan_id: int,
+        summary: Dict[str, Any],
+        ingestion_futures: List[Future],
+    ) -> None:
+        """Re-queue selected documents with no ProcessingTask and no chunks."""
+        orphan_queued = 0
+        for doc in orphan_selected:
+            if doc.file_path in seen_paths:
+                continue  # already handled above
+            if self._is_scan_cancelled(datastore_id):
+                break
+            try:
+                future = self._update_document_in_scan(
+                    doc.id, doc.file_path, doc.file_hash or "",
+                    datastore_id, scan_id,
+                )
+                if future is not None:
+                    ingestion_futures.append(future)
+                    orphan_queued += 1
+            except Exception as e:
+                logger.error("[WATCHER] orphan_queue error for %s: %s", doc.file_path, e)
+                summary["errors"] += 1
+        if orphan_queued:
+            logger.info(
+                "[WATCHER] queued_orphan_selected datastore_id=%d count=%d",
+                datastore_id, orphan_queued,
+            )
+
+    def _requeue_reprocess_documents(
+        self,
+        db: Session,
+        datastore_id: int,
+        reprocess_docs: List[Document],
+        seen_paths: set,
+        scan_id: int,
+        summary: Dict[str, Any],
+        ingestion_futures: List[Future],
+    ) -> None:
+        """Re-queue selected documents with needs_reprocess=True."""
+        reprocess_queued = 0
+        for doc in reprocess_docs:
+            if doc.file_path in seen_paths:
+                continue  # already handled above
+            if self._is_scan_cancelled(datastore_id):
+                break
+            try:
+                # Clear flag before re-ingesting
+                doc.needs_reprocess = False
+                db.commit()
+                # Re-ingest using existing markdown (skip conversion)
+                future = self._update_document_in_scan(
+                    doc.id, doc.file_path, doc.file_hash or "",
+                    datastore_id, scan_id,
+                    skip_conversion=True,
+                )
+                if future is not None:
+                    ingestion_futures.append(future)
+                    reprocess_queued += 1
+            except Exception as e:
+                logger.error("[WATCHER] reprocess_queue error for %s: %s", doc.file_path, e)
+                summary["errors"] += 1
+        if reprocess_queued:
+            logger.info(
+                "[WATCHER] queued_needs_reprocess datastore_id=%d count=%d",
+                datastore_id, reprocess_queued,
+            )
+
+    def _process_deletions(
+        self,
+        datastore_id: int,
+        deleted_files: List[Dict[str, Any]],
+        scan_id: int,
+        summary: Dict[str, Any],
+    ) -> None:
+        """Process deleted files (files on disk that no longer exist)."""
+        for fmeta in deleted_files:
+            fpath = fmeta["file_path"]
+            try:
+                self._handler._handle_deletion(fpath, datastore_id)
+            except Exception as e:
+                logger.error("[WATCHER] deletion error for %s: %s", fpath, e)
+                summary["errors"] += 1
+                with self._active_scans_lock:
+                    for sid, scan_info in self._active_scans.items():
+                        if scan_info["datastore_id"] == datastore_id:
+                            scan_info["error_count"] = summary["errors"]
+                            break
+
+    def _wait_for_ingestion(
+        self,
+        ingestion_futures: List[Future],
+        scan_id: int,
+        datastore_id: int,
+        summary: Dict[str, Any],
+    ) -> None:
+        """Wait for all ingestion tasks to complete before marking scan done.
+
+        Each task covers: parse → embed → Qdrant upsert.  Graph build runs
+        in a separate daemon thread and does not block the scan.  10 minutes
+        per file covers large PDFs with OCR; a timeout is a real hang (API
+        down, DB locked), not a slow graph build.
+        """
+        if ingestion_futures:
+            logger.info(
+                "[WATCHER] waiting_for_ingestion scan_id=%d datastore_id=%d tasks=%d",
+                scan_id, datastore_id, len(ingestion_futures),
+            )
+            for future in ingestion_futures:
+                try:
+                    future.result(timeout=600)  # 10 minutes per task
+                except TimeoutError:
+                    logger.error(
+                        "[WATCHER] ingestion_task_timeout scan_id=%d — cancelling future",
+                        scan_id,
+                    )
+                    future.cancel()
+                    summary["errors"] += 1
+                except Exception as e:
+                    logger.error(
+                        "[WATCHER] ingestion_task_failed scan_id=%d: %s",
+                        scan_id, e,
+                    )
+                    summary["errors"] += 1
 
     def _matches_pattern(self, filepath: str, pattern: str = "*") -> bool:
         """Check if a filepath matches the scan pattern. Delegates to shared utility."""
@@ -1185,6 +1294,79 @@ class DataStoreWatcher:
             release_file_lock(db, datastore_id, event_path)
             db.close()
 
+    def _validate_file_for_scan(
+        self,
+        event_path: str,
+    ) -> Optional[tuple]:
+        """Validate a file for scan ingestion.
+
+        Returns (fname, ext, file_size, content_type) or None if the file
+        should be skipped (unsupported extension, hidden/temp file, missing).
+        """
+        fname = os.path.basename(event_path)
+        _, ext = os.path.splitext(fname)
+        ext = ext.lower()
+
+        if ext not in SUPPORTED_EXTENSIONS:
+            return None
+
+        if fname.startswith(".") or fname.startswith("~$") or fname.startswith(".~"):
+            return None
+        if ext in (".tmp", ".swp", ".swo", ".bak", ".lock"):
+            return None
+
+        if not os.path.exists(event_path):
+            return None
+
+        try:
+            file_size = os.path.getsize(event_path)
+        except OSError:
+            file_size = 0
+
+        from app.services.ingestion.document_processor import CONTENT_TYPE_MAP
+        content_type = CONTENT_TYPE_MAP.get(ext, "application/octet-stream")
+
+        return (fname, ext, file_size, content_type)
+
+    def _submit_and_track_ingestion(
+        self,
+        event_path: str,
+        fname: str,
+        task_id: int,
+        document_id: int,
+        datastore_id: int,
+        scan_id: int,
+        file_hash: str,
+        file_size: int,
+        content_type: str,
+        skip_conversion: bool = False,
+    ) -> Future:
+        """Submit ingestion to executor and track the future for scan_id."""
+        future = self._executor.submit(
+            self._run_ingestion,
+            event_path,
+            fname,
+            None,
+            task_id,
+            document_id,
+            datastore_id,
+            None,
+            file_hash=file_hash,
+            file_size=file_size,
+            content_type=content_type,
+            skip_conversion=skip_conversion,
+        )
+        future.add_done_callback(
+            lambda f, ds=datastore_id: self._on_scan_ingestion_done(f, task_id, event_path, ds)
+        )
+
+        if scan_id > 0:
+            with self._scan_futures_lock:
+                if scan_id in self._scan_futures:
+                    self._scan_futures[scan_id].append(future)
+
+        return future
+
     def _ingest_file_in_scan(
         self,
         event_path: str,
@@ -1194,28 +1376,10 @@ class DataStoreWatcher:
         is_selected: bool = False,
     ) -> Optional[Future]:
         """Create Document + ProcessingTask records and enqueue background processing for scans."""
-        fname = os.path.basename(event_path)
-        _, ext = os.path.splitext(fname)
-        ext = ext.lower()
-
-        if ext not in SUPPORTED_EXTENSIONS:
+        validated = self._validate_file_for_scan(event_path)
+        if validated is None:
             return
-
-        if fname.startswith(".") or fname.startswith("~$") or fname.startswith(".~"):
-            return
-        if ext in (".tmp", ".swp", ".swo", ".bak", ".lock"):
-            return
-
-        if not os.path.exists(event_path):
-            return
-
-        try:
-            file_size = os.path.getsize(event_path)
-        except OSError:
-            file_size = 0
-
-        from app.services.ingestion.document_processor import CONTENT_TYPE_MAP
-        content_type = CONTENT_TYPE_MAP.get(ext, "application/octet-stream")
+        fname, ext, file_size, content_type = validated
 
         if file_hash is None:
             file_hash = self._handler._compute_hash(event_path)
@@ -1259,30 +1423,10 @@ class DataStoreWatcher:
             db.commit()
             db.refresh(task)
 
-            # Enqueue background processing
-            future = self._executor.submit(
-                self._run_ingestion,
-                event_path,
-                fname,
-                None,  # kb_id
-                task.id,
-                doc.id,
-                datastore_id,
-                None,
-                file_hash=file_hash,
-                file_size=file_size,
-                content_type=content_type,
+            return self._submit_and_track_ingestion(
+                event_path, fname, task.id, doc.id, datastore_id, scan_id,
+                file_hash, file_size, content_type,
             )
-            future.add_done_callback(
-                lambda f, ds=datastore_id: self._on_scan_ingestion_done(f, task.id, event_path, ds)
-            )
-
-            if scan_id > 0:
-                with self._scan_futures_lock:
-                    if scan_id in self._scan_futures:
-                        self._scan_futures[scan_id].append(future)
-
-            return future
         except Exception as e:
             logger.error(
                 "[WATCHER] failed_to_create_ingestion_records: %s",
@@ -1310,26 +1454,10 @@ class DataStoreWatcher:
         When skip_conversion=True, re-ingests using the existing
         converted_markdown instead of re-converting the source file.
         """
-        fname = os.path.basename(event_path)
-        _, ext = os.path.splitext(fname)
-        ext = ext.lower()
-
-        if ext not in SUPPORTED_EXTENSIONS:
+        validated = self._validate_file_for_scan(event_path)
+        if validated is None:
             return
-        if fname.startswith(".") or fname.startswith("~$") or fname.startswith(".~"):
-            return
-        if ext in (".tmp", ".swp", ".swo", ".bak", ".lock"):
-            return
-        if not os.path.exists(event_path):
-            return
-
-        try:
-            file_size = os.path.getsize(event_path)
-        except OSError:
-            file_size = 0
-
-        from app.services.ingestion.document_processor import CONTENT_TYPE_MAP
-        content_type = CONTENT_TYPE_MAP.get(ext, "application/octet-stream")
+        fname, ext, file_size, content_type = validated
 
         db: Session = SessionLocal()
         try:
@@ -1363,31 +1491,11 @@ class DataStoreWatcher:
                 db.add(task)
             db.commit()
 
-            # Enqueue background re-processing
-            future = self._executor.submit(
-                self._run_ingestion,
-                event_path,
-                fname,
-                None,
-                task.id,
-                document_id,
-                datastore_id,
-                None,
-                file_hash=file_hash,
-                file_size=file_size,
-                content_type=content_type,
+            return self._submit_and_track_ingestion(
+                event_path, fname, task.id, document_id, datastore_id, scan_id,
+                file_hash, file_size, content_type,
                 skip_conversion=skip_conversion,
             )
-            future.add_done_callback(
-                lambda f, ds=datastore_id: self._on_scan_ingestion_done(f, task.id, event_path, ds)
-            )
-
-            if scan_id > 0:
-                with self._scan_futures_lock:
-                    if scan_id in self._scan_futures:
-                        self._scan_futures[scan_id].append(future)
-
-            return future
         except Exception as e:
             logger.error(
                 "[WATCHER] update_error doc_id=%s path=%s: %s",

@@ -31,6 +31,68 @@ def strip_reasoning_tags(text: str) -> str:
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
 
+def _format_doc_parts(pruned_docs: list[dict], file_markdown: str | None) -> list[str]:
+    parts: list[str] = []
+    for i, doc in enumerate(pruned_docs, 1):
+        # Use original_text from metadata if available (clean prose for generation)
+        metadata = doc.get("metadata", {})
+        content = metadata.get("original_text", doc.get("page_content", "")).strip()
+        source = metadata.get("source", "")
+        title = metadata.get("title", "")
+        # Header shows title as primary identifier, filename in parentheses.
+        # Falls back to filename only when no title is available.
+        if title and title != source:
+            header = f"[KB-{i}] {title} ({source})"
+        else:
+            header = f"[KB-{i}]" + (f" ({source})" if source else "")
+        parts.append(f"{header}\n{content}")
+    if file_markdown:
+        parts.append(f"[File Content]\n{file_markdown}")
+    return parts
+
+
+def _build_chunk_glossary(db: Any, org_id: Any, pruned_docs: list[dict]) -> str:
+    if db is None:
+        return ""
+    from app.services.abbreviation_service import build_lookup, build_glossary_from_texts
+    abbr_lookup = build_lookup(db, org_id)
+    if not abbr_lookup or abbr_lookup.is_empty:
+        return ""
+    texts = []
+    for doc in (pruned_docs or []):
+        md = doc.get("metadata", {})
+        texts.append(md.get("original_text", doc.get("page_content", "")))
+    return build_glossary_from_texts(texts, abbr_lookup)
+
+
+def _merge_glossaries(*glossaries: str) -> str:
+    merged_lines = []
+    seen_abbrs = set()
+    for g in glossaries:
+        if not g:
+            continue
+        for line in g.split("\n"):
+            abbr = line.split("=", 1)[0].strip() if "=" in line else line.strip()
+            if abbr and abbr not in seen_abbrs:
+                seen_abbrs.add(abbr)
+                merged_lines.append(line)
+    if merged_lines:
+        return f"[Abbreviation Glossary]\n" + "\n".join(merged_lines)
+    return ""
+
+
+def _build_glossary_section(db: Any, org_id: Any, query_glossary: str, pruned_docs: list[dict]) -> str:
+    if db is None and not query_glossary:
+        return ""
+    try:
+        chunk_glossary = _build_chunk_glossary(db, org_id, pruned_docs)
+        return _merge_glossaries(query_glossary, chunk_glossary)
+    except Exception:
+        if query_glossary:
+            return f"[Abbreviation Glossary]\n{query_glossary}"
+    return ""
+
+
 def format_context_string(
     docs: list[dict],
     file_markdown: str | None = None,
@@ -57,55 +119,10 @@ def format_context_string(
     from app.services.agentic_rag.agent_graph import _prune_contiguous_overlaps
 
     pruned_docs = _prune_contiguous_overlaps(docs) if docs else docs
-    parts: list[str] = []
-    for i, doc in enumerate(pruned_docs, 1):
-        # Use original_text from metadata if available (clean prose for generation)
-        metadata = doc.get("metadata", {})
-        content = metadata.get("original_text", doc.get("page_content", "")).strip()
-        source = metadata.get("source", "")
-        title = metadata.get("title", "")
-        # Header shows title as primary identifier, filename in parentheses.
-        # Falls back to filename only when no title is available.
-        if title and title != source:
-            header = f"[KB-{i}] {title} ({source})"
-        else:
-            header = f"[KB-{i}]" + (f" ({source})" if source else "")
-        parts.append(f"{header}\n{content}")
-    if file_markdown:
-        parts.append(f"[File Content]\n{file_markdown}")
-
-    # Append scoped abbreviation glossary.
-    # query_glossary is pre-built by expand_query_node; scan chunk texts
-    # only for additional abbreviations not already covered.
-    if db is not None or query_glossary:
-        try:
-            from app.services.abbreviation_service import build_lookup, build_glossary_from_texts
-            chunk_glossary = ""
-            if db is not None:
-                abbr_lookup = build_lookup(db, org_id)
-                if abbr_lookup and not abbr_lookup.is_empty:
-                    texts = []
-                    for doc in (pruned_docs or []):
-                        md = doc.get("metadata", {})
-                        texts.append(md.get("original_text", doc.get("page_content", "")))
-                    chunk_glossary = build_glossary_from_texts(texts, abbr_lookup)
-            # Merge: query glossary first, then any chunk-only abbreviations
-            merged_lines = []
-            seen_abbrs = set()
-            for g in (query_glossary, chunk_glossary):
-                if not g:
-                    continue
-                for line in g.split("\n"):
-                    abbr = line.split("=", 1)[0].strip() if "=" in line else line.strip()
-                    if abbr and abbr not in seen_abbrs:
-                        seen_abbrs.add(abbr)
-                        merged_lines.append(line)
-            if merged_lines:
-                parts.append(f"[Abbreviation Glossary]\n" + "\n".join(merged_lines))
-        except Exception:
-            if query_glossary:
-                parts.append(f"[Abbreviation Glossary]\n{query_glossary}")
-
+    parts = _format_doc_parts(pruned_docs, file_markdown)
+    glossary = _build_glossary_section(db, org_id, query_glossary, pruned_docs)
+    if glossary:
+        parts.append(glossary)
     return "\n\n---\n\n".join(parts)
 
 

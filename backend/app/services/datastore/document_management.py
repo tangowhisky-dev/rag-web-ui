@@ -58,6 +58,279 @@ def _relative_path(absolute_path: str, root: str) -> str:
 # Folder browsing
 # ---------------------------------------------------------------------------
 
+def _scan_directory(
+    target: str,
+    include_unsupported: bool,
+    scan_pattern: str,
+) -> tuple[list, list, Optional[str]]:
+    """Scan *target* directory and split entries into folders and files.
+
+    Returns (folders, files, error).  On scandir failure, error is the
+    stringified exception and folders/files are empty.
+    """
+    entries = []
+    try:
+        for entry in os.scandir(target):
+            if _should_skip_name(entry.name):
+                continue
+            entries.append(entry)
+    except OSError as e:
+        logger.warning("[BROWSE] scandir failed for %s: %s", target, e)
+        return [], [], str(e)
+
+    folders = []
+    files = []
+    for entry in entries:
+        try:
+            is_dir = entry.is_dir(follow_symlinks=False)
+        except OSError:
+            continue
+        if is_dir:
+            folders.append(entry)
+        else:
+            ext = os.path.splitext(entry.name)[1].lower()
+            if not include_unsupported and ext not in SUPPORTED_EXTENSIONS:
+                continue
+            if not _matches_scan_pattern(entry.name, scan_pattern):
+                continue
+            files.append(entry)
+    return folders, files, None
+
+
+def _query_doc_metadata(
+    db: Session,
+    datastore_id: int,
+    file_abs_paths: list[str],
+) -> tuple[dict[str, Document], dict[int, int], dict[int, tuple]]:
+    """Batch-query Document records, chunk counts, and task statuses."""
+    doc_map: dict[str, Document] = {}
+    if file_abs_paths:
+        docs = (
+            db.query(Document)
+            .filter(
+                Document.data_store_id == datastore_id,
+                Document.file_path.in_(file_abs_paths),
+            )
+            .all()
+        )
+        doc_map = {d.file_path: d for d in docs}
+
+    doc_ids = [d.id for d in doc_map.values()]
+    chunk_counts: dict[int, int] = {}
+    task_statuses: dict[int, tuple] = {}
+    if doc_ids:
+        rows = (
+            db.query(DocumentChunk.document_id, func.count(DocumentChunk.id))
+            .filter(DocumentChunk.document_id.in_(doc_ids))
+            .group_by(DocumentChunk.document_id)
+            .all()
+        )
+        chunk_counts = {r[0]: r[1] for r in rows}
+
+        rows = (
+            db.query(
+                ProcessingTask.document_id,
+                ProcessingTask.status,
+                ProcessingTask.error_message,
+                ProcessingTask.graph_status,
+            )
+            .filter(ProcessingTask.document_id.in_(doc_ids))
+            .order_by(ProcessingTask.id.desc())
+            .all()
+        )
+        for r in rows:
+            if r[0] not in task_statuses:
+                task_statuses[r[0]] = (r[1], r[2], r[3])
+
+    return doc_map, chunk_counts, task_statuses
+
+
+def _build_single_file_item(
+    entry,
+    target: str,
+    root: str,
+    doc: Optional[Document],
+    chunk_counts: dict[int, int],
+    task_statuses: dict[int, tuple],
+) -> dict[str, Any]:
+    """Build a single file item dict from a scandir entry and optional Document."""
+    abs_path = os.path.join(target, entry.name)
+    ext = os.path.splitext(entry.name)[1].lower()
+    try:
+        st = entry.stat(follow_symlinks=False)
+        size = st.st_size
+        mtime = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
+    except OSError:
+        size = 0
+        mtime = None
+
+    if doc:
+        task_info = task_statuses.get(doc.id, ("not_ingested", None, None))
+        status, error_msg, graph_status = task_info
+        return {
+            "type": "file",
+            "name": entry.name,
+            "path": _relative_path(abs_path, root),
+            "absolute_path": abs_path,
+            "size": size,
+            "content_type": CONTENT_TYPE_MAP.get(ext, "application/octet-stream"),
+            "modified_at": mtime,
+            "document_id": doc.id,
+            "is_selected": doc.is_selected,
+            "status": status or "not_ingested",
+            "chunk_count": chunk_counts.get(doc.id, 0),
+            "graph_status": graph_status,
+            "conversion_status": doc.conversion_status,
+            "title": doc.title,
+            "error_message": error_msg,
+        }
+    return {
+        "type": "file",
+        "name": entry.name,
+        "path": _relative_path(abs_path, root),
+        "absolute_path": abs_path,
+        "size": size,
+        "content_type": CONTENT_TYPE_MAP.get(ext, "application/octet-stream"),
+        "modified_at": mtime,
+        "document_id": None,
+        "is_selected": False,
+        "status": "not_ingested",
+        "chunk_count": 0,
+        "graph_status": None,
+        "conversion_status": None,
+        "title": None,
+        "error_message": None,
+    }
+
+
+def _build_file_items(
+    files: list,
+    target: str,
+    root: str,
+    db: Session,
+    datastore_id: int,
+    search: str,
+) -> list[dict[str, Any]]:
+    """Apply search filter, batch-query Document state, build file item dicts."""
+    if search:
+        search_lower = search.lower()
+        files = [e for e in files if search_lower in e.name.lower()]
+
+    file_abs_paths = [os.path.join(target, e.name) for e in files]
+    doc_map, chunk_counts, task_statuses = _query_doc_metadata(
+        db, datastore_id, file_abs_paths,
+    )
+
+    file_items = []
+    for entry in files:
+        abs_path = os.path.join(target, entry.name)
+        doc = doc_map.get(abs_path)
+        file_items.append(
+            _build_single_file_item(entry, target, root, doc, chunk_counts, task_statuses)
+        )
+    return file_items
+
+
+def _build_folder_items(
+    folders: list,
+    target: str,
+    root: str,
+    db: Session,
+    datastore_id: int,
+    scan_pattern: str,
+) -> list[dict[str, Any]]:
+    """Build folder item dicts with recursive file counts and DB aggregates."""
+    folder_items = []
+    for entry in folders:
+        folder_abs = os.path.join(target, entry.name)
+        folder_rel = _relative_path(folder_abs, root)
+        prefix = folder_abs + os.sep
+
+        # Count actual files on disk under this folder (recursive)
+        # — the filesystem is the source of truth for file counts.
+        # The manifest table is only populated after a scan, so using it
+        # here would show 0 files before the first scan.
+        fs_file_count = 0
+        try:
+            for dirpath, _dirs, filenames in os.walk(folder_abs):
+                for fname in filenames:
+                    if _should_skip_name(fname):
+                        continue
+                    ext = os.path.splitext(fname)[1].lower()
+                    if ext not in SUPPORTED_EXTENSIONS:
+                        continue
+                    if not _matches_scan_pattern(fname, scan_pattern):
+                        continue
+                    fs_file_count += 1
+        except OSError:
+            pass
+
+        ingested_count = (
+            db.query(func.count(Document.id))
+            .filter(
+                Document.data_store_id == datastore_id,
+                Document.file_path.like(prefix + "%"),
+                Document.chunks.any(),
+            )
+            .scalar()
+        ) or 0
+
+        selected_count = (
+            db.query(func.count(Document.id))
+            .filter(
+                Document.data_store_id == datastore_id,
+                Document.file_path.like(prefix + "%"),
+                Document.is_selected == True,
+            )
+            .scalar()
+        ) or 0
+
+        folder_items.append({
+            "type": "folder",
+            "name": entry.name,
+            "path": folder_rel,
+            "file_count": fs_file_count,
+            "ingested_count": ingested_count,
+            "selected_count": selected_count,
+        })
+    return folder_items
+
+
+def _sort_items(folder_items: list[dict], file_items: list[dict], sort: str) -> None:
+    """Sort folder and file items in-place by *sort* field/direction."""
+    reverse = False
+    sort_field = sort.lstrip("-")
+    if sort.startswith("-"):
+        reverse = True
+
+    def _folder_sort_key(f):
+        return f["name"].lower()
+
+    def _file_sort_key(f):
+        if sort_field == "size":
+            return f["size"]
+        if sort_field == "modified":
+            return f["modified_at"] or ""
+        if sort_field == "status":
+            return f["status"]
+        return f["name"].lower()
+
+    folder_items.sort(key=_folder_sort_key, reverse=reverse)
+    file_items.sort(key=_file_sort_key, reverse=reverse)
+
+
+def _parse_breadcrumbs(relative_path: str, root: str) -> list[dict[str, str]]:
+    """Build breadcrumb list from *relative_path*."""
+    breadcrumbs = [{"name": "Root", "path": ""}]
+    if relative_path:
+        parts = relative_path.strip("/").split("/")
+        cumulative = ""
+        for part in parts:
+            cumulative = cumulative + "/" + part if cumulative else part
+            breadcrumbs.append({"name": part, "path": cumulative})
+    return breadcrumbs
+
+
 def get_folder_contents(
     db: Session,
     datastore_id: int,
@@ -87,236 +360,25 @@ def get_folder_contents(
     if not os.path.isdir(target):
         return {"error": "folder_not_found"}
 
-    # ── Scan directory ────────────────────────────────────────────────
-    entries = []
-    try:
-        for entry in os.scandir(target):
-            if _should_skip_name(entry.name):
-                continue
-            entries.append(entry)
-    except OSError as e:
-        logger.warning("[BROWSE] scandir failed for %s: %s", target, e)
-        return {"error": "scan_failed", "detail": str(e)}
+    folders, files, scan_error = _scan_directory(target, include_unsupported, ds.scan_pattern)
+    if scan_error is not None:
+        return {"error": "scan_failed", "detail": scan_error}
 
-    # ── Split into folders and files ──────────────────────────────────
-    folders = []
-    files = []
-    for entry in entries:
-        try:
-            is_dir = entry.is_dir(follow_symlinks=False)
-        except OSError:
-            continue
-        if is_dir:
-            folders.append(entry)
-        else:
-            ext = os.path.splitext(entry.name)[1].lower()
-            if not include_unsupported and ext not in SUPPORTED_EXTENSIONS:
-                continue
-            # Check scan pattern
-            if not _matches_scan_pattern(entry.name, ds.scan_pattern):
-                continue
-            files.append(entry)
-
-    # ── Apply search filter ───────────────────────────────────────────
+    file_items = _build_file_items(files, target, root, db, datastore_id, search)
     if search:
         search_lower = search.lower()
         folders = [e for e in folders if search_lower in e.name.lower()]
-        files = [e for e in files if search_lower in e.name.lower()]
+    folder_items = _build_folder_items(folders, target, root, db, datastore_id, ds.scan_pattern)
+    _sort_items(folder_items, file_items, sort)
 
-    # ── Batch-query Document state for all files in this folder ───────
-    file_abs_paths = [os.path.join(target, e.name) for e in files]
-    doc_map: dict[str, Document] = {}
-    if file_abs_paths:
-        docs = (
-            db.query(Document)
-            .filter(
-                Document.data_store_id == datastore_id,
-                Document.file_path.in_(file_abs_paths),
-            )
-            .all()
-        )
-        doc_map = {d.file_path: d for d in docs}
-
-    # ── Batch-query chunk counts per document ─────────────────────────
-    doc_ids = [d.id for d in doc_map.values()]
-    chunk_counts: dict[int, int] = {}
-    task_statuses: dict[int, tuple[str, Optional[str]]] = {}  # doc_id -> (status, error)
-    if doc_ids:
-        # Chunk counts
-        rows = (
-            db.query(DocumentChunk.document_id, func.count(DocumentChunk.id))
-            .filter(DocumentChunk.document_id.in_(doc_ids))
-            .group_by(DocumentChunk.document_id)
-            .all()
-        )
-        chunk_counts = {r[0]: r[1] for r in rows}
-
-        # Latest task status + graph_status per document
-        rows = (
-            db.query(
-                ProcessingTask.document_id,
-                ProcessingTask.status,
-                ProcessingTask.error_message,
-                ProcessingTask.graph_status,
-            )
-            .filter(ProcessingTask.document_id.in_(doc_ids))
-            .order_by(ProcessingTask.id.desc())
-            .all()
-        )
-        for r in rows:
-            if r[0] not in task_statuses:  # first = latest due to desc order
-                task_statuses[r[0]] = (r[1], r[2], r[3])
-
-    # ── Build file items ──────────────────────────────────────────────
-    file_items = []
-    for entry in files:
-        abs_path = os.path.join(target, entry.name)
-        doc = doc_map.get(abs_path)
-        ext = os.path.splitext(entry.name)[1].lower()
-        try:
-            st = entry.stat(follow_symlinks=False)
-            size = st.st_size
-            mtime = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
-        except OSError:
-            size = 0
-            mtime = None
-
-        if doc:
-            task_info = task_statuses.get(doc.id, ("not_ingested", None, None))
-            status, error_msg, graph_status = task_info
-            file_items.append({
-                "type": "file",
-                "name": entry.name,
-                "path": _relative_path(abs_path, root),
-                "absolute_path": abs_path,
-                "size": size,
-                "content_type": CONTENT_TYPE_MAP.get(ext, "application/octet-stream"),
-                "modified_at": mtime,
-                "document_id": doc.id,
-                "is_selected": doc.is_selected,
-                "status": status or "not_ingested",
-                "chunk_count": chunk_counts.get(doc.id, 0),
-                "graph_status": graph_status,
-                "conversion_status": doc.conversion_status,
-                "title": doc.title,
-                "error_message": error_msg,
-            })
-        else:
-            file_items.append({
-                "type": "file",
-                "name": entry.name,
-                "path": _relative_path(abs_path, root),
-                "absolute_path": abs_path,
-                "size": size,
-                "content_type": CONTENT_TYPE_MAP.get(ext, "application/octet-stream"),
-                "modified_at": mtime,
-                "document_id": None,
-                "is_selected": False,
-                "status": "not_ingested",
-                "chunk_count": 0,
-                "graph_status": None,
-                "conversion_status": None,
-                "title": None,
-                "error_message": None,
-            })
-
-    # ── Build folder items with aggregate counts ──────────────────────
-    folder_items = []
-    for entry in folders:
-        folder_abs = os.path.join(target, entry.name)
-        folder_rel = _relative_path(folder_abs, root)
-        prefix = folder_abs + os.sep
-
-        # Count actual files on disk under this folder (recursive)
-        # — the filesystem is the source of truth for file counts.
-        # The manifest table is only populated after a scan, so using it
-        # here would show 0 files before the first scan.
-        fs_file_count = 0
-        try:
-            for dirpath, _dirs, filenames in os.walk(folder_abs):
-                for fname in filenames:
-                    if _should_skip_name(fname):
-                        continue
-                    ext = os.path.splitext(fname)[1].lower()
-                    if ext not in SUPPORTED_EXTENSIONS:
-                        continue
-                    if not _matches_scan_pattern(fname, ds.scan_pattern):
-                        continue
-                    fs_file_count += 1
-        except OSError:
-            pass
-
-        # Count ingested documents under this folder
-        ingested_count = (
-            db.query(func.count(Document.id))
-            .filter(
-                Document.data_store_id == datastore_id,
-                Document.file_path.like(prefix + "%"),
-                Document.chunks.any(),
-            )
-            .scalar()
-        ) or 0
-
-        # Count selected documents
-        selected_count = (
-            db.query(func.count(Document.id))
-            .filter(
-                Document.data_store_id == datastore_id,
-                Document.file_path.like(prefix + "%"),
-                Document.is_selected == True,
-            )
-            .scalar()
-        ) or 0
-
-        folder_items.append({
-            "type": "folder",
-            "name": entry.name,
-            "path": folder_rel,
-            "file_count": fs_file_count,
-            "ingested_count": ingested_count,
-            "selected_count": selected_count,
-        })
-
-    # ── Sort ──────────────────────────────────────────────────────────
-    reverse = False
-    sort_field = sort.lstrip("-")
-    if sort.startswith("-"):
-        reverse = True
-
-    def _folder_sort_key(f):
-        return f["name"].lower()
-
-    def _file_sort_key(f):
-        if sort_field == "size":
-            return f["size"]
-        if sort_field == "modified":
-            return f["modified_at"] or ""
-        if sort_field == "status":
-            return f["status"]
-        return f["name"].lower()
-
-    folder_items.sort(key=_folder_sort_key, reverse=reverse)
-    file_items.sort(key=_file_sort_key, reverse=reverse)
-
-    # ── Pagination (applied to files only; folders always shown) ──────
     total_files = len(file_items)
     total_folders = len(folder_items)
     start = page * page_size
     end = start + page_size
     paged_files = file_items[start:end]
-
     items = folder_items + paged_files
 
-    # ── Breadcrumbs ───────────────────────────────────────────────────
-    breadcrumbs = [{"name": "Root", "path": ""}]
-    if relative_path:
-        parts = relative_path.strip("/").split("/")
-        cumulative = ""
-        for part in parts:
-            cumulative = cumulative + "/" + part if cumulative else part
-            breadcrumbs.append({"name": part, "path": cumulative})
-
-    # ── Datastore-level stats ─────────────────────────────────────────
+    breadcrumbs = _parse_breadcrumbs(relative_path, root)
     stats = _get_datastore_stats(db, datastore_id)
 
     return {

@@ -327,6 +327,104 @@ def _sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: 
     return result
 
 
+def _parse_raw_meta(raw_meta) -> dict:
+    if isinstance(raw_meta, str):
+        try:
+            return json.loads(raw_meta)
+        except (ValueError, TypeError):
+            return {}
+    if isinstance(raw_meta, dict):
+        return raw_meta
+    return {}
+
+
+def _enrich_meta_from_row(meta: dict, row) -> None:
+    # Ensure document_id and chunk_index are in metadata —
+    # they're columns on document_chunks but not always in
+    # the chunk_metadata JSON. Without these, citations from
+    # exact-retrieval docs can't be stored in message_citations.
+    if "document_id" not in meta and hasattr(row, "document_id"):
+        meta["document_id"] = row.document_id
+    if "chunk_index" not in meta and hasattr(row, "chunk_index"):
+        meta["chunk_index"] = row.chunk_index
+    # file_name is a column on document_chunks but stripped from
+    # chunk_metadata during ingestion. Add it so downstream consumers
+    # (search endpoint, citations) can display the source filename.
+    if "file_name" not in meta and hasattr(row, "file_name") and row.file_name:
+        meta["file_name"] = row.file_name
+    # title comes from the documents JOIN, not chunk_metadata.
+    if "title" not in meta and hasattr(row, "title") and row.title:
+        meta["title"] = row.title
+    # Store modified_at from the JOIN for recency-aware dedup.
+    if hasattr(row, "modified_at") and row.modified_at:
+        meta["_modified_at"] = row.modified_at.isoformat() if hasattr(row.modified_at, "isoformat") else str(row.modified_at)
+
+
+def _normalize_metadata(raw_meta, row) -> dict:
+    meta = _parse_raw_meta(raw_meta)
+    _enrich_meta_from_row(meta, row)
+    return meta
+
+
+def _run_fts_query_with_retry(query: str, kb_ids: List[int], datastore_ids: List[int], kb_sql, ds_sql, candidates: int):
+    from app.db.session import SessionLocal
+
+    kb_rows = []
+    ds_rows = []
+
+    for attempt in range(3):
+        fresh_db: Session | None = None
+        try:
+            fresh_db = SessionLocal()
+            if kb_ids:
+                kb_rows = fresh_db.execute(kb_sql, {"query": query, "kb_ids": kb_ids, "candidates": candidates}).fetchall()
+            if datastore_ids:
+                ds_rows = fresh_db.execute(ds_sql, {"query": query, "ds_ids": datastore_ids, "candidates": candidates}).fetchall()
+            return kb_rows, ds_rows
+        except Exception as e:
+            logger.warning("exact_search: MySQL FTS query failed (attempt %d): %s", attempt + 1, e)
+            try:
+                if fresh_db is not None:
+                    fresh_db.rollback()
+            except Exception:
+                pass
+            if fresh_db is not None:
+                try:
+                    fresh_db.close()
+                except Exception:
+                    pass
+            if attempt == 2:
+                return None
+            # Give the pool a moment to replace a bad connection before retrying.
+            import time
+            time.sleep(0.1 * (2 ** attempt))
+    return None
+
+
+def _filter_and_dedup_rows(all_rows, min_score: float) -> Dict[str, _Candidate]:
+    result: Dict[str, _Candidate] = {}
+    filtered = 0
+    for rank, row in enumerate(all_rows):
+        if min_score > 0.0 and (row.fts_score or 0) < min_score:
+            filtered += 1
+            continue
+        chunk_text = row.chunk_text or ""
+        h = content_hash(chunk_text)
+        if h not in result:
+            meta = _normalize_metadata(row.chunk_metadata, row)
+            result[h] = _Candidate(
+                doc=LangchainDocument(
+                    page_content=chunk_text,
+                    metadata=meta,
+                ),
+                content_hash=h,
+                exact_rank=rank,
+            )
+    if filtered:
+        logger.info("[EXACT] returned=%d | filtered_by_score=%d (min=%.2f)", len(result), filtered, min_score)
+    return result
+
+
 @with_retry_sync(max_attempts=3)
 def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: Session, candidates: int, org_id: Optional[int] = None, min_score: Optional[float] = None) -> Dict[str, _Candidate]:
     """MySQL InnoDB FULLTEXT search — exact keyword / BM25 scoring, server-side.
@@ -342,8 +440,6 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
     same dead connection. A fresh session per retry lets the pool provision
     a new connection.
     """
-    from app.db.session import SessionLocal
-
     if not query.strip():
         return {}
 
@@ -390,36 +486,11 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
 
     logger.info("[EXACT] MySQL FTS query | query=%r | kb_ids=%s | ds_ids=%s | candidates=%d", 
                 query[:120], kb_ids, datastore_ids, candidates)
-    
-    kb_rows = []
-    ds_rows = []
-    
-    for attempt in range(3):
-        fresh_db: Session | None = None
-        try:
-            fresh_db = SessionLocal()
-            if kb_ids:
-                kb_rows = fresh_db.execute(kb_sql, {"query": query, "kb_ids": kb_ids, "candidates": candidates}).fetchall()
-            if datastore_ids:
-                ds_rows = fresh_db.execute(ds_sql, {"query": query, "ds_ids": datastore_ids, "candidates": candidates}).fetchall()
-            break
-        except Exception as e:
-            logger.warning("exact_search: MySQL FTS query failed (attempt %d): %s", attempt + 1, e)
-            try:
-                if fresh_db is not None:
-                    fresh_db.rollback()
-            except Exception:
-                pass
-            if fresh_db is not None:
-                try:
-                    fresh_db.close()
-                except Exception:
-                    pass
-            if attempt == 2:
-                return {}
-            # Give the pool a moment to replace a bad connection before retrying.
-            import time
-            time.sleep(0.1 * (2 ** attempt))
+
+    rows = _run_fts_query_with_retry(query, kb_ids, datastore_ids, kb_sql, ds_sql, candidates)
+    if rows is None:
+        return {}
+    kb_rows, ds_rows = rows
 
     # Merge results and re-rank by FTS score
     all_rows = list(kb_rows) + list(ds_rows)
@@ -432,55 +503,7 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
             logger.debug("  exact[%d] fts_score=%.4f text=%r", i, row.fts_score, (row.chunk_text or "")[:80])
 
     min_score = get_setting(db, "EXACT_MIN_SCORE", org_id) if min_score is None else min_score
-    result: Dict[str, _Candidate] = {}
-    filtered = 0
-    for rank, row in enumerate(all_rows):
-        if min_score > 0.0 and (row.fts_score or 0) < min_score:
-            filtered += 1
-            continue
-        chunk_text = row.chunk_text or ""
-        h = content_hash(chunk_text)
-        if h not in result:
-            raw_meta = row.chunk_metadata
-            if isinstance(raw_meta, str):
-                try:
-                    meta = json.loads(raw_meta)
-                except (ValueError, TypeError):
-                    meta = {}
-            elif isinstance(raw_meta, dict):
-                meta = raw_meta
-            else:
-                meta = {}
-            # Ensure document_id and chunk_index are in metadata —
-            # they're columns on document_chunks but not always in
-            # the chunk_metadata JSON. Without these, citations from
-            # exact-retrieval docs can't be stored in message_citations.
-            if "document_id" not in meta and hasattr(row, "document_id"):
-                meta["document_id"] = row.document_id
-            if "chunk_index" not in meta and hasattr(row, "chunk_index"):
-                meta["chunk_index"] = row.chunk_index
-            # file_name is a column on document_chunks but stripped from
-            # chunk_metadata during ingestion. Add it so downstream consumers
-            # (search endpoint, citations) can display the source filename.
-            if "file_name" not in meta and hasattr(row, "file_name") and row.file_name:
-                meta["file_name"] = row.file_name
-            # title comes from the documents JOIN, not chunk_metadata.
-            if "title" not in meta and hasattr(row, "title") and row.title:
-                meta["title"] = row.title
-            # Store modified_at from the JOIN for recency-aware dedup.
-            if hasattr(row, "modified_at") and row.modified_at:
-                meta["_modified_at"] = row.modified_at.isoformat() if hasattr(row.modified_at, "isoformat") else str(row.modified_at)
-            result[h] = _Candidate(
-                doc=LangchainDocument(
-                    page_content=chunk_text,
-                    metadata=meta,
-                ),
-                content_hash=h,
-                exact_rank=rank,
-            )
-    if filtered:
-        logger.info("[EXACT] returned=%d | filtered_by_score=%d (min=%.2f)", len(result), filtered, min_score)
-    return result
+    return _filter_and_dedup_rows(all_rows, min_score)
 
 
 # ── Recency-aware dedup helpers (shared by leg nodes and merge_node) ──────────

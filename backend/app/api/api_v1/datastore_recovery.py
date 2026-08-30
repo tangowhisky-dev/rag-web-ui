@@ -89,6 +89,42 @@ def _map_recovery_status(scan: Dict[str, Any]) -> RecoveryStatusResponse:
     )
 
 
+def _find_recovery_scan(recovery, datastore_id: int):
+    scan = None
+    sid = None
+    for sid in reversed(recovery._active_scans.keys()):
+        scan = recovery._active_scans[sid]
+        if scan.get("datastore_id") == datastore_id:
+            break
+    return scan, sid
+
+
+def _build_recovery_event(scan: Dict[str, Any], status_default="running") -> Dict[str, Any]:
+    event = {
+        "total_files": scan.get("total_files", 0),
+        "processed_files": scan.get("processed_files", 0),
+        "status": scan.get("status", status_default),
+        "new_files": scan.get("new_files", 0),
+        "modified_files": scan.get("modified_files", 0),
+        "deleted_files": scan.get("deleted_files", 0),
+    }
+    if scan.get("error_message"):
+        event["error_message"] = scan["error_message"]
+    return event
+
+
+def _recovery_scan_state(scan: Dict[str, Any]) -> tuple:
+    return (
+        scan.get("processed_files", 0),
+        scan.get("total_files", 0),
+        scan.get("status"),
+        scan.get("new_files", 0),
+        scan.get("modified_files", 0),
+        scan.get("deleted_files", 0),
+        scan.get("error_message"),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -171,11 +207,7 @@ def recovery_status_stream(
         start_time = asyncio.get_event_loop().time() if hasattr(asyncio.get_event_loop(), 'time') else 0
         start_time = __import__('time').monotonic()
         while __import__('time').monotonic() - start_time < 5:
-            scan = None
-            for sid in reversed(recovery._active_scans.keys()):
-                scan = recovery._active_scans[sid]
-                if scan.get("datastore_id") == datastore_id:
-                    break
+            scan, sid = _find_recovery_scan(recovery, datastore_id)
             if scan is not None:
                 logger.info(
                     "[SSE] found recovery scan for datastore_id=%d scan_id=%d status=%s",
@@ -198,22 +230,9 @@ def recovery_status_stream(
 
         # First emission — always emit the current state so the client
         # never sees undefined values.
-        scan = None
-        for sid in reversed(recovery._active_scans.keys()):
-            scan = recovery._active_scans[sid]
-            if scan.get("datastore_id") == datastore_id:
-                break
+        scan, _ = _find_recovery_scan(recovery, datastore_id)
         if scan:
-            initial_event = {
-                "total_files": scan.get("total_files", 0),
-                "processed_files": scan.get("processed_files", 0),
-                "status": scan.get("status", "running"),
-                "new_files": scan.get("new_files", 0),
-                "modified_files": scan.get("modified_files", 0),
-                "deleted_files": scan.get("deleted_files", 0),
-            }
-            if scan.get("error_message"):
-                initial_event["error_message"] = scan["error_message"]
+            initial_event = _build_recovery_event(scan)
             logger.info(
                 "[SSE] emitting_recovery_initial_event datastore_id=%d event=%s",
                 datastore_id, json.dumps(initial_event),
@@ -221,66 +240,26 @@ def recovery_status_stream(
             yield f"data: {json.dumps(initial_event)}\n\n"
 
         # Subsequent emissions — only when values change
-        last_processed = -1
-        last_total = -1
-        last_new = -1
-        last_modified = -1
-        last_deleted = -1
-        last_error_message = None
-        last_status = None
+        last_state = None
 
         while True:
-            scan = None
-            for sid in reversed(recovery._active_scans.keys()):
-                scan = recovery._active_scans[sid]
-                if scan.get("datastore_id") == datastore_id:
-                    break
+            scan, _ = _find_recovery_scan(recovery, datastore_id)
             if scan is None:
                 break  # Scan gone, close connection silently
 
-            current_processed = scan.get("processed_files", 0)
-            current_total = scan.get("total_files", 0)
-            current_status = scan.get("status")
-            current_new = scan.get("new_files", 0)
-            current_modified = scan.get("modified_files", 0)
-            current_deleted = scan.get("deleted_files", 0)
-            current_error_message = scan.get("error_message")
+            current_state = _recovery_scan_state(scan)
 
-            # Only emit if something changed
-            if (
-                current_processed != last_processed
-                or current_total != last_total
-                or current_status != last_status
-                or current_new != last_new
-                or current_modified != last_modified
-                or current_deleted != last_deleted
-                or current_error_message != last_error_message
-            ):
-                event = {
-                    "total_files": current_total,
-                    "processed_files": current_processed,
-                    "status": current_status,
-                    "new_files": current_new,
-                    "modified_files": current_modified,
-                    "deleted_files": current_deleted,
-                }
-                if current_error_message:
-                    event["error_message"] = current_error_message
+            if current_state != last_state:
+                event = _build_recovery_event(scan, status_default=None)
                 logger.info(
                     "[SSE] emitting_recovery_event datastore_id=%d event=%s",
                     datastore_id, json.dumps(event),
                 )
                 yield f"data: {json.dumps(event)}\n\n"
-                last_processed = current_processed
-                last_total = current_total
-                last_new = current_new
-                last_modified = current_modified
-                last_deleted = current_deleted
-                last_error_message = current_error_message
-                last_status = current_status
+                last_state = current_state
 
             # If scan is done, stop streaming
-            if current_status in ("complete", "error"):
+            if current_state[2] in ("complete", "error"):
                 break
 
             await asyncio.sleep(0.5)

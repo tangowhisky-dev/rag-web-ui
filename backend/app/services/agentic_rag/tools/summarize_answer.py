@@ -24,6 +24,44 @@ class SummarizeAnswerInput(BaseModel):
     format: str = Field(default="bullet", description="bullet or paragraph")
 
 
+def _resolve_message_text(ctx: ToolContext, source_id: int) -> str:
+    if not ctx.chat_id:
+        return "Access denied."
+    msg = ctx.db.query(Message).filter(
+        Message.id == source_id,
+        Message.chat_id == ctx.chat_id,
+    ).first()
+    text = msg.content if msg else ""
+    if not text:
+        text = "Message not found."
+    return text
+
+
+def _resolve_file_text(ctx: ToolContext, source_id: int) -> str:
+    rbac = enforce_rbac(ctx, file_id=source_id)
+    if rbac.get("file_id") is None:
+        return "Access denied."
+    cf = ctx.db.query(ChatFile).filter(ChatFile.id == rbac["file_id"]).first()
+    return cf.markdown_content or "" if cf else ""
+
+
+def _resolve_source_text(ctx: ToolContext, input_obj: SummarizeAnswerInput) -> str:
+    text = ""
+    if input_obj.source == "last_answer":
+        lao = ctx.state.get("last_answer_object") if ctx.state else None
+        if lao:
+            text = getattr(lao, "summary", "") + "\n" + "\n".join(getattr(lao, "key_points", []))
+        if not text:
+            text = "No previous answer available."
+    elif input_obj.source == "message_id" and input_obj.source_id:
+        text = _resolve_message_text(ctx, input_obj.source_id)
+    elif input_obj.source == "file_id" and input_obj.source_id:
+        text = _resolve_file_text(ctx, input_obj.source_id)
+    else:
+        text = "Unsupported source."
+    return text
+
+
 class SummarizeAnswerTool(BaseAgentTool):
     name: str = "summarize_answer"
     ui_label: str = "Summarizing answer"
@@ -40,37 +78,8 @@ class SummarizeAnswerTool(BaseAgentTool):
         t0 = time.monotonic()
         ctx: ToolContext = self.ctx
 
-        text = ""
-        if input_obj.source == "last_answer":
-            # ctx.state is a dict (AgentState/MessagesState) at runtime.
-            lao = ctx.state.get("last_answer_object") if ctx.state else None
-            if lao:
-                text = getattr(lao, "summary", "") + "\n" + "\n".join(getattr(lao, "key_points", []))
-            if not text:
-                text = "No previous answer available."
-        elif input_obj.source == "message_id" and input_obj.source_id:
-            if not ctx.chat_id:
-                text = "Access denied."
-            else:
-                msg = ctx.db.query(Message).filter(
-                    Message.id == input_obj.source_id,
-                    Message.chat_id == ctx.chat_id,
-                ).first()
-                text = msg.content if msg else ""
-            if not text:
-                text = "Message not found."
-        elif input_obj.source == "file_id" and input_obj.source_id:
-            rbac = enforce_rbac(ctx, file_id=input_obj.source_id)
-            if rbac.get("file_id") is None:
-                text = "Access denied."
-            else:
-                cf = ctx.db.query(ChatFile).filter(ChatFile.id == rbac["file_id"]).first()
-                text = cf.markdown_content or "" if cf else ""
-        else:
-            text = "Unsupported source."
-
-        max_chars = 4000
-        text = text[:max_chars]
+        text = _resolve_source_text(ctx, input_obj)
+        text = text[:4000]
 
         prompt = (
             f"Summarize the following text into at most {input_obj.max_points} "

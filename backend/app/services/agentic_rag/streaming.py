@@ -40,6 +40,22 @@ class AgenticRAGTransformer(StreamTransformer):
         self._all_docs: list[dict] = []
         self._final_state: Optional[dict] = None
 
+        self._custom_handlers = {
+            "agent_step": self._passthrough,
+            "task_list": self._handle_task_list,
+            "rewritten_query": self._passthrough,
+            "expanded_query": self._passthrough,
+            "progress": self._passthrough,
+            "thinking": self._passthrough,
+            "context": self._handle_context,
+            "token": self._handle_token,
+            "plan": self._handle_plan,
+            "tool_call": self._passthrough,
+            "tool_observation": self._passthrough,
+            "last_answer": self._handle_last_answer,
+            "interrupt": self._handle_interrupt,
+        }
+
     def init(self) -> dict[str, Any]:
         return {
             "agentic": self,
@@ -136,65 +152,67 @@ class AgenticRAGTransformer(StreamTransformer):
 
         # Case 1: LangChain message chunk emitted by the model stream.
         if isinstance(payload, (BaseMessage, AIMessageChunk, AIMessage)):
-            usage = getattr(payload, "usage_metadata", None)
-            if isinstance(usage, dict):
-                self._input_tokens += usage.get("input_tokens", 0) or 0
-                self._output_tokens += usage.get("output_tokens", 0) or 0
+            self._collect_usage_from_message(payload)
             return
 
         # Case 2: Protocol event dict (content-block-delta / message-finish).
-        if not isinstance(payload, dict):
-            return
+        if isinstance(payload, dict):
+            self._collect_usage_from_event(payload)
 
-        event_type = payload.get("event", "")
-        if event_type == "message-finish":
-            usage = payload.get("usage") or {}
+    def _collect_usage_from_message(self, payload: Any) -> None:
+        usage = getattr(payload, "usage_metadata", None)
+        if isinstance(usage, dict):
             self._input_tokens += usage.get("input_tokens", 0) or 0
             self._output_tokens += usage.get("output_tokens", 0) or 0
-            # Some providers include usage under a nested 'usage' key inside metadata.
-            if not usage:
-                nested_metadata = payload.get("metadata") or {}
-                usage = nested_metadata.get("usage") or {}
-                self._input_tokens += usage.get("input_tokens", 0) or 0
-                self._output_tokens += usage.get("output_tokens", 0) or 0
+
+    def _collect_usage_from_event(self, payload: dict) -> None:
+        if payload.get("event", "") != "message-finish":
+            return
+        usage = payload.get("usage") or {}
+        self._input_tokens += usage.get("input_tokens", 0) or 0
+        self._output_tokens += usage.get("output_tokens", 0) or 0
+        # Some providers include usage under a nested 'usage' key inside metadata.
+        if not usage:
+            nested_metadata = payload.get("metadata") or {}
+            usage = nested_metadata.get("usage") or {}
+            self._input_tokens += usage.get("input_tokens", 0) or 0
+            self._output_tokens += usage.get("output_tokens", 0) or 0
 
     def _process_custom(self, data: Any) -> None:
         if not isinstance(data, dict):
             return
 
         kind = data.get("event")
-        if kind == "agent_step":
-            self.events.push({"event": "agent_step", **{k: v for k, v in data.items() if k != "event"}})
-        elif kind == "task_list":
-            self.events.push({"event": "task_list", "tasks": data.get("tasks", [])})
-        elif kind == "rewritten_query":
-            self.events.push({"event": "rewritten_query", **{k: v for k, v in data.items() if k != "event"}})
-        elif kind == "expanded_query":
-            self.events.push({"event": "expanded_query", **{k: v for k, v in data.items() if k != "event"}})
-        elif kind == "progress":
-            self.events.push({"event": "progress", **{k: v for k, v in data.items() if k != "event"}})
-        elif kind == "thinking":
-            self.events.push({"event": "thinking", **{k: v for k, v in data.items() if k != "event"}})
-        elif kind == "context":
-            docs = data.get("docs", [])
-            if isinstance(docs, list):
-                self._emit_context(docs)
-        elif kind == "token":
-            # Explicit per-token events emitted by generating_node via the
-            # LangGraph stream writer. Forward them unchanged.
-            content = data.get("content", "")
-            if content:
-                self.events.push({"event": "token", "content": content})
-        elif kind == "plan":
-            self.events.push({"event": "plan", "plan": data.get("plan", {})})
-        elif kind == "tool_call":
-            self.events.push({"event": "tool_call", **{k: v for k, v in data.items() if k != "event"}})
-        elif kind == "tool_observation":
-            self.events.push({"event": "tool_observation", **{k: v for k, v in data.items() if k != "event"}})
-        elif kind == "last_answer":
-            self.events.push({"event": "last_answer", "last_answer_object": data.get("last_answer_object", {})})
-        elif kind == "interrupt":
-            self.events.push({"event": "interrupt", "question": data.get("question", "")})
+        handler = self._custom_handlers.get(kind)
+        if handler is not None:
+            handler(data, kind)
+
+    def _passthrough(self, data: dict, kind: str) -> None:
+        self.events.push({"event": kind, **{k: v for k, v in data.items() if k != "event"}})
+
+    def _handle_task_list(self, data: dict, kind: str) -> None:
+        self.events.push({"event": "task_list", "tasks": data.get("tasks", [])})
+
+    def _handle_context(self, data: dict, kind: str) -> None:
+        docs = data.get("docs", [])
+        if isinstance(docs, list):
+            self._emit_context(docs)
+
+    def _handle_token(self, data: dict, kind: str) -> None:
+        # Explicit per-token events emitted by generating_node via the
+        # LangGraph stream writer. Forward them unchanged.
+        content = data.get("content", "")
+        if content:
+            self.events.push({"event": "token", "content": content})
+
+    def _handle_plan(self, data: dict, kind: str) -> None:
+        self.events.push({"event": "plan", "plan": data.get("plan", {})})
+
+    def _handle_last_answer(self, data: dict, kind: str) -> None:
+        self.events.push({"event": "last_answer", "last_answer_object": data.get("last_answer_object", {})})
+
+    def _handle_interrupt(self, data: dict, kind: str) -> None:
+        self.events.push({"event": "interrupt", "question": data.get("question", "")})
 
     # ------------------------------------------------------------------
     # Helpers

@@ -126,20 +126,8 @@ def _check_setting(
     )
 
 
-def check_required_settings(
-    db: Session,
-    role: str,
-    org_id: Optional[int],
-) -> PreflightResult:
-    """Check all settings required for the given role and org.
-
-    Resolution follows the 3-tier chain: org override → app value → default.
-    Only settings that resolve to None are reported as issues.
-    """
-    clear_cache()
+def _check_chat_settings(db: Session, org_id: Optional[int]) -> list[PreflightIssue]:
     issues: list[PreflightIssue] = []
-
-    # ── Chat settings (required for all roles) ────────────────────────────
     for key in _CHAT_SETTINGS:
         defn = get_def(key)
         if defn is None:
@@ -152,8 +140,11 @@ def check_required_settings(
         )
         if issue:
             issues.append(issue)
+    return issues
 
-    # ── Embedding settings (required for retrieval, app-only) ─────────────
+
+def _check_embedding_settings(db: Session, org_id: Optional[int]) -> list[PreflightIssue]:
+    issues: list[PreflightIssue] = []
     for key in _EMBEDDING_SETTINGS:
         defn = get_def(key)
         if defn is None:
@@ -168,22 +159,45 @@ def check_required_settings(
         )
         if issue:
             issues.append(issue)
+    return issues
 
-    # ── Optional ingestion settings (super_admin only, warnings) ──────────
+
+def _check_optional_ingestion_settings(db: Session, org_id: Optional[int]) -> list[PreflightIssue]:
+    issues: list[PreflightIssue] = []
+    for key in _OPTIONAL_INGESTION_SETTINGS:
+        defn = get_def(key)
+        if defn is None:
+            continue
+        fallback = "OPENAI_MODEL" if key in ("GRAPHRAG_LLM",) else None
+        issue = _check_setting(
+            db, defn, org_id,
+            fallback_key=fallback,
+            message=f"{defn.label} is not set. {'Graph extraction' if 'GRAPHRAG' in key else 'OCR'} will be skipped during ingestion.",
+            optional=True,
+        )
+        if issue:
+            issues.append(issue)
+    return issues
+
+
+def check_required_settings(
+    db: Session,
+    role: str,
+    org_id: Optional[int],
+) -> PreflightResult:
+    """Check all settings required for the given role and org.
+
+    Resolution follows the 3-tier chain: org override → app value → default.
+    Only settings that resolve to None are reported as issues.
+    """
+    clear_cache()
+    issues: list[PreflightIssue] = []
+
+    issues.extend(_check_chat_settings(db, org_id))
+    issues.extend(_check_embedding_settings(db, org_id))
+
     if role == "super_admin":
-        for key in _OPTIONAL_INGESTION_SETTINGS:
-            defn = get_def(key)
-            if defn is None:
-                continue
-            fallback = "OPENAI_MODEL" if key in ("GRAPHRAG_LLM",) else None
-            issue = _check_setting(
-                db, defn, org_id,
-                fallback_key=fallback,
-                message=f"{defn.label} is not set. {'Graph extraction' if 'GRAPHRAG' in key else 'OCR'} will be skipped during ingestion.",
-                optional=True,
-            )
-            if issue:
-                issues.append(issue)
+        issues.extend(_check_optional_ingestion_settings(db, org_id))
 
     return PreflightResult(
         role=role,

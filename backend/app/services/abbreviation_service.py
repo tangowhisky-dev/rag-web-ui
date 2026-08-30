@@ -101,6 +101,63 @@ def _get_active_list_ids(db: Session, org_id: Optional[int]) -> List[int]:
     return [row[0] for row in query.all()]
 
 
+def _build_forward_mapping(rows) -> Dict[str, List[str]]:
+    forward: Dict[str, List[str]] = {}
+    for row in rows:
+        abbr = row.abbreviation.strip()
+        form = row.expanded_form.strip()
+        if abbr and form:
+            if abbr not in forward:
+                forward[abbr] = []
+            if form not in forward[abbr]:
+                forward[abbr].append(form)
+    return forward
+
+
+def _classify_abbrs(forward: Dict[str, List[str]]) -> tuple[List[str], List[str]]:
+    exact_abbrs: List[str] = []
+    prose_abbrs: List[str] = []
+    for abbr in forward:
+        if len(abbr.strip()) <= 1:
+            continue
+        if _is_uppercase(abbr):
+            exact_abbrs.append(abbr)
+        else:
+            prose_abbrs.append(abbr)
+    return exact_abbrs, prose_abbrs
+
+
+def _build_keyword_processors(
+    exact_abbrs: List[str], prose_abbrs: List[str]
+) -> tuple[KeywordProcessor, KeywordProcessor]:
+    kp_exact = KeywordProcessor(case_sensitive=True)
+    for abbr in exact_abbrs:
+        kp_exact.add_keyword(abbr, abbr)
+    kp_prose = KeywordProcessor(case_sensitive=False)
+    for abbr in prose_abbrs:
+        kp_prose.add_keyword(abbr, abbr)
+    return kp_exact, kp_prose
+
+
+def _build_reverse_mapping(forward: Dict[str, List[str]]) -> tuple[Dict[str, List[str]], KeywordProcessor]:
+    reverse: Dict[str, List[str]] = {}
+    for abbr, forms in forward.items():
+        if len(abbr.strip()) <= 1:
+            continue
+        for form in forms:
+            key = form.lower()
+            if len(key) < _REVERSE_MIN_FORM_LEN:
+                continue
+            if key not in reverse:
+                reverse[key] = []
+            if abbr not in reverse[key]:
+                reverse[key].append(abbr)
+    kp_reverse = KeywordProcessor(case_sensitive=False)
+    for form_lower in reverse:
+        kp_reverse.add_keyword(form_lower, form_lower)
+    return reverse, kp_reverse
+
+
 def build_lookup(db: Session, org_id: Optional[int] = None) -> AbbreviationLookup:
     """Build the compiled abbreviation lookup, cached for 30 seconds.
 
@@ -123,65 +180,15 @@ def build_lookup(db: Session, org_id: Optional[int] = None) -> AbbreviationLooku
         _cache[cache_key] = (lookup, now)
         return lookup
 
-    # Build forward mapping: {abbr: [form1, form2, ...]}
-    # Also track categories per abbreviation for qualification detection.
     rows = (
         db.query(Abbreviation)
         .filter(Abbreviation.list_id.in_(list_ids))
         .all()
     )
-    forward: Dict[str, List[str]] = {}
-    for row in rows:
-        abbr = row.abbreviation.strip()
-        form = row.expanded_form.strip()
-        if abbr and form:
-            if abbr not in forward:
-                forward[abbr] = []
-            if form not in forward[abbr]:
-                forward[abbr].append(form)
-
-    # Classify abbreviations into case-sensitivity tiers.
-    # - exact (case_sensitive=True): all-uppercase abbrs (CO, DA, HQ, QMG)
-    # - prose (case_sensitive=False): lowercase + mixed-case (bns, wdr, Comd, Dy, met)
-    # Single-letter abbrs (A, D, C, F) are excluded — they are used as prefixes
-    # (e.g. A/Comd) and cause massive false positives as standalone tokens.
-    exact_abbrs: List[str] = []     # uppercase only
-    prose_abbrs: List[str] = []     # lowercase + mixed-case
-    for abbr in forward:
-        if len(abbr.strip()) <= 1:
-            continue
-        if _is_uppercase(abbr):
-            exact_abbrs.append(abbr)
-        else:
-            prose_abbrs.append(abbr)
-
-    # Build flashtext2 processors.
-    kp_exact = KeywordProcessor(case_sensitive=True)
-    for abbr in exact_abbrs:
-        kp_exact.add_keyword(abbr, abbr)
-
-    kp_prose = KeywordProcessor(case_sensitive=False)
-    for abbr in prose_abbrs:
-        kp_prose.add_keyword(abbr, abbr)
-
-    # Build reverse mapping: lowercase expanded_form → [abbr, ...]
-    # Only include forms ≥ _REVERSE_MIN_FORM_LEN to avoid false matches on short words.
-    reverse: Dict[str, List[str]] = {}
-    for abbr, forms in forward.items():
-        if len(abbr.strip()) <= 1:
-            continue
-        for form in forms:
-            key = form.lower()
-            if len(key) < _REVERSE_MIN_FORM_LEN:
-                continue
-            if key not in reverse:
-                reverse[key] = []
-            if abbr not in reverse[key]:
-                reverse[key].append(abbr)
-
-    kp_reverse = KeywordProcessor(case_sensitive=False)
-    for form_lower in reverse:
-        kp_reverse.add_keyword(form_lower, form_lower)
+    forward = _build_forward_mapping(rows)
+    exact_abbrs, prose_abbrs = _classify_abbrs(forward)
+    kp_exact, kp_prose = _build_keyword_processors(exact_abbrs, prose_abbrs)
+    reverse, kp_reverse = _build_reverse_mapping(forward)
 
     lookup = AbbreviationLookup(
         forward=forward,

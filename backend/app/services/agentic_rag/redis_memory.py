@@ -267,31 +267,41 @@ class RedisMemory:
         seen_keys: set[str] = set()
 
         for ns in namespaces:
-            try:
-                items = await self.store.asearch(ns, query=query, limit=limit)
-            except Exception as exc:
-                logger.warning("[MEMORY] search failed for %s: %s", ns, exc)
-                continue
-            for item in items:
-                key = str(item.key)
-                if key in seen_keys:
-                    continue
-                seen_keys.add(key)
-                value = item.value or {}
-                text = value.get("text") or value.get("data") or ""
-                if text:
-                    results.append(
-                        {
-                            "page_content": text,
-                            "metadata": {
-                                "source": "memory",
-                                "namespace": ns,
-                                "key": key,
-                            },
-                        }
-                    )
+            await self._search_namespace(ns, query, limit, results, seen_keys)
 
         return results[:limit]
+
+    async def _search_namespace(
+        self,
+        ns: tuple[str, ...],
+        query: str,
+        limit: int,
+        results: List[dict[str, Any]],
+        seen_keys: set[str],
+    ) -> None:
+        try:
+            items = await self.store.asearch(ns, query=query, limit=limit)
+        except Exception as exc:
+            logger.warning("[MEMORY] search failed for %s: %s", ns, exc)
+            return
+        for item in items:
+            key = str(item.key)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            value = item.value or {}
+            text = value.get("text") or value.get("data") or ""
+            if text:
+                results.append(
+                    {
+                        "page_content": text,
+                        "metadata": {
+                            "source": "memory",
+                            "namespace": ns,
+                            "key": key,
+                        },
+                    }
+                )
 
 
 def _cleanup_embeddings() -> _StringEmbeddings:

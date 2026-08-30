@@ -102,6 +102,35 @@ def _decode(raw: str, defn: SettingDef) -> Any:
 
 # ── Validation ────────────────────────────────────────────────────────────
 
+def _validate_numeric(key: str, value: Any, defn: SettingDef, cast, type_name: str) -> Any:
+    try:
+        v = cast(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{key} must be a {type_name}, got {value!r}")
+    if defn.min_value is not None and v < defn.min_value:
+        raise ValueError(f"{key} must be >= {defn.min_value}, got {v}")
+    if defn.max_value is not None and v > defn.max_value:
+        raise ValueError(f"{key} must be <= {defn.max_value}, got {v}")
+    return v
+
+
+def _validate_bool(key: str, value: Any) -> Any:
+    if isinstance(value, str):
+        return value.lower() == "true"
+    if isinstance(value, bool):
+        return value
+    raise ValueError(f"{key} must be a boolean, got {value!r}")
+
+
+def _validate_json(key: str, value: Any) -> Any:
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            raise ValueError(f"{key} must be valid JSON, got {value!r}")
+    return value
+
+
 def validate_value(key: str, value: Any) -> Any:
     """Validate a value against the registry. Returns the coerced value or raises ValueError."""
     defn = get_def(key)
@@ -113,41 +142,16 @@ def validate_value(key: str, value: Any) -> Any:
         return None
 
     if defn.value_type == "int":
-        try:
-            v = int(value)
-        except (TypeError, ValueError):
-            raise ValueError(f"{key} must be an integer, got {value!r}")
-        if defn.min_value is not None and v < defn.min_value:
-            raise ValueError(f"{key} must be >= {defn.min_value}, got {v}")
-        if defn.max_value is not None and v > defn.max_value:
-            raise ValueError(f"{key} must be <= {defn.max_value}, got {v}")
-        return v
+        return _validate_numeric(key, value, defn, int, "integer")
 
     if defn.value_type == "float":
-        try:
-            v = float(value)
-        except (TypeError, ValueError):
-            raise ValueError(f"{key} must be a float, got {value!r}")
-        if defn.min_value is not None and v < defn.min_value:
-            raise ValueError(f"{key} must be >= {defn.min_value}, got {v}")
-        if defn.max_value is not None and v > defn.max_value:
-            raise ValueError(f"{key} must be <= {defn.max_value}, got {v}")
-        return v
+        return _validate_numeric(key, value, defn, float, "float")
 
     if defn.value_type == "bool":
-        if isinstance(value, str):
-            return value.lower() == "true"
-        if isinstance(value, bool):
-            return value
-        raise ValueError(f"{key} must be a boolean, got {value!r}")
+        return _validate_bool(key, value)
 
     if defn.value_type == "json":
-        if isinstance(value, str):
-            try:
-                return json.loads(value)
-            except json.JSONDecodeError:
-                raise ValueError(f"{key} must be valid JSON, got {value!r}")
-        return value  # already a dict/list
+        return _validate_json(key, value)
 
     if defn.choices is not None and value not in defn.choices:
         raise ValueError(f"{key} must be one of {defn.choices}, got {value!r}")

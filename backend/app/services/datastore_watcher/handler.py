@@ -554,6 +554,110 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
     # File processing (called by _on_changes callback)
     # ------------------------------------------------------------------
 
+    def _should_skip_file(self, fname: str, ext: str, event_path: str) -> bool:
+        if ext not in SUPPORTED_EXTENSIONS:
+            logger.debug(
+                "[WATCHER] file_detected path=%s ext=%s action=skip reason=unsupported_ext",
+                event_path,
+                ext,
+            )
+            return True
+        if fname.startswith(".") or fname.startswith("~$") or fname.startswith(".~"):
+            logger.debug(
+                "[WATCHER] file_detected path=%s action=skip reason=hidden_or_temp",
+                event_path,
+            )
+            return True
+        if ext in (".tmp", ".swp", ".swo", ".bak", ".lock"):
+            logger.debug(
+                "[WATCHER] file_detected path=%s ext=%s action=skip reason=temp_ext",
+                event_path,
+                ext,
+            )
+            return True
+        if not os.path.exists(event_path):
+            logger.debug(
+                "[WATCHER] file_not_exists path=%s action=skip",
+                event_path,
+            )
+            return True
+        return False
+
+    def _get_scan_pattern(
+        self, datastore_id: int, event_path: str, event_type: str,
+    ) -> Optional[str]:
+        db: Session = SessionLocal()
+        try:
+            ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
+            if not ds:
+                return None
+            scan_pattern = ds.scan_pattern or "*"
+            if not self._matches_pattern(event_path, scan_pattern):
+                logger.debug(
+                    "[WATCHER] file_detected path=%s action=skip reason=pattern_mismatch",
+                    event_path,
+                )
+                return None
+            logger.info(
+                "[WATCHER] file_processing datastore_id=%d path=%s event=%s",
+                datastore_id, event_path, event_type,
+            )
+            return scan_pattern
+        finally:
+            db.close()
+
+    def _handle_existing_document(
+        self,
+        db: Session,
+        existing: Document,
+        event_path: str,
+        file_hash: str,
+        hash_prefix: str,
+        datastore_id: int,
+    ) -> Optional[Future]:
+        if not existing.is_selected:
+            logger.info(
+                "[WATCHER] file_unselected path=%s doc_id=%s — skipping",
+                event_path, existing.id,
+            )
+            return None
+
+        if existing.file_hash == file_hash:
+            chunk_count = db.query(DocumentChunk).filter(
+                DocumentChunk.document_id == existing.id
+            ).count()
+            if chunk_count > 0:
+                logger.info(
+                    "[WATCHER] no_change path=%s hash=%s datastore_id=%s doc_id=%s",
+                    event_path,
+                    hash_prefix,
+                    datastore_id,
+                    existing.id,
+                )
+                return None
+            else:
+                logger.info(
+                    "[WATCHER] re_ingest_no_chunks path=%s doc_id=%s datastore_id=%s",
+                    event_path,
+                    existing.id,
+                    datastore_id,
+                )
+                return self._update_document(
+                    existing.id, event_path, file_hash, datastore_id, scan_id=0
+                )
+        else:
+            logger.info(
+                "[WATCHER] file_modified path=%s old_hash=%s new_hash=%s datastore_id=%s doc_id=%s",
+                event_path,
+                (existing.file_hash or "none")[:8],
+                hash_prefix,
+                datastore_id,
+                existing.id,
+            )
+            return self._update_document(
+                existing.id, event_path, file_hash, datastore_id, scan_id=0
+            )
+
     def _handle_file(
         self,
         event_path: str,
@@ -570,7 +674,6 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
             datastore_id: ID of the datastore containing the file
             event_type: One of 'created', 'modified', 'deleted'
         """
-        # Handle deletion differently - no need to hash or check extensions
         if event_type == "deleted":
             self._handle_deletion(event_path, datastore_id)
             return
@@ -579,79 +682,24 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
         _, ext = os.path.splitext(fname)
         ext = ext.lower()
 
-        # Skip non-supported extensions — only process files the document
-        # engine can actually parse (anydoc/markitdown/text/image OCR).
-        if ext not in SUPPORTED_EXTENSIONS:
-            logger.debug(
-                "[WATCHER] file_detected path=%s ext=%s action=skip reason=unsupported_ext",
-                event_path,
-                ext,
-            )
+        if self._should_skip_file(fname, ext, event_path):
             return
 
-        # Skip hidden/system files and temp/lock files from editors
-        # (~$file.docx, .~file.txt, file.tmp, file.swp, file.bak)
-        if fname.startswith(".") or fname.startswith("~$") or fname.startswith(".~"):
-            logger.debug(
-                "[WATCHER] file_detected path=%s action=skip reason=hidden_or_temp",
-                event_path,
-            )
-            return
-        if ext in (".tmp", ".swp", ".swo", ".bak", ".lock"):
-            logger.debug(
-                "[WATCHER] file_detected path=%s ext=%s action=skip reason=temp_ext",
-                event_path,
-                ext,
-            )
+        scan_pattern = self._get_scan_pattern(datastore_id, event_path, event_type)
+        if scan_pattern is None:
             return
 
-        # Check if file exists (for modified events, file might have been deleted)
-        if not os.path.exists(event_path):
-            logger.debug(
-                "[WATCHER] file_not_exists path=%s action=skip",
-                event_path,
-            )
-            return
-
-        # Get datastore scan_pattern
-        db: Session = SessionLocal()
-        try:
-            ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
-            if not ds:
-                return
-            scan_pattern = ds.scan_pattern or "*"
-
-            # Check scan pattern
-            if not self._matches_pattern(event_path, scan_pattern):
-                logger.debug(
-                    "[WATCHER] file_detected path=%s action=skip reason=pattern_mismatch",
-                    event_path,
-                )
-                return
-
-            # Log the file that is about to be processed
-            logger.info(
-                "[WATCHER] file_processing datastore_id=%d path=%s event=%s",
-                datastore_id, event_path, event_type,
-            )
-        finally:
-            db.close()
-
-        # Compute SHA-256 hash
         file_hash = self._compute_hash(event_path)
         hash_prefix = file_hash[:8] if file_hash else "none"
         file_size = os.path.getsize(event_path)
 
-        # DataStore: process file independently (no KB knowledge needed)
         db: Session = SessionLocal()
-        # Acquire per-file advisory lock to prevent race with manual scan
         from app.services.datastore_watcher.utils import acquire_file_lock, release_file_lock
         if not acquire_file_lock(db, datastore_id, event_path):
             logger.info("[WATCHER] file_locked path=%s — skipping (another process holds lock)", event_path)
             db.close()
             return
         try:
-            # Check if document already exists for this file path
             existing = (
                 db.query(Document)
                 .filter(
@@ -662,57 +710,10 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
             )
 
             if existing:
-                # Skip if document was explicitly unselected by an admin
-                if not existing.is_selected:
-                    logger.info(
-                        "[WATCHER] file_unselected path=%s doc_id=%s — skipping",
-                        event_path, existing.id,
-                    )
-                    return
+                return self._handle_existing_document(
+                    db, existing, event_path, file_hash, hash_prefix, datastore_id,
+                )
 
-                # Document exists - check if hash changed (file modified)
-                if existing.file_hash == file_hash:
-                    # File unchanged - but check if chunks exist (ingestion may have failed)
-                    chunk_count = db.query(DocumentChunk).filter(
-                        DocumentChunk.document_id == existing.id
-                    ).count()
-                    if chunk_count > 0:
-                        # File unchanged and chunks exist - skip
-                        logger.info(
-                            "[WATCHER] no_change path=%s hash=%s datastore_id=%s doc_id=%s",
-                            event_path,
-                            hash_prefix,
-                            datastore_id,
-                            existing.id,
-                        )
-                        return
-                    else:
-                        # File unchanged but no chunks - re-ingest (ingestion likely failed)
-                        logger.info(
-                            "[WATCHER] re_ingest_no_chunks path=%s doc_id=%s datastore_id=%s",
-                            event_path,
-                            existing.id,
-                            datastore_id,
-                        )
-                        return self._update_document(
-                            existing.id, event_path, file_hash, datastore_id, scan_id=0
-                        )
-                else:
-                    # File was modified - trigger re-ingestion
-                    logger.info(
-                        "[WATCHER] file_modified path=%s old_hash=%s new_hash=%s datastore_id=%s doc_id=%s",
-                        event_path,
-                        (existing.file_hash or "none")[:8],
-                        hash_prefix,
-                        datastore_id,
-                        existing.id,
-                    )
-                    # Update existing document — use scan_id=0 for event-driven processing
-                    return self._update_document(
-                        existing.id, event_path, file_hash, datastore_id, scan_id=0
-                    )
-
-            # File is new — trigger ingestion in-place
             return self._ingest_file(
                 event_path, datastore_id, scan_id=0, file_hash=file_hash
             )
@@ -1055,6 +1056,168 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
     # Deletion handling
     # ------------------------------------------------------------------
 
+    def _delete_qdrant_vectors(self, collection_name: str, doc_id: int, chunk_ids: list) -> None:
+        """Delete Qdrant vectors for a document, handling missing collections."""
+        if not chunk_ids:
+            return
+        try:
+            point_ids = [_chunk_id_to_point_id(cid) for cid in chunk_ids]
+            get_qdrant_client().delete(
+                collection_name=collection_name,
+                points_selector=PointIdsList(points=point_ids),
+            )
+        except UnexpectedResponse as e:
+            if "404" in str(e):
+                logger.info(
+                    "[WATCHER] Qdrant vectors already gone for document_id=%s",
+                    doc_id,
+                )
+            else:
+                logger.warning(
+                    "[WATCHER] Qdrant delete failed for document_id=%s: %s",
+                    doc_id, e,
+                )
+        except Exception as e:
+            logger.warning(
+                "[WATCHER] Qdrant delete failed for document_id=%s: %s",
+                doc_id, e,
+            )
+
+    def _handle_datastore_deletion(
+        self,
+        db: Session,
+        event_path: str,
+        datastore_id: int,
+    ) -> None:
+        """Handle deletion for a DataStore document."""
+        # DataStore deletion: delete the document for this datastore
+        doc = (
+            db.query(Document)
+            .filter(
+                Document.file_path == event_path,
+                Document.data_store_id == datastore_id,
+            )
+            .first()
+        )
+        if doc:
+            # Capture IDs before DB deletion — needed for Qdrant/Neo4j
+            # cleanup after the DB commit.
+            doc_id = doc.id
+            chunk_ids = [
+                cid[0] for cid in db.query(DocumentChunk.id).filter(
+                    DocumentChunk.document_id == doc.id
+                ).all()
+            ]
+
+            # DB cleanup first. If this commit fails, vector/graph data
+            # is still intact and the next scan retries. If it succeeds
+            # but Qdrant/Neo4j cleanup fails below, orphaned data is
+            # invisible (document gone from DB) and reconciliation
+            # cleans it up on next startup.
+            db.query(DocumentChunk).filter(DocumentChunk.document_id == doc.id).delete()
+            db.query(ProcessingTask).filter(ProcessingTask.document_id == doc.id).delete()
+            db.delete(doc)
+            logger.info(
+                "[WATCHER] document_deleted path=%s datastore_id=%s doc_id=%s",
+                event_path,
+                datastore_id,
+                doc_id,
+            )
+
+        # Remove manifest entry for the deleted file (or if it was never ingested)
+        db.query(DataStoreFileManifest).filter(
+            DataStoreFileManifest.datastore_id == datastore_id,
+            DataStoreFileManifest.file_path == event_path,
+        ).delete(synchronize_session=False)
+
+        db.commit()
+
+        # Qdrant cleanup (after DB commit, using captured IDs)
+        if doc and chunk_ids:
+            self._delete_qdrant_vectors(f"ds_{datastore_id}", doc_id, chunk_ids)
+
+        # Neo4j cleanup (after DB commit, using captured doc_id)
+        if doc:
+            try:
+                from app.services.graph import delete_graph_for_document
+                delete_graph_for_document(kb_id=None, document_id=doc_id, data_store_id=datastore_id)
+                logger.info(
+                    "[WATCHER] Neo4j cleanup done for document_id=%s",
+                    doc_id,
+                )
+            except Exception as e:
+                logger.warning(
+                    "[WATCHER] Neo4j cleanup failed for document_id=%s: %s",
+                    doc_id, e,
+                )
+
+    def _handle_kb_deletion(
+        self,
+        db: Session,
+        event_path: str,
+        datastore_id: Optional[int],
+    ) -> None:
+        """Handle deletion for KB documents."""
+        # KB deletion: query by org_id from handler mapping
+        org_id = self.folder_paths.get(datastore_id, (None,))[0] if datastore_id else None
+        if org_id is not None:
+            kb_list = (
+                db.query(KnowledgeBase)
+                .filter(KnowledgeBase.org_id == org_id)
+                .values("id")
+            )
+            kb_list = [kb[0] for kb in kb_list]
+
+            # Capture (kb_id, doc_id, chunk_ids) for all affected docs
+            # before DB deletion — needed for Qdrant/Neo4j cleanup after.
+            cleanup_targets = []
+            for kb_id in kb_list:
+                doc = (
+                    db.query(Document)
+                    .filter(
+                        Document.file_path == event_path,
+                        Document.knowledge_base_id == kb_id,
+                    )
+                    .first()
+                )
+
+                if doc:
+                    chunk_ids = [
+                        cid[0] for cid in db.query(DocumentChunk.id).filter(
+                            DocumentChunk.document_id == doc.id
+                        ).all()
+                    ]
+                    cleanup_targets.append((kb_id, doc.id, chunk_ids))
+
+                    db.query(DocumentChunk).filter(DocumentChunk.document_id == doc.id).delete()
+                    db.query(ProcessingTask).filter(ProcessingTask.document_id == doc.id).delete()
+                    db.delete(doc)
+                    logger.info(
+                        "[WATCHER] document_deleted path=%s kb_id=%s doc_id=%s",
+                        event_path,
+                        kb_id,
+                        doc.id,
+                    )
+
+            db.commit()
+
+            # Qdrant + Neo4j cleanup after DB commit, using captured IDs
+            for kb_id, doc_id, chunk_ids in cleanup_targets:
+                self._delete_qdrant_vectors(f"kb_{kb_id}", doc_id, chunk_ids)
+
+                try:
+                    from app.services.graph import delete_graph_for_document
+                    delete_graph_for_document(kb_id=kb_id, document_id=doc_id)
+                    logger.info(
+                        "[WATCHER] Neo4j cleanup done for kb_id=%s doc_id=%s",
+                        kb_id, doc_id,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "[WATCHER] Neo4j cleanup failed for kb_id=%s doc_id=%s: %s",
+                        kb_id, doc_id, e,
+                    )
+
     def _handle_deletion(
         self,
         event_path: str,
@@ -1073,172 +1236,11 @@ class DatastoreFileEventHandler(FileSystemEventHandler):
 
         db: Session = SessionLocal()
         try:
-            # DataStore deletion: delete the document for this datastore
             if datastore_id is not None:
-                doc = (
-                    db.query(Document)
-                    .filter(
-                        Document.file_path == event_path,
-                        Document.data_store_id == datastore_id,
-                    )
-                    .first()
-                )
-                if doc:
-                    # Capture IDs before DB deletion — needed for Qdrant/Neo4j
-                    # cleanup after the DB commit.
-                    doc_id = doc.id
-                    chunk_ids = [
-                        cid[0] for cid in db.query(DocumentChunk.id).filter(
-                            DocumentChunk.document_id == doc.id
-                        ).all()
-                    ]
-
-                    # DB cleanup first. If this commit fails, vector/graph data
-                    # is still intact and the next scan retries. If it succeeds
-                    # but Qdrant/Neo4j cleanup fails below, orphaned data is
-                    # invisible (document gone from DB) and reconciliation
-                    # cleans it up on next startup.
-                    db.query(DocumentChunk).filter(DocumentChunk.document_id == doc.id).delete()
-                    db.query(ProcessingTask).filter(ProcessingTask.document_id == doc.id).delete()
-                    db.delete(doc)
-                    logger.info(
-                        "[WATCHER] document_deleted path=%s datastore_id=%s doc_id=%s",
-                        event_path,
-                        datastore_id,
-                        doc_id,
-                    )
-
-                # Remove manifest entry for the deleted file (or if it was never ingested)
-                db.query(DataStoreFileManifest).filter(
-                    DataStoreFileManifest.datastore_id == datastore_id,
-                    DataStoreFileManifest.file_path == event_path,
-                ).delete(synchronize_session=False)
-
-                db.commit()
-
-                # Qdrant cleanup (after DB commit, using captured IDs)
-                if doc and chunk_ids:
-                    try:
-                        point_ids = [_chunk_id_to_point_id(cid) for cid in chunk_ids]
-                        get_qdrant_client().delete(
-                            collection_name=f"ds_{datastore_id}",
-                            points_selector=PointIdsList(points=point_ids),
-                        )
-                    except UnexpectedResponse as e:
-                        if "404" in str(e):
-                            logger.info(
-                                "[WATCHER] Qdrant vectors already gone for document_id=%s",
-                                doc_id,
-                            )
-                        else:
-                            logger.warning(
-                                "[WATCHER] Qdrant delete failed for document_id=%s: %s",
-                                doc_id, e,
-                            )
-                    except Exception as e:
-                        logger.warning(
-                            "[WATCHER] Qdrant delete failed for document_id=%s: %s",
-                            doc_id, e,
-                        )
-
-                # Neo4j cleanup (after DB commit, using captured doc_id)
-                if doc:
-                    try:
-                        from app.services.graph import delete_graph_for_document
-                        delete_graph_for_document(kb_id=None, document_id=doc_id, data_store_id=datastore_id)
-                        logger.info(
-                            "[WATCHER] Neo4j cleanup done for document_id=%s",
-                            doc_id,
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            "[WATCHER] Neo4j cleanup failed for document_id=%s: %s",
-                            doc_id, e,
-                        )
-
+                self._handle_datastore_deletion(db, event_path, datastore_id)
                 return
 
-            # KB deletion: query by org_id from handler mapping
-            org_id = self.folder_paths.get(datastore_id, (None,))[0] if datastore_id else None
-            if org_id is not None:
-                kb_list = (
-                    db.query(KnowledgeBase)
-                    .filter(KnowledgeBase.org_id == org_id)
-                    .values("id")
-                )
-                kb_list = [kb[0] for kb in kb_list]
-
-                # Capture (kb_id, doc_id, chunk_ids) for all affected docs
-                # before DB deletion — needed for Qdrant/Neo4j cleanup after.
-                cleanup_targets = []
-                for kb_id in kb_list:
-                    doc = (
-                        db.query(Document)
-                        .filter(
-                            Document.file_path == event_path,
-                            Document.knowledge_base_id == kb_id,
-                        )
-                        .first()
-                    )
-
-                    if doc:
-                        chunk_ids = [
-                            cid[0] for cid in db.query(DocumentChunk.id).filter(
-                                DocumentChunk.document_id == doc.id
-                            ).all()
-                        ]
-                        cleanup_targets.append((kb_id, doc.id, chunk_ids))
-
-                        db.query(DocumentChunk).filter(DocumentChunk.document_id == doc.id).delete()
-                        db.query(ProcessingTask).filter(ProcessingTask.document_id == doc.id).delete()
-                        db.delete(doc)
-                        logger.info(
-                            "[WATCHER] document_deleted path=%s kb_id=%s doc_id=%s",
-                            event_path,
-                            kb_id,
-                            doc.id,
-                        )
-
-                db.commit()
-
-                # Qdrant + Neo4j cleanup after DB commit, using captured IDs
-                for kb_id, doc_id, chunk_ids in cleanup_targets:
-                    if chunk_ids:
-                        try:
-                            point_ids = [_chunk_id_to_point_id(cid) for cid in chunk_ids]
-                            get_qdrant_client().delete(
-                                collection_name=f"kb_{kb_id}",
-                                points_selector=PointIdsList(points=point_ids),
-                            )
-                        except UnexpectedResponse as e:
-                            if "404" in str(e):
-                                logger.info(
-                                    "[WATCHER] Qdrant vectors already gone for document_id=%s",
-                                    doc_id,
-                                )
-                            else:
-                                logger.warning(
-                                    "[WATCHER] Qdrant delete failed for document_id=%s: %s",
-                                    doc_id, e,
-                                )
-                        except Exception as e:
-                            logger.warning(
-                                "[WATCHER] Qdrant delete failed for document_id=%s: %s",
-                                doc_id, e,
-                            )
-
-                    try:
-                        from app.services.graph import delete_graph_for_document
-                        delete_graph_for_document(kb_id=kb_id, document_id=doc_id)
-                        logger.info(
-                            "[WATCHER] Neo4j cleanup done for kb_id=%s doc_id=%s",
-                            kb_id, doc_id,
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            "[WATCHER] Neo4j cleanup failed for kb_id=%s doc_id=%s: %s",
-                            kb_id, doc_id, e,
-                        )
+            self._handle_kb_deletion(db, event_path, datastore_id)
         finally:
             db.close()
 

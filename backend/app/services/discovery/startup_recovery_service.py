@@ -331,6 +331,107 @@ class StartupRecoveryService:
         current = self._active_scans[scan_id].get("processed_files", 0)
         self._active_scans[scan_id]["processed_files"] = current + 1
 
+    def _queue_ingestion_files(self, result, datastore_id: int) -> list:
+        from concurrent.futures import Future
+        ingestion_futures: list[tuple[Future, str]] = []
+        for fmeta in result.new_files:
+            if not self._running:
+                break
+            future = self.process_new_file(fmeta["file_path"], datastore_id)
+            if future is not None:
+                ingestion_futures.append((future, fmeta["file_path"]))
+        for fmeta in result.modified_files:
+            if not self._running:
+                break
+            future = self.process_new_file(fmeta["file_path"], datastore_id)
+            if future is not None:
+                ingestion_futures.append((future, fmeta["file_path"]))
+        return ingestion_futures
+
+    def _handle_deletions_phase(self, result, datastore_id: int, scan_id: int) -> int:
+        for fmeta in result.deleted_files:
+            if not self._running:
+                break
+            self._handle_deletion_records(fmeta["file_path"], datastore_id)
+            self._increment_progress(scan_id)
+        return len(result.deleted_files)
+
+    def _wait_for_ingestion(self, ingestion_futures, scan_id: int, datastore_id: int, initial_count: int) -> int:
+        completed_count = initial_count
+        self._active_scans[scan_id]["processed_files"] = completed_count
+        for future, fpath in ingestion_futures:
+            if not self._running:
+                break
+            try:
+                future.result(timeout=600)
+            except Exception as e:
+                logger.error(
+                    "[RECOVERY] ingestion_failed scan_id=%s path=%s: %s",
+                    scan_id, fpath, e,
+                )
+            completed_count += 1
+            self._active_scans[scan_id]["processed_files"] = completed_count
+            self._update_datastore_scan_fields(
+                datastore_id,
+                processed=completed_count,
+                status="running",
+            )
+        return completed_count
+
+    def _finalize_recovery(self, datastore_id: int, scan_id: int, total_to_process: int, completed_count: int) -> None:
+        self._active_scans[scan_id]["status"] = "complete"
+        logger.info(
+            "[RECOVERY] recovery_complete datastore_id=%s scan_id=%s total=%d processed=%d",
+            datastore_id, scan_id, total_to_process, completed_count,
+        )
+        recovered_at = datetime.now(timezone.utc)
+        db2: Session = SessionLocal()
+        try:
+            ds_record = db2.query(DataStore).filter(DataStore.id == datastore_id).first()
+            if ds_record:
+                ds_record.last_recovered_at = recovered_at
+                ds_record.last_scan_processed = completed_count
+                ds_record.last_scan_status = "completed"
+                ds_record.last_scan_at = recovered_at
+                db2.commit()
+                logger.info(
+                    "[RECOVERY] recovery_timestamp_set datastore_id=%s last_recovered_at=%s",
+                    datastore_id, ds_record.last_recovered_at.isoformat(),
+                )
+        except Exception as e:
+            logger.warning(
+                "[RECOVERY] Failed to set last_recovered_at datastore_id=%s: %s",
+                datastore_id, e,
+            )
+        finally:
+            db2.close()
+        self._active_scans[scan_id]["last_recovered_at"] = recovered_at.isoformat()
+
+    def _handle_pipeline_error(self, datastore_id: int, scan_id: int, error: Exception) -> None:
+        logger.error("[RECOVERY] recovery_error datastore_id=%s scan_id=%s: %s", datastore_id, scan_id, error, exc_info=True)
+        self._active_scans[scan_id]["status"] = "error"
+        self._active_scans[scan_id]["error_message"] = str(error)
+        self._update_datastore_scan_fields(datastore_id, status="error")
+        try:
+            db3: Session = SessionLocal()
+            try:
+                ds_record = db3.query(DataStore).filter(DataStore.id == datastore_id).first()
+                if ds_record:
+                    recovered_at = datetime.now(timezone.utc)
+                    ds_record.last_recovered_at = recovered_at
+                    self._active_scans[scan_id]["last_recovered_at"] = recovered_at.isoformat()
+                    db3.commit()
+                    logger.info(
+                        "[RECOVERY] recovery_timestamp_set datastore_id=%s last_recovered_at=%s reason=error",
+                        datastore_id, ds_record.last_recovered_at.isoformat(),
+                    )
+            except Exception:
+                db3.rollback()
+            finally:
+                db3.close()
+        except Exception:
+            pass
+
     def _discovery_pipeline_worker(self, datastore_id: int, scan_id: int) -> None:
         """Run the discovery pipeline in a background thread.
 
@@ -342,7 +443,6 @@ class StartupRecoveryService:
            incrementally as each future resolves.
         5. Mark recovery complete only after all ingestion is done.
         """
-        from concurrent.futures import Future
         from app.services.discovery import discover_datastore  # noqa: T100
 
         try:
@@ -382,88 +482,11 @@ class StartupRecoveryService:
                 status="running",
             )
 
-            # Phase 2: Queue ingestion for new + modified files.
-            # Collect futures so we can wait for actual completion.
-            ingestion_futures: list[tuple[Future, str]] = []
+            ingestion_futures = self._queue_ingestion_files(result, datastore_id)
+            deleted_count = self._handle_deletions_phase(result, datastore_id, scan_id)
+            completed_count = self._wait_for_ingestion(ingestion_futures, scan_id, datastore_id, deleted_count)
 
-            for fmeta in result.new_files:
-                if not self._running:
-                    break
-                future = self.process_new_file(fmeta["file_path"], datastore_id)
-                if future is not None:
-                    ingestion_futures.append((future, fmeta["file_path"]))
-
-            for fmeta in result.modified_files:
-                if not self._running:
-                    break
-                future = self.process_new_file(fmeta["file_path"], datastore_id)
-                if future is not None:
-                    ingestion_futures.append((future, fmeta["file_path"]))
-
-            # Phase 3: Handle deletions synchronously (fast — no embedding)
-            for fmeta in result.deleted_files:
-                if not self._running:
-                    break
-                self._handle_deletion_records(fmeta["file_path"], datastore_id)
-                self._increment_progress(scan_id)
-
-            # Phase 4: Wait for all ingestion futures to complete.
-            # Update progress incrementally as each future resolves.
-            completed_count = len(result.deleted_files)
-            self._active_scans[scan_id]["processed_files"] = completed_count
-
-            for future, fpath in ingestion_futures:
-                if not self._running:
-                    break
-                try:
-                    future.result(timeout=600)  # 10 min per file
-                except Exception as e:
-                    logger.error(
-                        "[RECOVERY] ingestion_failed scan_id=%s path=%s: %s",
-                        scan_id, fpath, e,
-                    )
-                completed_count += 1
-                self._active_scans[scan_id]["processed_files"] = completed_count
-                # Update DataStore last_scan_processed so the Status column
-                # shows live progress.
-                self._update_datastore_scan_fields(
-                    datastore_id,
-                    processed=completed_count,
-                    status="running",
-                )
-
-            # Phase 5: Mark complete only after all ingestion is done.
-            self._active_scans[scan_id]["status"] = "complete"
-            logger.info(
-                "[RECOVERY] recovery_complete datastore_id=%s scan_id=%s total=%d processed=%d",
-                datastore_id, scan_id, total_to_process, completed_count,
-            )
-
-            # Set last_recovered_at timestamp on the DataStore
-            recovered_at = datetime.now(timezone.utc)
-            db2: Session = SessionLocal()
-            try:
-                ds_record = db2.query(DataStore).filter(DataStore.id == datastore_id).first()
-                if ds_record:
-                    ds_record.last_recovered_at = recovered_at
-                    ds_record.last_scan_processed = completed_count
-                    ds_record.last_scan_status = "completed"
-                    ds_record.last_scan_at = recovered_at
-                    db2.commit()
-                    logger.info(
-                        "[RECOVERY] recovery_timestamp_set datastore_id=%s last_recovered_at=%s",
-                        datastore_id, ds_record.last_recovered_at.isoformat(),
-                    )
-            except Exception as e:
-                logger.warning(
-                    "[RECOVERY] Failed to set last_recovered_at datastore_id=%s: %s",
-                    datastore_id, e,
-                )
-            finally:
-                db2.close()
-
-            # Store in scan dict so the API can return it
-            self._active_scans[scan_id]["last_recovered_at"] = recovered_at.isoformat()
+            self._finalize_recovery(datastore_id, scan_id, total_to_process, completed_count)
 
             # Retry graph builds that were left pending or failed from a
             # previous run.  This runs after discovery so new/modified file
@@ -478,31 +501,7 @@ class StartupRecoveryService:
                 )
 
         except Exception as e:
-            logger.error("[RECOVERY] recovery_error datastore_id=%s scan_id=%s: %s", datastore_id, scan_id, e, exc_info=True)
-            self._active_scans[scan_id]["status"] = "error"
-            self._active_scans[scan_id]["error_message"] = str(e)
-            self._update_datastore_scan_fields(datastore_id, status="error")
-            # Set last_recovered_at even on error so the UI shows the recovery
-            # attempt timestamp rather than being indefinitely empty.
-            try:
-                db3: Session = SessionLocal()
-                try:
-                    ds_record = db3.query(DataStore).filter(DataStore.id == datastore_id).first()
-                    if ds_record:
-                        recovered_at = datetime.now(timezone.utc)
-                        ds_record.last_recovered_at = recovered_at
-                        self._active_scans[scan_id]["last_recovered_at"] = recovered_at.isoformat()
-                        db3.commit()
-                        logger.info(
-                            "[RECOVERY] recovery_timestamp_set datastore_id=%s last_recovered_at=%s reason=error",
-                            datastore_id, ds_record.last_recovered_at.isoformat(),
-                        )
-                except Exception:
-                    db3.rollback()
-                finally:
-                    db3.close()
-            except Exception:
-                pass
+            self._handle_pipeline_error(datastore_id, scan_id, e)
 
     # ------------------------------------------------------------------
     # New / Modified file ingestion
@@ -866,6 +865,70 @@ class StartupRecoveryService:
     # Graph build retry
     # ------------------------------------------------------------------
 
+    def _filter_retryable_tasks(self, tasks) -> list:
+        MAX_GRAPH_RETRIES = 3
+        retryable = []
+        for t in tasks:
+            retries = 0
+            if t.graph_error and t.graph_error.startswith("[retry:"):
+                try:
+                    retries = int(t.graph_error.split("]")[0].split(":")[1])
+                except (ValueError, IndexError):
+                    pass
+            if retries < MAX_GRAPH_RETRIES:
+                retryable.append(t)
+            else:
+                logger.warning(
+                    "[RECOVERY] graph_retry_skip task_id=%s — exceeded max retries (%d)",
+                    t.id, MAX_GRAPH_RETRIES,
+                )
+        return retryable
+
+    def _retry_single_graph_build(self, task, datastore_id: int) -> None:
+        from app.services.ingestion.ingestion_dispatcher import (
+            _start_graph_build_thread,
+        )
+        from app.services.ingestion.document_processor import GraphBuildRequest
+
+        chunk_db: Session = SessionLocal()
+        try:
+            doc = chunk_db.query(Document).filter(
+                Document.id == task.document_id
+            ).first()
+            if not doc:
+                logger.warning(
+                    "[RECOVERY] graph_retry_skip task_id=%s — document %s not found",
+                    task.id, task.document_id,
+                )
+                return
+
+            chunks = chunk_db.query(DocumentChunk).filter(
+                DocumentChunk.document_id == doc.id
+            ).order_by(DocumentChunk.chunk_index).all()
+            if not chunks:
+                logger.warning(
+                    "[RECOVERY] graph_retry_skip task_id=%s — no chunks for doc %s",
+                    task.id, doc.id,
+                )
+                return
+
+            req = GraphBuildRequest(
+                document_id=doc.id,
+                file_name=doc.file_name,
+                chunks=[c.chunk_text for c in chunks],
+                chunk_ids=[c.id for c in chunks],
+                kb_id=None,
+                data_store_id=datastore_id,
+                task_id=task.id,
+            )
+            _start_graph_build_thread(req)
+            logger.info(
+                "[RECOVERY] graph_retry_queued task_id=%s doc_id=%s",
+                task.id, doc.id,
+            )
+        finally:
+            chunk_db.close()
+
     def _retry_pending_graph_builds(self, datastore_id: int) -> None:
         """Find tasks with completed ingestion but pending/failed graph build
         and re-run the graph build in background threads.
@@ -906,25 +969,7 @@ class StartupRecoveryService:
         if not tasks:
             return
 
-        # Limit retries to 3 per task to avoid infinite retry loops on
-        # permanently failing graph builds (e.g. LLM API down, bad config).
-        # The retry count is encoded as a prefix in graph_error: "[retry:N] ...".
-        MAX_GRAPH_RETRIES = 3
-        retryable = []
-        for t in tasks:
-            retries = 0
-            if t.graph_error and t.graph_error.startswith("[retry:"):
-                try:
-                    retries = int(t.graph_error.split("]")[0].split(":")[1])
-                except (ValueError, IndexError):
-                    pass
-            if retries < MAX_GRAPH_RETRIES:
-                retryable.append(t)
-            else:
-                logger.warning(
-                    "[RECOVERY] graph_retry_skip task_id=%s — exceeded max retries (%d)",
-                    t.id, MAX_GRAPH_RETRIES,
-                )
+        retryable = self._filter_retryable_tasks(tasks)
 
         if not retryable:
             return
@@ -934,51 +979,8 @@ class StartupRecoveryService:
             datastore_id, len(retryable), len(tasks) - len(retryable),
         )
 
-        from app.services.ingestion.ingestion_dispatcher import (
-            _start_graph_build_thread,
-        )
-        from app.services.ingestion.document_processor import GraphBuildRequest
-
         for task in retryable:
-            # Fetch chunks for this document to rebuild the graph
-            chunk_db: Session = SessionLocal()
-            try:
-                doc = chunk_db.query(Document).filter(
-                    Document.id == task.document_id
-                ).first()
-                if not doc:
-                    logger.warning(
-                        "[RECOVERY] graph_retry_skip task_id=%s — document %s not found",
-                        task.id, task.document_id,
-                    )
-                    continue
-
-                chunks = chunk_db.query(DocumentChunk).filter(
-                    DocumentChunk.document_id == doc.id
-                ).order_by(DocumentChunk.chunk_index).all()
-                if not chunks:
-                    logger.warning(
-                        "[RECOVERY] graph_retry_skip task_id=%s — no chunks for doc %s",
-                        task.id, doc.id,
-                    )
-                    continue
-
-                req = GraphBuildRequest(
-                    document_id=doc.id,
-                    file_name=doc.file_name,
-                    chunks=[c.chunk_text for c in chunks],
-                    chunk_ids=[c.id for c in chunks],
-                    kb_id=None,
-                    data_store_id=datastore_id,
-                    task_id=task.id,
-                )
-                _start_graph_build_thread(req)
-                logger.info(
-                    "[RECOVERY] graph_retry_queued task_id=%s doc_id=%s",
-                    task.id, doc.id,
-                )
-            finally:
-                chunk_db.close()
+            self._retry_single_graph_build(task, datastore_id)
 
 
 # ------------------------------------------------------------------

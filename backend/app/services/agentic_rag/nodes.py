@@ -168,6 +168,44 @@ def _get_llm(
 # Node: rewrite_query
 # ---------------------------------------------------------------------------
 
+def _collect_provenance_sources(
+    state: AgentState,
+    recent_history: list,
+    clarification: str,
+) -> tuple[list[str], Any]:
+    """Build the list of provenance sources a resolver may draw terms from."""
+    lao = state.get("last_answer_object")
+    provenance_sources: list[str] = [history_to_text(recent_history)]
+    if clarification:
+        provenance_sources.append(clarification)
+    if state.get("compaction_summary"):
+        provenance_sources.append(str(state["compaction_summary"]))
+    if lao is not None:
+        summary = getattr(lao, "summary", "") or ""
+        key_points = getattr(lao, "key_points", None) or []
+        provenance_sources.append(summary)
+        provenance_sources.extend(str(k) for k in key_points)
+    for doc in state.get("recalled_memories", []) or []:
+        if isinstance(doc, dict):
+            provenance_sources.append(str(doc.get("page_content", "")))
+    return provenance_sources, lao
+
+
+def _lookup_cited_titles(lao: Any, db: Any) -> list[str]:
+    """Look up document titles from the last answer's citations."""
+    if lao is None or db is None:
+        return []
+    try:
+        from app.models.knowledge import Document
+        cited_doc_ids = {c.document_id for c in (getattr(lao, "citations", None) or [])}
+        if cited_doc_ids:
+            docs = db.query(Document).filter(Document.id.in_(cited_doc_ids)).all()
+            return [d.title for d in docs if d.title]
+    except Exception:
+        pass
+    return []
+
+
 async def rewrite_query_node(
     state: AgentState,
     api_base: Optional[str] = None,
@@ -207,35 +245,9 @@ async def rewrite_query_node(
         if clarification:
             resolver_input = f"{query}\n\n[User clarification: {clarification}]"
 
-        # Sources a resolved reference may legitimately draw terms from.
-        lao = state.get("last_answer_object")
-        provenance_sources = [history_to_text(recent_history)]
-        if clarification:
-            provenance_sources.append(clarification)
-        if state.get("compaction_summary"):
-            provenance_sources.append(str(state["compaction_summary"]))
-        if lao is not None:
-            summary = getattr(lao, "summary", "") or ""
-            key_points = getattr(lao, "key_points", None) or []
-            provenance_sources.append(summary)
-            provenance_sources.extend(str(k) for k in key_points)
-        for doc in state.get("recalled_memories", []) or []:
-            if isinstance(doc, dict):
-                provenance_sources.append(str(doc.get("page_content", "")))
+        provenance_sources, lao = _collect_provenance_sources(state, recent_history, clarification)
 
-        # Look up document titles from the last answer's citations so the
-        # rewriter can resolve references like "what about logistics?" using
-        # the titles of previously retrieved documents as provenance.
-        retrieved_titles: list[str] = []
-        if lao is not None and db is not None:
-            try:
-                from app.models.knowledge import Document
-                cited_doc_ids = {c.document_id for c in (getattr(lao, "citations", None) or [])}
-                if cited_doc_ids:
-                    docs = db.query(Document).filter(Document.id.in_(cited_doc_ids)).all()
-                    retrieved_titles = [d.title for d in docs if d.title]
-            except Exception:
-                pass
+        retrieved_titles = _lookup_cited_titles(lao, db)
         if retrieved_titles:
             provenance_sources.extend(retrieved_titles)
 
@@ -674,6 +686,43 @@ def merge_node(
 # Node: answer_evaluation
 # ---------------------------------------------------------------------------
 
+def _retrieval_confidence_level(retrieval_conf: float) -> str:
+    if retrieval_conf > 0.8:
+        return "very_high"
+    if retrieval_conf > 0.6:
+        return "high"
+    if retrieval_conf > 0.3:
+        return "medium"
+    return "low"
+
+
+def _resolve_eval_kwargs(ctx: Any) -> dict:
+    if ctx is None:
+        return {}
+    try:
+        from app.services.agentic_rag.llm_factory import get_org_llm
+        query_cfg = get_org_llm(ctx.org_id, ctx.db, role="query")
+        return {
+            "api_base": query_cfg["api_base"],
+            "api_key": query_cfg["api_key"],
+            "query_model": query_cfg["model_name"],
+        }
+    except Exception:
+        return {}
+
+
+def _final_confidence_level(final_confidence: float) -> str:
+    if final_confidence > 0.8:
+        return "very_high"
+    if final_confidence > 0.6:
+        return "high"
+    if final_confidence > 0.3:
+        return "medium"
+    if final_confidence > 0:
+        return "low"
+    return "none"
+
+
 async def answer_evaluation_node(
     state: AgentState,
     llm: ChatOpenAI | None = None,
@@ -703,25 +752,9 @@ async def answer_evaluation_node(
         _db = ctx.db if ctx is not None else None
         _org_id = ctx.org_id if ctx is not None else None
         context_text = format_context_string(docs, state.get("file_markdown"), db=_db, org_id=_org_id, query_glossary=state.get("abbreviation_glossary", ""))
-        conf_level = (
-            "very_high" if retrieval_conf > 0.8 else
-            "high" if retrieval_conf > 0.6 else
-            "medium" if retrieval_conf > 0.3 else "low"
-        )
+        conf_level = _retrieval_confidence_level(retrieval_conf)
 
-        # Resolve query-role LLM config for evaluation
-        eval_kwargs = {}
-        if ctx is not None:
-            try:
-                from app.services.agentic_rag.llm_factory import get_org_llm
-                query_cfg = get_org_llm(ctx.org_id, ctx.db, role="query")
-                eval_kwargs = {
-                    "api_base": query_cfg["api_base"],
-                    "api_key": query_cfg["api_key"],
-                    "query_model": query_cfg["model_name"],
-                }
-            except Exception:
-                pass
+        eval_kwargs = _resolve_eval_kwargs(ctx)
 
         try:
             evaluation = await evaluate_answer(
@@ -750,11 +783,7 @@ async def answer_evaluation_node(
         )
         final_confidence = round(final_confidence / 100.0, 3)
 
-        confidence_level = (
-            "very_high" if final_confidence > 0.8 else
-            "high" if final_confidence > 0.6 else
-            "medium" if final_confidence > 0.3 else "low" if final_confidence > 0 else "none"
-        )
+        confidence_level = _final_confidence_level(final_confidence)
 
         return {
             "answer_evaluation_attempts": state.get("answer_evaluation_attempts", 0) + 1,

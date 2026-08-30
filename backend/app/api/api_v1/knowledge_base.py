@@ -831,6 +831,53 @@ async def get_processing_tasks(
         }
     return result
 
+def _get_chunk_scope_filter(document: Document, kb_id: int) -> list:
+    """Return a list of SQLAlchemy filter conditions for chunk queries.
+
+    DataStore documents have kb_id=NULL and data_store_id set, so we
+    must use the correct scope filter to find their chunks.
+    """
+    if document.data_store_id is not None:
+        return [DocumentChunk.data_store_id == document.data_store_id]
+    return [
+        DocumentChunk.kb_id == kb_id,
+        DocumentChunk.data_store_id.is_(None),
+    ]
+
+
+def _delete_qdrant_points(
+    document: Document,
+    chunk_ids: list[int],
+    kb_id: int,
+    cleanup_warnings: list[str],
+) -> None:
+    """Delete chunk vectors from Qdrant for the given document."""
+    from app.services.ingestion import _chunk_id_to_point_id
+    from qdrant_client.models import PointIdsList
+
+    if not chunk_ids:
+        return
+    try:
+        qdrant = QdrantClient(host=settings.QDRANT_HOST, port=settings.QDRANT_PORT)
+        if document.data_store_id is not None:
+            collection_name = f"ds_{document.data_store_id}"
+        else:
+            collection_name = f"kb_{kb_id}"
+        existing = {c.name for c in qdrant.get_collections().collections}
+        if collection_name not in existing:
+            logger.info(f"Qdrant collection {collection_name} does not exist — skipping point deletion for document {document.id}")
+        else:
+            point_ids = [_chunk_id_to_point_id(cid) for cid in chunk_ids]
+            qdrant.delete(
+                collection_name=collection_name,
+                points_selector=PointIdsList(points=point_ids),
+            )
+            logger.info(f"Deleted {len(point_ids)} Qdrant points for document {document.id}")
+    except Exception as e:
+        cleanup_warnings.append(f"Qdrant cleanup warning: {str(e)}")
+        logger.error(f"Failed to delete Qdrant points for document {document.id}: {e}")
+
+
 @router.delete("/{kb_id}/documents/{doc_id}")
 async def delete_document(
     *,
@@ -847,9 +894,6 @@ async def delete_document(
     - Processing task records from MySQL
     - The document record itself from MySQL
     """
-    from app.services.ingestion import _chunk_id_to_point_id
-    from qdrant_client.models import PointIdsList
-
     # Verify the KB belongs to this user/org
     kb = (
         db.query(KnowledgeBase)
@@ -877,54 +921,25 @@ async def delete_document(
 
     try:
         # 1. Collect chunk IDs before deleting them (needed for Qdrant point IDs).
-        #    DataStore documents have kb_id=NULL and data_store_id set, so we
-        #    must use the correct scope filter to find their chunks.
-        if document.data_store_id is not None:
-            scope_filter = DocumentChunk.data_store_id == document.data_store_id
-        else:
-            scope_filter = (
-                DocumentChunk.kb_id == kb_id,
-                DocumentChunk.data_store_id.is_(None),
-            )
+        scope_filter = _get_chunk_scope_filter(document, kb_id)
         chunk_ids = [
             c.id for c in
             db.query(DocumentChunk.id)
             .filter(
                 DocumentChunk.document_id == doc_id,
-                *scope_filter if isinstance(scope_filter, tuple) else [scope_filter]
+                *scope_filter
             )
             .all()
         ]
 
         # 2. Delete vectors from Qdrant
-        if chunk_ids:
-            try:
-                qdrant = QdrantClient(host=settings.QDRANT_HOST, port=settings.QDRANT_PORT)
-                if document.data_store_id is not None:
-                    collection_name = f"ds_{document.data_store_id}"
-                else:
-                    collection_name = f"kb_{kb_id}"
-                # Check if collection exists — it may not if ingestion failed
-                # before the Qdrant upsert step, or if it was never created.
-                existing = {c.name for c in qdrant.get_collections().collections}
-                if collection_name not in existing:
-                    logger.info(f"Qdrant collection {collection_name} does not exist — skipping point deletion for document {doc_id}")
-                else:
-                    point_ids = [_chunk_id_to_point_id(cid) for cid in chunk_ids]
-                    qdrant.delete(
-                        collection_name=collection_name,
-                        points_selector=PointIdsList(points=point_ids),
-                    )
-                    logger.info(f"Deleted {len(point_ids)} Qdrant points for document {doc_id}")
-            except Exception as e:
-                cleanup_warnings.append(f"Qdrant cleanup warning: {str(e)}")
-                logger.error(f"Failed to delete Qdrant points for document {doc_id}: {e}")
+        _delete_qdrant_points(document, chunk_ids, kb_id, cleanup_warnings)
 
         # 3. Delete chunk rows from MySQL (explicit, don't rely on cascade here
         #    since we already fetched the IDs and want the delete to be transactional)
         db.query(DocumentChunk).filter(
             DocumentChunk.document_id == doc_id,
-            *scope_filter if isinstance(scope_filter, tuple) else [scope_filter]
+            *scope_filter
         ).delete(synchronize_session=False)
 
         # 4. Delete processing task records for this document

@@ -21,6 +21,68 @@ class FileExtractTableInput(BaseModel):
     filter: Optional[str] = Field(default=None)
 
 
+def _resolve_file(ctx: ToolContext, file_id: Optional[int]) -> tuple:
+    if file_id is None and ctx.chat_id:
+        cf = (
+            ctx.db.query(ChatFile)
+            .filter(ChatFile.chat_id == ctx.chat_id)
+            .order_by(ChatFile.id.desc())
+            .first()
+        )
+        file_id = cf.id if cf else None
+
+    if not file_id:
+        return None, {"ok": False, "result": {}, "error": "No attached file found.", "tokens": 0}
+
+    rbac = enforce_rbac(ctx, file_id=file_id)
+    if rbac.get("file_id") is None:
+        return None, {"ok": False, "result": {}, "error": "Access denied to file.", "tokens": 0}
+    file_id = rbac["file_id"]
+
+    cf = ctx.db.query(ChatFile).filter(ChatFile.id == file_id).first()
+    if not cf:
+        return None, {"ok": False, "result": {}, "error": "File not found.", "tokens": 0}
+
+    return cf, None
+
+
+def _parse_table(cf: Any, table_index: int) -> tuple:
+    try:
+        import pandas as pd
+    except Exception as exc:
+        return None, {"ok": False, "result": {}, "error": f"pandas not available: {exc}", "tokens": 0}
+
+    df = None
+    try:
+        if cf.content_type.endswith("csv") or cf.file_name.lower().endswith(".csv"):
+            df = pd.read_csv(cf.stored_path)
+        elif cf.content_type.endswith(("xlsx", "xls")) or cf.file_name.lower().endswith((".xlsx", ".xls")):
+            df = pd.read_excel(cf.stored_path)
+        elif "html" in cf.content_type or cf.file_name.lower().endswith(".html"):
+            tables = pd.read_html(cf.markdown_content or "")
+            df = tables[table_index] if 0 <= table_index < len(tables) else None
+        else:
+            tables = pd.read_html(cf.markdown_content or "")
+            df = tables[table_index] if 0 <= table_index < len(tables) else None
+    except Exception as exc:
+        logger.warning("[file_extract_table] parse failed: %s", exc)
+        return None, {"ok": False, "result": {}, "error": f"Could not extract table: {exc}", "tokens": 0}
+
+    if df is None:
+        return None, {"ok": False, "result": {}, "error": "No table found.", "tokens": 0}
+
+    return df, None
+
+
+def _apply_filter(df: Any, filter_expr: Optional[str]) -> Any:
+    if filter_expr:
+        try:
+            df = df.query(filter_expr)
+        except Exception as exc:
+            logger.warning("[file_extract_table] filter failed: %s", exc)
+    return df
+
+
 class FileExtractTableTool(BaseAgentTool):
     name: str = "file_extract_table"
     ui_label: str = "Extracting table from file"
@@ -37,58 +99,15 @@ class FileExtractTableTool(BaseAgentTool):
         t0 = time.monotonic()
         ctx: ToolContext = self.ctx
 
-        file_id = input_obj.file_id
-        if file_id is None and ctx.chat_id:
-            cf = (
-                ctx.db.query(ChatFile)
-                .filter(ChatFile.chat_id == ctx.chat_id)
-                .order_by(ChatFile.id.desc())
-                .first()
-            )
-            file_id = cf.id if cf else None
+        cf, err = _resolve_file(ctx, input_obj.file_id)
+        if err:
+            return err
 
-        if not file_id:
-            return {"ok": False, "result": {}, "error": "No attached file found.", "tokens": 0}
+        df, err = _parse_table(cf, input_obj.table_index)
+        if err:
+            return err
 
-        rbac = enforce_rbac(ctx, file_id=file_id)
-        if rbac.get("file_id") is None:
-            return {"ok": False, "result": {}, "error": "Access denied to file.", "tokens": 0}
-        file_id = rbac["file_id"]
-
-        cf = ctx.db.query(ChatFile).filter(ChatFile.id == file_id).first()
-        if not cf:
-            return {"ok": False, "result": {}, "error": "File not found.", "tokens": 0}
-
-        try:
-            import pandas as pd
-        except Exception as exc:
-            return {"ok": False, "result": {}, "error": f"pandas not available: {exc}", "tokens": 0}
-
-        df = None
-        try:
-            if cf.content_type.endswith("csv") or cf.file_name.lower().endswith(".csv"):
-                df = pd.read_csv(cf.stored_path)
-            elif cf.content_type.endswith(("xlsx", "xls")) or cf.file_name.lower().endswith((".xlsx", ".xls")):
-                df = pd.read_excel(cf.stored_path)
-            elif "html" in cf.content_type or cf.file_name.lower().endswith(".html"):
-                tables = pd.read_html(cf.markdown_content or "")
-                df = tables[input_obj.table_index] if 0 <= input_obj.table_index < len(tables) else None
-            else:
-                # Try markdown/html table extraction
-                tables = pd.read_html(cf.markdown_content or "")
-                df = tables[input_obj.table_index] if 0 <= input_obj.table_index < len(tables) else None
-        except Exception as exc:
-            logger.warning("[file_extract_table] parse failed: %s", exc)
-            return {"ok": False, "result": {}, "error": f"Could not extract table: {exc}", "tokens": 0}
-
-        if df is None:
-            return {"ok": False, "result": {}, "error": "No table found.", "tokens": 0}
-
-        if input_obj.filter:
-            try:
-                df = df.query(input_obj.filter)
-            except Exception as exc:
-                logger.warning("[file_extract_table] filter failed: %s", exc)
+        df = _apply_filter(df, input_obj.filter)
 
         rows = df.head(1000).values.tolist()
         columns = df.columns.tolist()

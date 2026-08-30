@@ -64,6 +64,86 @@ def _inplacevar_(op, x, y):
     return _INPLACE_OPS[op](x, y)
 
 
+def _build_sandbox_globals(data: Optional[dict]) -> Optional[dict[str, Any]]:
+    try:
+        from RestrictedPython import safe_builtins
+        from RestrictedPython.Guards import (
+            safer_getattr,
+            guarded_setattr,
+            guarded_delattr,
+            guarded_iter_unpack_sequence,
+            guarded_unpack_sequence,
+        )
+        from RestrictedPython.PrintCollector import PrintCollector
+    except ImportError:
+        return None
+
+    restricted_builtins = dict(safe_builtins)
+    for name, fn in [
+        ("sum", sum), ("min", min), ("max", max), ("print", print),
+        ("list", list), ("dict", dict), ("set", set), ("enumerate", enumerate),
+        ("all", all), ("any", any), ("reversed", reversed),
+        ("map", map), ("filter", filter), ("type", type),
+        ("__import__", _safe_import),
+    ]:
+        restricted_builtins[name] = fn
+
+    globals_dict: dict[str, Any] = {
+        "__builtins__": restricted_builtins,
+        "_getattr_": safer_getattr,
+        "_getiter_": _getiter_,
+        "_getitem_": _getitem_,
+        "_write_": _write_,
+        "_print_": PrintCollector,
+        "setattr": guarded_setattr,
+        "delattr": guarded_delattr,
+        "_iter_unpack_sequence_": guarded_iter_unpack_sequence,
+        "_unpack_sequence_": guarded_unpack_sequence,
+        "_inplacevar_": _inplacevar_,
+    }
+
+    try:
+        import numpy as np
+        globals_dict["np"] = np
+    except Exception:
+        pass
+
+    try:
+        import pandas as pd
+        globals_dict["pd"] = pd
+    except Exception:
+        pass
+
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        globals_dict["plt"] = plt
+    except Exception:
+        pass
+
+    if data:
+        globals_dict.update(data)
+
+    return globals_dict
+
+
+def _capture_matplotlib_plot() -> list[str]:
+    plots: list[str] = []
+    try:
+        import base64
+        import matplotlib.pyplot as plt
+        fig = plt.gcf()
+        if fig.get_axes():
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png")
+            plots.append(base64.b64encode(buf.getvalue()).decode())
+            plt.close(fig)
+    except Exception:
+        pass
+    return plots
+
+
 class CodeExecuteTool(BaseAgentTool):
     name: str = "code_execute"
     ui_label: str = "Executing Python code"
@@ -94,70 +174,9 @@ class CodeExecuteTool(BaseAgentTool):
 
         code = input_obj.code
 
-        # Build a RestrictedPython-compatible globals dict.
-        # safe_builtins provides a vetted subset of builtins (no open, eval,
-        # exec, __import__, getattr). We add back the safe builtins the tool
-        # needs (sum, min, max, print, list, dict, enumerate, all, any) and a
-        # guarded __import__ that only allows whitelisted top-level packages.
-        try:
-            from RestrictedPython import safe_builtins
-            from RestrictedPython.Guards import (
-                safer_getattr,
-                guarded_setattr,
-                guarded_delattr,
-                guarded_iter_unpack_sequence,
-                guarded_unpack_sequence,
-            )
-            from RestrictedPython.PrintCollector import PrintCollector
-        except ImportError:
+        globals_dict = _build_sandbox_globals(input_obj.data)
+        if globals_dict is None:
             return {"ok": False, "result": {}, "error": "RestrictedPython is not installed; code execution disabled.", "tokens": 0}
-
-        restricted_builtins = dict(safe_builtins)
-        for name, fn in [
-            ("sum", sum), ("min", min), ("max", max), ("print", print),
-            ("list", list), ("dict", dict), ("set", set), ("enumerate", enumerate),
-            ("all", all), ("any", any), ("reversed", reversed),
-            ("map", map), ("filter", filter), ("type", type),
-            ("__import__", _safe_import),
-        ]:
-            restricted_builtins[name] = fn
-
-        globals_dict: dict[str, Any] = {
-            "__builtins__": restricted_builtins,
-            "_getattr_": safer_getattr,
-            "_getiter_": _getiter_,
-            "_getitem_": _getitem_,
-            "_write_": _write_,
-            "_print_": PrintCollector,
-            "setattr": guarded_setattr,
-            "delattr": guarded_delattr,
-            "_iter_unpack_sequence_": guarded_iter_unpack_sequence,
-            "_unpack_sequence_": guarded_unpack_sequence,
-            "_inplacevar_": _inplacevar_,
-        }
-
-        try:
-            import numpy as np
-            globals_dict["np"] = np
-        except Exception:
-            pass
-
-        try:
-            import pandas as pd
-            globals_dict["pd"] = pd
-        except Exception:
-            pass
-
-        try:
-            import matplotlib
-            matplotlib.use("Agg")
-            import matplotlib.pyplot as plt
-            globals_dict["plt"] = plt
-        except Exception:
-            pass
-
-        if input_obj.data:
-            globals_dict.update(input_obj.data)
 
         stdout_buf = io.StringIO()
         stderr_buf = io.StringIO()
@@ -182,38 +201,19 @@ class CodeExecuteTool(BaseAgentTool):
 
             result = globals_dict.get("result")
             if result is None:
-                # try last expression? exec doesn't return. Use result variable.
                 result = ""
         except TimeoutError as exc:
             return {"ok": False, "result": {}, "error": f"Timeout after {input_obj.timeout_s}s", "tokens": 0}
         except Exception as exc:
             return {"ok": False, "result": {}, "error": f"{exc}\n{traceback.format_exc()}", "tokens": 0}
         finally:
-            # Always disarm the alarm on every exit path (including early
-            # returns from compile failure) — an unarmed alarm otherwise
-            # fires later inside the asyncio event loop and crashes the
-            # whole worker process with an uncaught TimeoutError.
             signal.alarm(0)
 
-        # RestrictedPython routes print() through a PrintCollector instance
-        # bound to `_print` in globals_dict, not real stdout.
         print_collector = globals_dict.get("_print")
         stdout = stdout_buf.getvalue() + (print_collector() if print_collector else "")
         stderr = stderr_buf.getvalue()
 
-        # Capture matplotlib figure as base64 if any
-        plots: list[str] = []
-        try:
-            import base64
-            import matplotlib.pyplot as plt
-            fig = plt.gcf()
-            if fig.get_axes():
-                buf = io.BytesIO()
-                fig.savefig(buf, format="png")
-                plots.append(base64.b64encode(buf.getvalue()).decode())
-                plt.close(fig)
-        except Exception:
-            pass
+        plots = _capture_matplotlib_plot()
 
         latency_ms = round((time.monotonic() - t0) * 1000)
         write_audit(ctx, "code_execute", input_obj.model_dump(), {"stdout_len": len(stdout)}, latency_ms=latency_ms, status="ok")

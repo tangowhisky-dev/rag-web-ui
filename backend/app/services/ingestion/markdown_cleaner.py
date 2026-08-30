@@ -11,7 +11,7 @@ No LLM calls, no external dependencies beyond stdlib re.
 """
 import logging
 import re
-from typing import List
+from typing import List, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,71 @@ def _is_ocr_garbage(line: str) -> bool:
     return (non_alnum / len(stripped)) > _OCR_GARBAGE_THRESHOLD
 
 
+def _count_header_frequencies(lines: List[str]) -> dict[str, int]:
+    line_freq: dict[str, int] = {}
+    for line in lines:
+        stripped = line.strip()
+        if 0 < len(stripped) <= _HEADER_MAX_LEN:
+            line_freq[stripped] = line_freq.get(stripped, 0) + 1
+    return line_freq
+
+
+def _filter_noise_lines(
+    lines: List[str],
+    repeated_headers: set[str],
+) -> Tuple[List[str], int, int, int, int]:
+    filtered: List[str] = []
+    removed_page = 0
+    removed_table_sep = 0
+    removed_ocr = 0
+    removed_headers = 0
+    seen_headers: set[str] = set()
+
+    for line in lines:
+        stripped = line.strip()
+
+        if _PAGE_NUMBER_RE.match(line):
+            removed_page += 1
+            continue
+
+        if stripped and _TABLE_SEP_RE.match(line) and "|" in line:
+            removed_table_sep += 1
+            continue
+
+        if _is_ocr_garbage(line):
+            removed_ocr += 1
+            continue
+
+        if stripped in repeated_headers:
+            if stripped in seen_headers:
+                removed_headers += 1
+                continue
+            seen_headers.add(stripped)
+
+        filtered.append(line)
+
+    return filtered, removed_page, removed_table_sep, removed_ocr, removed_headers
+
+
+def _collapse_blank_lines(filtered: List[str]) -> Tuple[List[str], int]:
+    collapsed: List[str] = []
+    blank_run = 0
+    removed_blanks = 0
+
+    for line in filtered:
+        if line.strip() == "":
+            blank_run += 1
+            if blank_run <= 2:
+                collapsed.append(line)
+            else:
+                removed_blanks += 1
+        else:
+            blank_run = 0
+            collapsed.append(line)
+
+    return collapsed, removed_blanks
+
+
 def clean_markdown(text: str) -> str:
     """Clean noise from markdown text produced by document conversion.
 
@@ -66,65 +131,14 @@ def clean_markdown(text: str) -> str:
     lines: List[str] = text.splitlines()
     total_in = len(lines)
 
-    # --- Pass 1: count line frequencies for header deduplication ---
-    line_freq: dict[str, int] = {}
-    for line in lines:
-        stripped = line.strip()
-        if 0 < len(stripped) <= _HEADER_MAX_LEN:
-            line_freq[stripped] = line_freq.get(stripped, 0) + 1
-
+    line_freq = _count_header_frequencies(lines)
     repeated_headers = {s for s, count in line_freq.items() if count >= _HEADER_REPEAT_THRESHOLD}
-    seen_headers: set[str] = set()
 
-    # --- Pass 2: filter lines ---
-    filtered: List[str] = []
-    removed_page = 0
-    removed_table_sep = 0
-    removed_ocr = 0
-    removed_headers = 0
+    filtered, removed_page, removed_table_sep, removed_ocr, removed_headers = _filter_noise_lines(
+        lines, repeated_headers,
+    )
 
-    for line in lines:
-        stripped = line.strip()
-
-        # Rule 1: stray page numbers
-        if _PAGE_NUMBER_RE.match(line):
-            removed_page += 1
-            continue
-
-        # Rule 2: broken table separator
-        if stripped and _TABLE_SEP_RE.match(line) and "|" in line:
-            removed_table_sep += 1
-            continue
-
-        # Rule 3: OCR garbage
-        if _is_ocr_garbage(line):
-            removed_ocr += 1
-            continue
-
-        # Rule 4: repeated short headers — keep first, drop rest
-        if stripped in repeated_headers:
-            if stripped in seen_headers:
-                removed_headers += 1
-                continue
-            seen_headers.add(stripped)
-
-        filtered.append(line)
-
-    # --- Pass 3: collapse excessive blank lines ---
-    collapsed: List[str] = []
-    blank_run = 0
-    removed_blanks = 0
-
-    for line in filtered:
-        if line.strip() == "":
-            blank_run += 1
-            if blank_run <= 2:
-                collapsed.append(line)
-            else:
-                removed_blanks += 1
-        else:
-            blank_run = 0
-            collapsed.append(line)
+    collapsed, removed_blanks = _collapse_blank_lines(filtered)
 
     total_removed = removed_page + removed_table_sep + removed_ocr + removed_headers + removed_blanks
     logger.debug(

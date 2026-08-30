@@ -20,23 +20,7 @@ from app.services.agentic_rag.redis_memory import delete_user_redis_sync
 org_router = APIRouter()
 
 
-@org_router.get("/orgs", response_model=List[OrgResponse])
-def list_orgs(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
-):
-    admin_org_ids = get_admin_org_ids(db, current_user)
-    query = db.query(Organisation)
-    if admin_org_ids is not None:
-        query = query.filter(Organisation.id.in_(admin_org_ids))
-    orgs = query.order_by(Organisation.id).all()
-    # Attach user_count and level to each org response
-    user_counts = {
-        o.id: db.query(User).filter(User.org_id == o.id).count()
-        for o in orgs
-    }
-    # Build a name lookup that includes ancestor orgs (not in admin scope)
-    # so we can compute the full hierarchy_name for the tooltip.
+def _build_org_name_lookup(db: Session, orgs) -> dict:
     all_org_ids_in_paths = set()
     for o in orgs:
         if o.path:
@@ -50,23 +34,43 @@ def list_orgs(
     } if ancestor_ids else {}
     name_lookup = {o.id: o.name for o in orgs}
     name_lookup.update(ancestor_names)
+    return name_lookup
 
-    result = []
-    for org in orgs:
-        resp = OrgResponse.model_validate(org)
-        resp.user_count = user_counts.get(org.id, 0)
-        # level = number of segments in path minus 1 (root = level 0)
-        if org.path:
-            parts = [p for p in org.path.split("/") if p]
-            resp.level = max(0, len(parts) - 1)
-            resp.hierarchy_name = " → ".join(
-                name_lookup.get(int(p), f"#{p}") for p in parts
-            )
-        else:
-            resp.level = 0
-            resp.hierarchy_name = org.name
-        result.append(resp)
-    # Sort hierarchically: by path (depth-first), then alphabetically within same level
+
+def _org_response_with_hierarchy(org, user_count: int, name_lookup: dict) -> OrgResponse:
+    resp = OrgResponse.model_validate(org)
+    resp.user_count = user_count
+    if org.path:
+        parts = [p for p in org.path.split("/") if p]
+        resp.level = max(0, len(parts) - 1)
+        resp.hierarchy_name = " → ".join(
+            name_lookup.get(int(p), f"#{p}") for p in parts
+        )
+    else:
+        resp.level = 0
+        resp.hierarchy_name = org.name
+    return resp
+
+
+@org_router.get("/orgs", response_model=List[OrgResponse])
+def list_orgs(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    admin_org_ids = get_admin_org_ids(db, current_user)
+    query = db.query(Organisation)
+    if admin_org_ids is not None:
+        query = query.filter(Organisation.id.in_(admin_org_ids))
+    orgs = query.order_by(Organisation.id).all()
+    user_counts = {
+        o.id: db.query(User).filter(User.org_id == o.id).count()
+        for o in orgs
+    }
+    name_lookup = _build_org_name_lookup(db, orgs)
+    result = [
+        _org_response_with_hierarchy(org, user_counts.get(org.id, 0), name_lookup)
+        for org in orgs
+    ]
     result.sort(key=lambda o: (o.path or "", o.name))
     return result
 
@@ -105,6 +109,55 @@ def create_org(
     return org
 
 
+def _validate_admin_edit_restriction(db: Session, current_user: User, org: Organisation):
+    if current_user.role != UserRole.admin or current_user.org_id is None:
+        return
+    if org.id == current_user.org_id:
+        raise HTTPException(
+            status_code=403,
+            detail="You cannot edit your own organisation. Only super admin can do that.",
+        )
+    # Check if the org is an ancestor of the admin's org
+    if org.path and current_user.org_id:
+        admin_org = db.query(Organisation).filter(Organisation.id == current_user.org_id).first()
+        if admin_org and admin_org.path and admin_org.path.startswith(org.path + "/"):
+            raise HTTPException(
+                status_code=403,
+                detail="You cannot edit a parent organisation. Only super admin can do that.",
+            )
+
+
+def _update_org_name(db: Session, org: Organisation, org_id: int, name: str):
+    if name != org.name and db.query(Organisation).filter(
+        Organisation.name == name, Organisation.id != org_id
+    ).first():
+        raise HTTPException(status_code=400, detail="Org name already exists")
+    org.name = name
+
+
+def _update_org_parent(db: Session, org: Organisation, parent_id: int, admin_org_ids):
+    if admin_org_ids is not None and parent_id not in admin_org_ids:
+        raise HTTPException(status_code=403, detail="Parent org is outside your organisation scope")
+    parent = db.query(Organisation).filter(Organisation.id == parent_id).first()
+    if parent is None:
+        raise HTTPException(status_code=404, detail="Parent org not found")
+    # Prevent setting a descendant as parent (would create a cycle)
+    if org.path and parent.path and org.id != parent.id:
+        # parent must not be a descendant of org
+        # i.e., org's path must not be a prefix of parent's path
+        if parent.path.startswith(org.path + "/"):
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot set a child or descendant organisation as parent",
+            )
+    org.parent_id = parent_id
+    # Guard against self-referencing root org
+    if parent.id == org.id:
+        org.path = f"/{org.id}"
+    else:
+        org.path = f"{parent.path}/{org.id}"
+
+
 @org_router.patch("/orgs/{org_id}", response_model=OrgResponse)
 def update_org(
     org_id: int,
@@ -121,52 +174,16 @@ def update_org(
         raise HTTPException(status_code=403, detail="Org is outside your organisation scope")
 
     # Org admins cannot edit their own org or ancestors — only descendants
-    if current_user.role == UserRole.admin and current_user.org_id is not None:
-        if org.id == current_user.org_id:
-            raise HTTPException(
-                status_code=403,
-                detail="You cannot edit your own organisation. Only super admin can do that.",
-            )
-        # Check if the org is an ancestor of the admin's org
-        if org.path and current_user.org_id:
-            admin_org = db.query(Organisation).filter(Organisation.id == current_user.org_id).first()
-            if admin_org and admin_org.path and admin_org.path.startswith(org.path + "/"):
-                raise HTTPException(
-                    status_code=403,
-                    detail="You cannot edit a parent organisation. Only super admin can do that.",
-                )
+    _validate_admin_edit_restriction(db, current_user, org)
 
     if payload.name is not None:
-        if payload.name != org.name and db.query(Organisation).filter(
-            Organisation.name == payload.name, Organisation.id != org_id
-        ).first():
-            raise HTTPException(status_code=400, detail="Org name already exists")
-        org.name = payload.name
+        _update_org_name(db, org, org_id, payload.name)
 
     if payload.remove_parent:
         raise HTTPException(status_code=400, detail="Organisation must always have a parent")
 
     if payload.parent_id is not None:
-        if admin_org_ids is not None and payload.parent_id not in admin_org_ids:
-            raise HTTPException(status_code=403, detail="Parent org is outside your organisation scope")
-        parent = db.query(Organisation).filter(Organisation.id == payload.parent_id).first()
-        if parent is None:
-            raise HTTPException(status_code=404, detail="Parent org not found")
-        # Prevent setting a descendant as parent (would create a cycle)
-        if org.path and parent.path and org.id != parent.id:
-            # parent must not be a descendant of org
-            # i.e., org's path must not be a prefix of parent's path
-            if parent.path.startswith(org.path + "/"):
-                raise HTTPException(
-                    status_code=400,
-                    detail="Cannot set a child or descendant organisation as parent",
-                )
-        org.parent_id = payload.parent_id
-        # Guard against self-referencing root org
-        if parent.id == org.id:
-            org.path = f"/{org.id}"
-        else:
-            org.path = f"{parent.path}/{org.id}"
+        _update_org_parent(db, org, payload.parent_id, admin_org_ids)
 
     db.commit()
     db.refresh(org)
@@ -220,6 +237,24 @@ def delete_org(
 # ---------------------------------------------------------------------------
 
 
+def _count_tasks_by_status(tasks) -> tuple:
+    counts = {"pending": 0, "processing": 0, "completed": 0, "failed": 0}
+    for t in tasks:
+        if t.status in counts:
+            counts[t.status] += 1
+    return counts["pending"], counts["processing"], counts["completed"], counts["failed"]
+
+
+def _ingestion_status_from_counts(processing_docs: int, failed_docs: int, completed_docs: int, total_docs: int) -> str:
+    if processing_docs > 0:
+        return "running"
+    if failed_docs > 0:
+        return "failed"
+    if total_docs > 0 and completed_docs == total_docs:
+        return "completed"
+    return "idle"
+
+
 @org_router.get("/orgs/{org_id}/ingestion-status", response_model=OrgIngestionStatusResponse)
 def get_org_ingestion_status(
     org_id: int,
@@ -234,7 +269,6 @@ def get_org_ingestion_status(
     if admin_org_ids is not None and org_id not in admin_org_ids:
         raise HTTPException(status_code=403, detail="Org is outside your organisation scope")
 
-    # Aggregate ProcessingTask rows across all KBs belonging to this org
     tasks = (
         db.query(ProcessingTask)
         .join(KnowledgeBase, ProcessingTask.knowledge_base_id == KnowledgeBase.id)
@@ -242,22 +276,10 @@ def get_org_ingestion_status(
         .all()
     )
 
-    pending_docs = sum(1 for t in tasks if t.status == "pending")
-    processing_docs = sum(1 for t in tasks if t.status == "processing")
-    completed_docs = sum(1 for t in tasks if t.status == "completed")
-    failed_docs = sum(1 for t in tasks if t.status == "failed")
+    pending_docs, processing_docs, completed_docs, failed_docs = _count_tasks_by_status(tasks)
     total_docs = len(tasks)
+    status = _ingestion_status_from_counts(processing_docs, failed_docs, completed_docs, total_docs)
 
-    if processing_docs > 0:
-        status = "running"
-    elif failed_docs > 0:
-        status = "failed"
-    elif total_docs > 0 and completed_docs == total_docs:
-        status = "completed"
-    else:
-        status = "idle"
-
-    # last_run_at = max updated_at among completed or failed tasks
     terminal_tasks = [t for t in tasks if t.status in ("completed", "failed")]
     last_run_at = max((t.updated_at for t in terminal_tasks), default=None)
 
@@ -383,6 +405,27 @@ def create_user(
     return user
 
 
+def _apply_user_role_update(current_user: User, payload: UserAdminUpdate, user: User):
+    if current_user.role == UserRole.admin and payload.role not in ("user",):
+        raise HTTPException(
+            status_code=403,
+            detail="Only super admin can promote users to admin or super admin role",
+        )
+    try:
+        user.role = UserRole(payload.role)
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"Invalid role: {payload.role}")
+
+
+def _apply_user_org_update(db: Session, payload: UserAdminUpdate, admin_org_ids, user: User):
+    if admin_org_ids is not None and payload.org_id not in admin_org_ids:
+        raise HTTPException(status_code=403, detail="Target org is outside your organisation scope")
+    org = db.query(Organisation).filter(Organisation.id == payload.org_id).first()
+    if org is None:
+        raise HTTPException(status_code=404, detail="Org not found")
+    user.org_id = payload.org_id
+
+
 @user_router.patch("/users/{user_id}", response_model=UserResponse)
 def update_user(
     user_id: int,
@@ -398,7 +441,6 @@ def update_user(
     if admin_org_ids is not None and user.org_id not in admin_org_ids:
         raise HTTPException(status_code=403, detail="User is outside your organisation scope")
 
-    # Org admins can only edit normal users — not other admins or super_admins
     if current_user.role == UserRole.admin and user.role != UserRole.user:
         raise HTTPException(
             status_code=403,
@@ -406,24 +448,10 @@ def update_user(
         )
 
     if payload.role is not None:
-        # Only super_admin can promote a user to admin or super_admin role
-        if current_user.role == UserRole.admin and payload.role not in ("user",):
-            raise HTTPException(
-                status_code=403,
-                detail="Only super admin can promote users to admin or super admin role",
-            )
-        try:
-            user.role = UserRole(payload.role)
-        except ValueError:
-            raise HTTPException(status_code=422, detail=f"Invalid role: {payload.role}")
+        _apply_user_role_update(current_user, payload, user)
 
     if payload.org_id is not None:
-        if admin_org_ids is not None and payload.org_id not in admin_org_ids:
-            raise HTTPException(status_code=403, detail="Target org is outside your organisation scope")
-        org = db.query(Organisation).filter(Organisation.id == payload.org_id).first()
-        if org is None:
-            raise HTTPException(status_code=404, detail="Org not found")
-        user.org_id = payload.org_id
+        _apply_user_org_update(db, payload, admin_org_ids, user)
     elif "org_id" in payload.model_fields_set:
         raise HTTPException(status_code=422, detail="User must belong to an organisation")
 

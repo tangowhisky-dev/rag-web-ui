@@ -81,6 +81,137 @@ class _ExtractResult(BaseModel):
     data: List[DataPoint] = Field(default_factory=list, description="Extracted data points.")
 
 
+def _extract_from_last_answer(
+    input_obj: ExtractDataInput, ctx: ToolContext, tool: ExtractDataTool, t0: float,
+) -> tuple[str, Optional[dict]]:
+    lao = ctx.state.get("last_answer_object") if ctx.state else None
+    if lao and isinstance(lao, LastAnswerObject) and lao.data:
+        # Already structured data; return it directly.
+        points = [
+            {"label": dp.label, "value": dp.value, "unit": dp.unit, "context": dp.context}
+            for dp in lao.data
+        ]
+        return "", tool._finish(input_obj, points, 0, t0)
+    # No structured data in lao.data — check chart_options as fallback.
+    if lao and isinstance(lao, LastAnswerObject) and lao.chart_options:
+        points = _extract_from_chart_options(lao.chart_options)
+        if points:
+            return "", tool._finish(input_obj, points, 0, t0)
+    text = ""
+    if lao and hasattr(lao, "summary"):
+        text = lao.summary + "\n" + "\n".join(lao.key_points or [])
+    if not text:
+        text = "No previous answer available."
+    return text, None
+
+
+def _extract_from_retrieved_docs(
+    input_obj: ExtractDataInput, ctx: ToolContext, tool: ExtractDataTool, t0: float,
+) -> tuple[str, Optional[dict]]:
+    docs = ctx.state.get("retrieved_docs", []) if ctx.state else []
+    parts = []
+    for d in docs[:10]:
+        parts.append(d.get("page_content", ""))
+    return "\n\n".join(parts), None
+
+
+def _extract_from_file(
+    input_obj: ExtractDataInput, ctx: ToolContext, tool: ExtractDataTool, t0: float,
+) -> tuple[str, Optional[dict]]:
+    if not input_obj.source_id:
+        return "Unsupported source.", None
+    rbac = enforce_rbac(ctx, file_id=input_obj.source_id)
+    if rbac.get("file_id") is None:
+        return "", {"ok": False, "result": {}, "error": "Access denied to file.", "tokens": 0}
+    cf = ctx.db.query(ChatFile).filter(ChatFile.id == rbac["file_id"]).first()
+    text = cf.markdown_content or "" if cf else ""
+    return text, None
+
+
+def _extract_from_specified(
+    input_obj: ExtractDataInput, ctx: ToolContext, tool: ExtractDataTool, t0: float,
+) -> tuple[str, Optional[dict]]:
+    if not input_obj.source_id:
+        return "Unsupported source.", None
+    if not ctx.chat_id:
+        return "", {"ok": False, "result": {}, "error": "Access denied: no chat context.", "tokens": 0}
+    msg = ctx.db.query(Message).filter(
+        Message.id == input_obj.source_id,
+        Message.chat_id == ctx.chat_id,
+    ).first()
+    text = msg.content if msg else ""
+    if not text:
+        text = "Message not found."
+    return text, None
+
+
+SOURCE_EXTRACTORS = {
+    "last_answer": _extract_from_last_answer,
+    "retrieved_docs": _extract_from_retrieved_docs,
+    "file": _extract_from_file,
+    "specified": _extract_from_specified,
+}
+
+
+async def _extract_with_llm(text: str, ctx: ToolContext, focus: Optional[str]) -> list[dict]:
+    prompt = (
+        "Extract all explicit numerical statistics from the text below. "
+        "Return a JSON list of objects with keys: label, value, unit, context. "
+        f"Focus: {focus or 'any statistics'}.\n\n{text}"
+    )
+    points: list[dict] = []
+    try:
+        llm = build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)
+
+        # Primary path: structured output (forces valid JSON from the LLM).
+        for attempt in range(_MAX_LLM_RETRIES):
+            try:
+                structured = llm.with_structured_output(_ExtractResult, method="json_schema")
+                result = await structured.ainvoke([{"role": "user", "content": prompt}])
+                if result and result.data:
+                    points = [
+                        {"label": dp.label, "value": dp.value, "unit": dp.unit, "context": dp.context}
+                        for dp in result.data
+                    ]
+                    break
+            except Exception as exc:
+                logger.debug("[extract_data] structured output attempt %d failed: %s", attempt + 1, exc)
+
+        # Fallback: plain ainvoke + _extract_json_block + json_repair
+        # for gateways without structured output support.
+        if not points:
+            from app.services.agentic_rag.agent_graph import _extract_json_block
+            response = await llm.ainvoke([{"role": "user", "content": prompt}])
+            raw = str(response.content)
+            block = _extract_json_block(raw)
+            if block:
+                try:
+                    points = json.loads(block)
+                except json.JSONDecodeError:
+                    from json_repair import repair_json
+                    points = json.loads(repair_json(block))
+                if not isinstance(points, list):
+                    points = []
+    except Exception as exc:
+        logger.warning("[extract_data] LLM extraction failed: %s", exc)
+
+    if not points:
+        points = _rule_based_extract(text, focus)
+    return points
+
+
+def _validate_points(points: list[dict]) -> list[dict]:
+    # Validate against DataPoint schema where possible.
+    validated = []
+    for p in points:
+        try:
+            dp = DataPoint(**p)
+            validated.append({"label": dp.label, "value": dp.value, "unit": dp.unit, "context": dp.context})
+        except Exception:
+            validated.append(p)
+    return validated
+
+
 class ExtractDataTool(BaseAgentTool):
     name: str = "extract_data"
     ui_label: str = "Extracting data"
@@ -98,105 +229,18 @@ class ExtractDataTool(BaseAgentTool):
         t0 = time.monotonic()
         ctx: ToolContext = self.ctx
 
-        text = ""
-        if input_obj.source == "last_answer":
-            lao = ctx.state.get("last_answer_object") if ctx.state else None
-            if lao and isinstance(lao, LastAnswerObject) and lao.data:
-                # Already structured data; return it directly.
-                points = [
-                    {"label": dp.label, "value": dp.value, "unit": dp.unit, "context": dp.context}
-                    for dp in lao.data
-                ]
-                return self._finish(input_obj, points, 0, t0)
-            # No structured data in lao.data — check chart_options as fallback.
-            if lao and isinstance(lao, LastAnswerObject) and lao.chart_options:
-                points = _extract_from_chart_options(lao.chart_options)
-                if points:
-                    return self._finish(input_obj, points, 0, t0)
-            if lao and hasattr(lao, "summary"):
-                text = lao.summary + "\n" + "\n".join(lao.key_points or [])
-            if not text:
-                text = "No previous answer available."
-        elif input_obj.source == "retrieved_docs":
-            docs = ctx.state.get("retrieved_docs", []) if ctx.state else []
-            parts = []
-            for d in docs[:10]:
-                parts.append(d.get("page_content", ""))
-            text = "\n\n".join(parts)
-        elif input_obj.source == "file" and input_obj.source_id:
-            rbac = enforce_rbac(ctx, file_id=input_obj.source_id)
-            if rbac.get("file_id") is None:
-                return {"ok": False, "result": {}, "error": "Access denied to file.", "tokens": 0}
-            cf = ctx.db.query(ChatFile).filter(ChatFile.id == rbac["file_id"]).first()
-            text = cf.markdown_content or "" if cf else ""
-        elif input_obj.source == "specified" and input_obj.source_id:
-            if not ctx.chat_id:
-                return {"ok": False, "result": {}, "error": "Access denied: no chat context.", "tokens": 0}
-            msg = ctx.db.query(Message).filter(
-                Message.id == input_obj.source_id,
-                Message.chat_id == ctx.chat_id,
-            ).first()
-            text = msg.content if msg else ""
-            if not text:
-                text = "Message not found."
+        extractor = SOURCE_EXTRACTORS.get(input_obj.source)
+        if extractor:
+            text, early_return = extractor(input_obj, ctx, self, t0)
         else:
-            text = "Unsupported source."
+            text, early_return = "Unsupported source.", None
+
+        if early_return is not None:
+            return early_return
 
         text = text[:6000]
-
-        prompt = (
-            "Extract all explicit numerical statistics from the text below. "
-            "Return a JSON list of objects with keys: label, value, unit, context. "
-            f"Focus: {input_obj.focus or 'any statistics'}.\n\n{text}"
-        )
-
-        points: list[dict] = []
-        try:
-            llm = build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)
-
-            # Primary path: structured output (forces valid JSON from the LLM).
-            for attempt in range(_MAX_LLM_RETRIES):
-                try:
-                    structured = llm.with_structured_output(_ExtractResult, method="json_schema")
-                    result = await structured.ainvoke([{"role": "user", "content": prompt}])
-                    if result and result.data:
-                        points = [
-                            {"label": dp.label, "value": dp.value, "unit": dp.unit, "context": dp.context}
-                            for dp in result.data
-                        ]
-                        break
-                except Exception as exc:
-                    logger.debug("[extract_data] structured output attempt %d failed: %s", attempt + 1, exc)
-
-            # Fallback: plain ainvoke + _extract_json_block + json_repair
-            # for gateways without structured output support.
-            if not points:
-                from app.services.agentic_rag.agent_graph import _extract_json_block
-                response = await llm.ainvoke([{"role": "user", "content": prompt}])
-                raw = str(response.content)
-                block = _extract_json_block(raw)
-                if block:
-                    try:
-                        points = json.loads(block)
-                    except json.JSONDecodeError:
-                        from json_repair import repair_json
-                        points = json.loads(repair_json(block))
-                    if not isinstance(points, list):
-                        points = []
-        except Exception as exc:
-            logger.warning("[extract_data] LLM extraction failed: %s", exc)
-
-        if not points:
-            points = _rule_based_extract(text, input_obj.focus)
-
-        # Validate against DataPoint schema where possible.
-        validated = []
-        for p in points:
-            try:
-                dp = DataPoint(**p)
-                validated.append({"label": dp.label, "value": dp.value, "unit": dp.unit, "context": dp.context})
-            except Exception:
-                validated.append(p)
+        points = await _extract_with_llm(text, ctx, input_obj.focus)
+        validated = _validate_points(points)
 
         latency_ms = round((time.monotonic() - t0) * 1000)
         return self._finish(input_obj, validated, latency_ms, t0)

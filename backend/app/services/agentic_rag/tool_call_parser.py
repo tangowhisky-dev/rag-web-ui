@@ -95,6 +95,56 @@ def _normalize_tool_calls(raw: Any) -> list[dict]:
     return calls
 
 
+def _dispatch_parsed_json(parsed: Any) -> Optional[ParsedThinkResponse]:
+    """Map a parsed JSON object to tool calls or a final answer."""
+    if "tool_calls" in parsed:
+        tool_calls = _normalize_tool_calls(parsed["tool_calls"])
+        if tool_calls:
+            return ParsedThinkResponse(tool_calls=tool_calls)
+    elif "tool" in parsed or "name" in parsed:
+        name = parsed.get("tool") or parsed.get("name")
+        args = parsed.get("arguments", parsed.get("args", {}))
+        if name:
+            return ParsedThinkResponse(tool_calls=[{"tool": name, "arguments": args}])
+    elif "final_answer" in parsed:
+        return ParsedThinkResponse(final_answer=parsed["final_answer"])
+    elif isinstance(parsed, dict) and len(parsed) == 1:
+        # Malformed shorthand some local models emit, e.g.
+        # {"rag_retrieve": {"query": "..."}} instead of the
+        # documented {"tool": ..., "arguments": ...} shape.
+        # Treat the single key as the tool name.
+        (name, args), = parsed.items()
+        if isinstance(args, dict):
+            return ParsedThinkResponse(tool_calls=[{"tool": name, "arguments": args}])
+    elif isinstance(parsed, dict) and "chart_type" in parsed and "data" in parsed:
+        # Some local models, asked for a chart, write the
+        # chart_generate *arguments* directly as the answer body
+        # instead of an actual tool call — e.g.
+        # {"chart_type": "bar", "data": [...], "title": "..."}.
+        # Recognize the tool's own argument shape and dispatch it
+        # as a real chart_generate call instead of letting this
+        # raw JSON leak into the final answer text verbatim.
+        return ParsedThinkResponse(tool_calls=[{"tool": "chart_generate", "arguments": parsed}])
+    return None
+
+
+def _parse_json_text_fallback(raw: str) -> Optional[ParsedThinkResponse]:
+    """Tier 2: try to extract tool calls or final answer from JSON text."""
+    try:
+        block = _extract_json_block(raw)
+        if block:
+            try:
+                parsed = json.loads(block)
+            except json.JSONDecodeError:
+                parsed = json.loads(_repair_json_brackets(block))
+            result = _dispatch_parsed_json(parsed)
+            if result is not None:
+                return result
+    except Exception as exc:
+        logger.warning("[tool_call_parser] JSON fallback parse failed: %s", exc)
+    return None
+
+
 def parse_think_response(
     response: AIMessage,
     mode: str = "auto",
@@ -117,44 +167,9 @@ def parse_think_response(
 
     # Tier 2: JSON-text fallback.
     if mode in ("auto", "json_text"):
-        try:
-            block = _extract_json_block(raw)
-            if block:
-                try:
-                    parsed = json.loads(block)
-                except json.JSONDecodeError:
-                    parsed = json.loads(_repair_json_brackets(block))
-                if "tool_calls" in parsed:
-                    tool_calls = _normalize_tool_calls(parsed["tool_calls"])
-                    if tool_calls:
-                        return ParsedThinkResponse(tool_calls=tool_calls)
-                elif "tool" in parsed or "name" in parsed:
-                    name = parsed.get("tool") or parsed.get("name")
-                    args = parsed.get("arguments", parsed.get("args", {}))
-                    if name:
-                        return ParsedThinkResponse(tool_calls=[{"tool": name, "arguments": args}])
-                elif "final_answer" in parsed:
-                    final_answer = parsed["final_answer"]
-                    return ParsedThinkResponse(final_answer=final_answer)
-                elif isinstance(parsed, dict) and len(parsed) == 1:
-                    # Malformed shorthand some local models emit, e.g.
-                    # {"rag_retrieve": {"query": "..."}} instead of the
-                    # documented {"tool": ..., "arguments": ...} shape.
-                    # Treat the single key as the tool name.
-                    (name, args), = parsed.items()
-                    if isinstance(args, dict):
-                        return ParsedThinkResponse(tool_calls=[{"tool": name, "arguments": args}])
-                elif isinstance(parsed, dict) and "chart_type" in parsed and "data" in parsed:
-                    # Some local models, asked for a chart, write the
-                    # chart_generate *arguments* directly as the answer body
-                    # instead of an actual tool call — e.g.
-                    # {"chart_type": "bar", "data": [...], "title": "..."}.
-                    # Recognize the tool's own argument shape and dispatch it
-                    # as a real chart_generate call instead of letting this
-                    # raw JSON leak into the final answer text verbatim.
-                    return ParsedThinkResponse(tool_calls=[{"tool": "chart_generate", "arguments": parsed}])
-        except Exception as exc:
-            logger.warning("[tool_call_parser] JSON fallback parse failed: %s", exc)
+        result = _parse_json_text_fallback(raw)
+        if result is not None:
+            return result
 
     # Tier 3: final-answer default.
     return ParsedThinkResponse(final_answer=raw)

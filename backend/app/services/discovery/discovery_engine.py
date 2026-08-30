@@ -328,6 +328,243 @@ def _upsert_manifest(
         db.commit()
 
 
+def _load_datastore(
+    db: Session,
+    datastore_id: int,
+) -> tuple[
+    DataStore | None,
+    dict[str, DataStoreFileManifest],
+    DiscoveryResult | None,
+]:
+    """Load the DataStore and its manifest entries in a single query.
+
+    Returns ``(ds, manifest_map, early_result)``.  When *early_result* is
+    not ``None`` the caller should return it immediately (datastore missing,
+    inactive, or folder absent).
+    """
+    ds_stmt = (
+        select(DataStore)
+        .options(selectinload(DataStore.manifest_entries))
+        .where(DataStore.id == datastore_id)
+    )
+    ds = db.scalars(ds_stmt).first()
+
+    if ds is None:
+        logger.warning("[DISCOVERY] datastore_not_found id=%d", datastore_id)
+        return None, {}, DiscoveryResult(
+            datastore_id=datastore_id,
+            datastore_name="unknown",
+            folder_path="",
+        )
+
+    if not ds.is_active:
+        logger.info("[DISCOVERY] datastore_inactive id=%d", datastore_id)
+        return ds, {}, DiscoveryResult(
+            datastore_id=datastore_id,
+            datastore_name=ds.name,
+            folder_path=ds.folder_path,
+        )
+
+    if not ds.folder_path or not os.path.isdir(ds.folder_path):
+        logger.warning(
+            "[DISCOVERY] datastore_folder_missing id=%d path=%s",
+            datastore_id,
+            ds.folder_path,
+        )
+        return ds, {}, DiscoveryResult(
+            datastore_id=datastore_id,
+            datastore_name=ds.name,
+            folder_path=ds.folder_path or "",
+        )
+
+    # Build manifest lookup keyed by file_path.
+    manifest_map: dict[str, DataStoreFileManifest] = {
+        m.file_path: m for m in ds.manifest_entries
+    }
+    return ds, manifest_map, None
+
+
+def _run_hash_workers(
+    file_paths: list[str],
+    config: DiscoveryConfig,
+) -> tuple[list[dict[str, Any]], int]:
+    """Hash *file_paths* concurrently, returning ``(collected, skipped)``."""
+    collected: list[dict[str, Any]] = []
+    skipped = 0
+    with ThreadPoolExecutor(max_workers=config.max_workers) as executor:
+        futures = {
+            executor.submit(_hash_worker, (fp, config)): fp
+            for fp in file_paths
+        }
+        for future in as_completed(futures):
+            fp = futures[future]
+            try:
+                result = future.result()
+            except Exception:
+                logger.exception(
+                    "[DISCOVERY] worker_exception path=%s", fp
+                )
+                skipped += 1
+                continue
+            if result is None:
+                skipped += 1
+            else:
+                collected.append(result)
+    return collected, skipped
+
+
+def _run_stat_workers(
+    file_paths: list[str],
+    config: DiscoveryConfig,
+) -> tuple[dict[str, dict[str, Any]], int]:
+    """Stat *file_paths* concurrently, returning ``(stat_results, skipped)``."""
+    stat_results: dict[str, dict[str, Any]] = {}
+    skipped = 0
+    with ThreadPoolExecutor(max_workers=config.max_workers) as executor:
+        futures = {
+            executor.submit(_stat_worker, (fp, config)): fp
+            for fp in file_paths
+        }
+        for future in as_completed(futures):
+            fp = futures[future]
+            try:
+                result = future.result()
+            except Exception:
+                logger.exception(
+                    "[DISCOVERY] stat_worker_exception path=%s", fp
+                )
+                skipped += 1
+                continue
+            if result is None:
+                skipped += 1
+            else:
+                stat_results[result["file_path"]] = result
+    return stat_results, skipped
+
+
+def _collect_full_hash(
+    file_paths: list[str],
+    config: DiscoveryConfig,
+    datastore_id: int,
+) -> tuple[list[dict[str, Any]], int]:
+    """Hash every file — safety-net path for *force_full_hash* scans."""
+    collected, skipped = _run_hash_workers(file_paths, config)
+    logger.info(
+        "[DISCOVERY] hashing_done datastore_id=%d collected=%d skipped=%d (force_full_hash=True)",
+        datastore_id,
+        len(collected),
+        skipped,
+    )
+    return collected, skipped
+
+
+def _compare_stats(
+    stat_results: dict[str, dict[str, Any]],
+    manifest_map: dict[str, DataStoreFileManifest],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Compare stats against manifest, returning ``(unchanged, candidates)``.
+
+    Files where (mtime, size) match the manifest are unchanged — reuse the
+    manifest hash and skip hashing.  The rest are candidates for hashing.
+    """
+    unchanged: list[dict[str, Any]] = []
+    candidates: list[str] = []  # file_paths that need hashing
+
+    for fp, stat_meta in stat_results.items():
+        existing = manifest_map.get(fp)
+        if (
+            existing is not None
+            and existing.file_mtime is not None
+            and existing.file_mtime == stat_meta["file_mtime"]
+            and existing.file_size == stat_meta["file_size"]
+        ):
+            # Unchanged — reuse manifest hash.
+            unchanged.append({
+                "file_path": fp,
+                "file_hash": existing.file_hash,
+                "file_size": stat_meta["file_size"],
+                "file_mtime": stat_meta["file_mtime"],
+            })
+        else:
+            # New or modified — needs hashing.
+            candidates.append(fp)
+
+    return unchanged, candidates
+
+
+def _collect_incremental(
+    file_paths: list[str],
+    config: DiscoveryConfig,
+    manifest_map: dict[str, DataStoreFileManifest],
+    datastore_id: int,
+) -> tuple[list[dict[str, Any]], int]:
+    """Two-phase stat-first incremental scan, returning ``(collected, skipped)``.
+
+    Phase 1 — stat every file concurrently.  Compare (mtime, size) against
+    the manifest.  Files where both match are unchanged — reuse the manifest
+    hash and skip hashing entirely.
+
+    Phase 2 — hash only the candidates (new files + files where mtime or
+    size changed).
+    """
+    # ── Phase 1: stat all files concurrently ───────────────────
+    stat_results, skipped = _run_stat_workers(file_paths, config)
+
+    # ── First-scan fast path ────────────────────────────────────
+    # When the manifest is empty (first scan of a datastore), every
+    # file is new by definition. Skip the hash phase entirely —
+    # downstream consumers (watcher, recovery) hash each file lazily
+    # during ingestion, interleaved with the conversion read at
+    # 4-way concurrency instead of a 16-way batch that saturates
+    # network mounts. The manifest is populated incrementally as
+    # each file is processed.
+    if not manifest_map:
+        logger.info(
+            "[DISCOVERY] first_scan_skip_hashing datastore_id=%d total=%d skipped=%d",
+            datastore_id,
+            len(stat_results),
+            skipped,
+        )
+        collected = [
+            {
+                "file_path": fp,
+                "file_hash": "",  # placeholder — downstream hashes lazily
+                "file_size": meta["file_size"],
+                "file_mtime": meta["file_mtime"],
+            }
+            for fp, meta in stat_results.items()
+        ]
+        return collected, skipped
+
+    # ── Compare stats against manifest ──────────────────────
+    unchanged, candidates = _compare_stats(stat_results, manifest_map)
+
+    logger.info(
+        "[DISCOVERY] stat_done datastore_id=%d total=%d unchanged=%d candidates=%d skipped=%d",
+        datastore_id,
+        len(stat_results),
+        len(unchanged),
+        len(candidates),
+        skipped,
+    )
+
+    # ── Phase 2: hash only candidates ──────────────────────
+    hashed: list[dict[str, Any]] = []
+    if candidates:
+        hashed, hash_skipped = _run_hash_workers(candidates, config)
+        skipped += hash_skipped
+
+        logger.info(
+            "[DISCOVERY] hashing_done datastore_id=%d hashed=%d skipped=%d",
+            datastore_id,
+            len(hashed),
+            skipped - (len(stat_results) - len(unchanged) - len(candidates)),
+        )
+
+    collected = unchanged + hashed
+    return collected, skipped
+
+
 def discover_datastore(
     datastore_id: int,
     force_full_hash: bool = False,
@@ -360,46 +597,9 @@ def discover_datastore(
 
     db = SessionLocal()
     try:
-        # Load the DataStore and its manifest entries in a single query.
-        ds_stmt = (
-            select(DataStore)
-            .options(selectinload(DataStore.manifest_entries))
-            .where(DataStore.id == datastore_id)
-        )
-        ds = db.scalars(ds_stmt).first()
-
-        if ds is None:
-            logger.warning("[DISCOVERY] datastore_not_found id=%d", datastore_id)
-            return DiscoveryResult(
-                datastore_id=datastore_id,
-                datastore_name="unknown",
-                folder_path="",
-            )
-
-        if not ds.is_active:
-            logger.info("[DISCOVERY] datastore_inactive id=%d", datastore_id)
-            return DiscoveryResult(
-                datastore_id=datastore_id,
-                datastore_name=ds.name,
-                folder_path=ds.folder_path,
-            )
-
-        if not ds.folder_path or not os.path.isdir(ds.folder_path):
-            logger.warning(
-                "[DISCOVERY] datastore_folder_missing id=%d path=%s",
-                datastore_id,
-                ds.folder_path,
-            )
-            return DiscoveryResult(
-                datastore_id=datastore_id,
-                datastore_name=ds.name,
-                folder_path=ds.folder_path or "",
-            )
-
-        # Build manifest lookup keyed by file_path.
-        manifest_map: dict[str, DataStoreFileManifest] = {
-            m.file_path: m for m in ds.manifest_entries
-        }
+        ds, manifest_map, early_result = _load_datastore(db, datastore_id)
+        if early_result is not None:
+            return early_result
 
         logger.info(
             "[DISCOVERY] scanning_start datastore_id=%d folder=%s force_full_hash=%s",
@@ -417,150 +617,15 @@ def discover_datastore(
         )
 
         config = DiscoveryConfig()
-        skipped = 0
-        collected: list[dict[str, Any]] = []
 
         if force_full_hash:
-            # Hash every file — safety-net path.
-            with ThreadPoolExecutor(max_workers=config.max_workers) as executor:
-                futures = {
-                    executor.submit(_hash_worker, (fp, config)): fp
-                    for fp in file_paths
-                }
-                for future in as_completed(futures):
-                    fp = futures[future]
-                    try:
-                        result = future.result()
-                    except Exception:
-                        logger.exception(
-                            "[DISCOVERY] worker_exception path=%s", fp
-                        )
-                        skipped += 1
-                        continue
-                    if result is None:
-                        skipped += 1
-                    else:
-                        collected.append(result)
-
-            logger.info(
-                "[DISCOVERY] hashing_done datastore_id=%d collected=%d skipped=%d (force_full_hash=True)",
-                datastore_id,
-                len(collected),
-                skipped,
+            collected, skipped = _collect_full_hash(
+                file_paths, config, datastore_id
             )
         else:
-            # ── Phase 1: stat all files concurrently ───────────────────
-            stat_results: dict[str, dict[str, Any]] = {}
-            with ThreadPoolExecutor(max_workers=config.max_workers) as executor:
-                futures = {
-                    executor.submit(_stat_worker, (fp, config)): fp
-                    for fp in file_paths
-                }
-                for future in as_completed(futures):
-                    fp = futures[future]
-                    try:
-                        result = future.result()
-                    except Exception:
-                        logger.exception(
-                            "[DISCOVERY] stat_worker_exception path=%s", fp
-                        )
-                        skipped += 1
-                        continue
-                    if result is None:
-                        skipped += 1
-                    else:
-                        stat_results[result["file_path"]] = result
-
-            # ── First-scan fast path ────────────────────────────────────
-            # When the manifest is empty (first scan of a datastore), every
-            # file is new by definition. Skip the hash phase entirely —
-            # downstream consumers (watcher, recovery) hash each file lazily
-            # during ingestion, interleaved with the conversion read at
-            # 4-way concurrency instead of a 16-way batch that saturates
-            # network mounts. The manifest is populated incrementally as
-            # each file is processed.
-            if not manifest_map:
-                logger.info(
-                    "[DISCOVERY] first_scan_skip_hashing datastore_id=%d total=%d skipped=%d",
-                    datastore_id,
-                    len(stat_results),
-                    skipped,
-                )
-                collected = [
-                    {
-                        "file_path": fp,
-                        "file_hash": "",  # placeholder — downstream hashes lazily
-                        "file_size": meta["file_size"],
-                        "file_mtime": meta["file_mtime"],
-                    }
-                    for fp, meta in stat_results.items()
-                ]
-            else:
-                # ── Compare stats against manifest ──────────────────────
-                # Files where (mtime, size) match the manifest are unchanged.
-                # Reuse the manifest hash and skip hashing.
-                unchanged: list[dict[str, Any]] = []
-                candidates: list[str] = []  # file_paths that need hashing
-
-                for fp, stat_meta in stat_results.items():
-                    existing = manifest_map.get(fp)
-                    if (
-                        existing is not None
-                        and existing.file_mtime is not None
-                        and existing.file_mtime == stat_meta["file_mtime"]
-                        and existing.file_size == stat_meta["file_size"]
-                    ):
-                        # Unchanged — reuse manifest hash.
-                        unchanged.append({
-                            "file_path": fp,
-                            "file_hash": existing.file_hash,
-                            "file_size": stat_meta["file_size"],
-                            "file_mtime": stat_meta["file_mtime"],
-                        })
-                    else:
-                        # New or modified — needs hashing.
-                        candidates.append(fp)
-
-                logger.info(
-                    "[DISCOVERY] stat_done datastore_id=%d total=%d unchanged=%d candidates=%d skipped=%d",
-                    datastore_id,
-                    len(stat_results),
-                    len(unchanged),
-                    len(candidates),
-                    skipped,
-                )
-
-                # ── Phase 2: hash only candidates ──────────────────────
-                hashed: list[dict[str, Any]] = []
-                if candidates:
-                    with ThreadPoolExecutor(max_workers=config.max_workers) as executor:
-                        futures = {
-                            executor.submit(_hash_worker, (fp, config)): fp
-                            for fp in candidates
-                        }
-                        for future in as_completed(futures):
-                            fp = futures[future]
-                            try:
-                                result = future.result()
-                            except Exception:
-                                logger.exception(
-                                    "[DISCOVERY] worker_exception path=%s", fp
-                                )
-                                skipped += 1
-                                continue
-                            if result is None:
-                                skipped += 1
-                            else:
-                                hashed.append(result)
-
-                    logger.info(
-                        "[DISCOVERY] hashing_done datastore_id=%d hashed=%d skipped=%d",
-                        datastore_id,
-                        len(hashed),
-                        skipped - (len(stat_results) - len(unchanged) - len(candidates)),
-                    )
-
-                collected = unchanged + hashed
+            collected, skipped = _collect_incremental(
+                file_paths, config, manifest_map, datastore_id
+            )
 
         # Classify.
         new_files, modified_files, deleted_files = _classify_files(

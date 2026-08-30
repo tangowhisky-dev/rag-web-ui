@@ -48,6 +48,28 @@ class KbGrepInput(BaseModel):
     case_insensitive: bool = Field(default=True, description="Case-insensitive matching.")
 
 
+def _search_documents(documents: list, regex: re.Pattern, max_results: int) -> list[dict]:
+    matches: list[dict] = []
+    for doc in documents:
+        markdown = doc.converted_markdown or ""
+        if not markdown:
+            continue
+        for line_num, line in enumerate(markdown.splitlines(), 1):
+            if regex.search(line):
+                matches.append({
+                    "document_id": doc.id,
+                    "title": doc.title or doc.file_name,
+                    "file_name": doc.file_name,
+                    "line_number": line_num,
+                    "line_text": line.strip()[:200],
+                })
+                if len(matches) >= max_results:
+                    break
+        if len(matches) >= max_results:
+            break
+    return matches
+
+
 class KbGrepTool(BaseAgentTool):
     name: str = "kb_grep"
     ui_label: str = "Searching KB documents"
@@ -71,11 +93,9 @@ class KbGrepTool(BaseAgentTool):
         if not kb_ids:
             return {"ok": False, "result": {}, "error": "No authorized knowledge bases for this chat.", "tokens": 0}
 
-        # Resolve datastore IDs linked to authorized KBs.
         from app.services.retrieval.retrieval import get_effective_datastore_ids
         ds_ids = get_effective_datastore_ids(kb_ids, ctx.org_id, ctx.db)
 
-        # Build document query scoped to authorized KBs + datastores.
         from sqlalchemy import or_
         query = ctx.db.query(Document).filter(
             or_(
@@ -103,24 +123,7 @@ class KbGrepTool(BaseAgentTool):
         except re.error as exc:
             return {"ok": False, "result": {}, "error": f"Invalid regex pattern: {exc}", "tokens": 0}
 
-        matches: list[dict] = []
-        for doc in documents:
-            markdown = doc.converted_markdown or ""
-            if not markdown:
-                continue
-            for line_num, line in enumerate(markdown.splitlines(), 1):
-                if regex.search(line):
-                    matches.append({
-                        "document_id": doc.id,
-                        "title": doc.title or doc.file_name,
-                        "file_name": doc.file_name,
-                        "line_number": line_num,
-                        "line_text": line.strip()[:200],
-                    })
-                    if len(matches) >= input_obj.max_results:
-                        break
-            if len(matches) >= input_obj.max_results:
-                break
+        matches = _search_documents(documents, regex, input_obj.max_results)
 
         latency_ms = round((time.monotonic() - t0) * 1000)
         result_summary = {
