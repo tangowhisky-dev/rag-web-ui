@@ -194,21 +194,25 @@ def _mock_settings(overrides: dict):
 
 
 def test_route_think_respects_wall_clock_budget():
-    with patch("app.services.agentic_rag.agent_graph.get_setting",
+    with patch("app.services.agentic_rag.agent_graph.thinking.get_setting",
+               side_effect=_mock_settings({"AGENT_MAX_ITERATIONS": 100, "AGENT_MAX_WALL_SECONDS": 1.0})), \
+         patch("app.services.agentic_rag.agent_graph.helpers.get_setting",
                side_effect=_mock_settings({"AGENT_MAX_ITERATIONS": 100, "AGENT_MAX_WALL_SECONDS": 1.0})):
         state = {"iteration": 1, "tool_calls": [{"tool": "rag_retrieve"}], "started_at": time.monotonic() - 10}
         assert route_think(state) == "reflect_final"
 
 
 def test_route_think_ignores_wall_clock_when_not_started():
-    with patch("app.services.agentic_rag.agent_graph.get_setting",
+    with patch("app.services.agentic_rag.agent_graph.thinking.get_setting",
                side_effect=_mock_settings({"AGENT_MAX_ITERATIONS": 100, "AGENT_MAX_WALL_SECONDS": 1.0})):
         state = {"iteration": 1, "tool_calls": [{"tool": "rag_retrieve"}]}
         assert route_think(state) == "tool"
 
 
 def test_route_reflect_final_respects_wall_clock_budget():
-    with patch("app.services.agentic_rag.agent_graph.get_setting",
+    with patch("app.services.agentic_rag.agent_graph.tooling.get_setting",
+               side_effect=_mock_settings({"AGENT_MAX_ITERATIONS": 100, "AGENT_MAX_WALL_SECONDS": 1.0})), \
+         patch("app.services.agentic_rag.agent_graph.helpers.get_setting",
                side_effect=_mock_settings({"AGENT_MAX_ITERATIONS": 100, "AGENT_MAX_WALL_SECONDS": 1.0})):
         state = {
             "iteration": 1,

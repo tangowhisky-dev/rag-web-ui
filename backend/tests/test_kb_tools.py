@@ -455,7 +455,7 @@ def test_applicable_tools_includes_with_kb():
 
 def test_tool_call_budget_includes_kb_tools():
     from app.services.agentic_rag.agent_graph import _tool_call_budget
-    with patch("app.services.agentic_rag.agent_graph.get_setting", side_effect=lambda db, key, org_id=None: {
+    with patch("app.services.agentic_rag.agent_graph.helpers.get_setting", side_effect=lambda db, key, org_id=None: {
         "AGENT_MAX_RETRIEVALS": 3, "AGENT_MAX_CODE_EXEC": 3,
         "AGENT_MAX_KB_GREP": 5, "AGENT_MAX_KB_READ": 10,
     }.get(key, 0)):

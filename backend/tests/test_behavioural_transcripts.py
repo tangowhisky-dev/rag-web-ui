@@ -186,7 +186,17 @@ def _setup_graph(monkeypatch, scripted_llm: _ScriptedLLM, ctx: ToolContext,
     rag_results = rag_results or {}
 
     # Mock build_chat_llm to return our scripted LLM everywhere.
-    monkeypatch.setattr(agent_graph, "build_chat_llm", lambda *a, **kw: scripted_llm)
+    # After the agent_graph split, build_chat_llm is imported individually
+    # by each sub-module, so we must patch it on every one.
+    from app.services.agentic_rag.agent_graph import (
+        planning as _planning_mod,
+        thinking as _thinking_mod,
+        tooling as _tooling_mod,
+        finalization as _finalization_mod,
+        compaction as _compaction_mod,
+    )
+    for _mod in (_planning_mod, _thinking_mod, _tooling_mod, _finalization_mod, _compaction_mod):
+        monkeypatch.setattr(_mod, "build_chat_llm", lambda *a, **kw: scripted_llm)
 
     # Mock resolve_retrieval_query — the rewriter uses AsyncOpenAI directly
     # (not LangChain), so build_chat_llm mock doesn't cover it. The test
@@ -246,7 +256,7 @@ def _setup_graph(monkeypatch, scripted_llm: _ScriptedLLM, ctx: ToolContext,
             "retrieval_score": 0.85,
         }
 
-    monkeypatch.setattr(agent_graph, "answer_scoring_node", _mock_eval_node)
+    monkeypatch.setattr("app.services.agentic_rag.agent_graph.build.answer_scoring_node", _mock_eval_node)
 
     # Inject a MemorySaver checkpointer via a mock redis_memory, but only
     # if one isn't already set (so re-calling _setup_graph with the same
@@ -699,7 +709,11 @@ class TestCodeExecuteChartGenerate:
         # verifies tool execution flow, not tool availability gating.
         from app.services.agentic_rag.tools import build_tools
         monkeypatch.setattr(
-            "app.services.agentic_rag.agent_graph.applicable_tools",
+            "app.services.agentic_rag.agent_graph.thinking.applicable_tools",
+            lambda ctx: build_tools(ctx),
+        )
+        monkeypatch.setattr(
+            "app.services.agentic_rag.agent_graph.tooling.applicable_tools",
             lambda ctx: build_tools(ctx),
         )
 

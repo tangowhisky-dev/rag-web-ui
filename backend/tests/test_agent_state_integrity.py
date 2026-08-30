@@ -43,7 +43,7 @@ class TestAssistantTurnsArePersisted:
             async def ainvoke(self, *_a, **_kw):
                 return SimpleNamespace(content="not json")
 
-        monkeypatch.setattr(agent_graph, "build_chat_llm", lambda *a, **kw: _FakeLLM())
+        monkeypatch.setattr("app.services.agentic_rag.agent_graph.finalization.build_chat_llm", lambda *a, **kw: _FakeLLM())
         return asyncio.run(agent_graph.finalize_node(
             {
                 "precomputed_answer": answer,
@@ -152,7 +152,8 @@ class TestDeclaredStateKeys:
                 return 0.0
             return _real_get_setting(db, key, org_id)
 
-        monkeypatch.setattr("app.services.agentic_rag.agent_graph.get_setting", _mock_get_setting)
+        monkeypatch.setattr("app.services.agentic_rag.agent_graph.helpers.get_setting", _mock_get_setting)
+        monkeypatch.setattr("app.services.agentic_rag.agent_graph.thinking.get_setting", _mock_get_setting)
         state = {"started_at": 0.0, "iteration": 1, "tool_calls": [{"tool": "rag_retrieve"}]}
         assert _wall_clock_exceeded(state) is True
         assert route_think(state) == "reflect_final"
@@ -343,7 +344,7 @@ class TestClarificationFlow:
                 return 1
             return _real_get_setting(db, key, org_id)
 
-        monkeypatch.setattr(agent_graph, "get_setting", _mock_get_setting)
+        monkeypatch.setattr("app.services.agentic_rag.agent_graph.planning.get_setting", _mock_get_setting)
 
         plan = Plan(intent="rag", needs_clarification=True, clarification_question="Which one?")
 
@@ -354,7 +355,7 @@ class TestClarificationFlow:
             async def ainvoke(self, *_a, **_kw):
                 return {"parsed": plan, "parsing_error": None}
 
-        monkeypatch.setattr(agent_graph, "build_chat_llm", lambda *a, **kw: _FakeLLM())
+        monkeypatch.setattr("app.services.agentic_rag.agent_graph.planning.build_chat_llm", lambda *a, **kw: _FakeLLM())
 
         first = asyncio.run(agent_graph.plan_node(
             {"original_query": "q", "rewritten_query": "q", "clarification_count": 0}, _ctx(),
@@ -381,13 +382,13 @@ class TestCompactionReplacesHistory:
                 return SimpleNamespace(default=2)
             return _real_get_def(key)
 
-        monkeypatch.setattr(agent_graph, "get_def", _mock_get_def)
+        monkeypatch.setattr("app.services.agentic_rag.agent_graph.compaction.get_def", _mock_get_def)
 
         class _FakeLLM:
             async def ainvoke(self, *_a, **_kw):
                 return SimpleNamespace(content="## Goal\nDiscussed mutexes.")
 
-        monkeypatch.setattr(agent_graph, "_build_compaction_llm", lambda ctx: _FakeLLM())
+        monkeypatch.setattr("app.services.agentic_rag.agent_graph.compaction._build_compaction_llm", lambda ctx: _FakeLLM())
 
         history = [
             HumanMessage(content="q1", id="1"),
@@ -431,13 +432,13 @@ class TestCompactionReplacesHistory:
                 return SimpleNamespace(default=2)
             return _real_get_def(key)
 
-        monkeypatch.setattr(agent_graph, "get_def", _mock_get_def)
+        monkeypatch.setattr("app.services.agentic_rag.agent_graph.compaction.get_def", _mock_get_def)
 
         class _FakeLLM:
             async def ainvoke(self, *_a, **_kw):
                 return SimpleNamespace(content="summary text")
 
-        monkeypatch.setattr(agent_graph, "_build_compaction_llm", lambda ctx: _FakeLLM())
+        monkeypatch.setattr("app.services.agentic_rag.agent_graph.compaction._build_compaction_llm", lambda ctx: _FakeLLM())
 
         graph = StateGraph(AgentState)
         graph.add_node("noop", lambda _s: {})

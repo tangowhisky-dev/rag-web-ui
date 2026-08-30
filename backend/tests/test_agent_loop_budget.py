@@ -8,19 +8,19 @@ from app.services.agentic_rag.token_budget import count_tokens
 
 def test_route_think_routes_to_tool_when_calls_present():
     state = {"iteration": 1, "tool_calls": [{"tool": "rag_retrieve"}]}
-    with patch("app.services.agentic_rag.agent_graph.get_setting", return_value=8):
+    with patch("app.services.agentic_rag.agent_graph.thinking.get_setting", return_value=8):
         assert route_think(state) == "tool"
 
 
 def test_route_think_routes_to_reflect_final_at_max_iterations():
     state = {"iteration": 3, "tool_calls": []}
-    with patch("app.services.agentic_rag.agent_graph.get_setting", return_value=3):
+    with patch("app.services.agentic_rag.agent_graph.thinking.get_setting", return_value=3):
         assert route_think(state) == "reflect_final"
 
 
 def test_route_think_routes_to_reflect_final_when_no_calls():
     state = {"iteration": 2, "tool_calls": []}
-    with patch("app.services.agentic_rag.agent_graph.get_setting", return_value=5):
+    with patch("app.services.agentic_rag.agent_graph.thinking.get_setting", return_value=5):
         assert route_think(state) == "reflect_final"
 
 
