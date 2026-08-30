@@ -30,12 +30,13 @@ export default function NewChatPage() {
     try {
       const data = await api.get("/api/knowledge-base");
       setKnowledgeBases(data);
-      setIsLoading(false);
     } catch (error) {
       console.error("Failed to fetch knowledge bases:", error);
       if (error instanceof ApiError) {
         toast({ title: "Error", description: error.message, variant: "destructive" });
       }
+    } finally {
+      setIsLoading(false);
     }
   }, [toast]);
 

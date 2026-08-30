@@ -264,7 +264,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       confidence: msg.confidence_level as Message["confidence"] | undefined,
       confidenceScore: msg.confidence_score ?? undefined,
       confidenceBreakdown: msg.confidence_breakdown
-        ? JSON.parse(msg.confidence_breakdown)
+        ? (() => { try { return JSON.parse(msg.confidence_breakdown); } catch { return undefined; } })()
         : undefined,
       finalConfidence: msg.final_confidence ?? undefined,
       finalConfidenceLevel: msg.final_confidence_level as Message["finalConfidenceLevel"] | undefined,
@@ -288,7 +288,6 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       setAssociatedKbIds(kbs.map((kb) => kb.id));
       const allKbList = Array.isArray(kbList) ? kbList : (kbList as any).items ?? [];
       setAllKbs(allKbList.map((kb: any) => ({ id: kb.id, name: kb.name })));
-      console.log("[FETCH] paginated messages:", page.messages.map((m: any) => ({ id: m.id, role: m.role, content: m.content?.slice(0, 30) })));
       setMessages(page.messages.map(formatMessage));
       setHasMoreMessages(page.has_more);
     } catch (error) {
@@ -1094,11 +1093,10 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     });
 
     // Persist the active branch selection so reload picks the right branch
-    console.log("[NAVIGATE] about to PUT", { chatId: params.id, parent: parseInt(parentMessageId), selected: parseInt(targetUserMsg.id) });
     api.put(`/api/chat/${params.id}/active-branch`, {
       parent_message_id: parseInt(parentMessageId),
       selected_message_id: parseInt(targetUserMsg.id),
-    }).then(() => console.log("[NAVIGATE] PUT success")).catch((e) => console.error("[NAVIGATE] PUT failed", e));
+    }).catch((e) => console.error("[NAVIGATE] PUT failed", e));
   };
 
   /** Handle user's clarification response */

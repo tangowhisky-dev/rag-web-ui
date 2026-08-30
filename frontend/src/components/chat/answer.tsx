@@ -648,11 +648,12 @@ export const Answer: FC<{
       if (await handleAuthRedirect(res)) return;
       if (!res.ok) throw new Error(`Export failed: ${res.status}`);
       const blob = await res.blob();
+      const blobUrl = URL.createObjectURL(blob);
       const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
+      a.href = blobUrl;
       a.download = `answer.${ext}`;
       a.click();
-      URL.revokeObjectURL(a.href);
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
     } catch (e) {
       console.error("Export failed:", e);
     }

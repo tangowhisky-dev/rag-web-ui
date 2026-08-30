@@ -48,5 +48,5 @@ export async function exportChatToMarkdown(chatId: string | number): Promise<voi
   document.body.appendChild(a);
   a.click();
   a.remove();
-  URL.revokeObjectURL(url);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }

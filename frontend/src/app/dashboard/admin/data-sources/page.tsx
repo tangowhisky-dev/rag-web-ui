@@ -153,6 +153,12 @@ export default function DataSourcesPage() {
   const [recoveryStatuses, setRecoveryStatuses] = useState<Record<number, RecoveryStatus>>({});
   const pollingRef = useRef<NodeJS.Timeout | null>(null);
   const scanEventSourceRef = useRef<EventSource | null>(null);
+  // Refs for polling effects — read latest state without re-triggering the interval
+  const datastoresRef = useRef(datastores);
+  const fetchDataRef = useRef<() => Promise<void>>(async () => {});
+  const recoveryStatusesRef = useRef(recoveryStatuses);
+  useEffect(() => { datastoresRef.current = datastores; }, [datastores]);
+  useEffect(() => { recoveryStatusesRef.current = recoveryStatuses; }, [recoveryStatuses]);
 
   // Default form values — source of truth for the create/edit dialog
   const formDefaults = {
@@ -206,43 +212,36 @@ export default function DataSourcesPage() {
       setLoading(false);
     }
   }, [toast]);
+  useEffect(() => { fetchDataRef.current = fetchData; }, [fetchData]);
 
   // Poll for scan progress when ANY datastore is processing or scanning
   // Note: SSE is used for real-time progress during manual scans, but we
   // still poll for event-driven processing and background scans.
+  // Uses refs to avoid interval churn — the interval is set up once and
+  // reads the latest state via refs on each tick.
   useEffect(() => {
-    const hasProcessing = datastores.some(
-      (ds) => ds.processing
-    );
-    const hasRunningScan = datastores.some(
-      (ds) => ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running'
-    );
-    const hasRunningGraph = datastores.some(
-      (ds) => ds.graph_summary?.status === 'running'
-    );
-    if (hasProcessing || hasRunningScan || hasRunningGraph) {
-      // Poll every 2-5 seconds for event-driven processing and background scans
-      pollingRef.current = setInterval(() => {
-        fetchData();
-      }, hasProcessing ? 2000 : 5000);
-    } else {
+    const tick = () => {
+      const ds = datastoresRef.current;
+      const hasProcessing = ds.some((d) => d.processing);
+      const hasRunningScan = ds.some(
+        (d) => d.last_scan_status === 'running' || d.scan_progress?.status === 'running'
+      );
+      const hasRunningGraph = ds.some((d) => d.graph_summary?.status === 'running');
+      if (hasProcessing || hasRunningScan || hasRunningGraph) {
+        fetchDataRef.current();
+      }
+    };
+    pollingRef.current = setInterval(tick, 3000);
+    return () => {
       if (pollingRef.current) {
         clearInterval(pollingRef.current);
         pollingRef.current = null;
       }
-    }
-
-    return () => {
-      if (pollingRef.current) {
-        clearInterval(pollingRef.current);
-      }
       // NOTE: Do NOT close scanEventSourceRef here.  The SSE connection is
       // managed by handleTriggerScan (opens) and its onmessage/onerror
-      // handlers (closes).  Closing it here kills the SSE stream every time
-      // datastores changes (which happens on every poll), leaving
-      // scanProgress stuck at 0/0 until the page is refreshed.
+      // handlers (closes).
     };
-  }, [triggering, datastores, fetchData]);
+  }, []);
 
   // Poll recovery status for all datastores
   useEffect(() => {
@@ -277,20 +276,23 @@ export default function DataSourcesPage() {
     return () => clearInterval(id);
   }, [datastores.length]);
 
-  // Refresh datastores list when recovery completes or fails
+  // Refresh datastores list when recovery completes or fails.
+  // Uses refs to avoid interval churn — reads latest state on each tick.
   useEffect(() => {
     const interval = setInterval(() => {
-      for (const ds of datastores) {
-        const st = recoveryStatuses[ds.id];
+      const ds = datastoresRef.current;
+      const statuses = recoveryStatusesRef.current;
+      for (const d of ds) {
+        const st = statuses[d.id];
         if (!st) continue;
         if (st.recovery_status === 'complete' || st.recovery_status === 'error') {
-          fetchData();
+          fetchDataRef.current();
           break;
         }
       }
     }, 2000);
     return () => clearInterval(interval);
-  }, [recoveryStatuses, datastores, fetchData]);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;

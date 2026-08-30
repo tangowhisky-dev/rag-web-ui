@@ -49,7 +49,7 @@ export function useVoiceInput(onFinal: (text: string) => void) {
   // render the same initial UI (no hydration mismatch).
   const isSupported = useSyncExternalStore(
     () => () => {},
-    () => !!window.AudioContext && typeof Worker !== "undefined",
+    () => !!(window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext) && typeof Worker !== "undefined",
     () => false,
   );
 

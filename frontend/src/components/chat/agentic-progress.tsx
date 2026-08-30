@@ -234,7 +234,7 @@ export const AgenticProgress = ({
 
   return (
     <div className="not-prose mb-2">
-      <ChainOfThought open={isOpen} onOpenChange={setIsOpen} defaultOpen={true}>
+      <ChainOfThought open={isOpen} onOpenChange={setIsOpen}>
         <ChainOfThoughtHeader>
           {isStreaming ? <Shimmer duration={1.5}>Agent working…</Shimmer> : "Agent timeline"}
         </ChainOfThoughtHeader>

@@ -58,6 +58,8 @@ export function DocumentList({ knowledgeBaseId, refreshKey }: DocumentListProps)
   const [confirmDoc, setConfirmDoc] = useState<Document | null>(null);
   // live progress keyed by task id — overlays the static data from KB GET
   const [taskProgress, setTaskProgress] = useState<Record<number, ProcessingTask>>({});
+  const taskProgressRef = useRef(taskProgress);
+  useEffect(() => { taskProgressRef.current = taskProgress; }, [taskProgress]);
   const { toast } = useToast();
 
   // Stable refs so the poll loop never has stale closures
@@ -108,15 +110,12 @@ export function DocumentList({ knowledgeBaseId, refreshKey }: DocumentListProps)
 
       // Also poll any task we're tracking in taskProgress that's still running
       // (handles the case where the dialog was closed before the KB list refreshed)
-      setTaskProgress((prev) => {
-        for (const [idStr, t] of Object.entries(prev)) {
-          if (t.status === "pending" || t.status === "processing" || t.graph_status === "pending") {
-            const id = parseInt(idStr);
-            if (!taskIds.includes(id)) taskIds.push(id);
-          }
+      for (const [idStr, t] of Object.entries(taskProgressRef.current)) {
+        if (t.status === "pending" || t.status === "processing" || t.graph_status === "pending") {
+          const id = parseInt(idStr);
+          if (!taskIds.includes(id)) taskIds.push(id);
         }
-        return prev;
-      });
+      }
 
       if (taskIds.length === 0) return; // nothing in progress, stop polling
 
