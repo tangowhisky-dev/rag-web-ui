@@ -3,11 +3,6 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import {
   Search as SearchIcon,
-  FileText,
-  FileCode,
-  FileType,
-  FileSpreadsheet,
-  File,
   Info,
   Loader2,
   ChevronDown,
@@ -16,14 +11,61 @@ import {
   Clock,
   Sparkles,
 } from "lucide-react";
-import Markdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+
+// ── Composite search + AI icon ───────────────────────────────────────────────
+// A magnifying glass with a sparkle inside the lens, conveying AI-powered search.
+
+function SearchAiIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 120 120"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-hidden="true"
+    >
+      {/* Magnifying glass lens */}
+      <circle
+        cx="48"
+        cy="48"
+        r="34"
+        stroke="currentColor"
+        strokeWidth="6"
+        strokeLinecap="round"
+        opacity="0.35"
+      />
+      {/* Magnifying glass handle */}
+      <line
+        x1="74"
+        y1="74"
+        x2="104"
+        y2="104"
+        stroke="currentColor"
+        strokeWidth="7"
+        strokeLinecap="round"
+        opacity="0.35"
+      />
+      {/* Four-point sparkle inside the lens (AI) */}
+      <path
+        d="M48 28 C50 38, 58 46, 68 48 C58 50, 50 58, 48 68 C46 58, 38 50, 28 48 C38 46, 46 38, 48 28 Z"
+        fill="currentColor"
+      />
+      {/* Small accent sparkle */}
+      <path
+        d="M62 60 C63 64, 66 67, 70 68 C66 69, 63 72, 62 76 C61 72, 58 69, 54 68 C58 67, 61 64, 62 60 Z"
+        fill="currentColor"
+        opacity="0.5"
+      />
+    </svg>
+  );
+}
 import DashboardLayout from "@/components/layout/dashboard-layout";
 import { api, ApiError } from "@/lib/api";
 import { useHydrated } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/components/ui/use-toast";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import GroupedResultCard, { groupResultsByDocument } from "@/components/search/GroupedResultCard";
 
 interface KbItem {
   id: number;
@@ -55,53 +97,6 @@ interface HistoryItem {
   query: string;
   result_count: number;
   created_at: string;
-}
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-function snippet(text: string, maxChars = 500): string {
-  const clean = text.trim();
-  if (clean.length <= maxChars) return clean;
-  return clean.slice(0, maxChars).trimEnd() + "…";
-}
-
-function fileIcon(name: string) {
-  const ext = name.split(".").pop()?.toLowerCase() ?? "";
-  if (["py", "js", "ts", "tsx", "jsx", "go", "rs", "java", "c", "cpp", "rb", "sh", "yaml", "yml", "json", "xml"].includes(ext))
-    return FileCode;
-  if (["pdf"].includes(ext))
-    return FileType;
-  if (["xls", "xlsx", "csv"].includes(ext))
-    return FileSpreadsheet;
-  if (["md", "txt", "rtf"].includes(ext))
-    return FileText;
-  return File;
-}
-
-function scoreTier(score: number): { label: string; className: string } {
-  if (score >= 0.8) return { label: "high", className: "bg-success/15 text-success border-success/20" };
-  if (score >= 0.5) return { label: "med", className: "bg-warning/15 text-warning border-warning/20" };
-  return { label: "low", className: "bg-muted text-muted-foreground border-border" };
-}
-
-// Clean a filename into a title-like string for comparison, so we don't
-// show a redundant filename line when the title is just the cleaned name.
-function cleanFilename(name: string): string {
-  const stem = name.replace(/\.[^.]+$/, "").replace(/[_-]/g, " ").replace(/\./g, " ");
-  return stem.replace(/\s+/g, " ").trim();
-}
-
-// Bold query terms in markdown source so they render emphasized within
-// the Markdown component. Wraps whole-word matches in ** for bold.
-function highlightInMarkdown(text: string, query: string): string {
-  const terms = query
-    .split(/\s+/)
-    .map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
-    .filter((t) => t.length >= 2);
-  if (terms.length === 0) return text;
-
-  const regex = new RegExp(`\\b(${terms.join("|")})\\b`, "gi");
-  return text.replace(regex, "**$1**");
 }
 
 // ── Skeleton ─────────────────────────────────────────────────────────────────
@@ -136,6 +131,7 @@ export default function SearchPage() {
   const [selectedKbIds, setSelectedKbIds] = useState<number[]>([]);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
+  const [groupedResults, setGroupedResults] = useState<ReturnType<typeof groupResultsByDocument>>([]);
   const [expandedQuery, setExpandedQuery] = useState("");
   const [hasSearched, setHasSearched] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -208,6 +204,7 @@ export default function SearchPage() {
         kb_ids: selectedKbIds,
       }) as SearchResponse;
       setResults(res.results);
+      setGroupedResults(groupResultsByDocument(res.results));
       setExpandedQuery(res.expanded_query);
       setLatencyMs(res.latency_ms);
     } catch (err) {
@@ -235,12 +232,36 @@ export default function SearchPage() {
 
   return (
     <DashboardLayout pageTitle="Search">
-      <div className="max-w-3xl mx-auto">
-        {/* Search bar — single input, Enter to submit */}
-        <form
-          onSubmit={(e) => { e.preventDefault(); handleSearch(); }}
-          className="relative mb-4"
-        >
+      <div
+        className={cn(
+          "flex flex-col transition-all duration-500 ease-in-out",
+          hasSearched
+            ? "items-start pt-6"
+            : "items-center justify-center min-h-[70vh]",
+        )}
+      >
+        <div className="w-full max-w-3xl mx-auto">
+          {/* Hero icon — only before search */}
+          {!hasSearched && (
+            <div className="flex flex-col items-center mb-8 animate-in fade-in zoom-in-95 duration-700">
+              <SearchAiIcon className="h-24 w-24 text-primary" />
+              <h1 className="mt-4 text-2xl font-semibold tracking-tight text-foreground">
+                AI-powered search across your knowledge bases
+              </h1>
+              {/* <p className="mt-1 text-sm text-muted-foreground">
+                AI-powered retrieval across your knowledge bases
+              </p> */}
+            </div>
+          )}
+
+          {/* Search bar — single input, Enter to submit */}
+          <form
+            onSubmit={(e) => { e.preventDefault(); handleSearch(); }}
+            className={cn(
+              "relative transition-all duration-500",
+              hasSearched ? "mb-4" : "mb-6",
+            )}
+          >
           <div className="relative">
             <SearchIcon className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
             <input
@@ -248,7 +269,7 @@ export default function SearchPage() {
               type="text"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search your knowledge bases…"
+              placeholder="Type + Enter to search…"
               className="w-full rounded-lg border bg-background pl-10 pr-10 py-2.5 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
               autoFocus
             />
@@ -350,7 +371,7 @@ export default function SearchPage() {
         )}
 
         {/* No results */}
-        {!loading && hasSearched && results.length === 0 && (
+        {!loading && hasSearched && groupedResults.length === 0 && (
           <div className="text-center py-20 text-muted-foreground">
             <p className="text-sm">No results found for &ldquo;{query}&rdquo;.</p>
           </div>
@@ -416,72 +437,39 @@ export default function SearchPage() {
         )}
 
         {/* Results */}
-        {!loading && results.length > 0 && (() => {
-          const totalPages = Math.ceil(results.length / PAGE_SIZE);
-          const pageResults = results.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+        {!loading && groupedResults.length > 0 && (() => {
+          const totalPages = Math.ceil(groupedResults.length / PAGE_SIZE);
+          const pageResults = groupedResults.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
           const startIdx = page * PAGE_SIZE + 1;
-          const endIdx = Math.min((page + 1) * PAGE_SIZE, results.length);
+          const endIdx = Math.min((page + 1) * PAGE_SIZE, groupedResults.length);
+          const totalChunks = results.length;
           return (
             <div className="space-y-3">
               <p className="text-xs text-muted-foreground tabular-nums">
-                {results.length} result{results.length !== 1 ? "s" : ""} · {latencyMs}ms
+                {groupedResults.length} document{groupedResults.length !== 1 ? "s" : ""} ({totalChunks} chunk{totalChunks !== 1 ? "s" : ""}) · {latencyMs}ms
               </p>
-              {pageResults.map((result, i) => {
-                const Icon = fileIcon(result.file_name);
-                const tier = scoreTier(result.reranker_score);
-                const kbName = result.kb_id
-                  ? kbs.find((kb) => kb.id === result.kb_id)?.name ?? `#${result.kb_id}`
-                  : result.data_store_id
-                    ? `DS #${result.data_store_id}`
+              {pageResults.map((group, i) => {
+                const kbName = group.kbId
+                  ? kbs.find((kb) => kb.id === group.kbId)?.name ?? `#${group.kbId}`
+                  : group.dataStoreId
+                    ? `DS #${group.dataStoreId}`
                     : null;
-                const displayTitle = result.title || result.file_name;
-                const showFilename = result.title && result.title !== cleanFilename(result.file_name);
                 return (
                   <a
-                    key={`${result.document_id}-${result.chunk_index}-${i}`}
-                    href={`/api/knowledge-base/documents/${result.document_id}/download`}
+                    key={`${group.documentId}-${i}`}
+                    href={`/api/knowledge-base/documents/${group.documentId}/download`}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="block rounded-lg border bg-card p-4 hover:border-primary/30 transition-colors group"
+                    onClick={(e) => e.preventDefault()}
                   >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="flex items-center gap-2 min-w-0">
-                        <Icon className="h-4 w-4 text-muted-foreground shrink-0" />
-                        <div className="min-w-0">
-                          <span className="text-sm font-medium text-foreground truncate block group-hover:text-primary transition-colors">
-                            {displayTitle}
-                          </span>
-                          {showFilename && (
-                            <span className="text-xs text-muted-foreground/70 truncate block">
-                              {result.file_name}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                      <span className={cn(
-                        "shrink-0 rounded-full border px-2 py-0.5 text-xs font-medium tabular-nums",
-                        tier.className,
-                      )}>
-                        {result.reranker_score.toFixed(2)}
-                      </span>
-                    </div>
-                    <div className="mt-2 text-sm text-muted-foreground leading-relaxed prose prose-sm dark:prose-invert max-w-none pointer-events-none line-clamp-4">
-                      <Markdown remarkPlugins={[remarkGfm]}>
-                        {highlightInMarkdown(snippet(result.original_text || result.chunk_text), query)}
-                      </Markdown>
-                    </div>
-                    {kbName && (
-                      <div className="mt-2 text-xs text-muted-foreground/70">
-                        {kbName}
-                      </div>
-                    )}
+                    <GroupedResultCard group={group} query={query} kbName={kbName ?? undefined} />
                   </a>
                 );
               })}
               {totalPages > 1 && (
                 <div className="flex items-center justify-between pt-2">
                   <span className="text-xs text-muted-foreground tabular-nums">
-                    {startIdx}–{endIdx} of {results.length}
+                    {startIdx}–{endIdx} of {groupedResults.length} documents
                   </span>
                   <div className="flex items-center gap-1">
                     <button
@@ -511,6 +499,7 @@ export default function SearchPage() {
             </div>
           );
         })()}
+        </div>
       </div>
     </DashboardLayout>
   );
