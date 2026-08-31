@@ -1,8 +1,22 @@
 /** @type {import('next').NextConfig} */
+
+// Allow HMR/dev resource access from LAN IPs. Set ALLOWED_DEV_ORIGINS
+// env var to the server's LAN address, e.g. http://192.168.1.21:3000
+const devOrigins = (process.env.ALLOWED_DEV_ORIGINS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
 module.exports = {
   output: "standalone",
   skipProxyUrlNormalize: true,
   skipTrailingSlashRedirect: true,
+  allowedDevOrigins: [
+    "0.0.0.0",
+    "127.0.0.1",
+    "localhost",
+    ...devOrigins,
+  ],
   experimental: {
     proxyTimeout: 120000,
   },
