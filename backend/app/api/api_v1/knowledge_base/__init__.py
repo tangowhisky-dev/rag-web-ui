@@ -43,7 +43,10 @@ from app.api.api_v1.knowledge_base.helpers import (  # noqa: E402, F401
 )
 
 # Import submodules to register their routes on ``router``.
-from app.api.api_v1.knowledge_base import kb  # noqa: E402, F401
+# Order matters: static paths (e.g. /available-datastores, /ocr-availability)
+# must be registered before /{kb_id} wildcard routes, otherwise FastAPI
+# matches the wildcard first and fails with 422 on int validation.
 from app.api.api_v1.knowledge_base import datastores  # noqa: E402, F401
 from app.api.api_v1.knowledge_base import documents  # noqa: E402, F401
 from app.api.api_v1.knowledge_base import ingestion  # noqa: E402, F401
+from app.api.api_v1.knowledge_base import kb  # noqa: E402, F401
