@@ -9,7 +9,6 @@ import logging
 import uuid
 from typing import Dict, List, Optional, Tuple
 
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document as LangchainDocument
 from openai import AsyncOpenAI
 from pydantic import BaseModel

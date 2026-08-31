@@ -99,7 +99,7 @@ _APP_ONLY = [
                requires_reindex=True,
                description="DataStores are shared across orgs; per-org chunking would produce inconsistent indexes."),
     SettingDef("OVERLAP_PERCENTAGE", "Ingestion", "Overlap fraction",
-               "float", 0.20, scope="app", reload="ingest", min_value=0.0, max_value=0.9,
+               "float", 0.10, scope="app", reload="ingest", min_value=0.0, max_value=0.9,
                requires_reindex=True,
                description="Fraction of CHUNK_SIZE repeated at the start of the next chunk."),
     SettingDef("GRAPHRAG_ENABLED", "Ingestion", "Enable graph extraction",

@@ -104,7 +104,7 @@ async def preview_document(file_path: str, chunk_size: int = None, chunk_overlap
         from app.db.session import SessionLocal
         _db = SessionLocal()
         try:
-            chunk_size = int(get_setting(_db, "CHUNK_SIZE", None) or 1000)
+            chunk_size = int(get_setting(_db, "CHUNK_SIZE", None) or 1500)
         finally:
             _db.close()
     if chunk_overlap is None:
@@ -112,8 +112,8 @@ async def preview_document(file_path: str, chunk_size: int = None, chunk_overlap
         from app.db.session import SessionLocal
         _db = SessionLocal()
         try:
-            _cs = int(get_setting(_db, "CHUNK_SIZE", None) or 1000)
-            _op = float(get_setting(_db, "OVERLAP_PERCENTAGE", None) or 0.1)
+            _cs = int(get_setting(_db, "CHUNK_SIZE", None) or 1500)
+            _op = float(get_setting(_db, "OVERLAP_PERCENTAGE", None) or 0.10)
             chunk_overlap = int(_cs * _op)
         finally:
             _db.close()
@@ -148,7 +148,8 @@ async def preview_document(file_path: str, chunk_size: int = None, chunk_overlap
         )
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap
+            chunk_overlap=chunk_overlap,
+            separators=["\n\n", "\n", ". ", " ", ""],
         )
         chunks = text_splitter.split_documents([doc])
         preview_chunks = [
@@ -292,8 +293,8 @@ async def _prepare_ingestion(
 
     # Chunk size from settings (with defaults to prevent None crash)
     from app.services.settings_service import get_setting
-    chunk_size = int(get_setting(db, "CHUNK_SIZE", None) or 1000)
-    overlap_pct = float(get_setting(db, "OVERLAP_PERCENTAGE", None) or 0.1)
+    chunk_size = int(get_setting(db, "CHUNK_SIZE", None) or 1500)
+    overlap_pct = float(get_setting(db, "OVERLAP_PERCENTAGE", None) or 0.10)
     chunk_overlap = int(chunk_size * overlap_pct)
 
     loop = asyncio.get_event_loop()
@@ -301,7 +302,11 @@ async def _prepare_ingestion(
     # Chunk
     _prog(20, "Splitting into chunks…")
     doc = LangchainDocument(page_content=markdown_text, metadata={"source": file_name})
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        separators=["\n\n", "\n", ". ", " ", ""],
+    )
     chunks = await loop.run_in_executor(None, lambda: text_splitter.split_documents([doc]))
     logger.info("[INGEST] document_id=%s chunks=%d", document_id, len(chunks))
 
