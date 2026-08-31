@@ -61,7 +61,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
             userRole={userRole}
           />
         </div>
-        <main className="flex-1 min-w-0 overflow-hidden">
+        <main className="flex-1 min-w-0 overflow-y-auto">
           {children}
         </main>
       </div>

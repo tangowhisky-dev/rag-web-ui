@@ -640,7 +640,52 @@ class ScanMixin:
         Returns True if the scan was cancelled mid-phase (caller should
         return immediately), False otherwise.
         """
-        for idx, fmeta in enumerate(files_to_process):
+        # Pre-filter: only process selected files (or new files on
+        # auto-process datastores).  Without this, the scan iterates
+        # over every file on disk — including the 7700 unselected ones —
+        # calling _handle_file_in_scan which skips them, but still
+        # incrementing the progress counter and spamming the log with
+        # "file_unselected" messages.  This makes the progress counter
+        # exceed the total (e.g. 3616/372) and delays actual ingestion
+        # of the selected files.
+        db = SessionLocal()
+        try:
+            ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
+            auto_select = ds.auto_process_enabled if ds else False
+
+            # Build a set of selected file paths for fast lookup.
+            selected_paths = set(
+                row[0] for row in
+                db.query(Document.file_path)
+                .filter(
+                    Document.data_store_id == datastore_id,
+                    Document.is_selected == True,  # noqa: E712
+                )
+                .all()
+            )
+        finally:
+            db.close()
+
+        filtered = []
+        skipped_unselected = 0
+        for fmeta in files_to_process:
+            fpath = fmeta["file_path"]
+            if fpath in selected_paths:
+                filtered.append(fmeta)
+            elif fpath not in selected_paths and auto_select:
+                # New file on auto-process datastore — no Document record
+                # yet, but auto_select means it should be ingested.
+                filtered.append(fmeta)
+            else:
+                skipped_unselected += 1
+
+        if skipped_unselected > 0:
+            logger.info(
+                "[WATCHER] scan_filtered_unselected datastore_id=%d skipped=%d selected_to_process=%d",
+                datastore_id, skipped_unselected, len(filtered),
+            )
+
+        for fmeta in filtered:
             if self._is_scan_cancelled(datastore_id):
                 logger.info("[WATCHER] scan_cancelled mid-scan datastore_id=%d", datastore_id)
                 self._complete_scan(datastore_id, False, "Scan cancelled by admin")
