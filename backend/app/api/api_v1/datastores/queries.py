@@ -90,6 +90,38 @@ def _fetch_document_counts(
     return selected_counts, processed_counts
 
 
+def _fetch_pending_ingestion_counts(
+    db: Session, ds_ids: list[int]
+) -> dict[int, int]:
+    """Count selected documents with no chunks and no ProcessingTask.
+
+    These are files selected via the datastore browser that are waiting
+    for ingestion — either on the next manual scan or the next auto-process
+    interval tick.
+    """
+    if not ds_ids:
+        return {}
+    from app.models.knowledge import Document, ProcessingTask
+    from sqlalchemy import func
+
+    rows = (
+        db.query(
+            Document.data_store_id,
+            func.count(Document.id).label("pending"),
+        )
+        .outerjoin(ProcessingTask, ProcessingTask.document_id == Document.id)
+        .filter(
+            Document.data_store_id.in_(ds_ids),
+            Document.is_selected == True,  # noqa: E712
+            ProcessingTask.id.is_(None),
+            ~Document.chunks.any(),
+        )
+        .group_by(Document.data_store_id)
+        .all()
+    )
+    return {r[0]: int(r[1]) for r in rows}
+
+
 def _graph_status_from_counts(total: int, pending: int, completed: int, failed: int) -> str:
     if pending > 0:
         return "running"

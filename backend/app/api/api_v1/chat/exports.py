@@ -4,10 +4,11 @@ Renders an individual assistant message as PDF, Word (.docx), or PNG image,
 or exports the entire conversation as a Markdown file with role headers
 and rewritten-query annotations.
 """
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
 from fastapi import Depends, HTTPException, Query
 from fastapi.responses import Response
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.api.api_v1.chat import router
@@ -18,16 +19,25 @@ from app.api.api_v1.rbac import chat_owner_filter as _chat_owner_filter
 from app.core.security import get_current_user
 
 
-@router.get("/{chat_id}/messages/{message_id}/export")
+class ExportRequest(BaseModel):
+    format: Literal["pdf", "word", "image"]
+    charts: list[str] = []  # base64-encoded PNG data URLs from the frontend
+
+
+@router.post("/{chat_id}/messages/{message_id}/export")
 def export_message(
     *,
     db: Session = Depends(get_db),
     chat_id: int,
     message_id: int,
-    format: Literal["pdf", "word", "image"] = Query(...),
+    body: ExportRequest,
     current_user: User = Depends(get_current_user),
 ) -> Response:
-    """Export a single assistant message as PDF, Word (.docx), or PNG image."""
+    """Export a single assistant message as PDF, Word (.docx), or PNG image.
+
+    Chart PNGs are sent by the frontend (rendered via ECharts getDataURL)
+    so the backend doesn't need a headless browser.
+    """
     chat = (
         db.query(Chat)
         .filter(Chat.id == chat_id, _chat_owner_filter(current_user))
@@ -51,7 +61,7 @@ def export_message(
 
     from app.services.export import export_message as _export
     try:
-        data, media_type, filename = _export(content, format)
+        data, media_type, filename = _export(content, body.format, body.charts)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Export failed: {exc}")
 

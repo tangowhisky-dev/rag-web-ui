@@ -15,6 +15,7 @@ Methods:
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time as time_module
 from typing import Optional
@@ -160,6 +161,17 @@ class DispatchMixin:
 
     def _dispatch(self, path: str, event_type: str) -> None:
         """Apply debouncer then queue the change."""
+        # Filter hidden/temp/unsupported files before queueing so they
+        # don't inflate the pending_changes count shown in the UI.
+        # Deletions are never filtered — we need to clean up DB records
+        # even for files that would have been skipped on ingest.
+        if event_type != "deleted":
+            fname = os.path.basename(path)
+            _, ext = os.path.splitext(fname)
+            ext = ext.lower()
+            if self._should_skip_file(fname, ext, path):
+                return
+
         if self.debouncer is not None:
             coalesced = self.debouncer.touch(path, event_type)
             if coalesced is None:

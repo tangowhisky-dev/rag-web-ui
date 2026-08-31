@@ -352,6 +352,15 @@ class IngestMixin:
         )
         db: Session = SessionLocal()
         try:
+            # Check auto_process_enabled to determine is_selected.
+            # Matches the scan path (_handle_file_in_scan) which sets
+            # is_selected=auto_select for new files.  Without this,
+            # event-detected files on auto-process datastores are
+            # ingested but never marked as selected, so the UI shows
+            # a stale selected count (e.g. 16/17 instead of 17/17).
+            ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
+            auto_select = ds.auto_process_enabled if ds else False
+
             # Create Document record (in-place, no copy to uploads)
             try:
                 doc = Document(
@@ -362,6 +371,7 @@ class IngestMixin:
                     file_hash=file_hash,
                     file_size=file_size,
                     content_type=content_type,
+                    is_selected=auto_select,
                 )
                 db.add(doc)
                 db.commit()

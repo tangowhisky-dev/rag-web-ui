@@ -475,9 +475,12 @@ class StartupRecoveryService:
 
             # Update DataStore scan fields so the Status column reflects
             # recovery activity, not stale creation-time defaults.
+            # Use total_files_discovered (all files on disk) for the total,
+            # not total_to_process (only new+modified) — otherwise a resume
+            # with 0 new files shows "0 files" instead of the real count.
             self._update_datastore_scan_fields(
                 datastore_id,
-                total_files=total_to_process,
+                total_files=result.total_files_discovered,
                 processed=0,
                 status="running",
             )

@@ -215,3 +215,61 @@ class ChangesMixin:
             db.commit()
         finally:
             db.close()
+
+    def _process_orphan_selected(self, datastore_id: int) -> None:
+        """Find and ingest selected documents that have no ProcessingTask
+        and no chunks.
+
+        These are files that were selected via the datastore browser
+        (save-selection endpoint) on an auto-process datastore.  The
+        watcher only processes filesystem events, so without this check
+        these files would never be ingested until a manual scan is
+        triggered.
+
+        Called by the batch timer on each interval tick.
+        """
+        from app.models.knowledge import Document, ProcessingTask
+        from sqlalchemy.orm import Session as _Session
+
+        db: _Session = SessionLocal()
+        try:
+            orphans = (
+                db.query(Document)
+                .outerjoin(ProcessingTask, ProcessingTask.document_id == Document.id)
+                .filter(
+                    Document.data_store_id == datastore_id,
+                    Document.is_selected == True,  # noqa: E712
+                    ProcessingTask.id.is_(None),
+                    ~Document.chunks.any(),
+                )
+                .all()
+            )
+        finally:
+            db.close()
+
+        if not orphans:
+            return
+
+        logger.info(
+            "[WATCHER] orphan_selected_found datastore_id=%d count=%d",
+            datastore_id, len(orphans),
+        )
+
+        futures = []
+        for doc in orphans:
+            try:
+                future = self._handle_file(doc.file_path, datastore_id, "modified")
+                if future is not None:
+                    futures.append(future)
+            except Exception as e:
+                logger.error(
+                    "[WATCHER] orphan_ingest_error doc_id=%s path=%s: %s",
+                    doc.id, doc.file_path, e,
+                )
+
+        # Wait for ingestion to complete so the UI reflects actual state
+        for f in futures:
+            try:
+                f.result(timeout=3600)
+            except Exception as e:
+                logger.error("[WATCHER] orphan_future_error: %s", e)

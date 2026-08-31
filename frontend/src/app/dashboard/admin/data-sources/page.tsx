@@ -66,6 +66,8 @@ interface DataStore {
     error_files: number;
   };
   pending_changes: number;
+  // Selected files waiting for ingestion (no chunks, no task yet)
+  pending_ingestion: number;
   // Whether changes are currently being processed (event-driven ingestion)
   processing: boolean;
   // Aggregated graph build status across all documents
@@ -227,7 +229,8 @@ export default function DataSourcesPage() {
         (d) => d.last_scan_status === 'running' || d.scan_progress?.status === 'running'
       );
       const hasRunningGraph = ds.some((d) => d.graph_summary?.status === 'running');
-      if (hasProcessing || hasRunningScan || hasRunningGraph) {
+      const hasPendingIngestion = ds.some((d) => d.pending_ingestion > 0);
+      if (hasProcessing || hasRunningScan || hasRunningGraph || hasPendingIngestion) {
         fetchDataRef.current();
       }
     };
@@ -661,11 +664,11 @@ export default function DataSourcesPage() {
                   <TableCell>
                     {ds.auto_process_enabled ? (
                       <Badge variant="secondary" className="bg-green-100 text-green-700">
-                        Immediate + auto-scan
+                        auto-scan ({ds.auto_process_interval_minutes} min)
                       </Badge>
                     ) : (
                       <Badge variant="secondary" className="bg-gray-100 text-gray-500">
-                        Manual only
+                        manual only
                       </Badge>
                     )}
                   </TableCell>
@@ -798,6 +801,12 @@ export default function DataSourcesPage() {
                             <div className="mt-1 flex items-center gap-1">
                               <div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse"></div>
                               <span className="text-yellow-600">{ds.pending_changes} pending</span>
+                            </div>
+                          )}
+                          {ds.pending_ingestion > 0 && (
+                            <div className="mt-1 flex items-center gap-1">
+                              <div className="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></div>
+                              <span className="text-blue-600">{ds.pending_ingestion} queued for ingestion</span>
                             </div>
                           )}
                         </div>

@@ -119,6 +119,10 @@ class ScanMixin:
                         datastore_id, list(self._active_scans.keys()),
                     )
 
+            # Capture previous status before overwriting — needed to
+            # distinguish a resume (paused) from a fresh scan.
+            previous_status = ds.last_scan_status
+
             # Record scan status
             ds.last_scan_status = "running"
             ds.last_scan_at = datetime.now(timezone.utc)
@@ -147,7 +151,31 @@ class ScanMixin:
                 .scalar()
             ) or 0
             ds.last_scan_total_files = total_files_on_disk
-            ds.last_scan_processed = 0
+
+            # On resume from pause, start the progress counter at the number
+            # of already-completed selected documents.  Without this, the UI
+            # shows 0/16 even though 4 files were fully ingested before the
+            # pause — the actual ingestion correctly skips them (discovery
+            # manifest comparison), but the counter makes it look like a
+            # restart from scratch.
+            if previous_status == "paused":
+                completed_count = (
+                    db.query(func.count(Document.id))
+                    .filter(
+                        Document.data_store_id == datastore_id,
+                        Document.is_selected == True,  # noqa: E712
+                        Document.chunks.any(),
+                    )
+                    .scalar()
+                ) or 0
+                ds.last_scan_processed = completed_count
+                logger.info(
+                    "[WATCHER] scan_resume scan_id=%d datastore_id=%d completed_before=%d total=%d",
+                    scan_id, datastore_id, completed_count, selected_count,
+                )
+            else:
+                completed_count = 0
+                ds.last_scan_processed = 0
 
             db.commit()
 
@@ -161,7 +189,7 @@ class ScanMixin:
                     "datastore_id": datastore_id,
                     "total": selected_count,
                     "total_files_on_disk": total_files_on_disk,
-                    "processed": 0,
+                    "processed": completed_count,
                     "status": "running",
                     "error_count": 0,
                     "new": 0,
@@ -534,6 +562,52 @@ class ScanMixin:
             # Clean up futures tracking
             with self._scan_futures_lock:
                 self._scan_futures.pop(scan_id, None)
+
+            # Retry pending/failed graph builds for documents that completed
+            # ingestion but whose graph extraction was never started or was
+            # cancelled (e.g. by a pause).  Without this, a resume scan finds
+            # 0 new files and exits immediately, leaving graph builds orphaned
+            # at graph_status="pending" forever.  Graph builds run in daemon
+            # threads and don't block scan completion.
+            if not self._is_scan_cancelled(datastore_id):
+                try:
+                    # Reset "failed" graph builds that were cancelled by a
+                    # pause back to "pending" so the retry picks them up.
+                    # _check_graph_build_eligible in the dispatcher skips
+                    # "failed" tasks, so we must reset them first.
+                    graph_db = SessionLocal()
+                    try:
+                        failed_tasks = (
+                            graph_db.query(ProcessingTask)
+                            .filter(
+                                ProcessingTask.data_store_id == datastore_id,
+                                ProcessingTask.status == "completed",
+                                ProcessingTask.graph_status == "failed",
+                            )
+                            .all()
+                        )
+                        reset_count = 0
+                        for t in failed_tasks:
+                            if t.graph_error and "Cancelled" in t.graph_error:
+                                t.graph_status = "pending"
+                                t.graph_error = None
+                                reset_count += 1
+                        if reset_count:
+                            graph_db.commit()
+                            logger.info(
+                                "[WATCHER] graph_reset_failed scan_id=%d datastore_id=%d reset=%d",
+                                scan_id, datastore_id, reset_count,
+                            )
+                    finally:
+                        graph_db.close()
+
+                    from app.services.discovery.startup_recovery_service import StartupRecoveryService
+                    StartupRecoveryService()._retry_pending_graph_builds(datastore_id)
+                except Exception as e:
+                    logger.warning(
+                        "[WATCHER] graph_retry_failed scan_id=%d datastore_id=%d: %s",
+                        scan_id, datastore_id, e,
+                    )
 
             # Mark scan complete — success only if no ingestion errors
             scan_success = summary["errors"] == 0

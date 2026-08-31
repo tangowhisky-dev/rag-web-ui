@@ -659,28 +659,52 @@ def _apply_config_to_chart(chart, config: dict):
             builder(chart, series, i, name, data, x_data, config, series_list)
 
 
-def process_echarts_blocks(text: str) -> Tuple[str, list[bytes], list[str]]:
-    """Find echarts code blocks in text and render them to PNG.
+def _decode_data_url(data_url: str) -> bytes | None:
+    """Decode a base64 PNG data URL to raw bytes."""
+    try:
+        # Format: data:image/png;base64,<base64data>
+        if "," in data_url:
+            _, b64 = data_url.split(",", 1)
+        else:
+            b64 = data_url
+        import base64
+        return base64.b64decode(b64)
+    except Exception:
+        return None
+
+
+def process_echarts_blocks(
+    text: str,
+    chart_pngs: list[str] | None = None,
+) -> Tuple[str, list[bytes], list[str]]:
+    """Find echarts code blocks in text and replace with chart images.
+
+    chart_pngs: list of base64 PNG data URLs from the frontend (rendered
+    via ECharts getDataURL). If provided, used in order. If not provided
+    or insufficient, the placeholder is left empty (no image).
 
     Returns:
         (processed_text, png_bytes_list, raw_json_list)
         - processed_text: original text with echarts blocks replaced by placeholders
-        - png_bytes_list: list of PNG bytes for each chart
+        - png_bytes_list: list of PNG bytes for each chart (None entries if no image)
         - raw_json_list: list of raw JSON strings from each block
     """
     png_list: list[bytes] = []
     raw_json_list: list[str] = []
-    placeholders: list[str] = []
 
     def _replace_block(match: re.Match) -> str:
         json_str = match.group(1).strip()
         raw_json_list.append(json_str)
-        placeholder = f"\n[ECHARTS_CHART_{len(png_list)}]\n"
-        placeholders.append(placeholder)
+        idx = len(raw_json_list) - 1
+        placeholder = f"\n[ECHARTS_CHART_{idx}]\n"
 
-        png = _render_echarts_to_png(json_str)
+        png = None
+        if chart_pngs and idx < len(chart_pngs):
+            png = _decode_data_url(chart_pngs[idx])
         if png:
             png_list.append(png)
+        else:
+            png_list.append(b"")  # placeholder to keep indices aligned
         return placeholder
 
     processed = _ECHARTS_BLOCK_RE.sub(_replace_block, text)
@@ -698,7 +722,7 @@ def _insert_png_in_docx(doc, png_bytes: bytes, index: int):
     doc.add_paragraph()
 
 
-def export_to_pdf(answer_text: str) -> bytes:
+def export_to_pdf(answer_text: str, chart_pngs: list[str] | None = None) -> bytes:
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import getSampleStyleSheet
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image
@@ -718,8 +742,10 @@ def export_to_pdf(answer_text: str) -> bytes:
     body_style.fontSize = 11
     body_style.leading = 16
 
-    clean = _strip_markdown(answer_text)
-    clean, png_list, _ = process_echarts_blocks(clean)
+    # Process echarts blocks BEFORE stripping markdown — the regex
+    # needs the ```echarts fences intact to match.
+    processed, png_list, _ = process_echarts_blocks(answer_text, chart_pngs)
+    clean = _strip_markdown(processed)
 
     elements = []
     for para in clean.split("\n\n"):
@@ -731,17 +757,19 @@ def export_to_pdf(answer_text: str) -> bytes:
         chart_match = re.match(r'\[ECHARTS_CHART_(\d+)\]', para)
         if chart_match:
             idx = int(chart_match.group(1))
-            if idx < len(png_list):
+            if idx < len(png_list) and png_list[idx]:
                 img_buf = io.BytesIO(png_list[idx])
                 from reportlab.lib.utils import ImageReader
-                img = ImageReader(img_buf)
+                img_reader = ImageReader(img_buf)
                 # Read image dimensions and scale to fit page width
                 avail_width = 612 - doc.leftMargin - doc.rightMargin  # A4 width in points
-                orig_w, orig_h = img.getSize()
+                orig_w, orig_h = img_reader.getSize()
                 scale = min(avail_width / orig_w, 400 / orig_h) if orig_w > 0 else 0.8
                 new_w = int(orig_w * scale)
                 new_h = int(orig_h * scale)
-                elements.append(Image(img, width=new_w, height=new_h))
+                # Reset buffer position for Image flowable
+                img_buf.seek(0)
+                elements.append(Image(img_buf, width=new_w, height=new_h))
                 elements.append(Spacer(1, 0.3 * cm))
             continue
 
@@ -752,7 +780,7 @@ def export_to_pdf(answer_text: str) -> bytes:
     return buf.getvalue()
 
 
-def export_to_word(answer_text: str) -> bytes:
+def export_to_word(answer_text: str, chart_pngs: list[str] | None = None) -> bytes:
     from docx import Document
     from docx.shared import Pt, Cm, Inches
 
@@ -764,8 +792,9 @@ def export_to_word(answer_text: str) -> bytes:
         section.left_margin = Cm(2.5)
         section.right_margin = Cm(2.5)
 
-    clean = _strip_markdown(answer_text)
-    clean, png_list, raw_json_list = process_echarts_blocks(clean)
+    # Process echarts blocks BEFORE stripping markdown
+    processed, png_list, raw_json_list = process_echarts_blocks(answer_text, chart_pngs)
+    clean = _strip_markdown(processed)
 
     for para in clean.split("\n\n"):
         para = para.strip()
@@ -777,7 +806,7 @@ def export_to_word(answer_text: str) -> bytes:
         if chart_match:
             idx = int(chart_match.group(1))
             # Insert the chart image
-            if idx < len(png_list):
+            if idx < len(png_list) and png_list[idx]:
                 _insert_png_in_docx(doc, png_list[idx], idx)
             # Also include the raw JSON for reference
             if idx < len(raw_json_list):
@@ -814,7 +843,7 @@ def _build_image_lines(
         chart_match = re.match(r'\[ECHARTS_CHART_(\d+)\]', para)
         if chart_match:
             idx = int(chart_match.group(1))
-            if idx < len(png_list):
+            if idx < len(png_list) and png_list[idx]:
                 chart_img = Image.open(io.BytesIO(png_list[idx]))
                 max_h = 400
                 ratio = min(width / chart_img.width, max_h / chart_img.height)
@@ -856,11 +885,12 @@ def _render_image_lines(
             y += chart_h + 20
 
 
-def export_to_image(answer_text: str) -> bytes:
+def export_to_image(answer_text: str, chart_pngs: list[str] | None = None) -> bytes:
     from PIL import Image, ImageDraw, ImageFont
 
-    clean = _strip_markdown(answer_text)
-    clean, png_list, _ = process_echarts_blocks(clean)
+    # Process echarts blocks BEFORE stripping markdown
+    processed, png_list, _ = process_echarts_blocks(answer_text, chart_pngs)
+    clean = _strip_markdown(processed)
 
     width = 900
     padding = 40
@@ -887,18 +917,22 @@ def export_to_image(answer_text: str) -> bytes:
     return buf.getvalue()
 
 
-def export_message(answer_text: str, fmt: ExportFormat) -> tuple[bytes, str, str]:
+def export_message(
+    answer_text: str,
+    fmt: ExportFormat,
+    chart_pngs: list[str] | None = None,
+) -> tuple[bytes, str, str]:
     """
     Returns (content_bytes, media_type, filename).
     """
     if fmt == "pdf":
-        data = export_to_pdf(answer_text)
+        data = export_to_pdf(answer_text, chart_pngs)
         return data, "application/pdf", "answer.pdf"
     elif fmt == "word":
-        data = export_to_word(answer_text)
+        data = export_to_word(answer_text, chart_pngs)
         return data, "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "answer.docx"
     elif fmt == "image":
-        data = export_to_image(answer_text)
+        data = export_to_image(answer_text, chart_pngs)
         return data, "image/png", "answer.png"
     else:
         raise ValueError(f"Unknown export format: {fmt}")

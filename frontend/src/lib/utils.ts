@@ -39,6 +39,9 @@ export function cleanChunkText(text: string): string {
   // 1. Strip *[Image OCR] ... [End OCR]* blocks
   let s = text.replace(/\*\[Image OCR\][\s\S]*?\[End OCR\]\*/g, "").trim();
 
+  // 1b. Strip leaked [Abbreviation Glossary] blocks
+  s = s.replace(/\[Abbreviation Glossary\][\s\S]*?(?=\n[A-Z\[]|\n\n|$)/g, "").trim();
+
   // 2. ● → markdown list item
   s = s.replace(/●\s*/g, "- ");
 

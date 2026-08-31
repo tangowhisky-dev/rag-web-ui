@@ -227,9 +227,9 @@ Every factual statement derived from the retrieved documents should cite at leas
 
 Use markdown citations in the following format:
 
-[1](1)
+[N](N)
 
-where `1` is the numeric portion of the corresponding `KB-1` label.
+where `N` is the numeric portion of the corresponding `KB-N` label.
 
 Examples:
 
@@ -243,6 +243,8 @@ Rules:
 - Never invent citations.
 - Never cite unrelated chunks.
 - A sentence supported by multiple chunks may include multiple citations.
+- NEVER use bare bracket citations like [4] or [4, 5]. Always use the full markdown link format [N](N) where both the display text and the link target are the same number.
+- The number inside the brackets MUST match a KB-N label from the retrieved context. Do not use numbers that do not correspond to any KB-N label.
 
 ---
 
@@ -272,6 +274,7 @@ Avoid unnecessary verbosity.
 - Prefer retrieved documents over general knowledge.
 - Never fabricate document contents.
 - Never fabricate citations.
+- Always use [N](N) markdown citation format. Never use bare [N] or [N, M] brackets.
 - Clearly distinguish document-derived information from general knowledge.
 - If the available documents do not contain enough information, explicitly say so.
 - Maintain continuity with previous conversation whenever appropriate.
@@ -524,9 +527,9 @@ Every factual statement derived from the retrieved documents should cite at leas
 
 Use markdown citations in the following format:
 
-[1](1)
+[N](N)
 
-where `1` is the numeric portion of the corresponding `KB-1` label.
+where `N` is the numeric portion of the corresponding `KB-N` label.
 
 Examples:
 
@@ -540,6 +543,8 @@ Rules:
 - Never invent citations.
 - Never cite unrelated chunks.
 - A sentence supported by multiple chunks may include multiple citations.
+- NEVER use bare bracket citations like [4] or [4, 5]. Always use the full markdown link format [N](N) where both the display text and the link target are the same number.
+- The number inside the brackets MUST match a KB-N label from the retrieved context. Do not use numbers that do not correspond to any KB-N label.
 
 ---
 
@@ -569,6 +574,7 @@ Avoid unnecessary verbosity.
 - Prefer retrieved documents over general knowledge.
 - Never fabricate document contents.
 - Never fabricate citations.
+- Always use [N](N) markdown citation format. Never use bare [N] or [N, M] brackets.
 - Clearly distinguish document-derived information from general knowledge.
 - If the available documents do not contain enough information, explicitly say so.
 """

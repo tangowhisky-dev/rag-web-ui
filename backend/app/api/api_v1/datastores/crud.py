@@ -37,6 +37,7 @@ from app.api.api_v1.datastores.queries import (
     _build_datastore_query,
     _fetch_org_assignments,
     _fetch_document_counts,
+    _fetch_pending_ingestion_counts,
     _fetch_graph_counts,
     _apply_watcher_status,
     _fetch_assigned_orgs,
@@ -82,6 +83,7 @@ def list_datastores(
     ds_ids = [ds.id for ds in datastores]
     orgs_by_ds = _fetch_org_assignments(db, ds_ids)
     selected_counts, processed_counts = _fetch_document_counts(db, ds_ids)
+    pending_ingestion_counts = _fetch_pending_ingestion_counts(db, ds_ids)
     graph_counts = _fetch_graph_counts(db, ds_ids)
 
     result = []
@@ -93,6 +95,7 @@ def list_datastores(
         resp["graph_ingestion_paused"] = bool(getattr(ds, 'graph_ingestion_paused', False))
         resp["selected_files"] = selected_counts.get(ds.id, 0)
         resp["processed_files"] = processed_counts.get(ds.id, 0)
+        resp["pending_ingestion"] = pending_ingestion_counts.get(ds.id, 0)
         result.append(DataStoreResponse(**resp))
     return DataStoreListResponse(items=result, total=total, skip=skip, limit=limit)
 

@@ -45,6 +45,13 @@ class FolderMixin:
             self.folder_paths[datastore_id] = (org_id, folder_path, min_interval_seconds)
         # Cancel any existing batch timer for this datastore
         self._cancel_batch_timer(datastore_id)
+        # Schedule the batch timer immediately so that orphan selected
+        # documents (e.g. files selected via the datastore browser) are
+        # picked up on the next interval tick even if no filesystem
+        # events arrive.  Without this, the timer only starts when the
+        # first filesystem event triggers _dispatch → _schedule_batch_timer.
+        if min_interval_seconds > 0:
+            self._schedule_batch_timer(datastore_id)
         logger.info(
             "[WATCHER] handler_folder_added datastore_id=%d path=%s",
             datastore_id, folder_path,
@@ -100,10 +107,15 @@ class FolderMixin:
         self._cancel_batch_timer(datastore_id)
 
         def _fire():
-            # Process accumulated changes when the timer fires
+            # Process accumulated filesystem changes when the timer fires
             self._process_pending_changes(datastore_id)
-            # Reschedule if there are still pending changes or the datastore
-            # is still being watched
+            # Also pick up orphan selected documents — files that were
+            # selected via the datastore browser (save-selection) but
+            # have no ProcessingTask and no chunks.  The watcher only
+            # processes filesystem events, so without this check these
+            # files would never be ingested on auto-process datastores.
+            self._process_orphan_selected(datastore_id)
+            # Reschedule for the next interval
             if datastore_id in self.folder_paths:
                 self._schedule_batch_timer(datastore_id)
 

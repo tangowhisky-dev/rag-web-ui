@@ -194,6 +194,18 @@ h3[data-stat] {
 .prose h5 { font-size: 0.875em; }
 .prose h6 { font-size: 0.85em; }
 
+/* ── Reasoning content — force all elements to inherit muted color ── */
+.reasoning-content h1,
+.reasoning-content h2,
+.reasoning-content h3,
+.reasoning-content h4,
+.reasoning-content h5,
+.reasoning-content h6,
+.reasoning-content strong,
+.reasoning-content b {
+  color: inherit;
+}
+
 /* ── Skeleton cursor ────────────────────────────────────────────── */
 
 @keyframes skeleton-pulse {

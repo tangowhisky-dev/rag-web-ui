@@ -25,6 +25,11 @@ import {
   WrenchIcon,
   BookOpenIcon,
   ScanTextIcon,
+  CompassIcon,
+  ScanSearchIcon,
+  MicroscopeIcon,
+  InspectIcon,
+  ZoomInIcon,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
@@ -74,8 +79,8 @@ const NODE_PHASE: Record<string, string> = {
 
 // Map phase labels to icons
 const PHASE_ICONS: Record<string, LucideIcon> = {
-  "Analyzing query": BrainIcon,
-  "Gathering sources": SearchIcon,
+  "Analyzing query": SearchIcon,
+  "Gathering sources": ZoomInIcon,
   Synthesizing: FileTextIcon,
   Thinking: BrainIcon,
   Reflecting: BrainIcon,
@@ -87,7 +92,7 @@ const PHASE_ICONS: Record<string, LucideIcon> = {
 
 // Map tool names to icons
 const TOOL_ICONS: Record<string, LucideIcon> = {
-  rag_retrieve: SearchIcon,
+  rag_retrieve: ScanSearchIcon,
   kb_grep: ScanTextIcon,
   kb_outline: BookOpenIcon,
   kb_read: FileTextIcon,
@@ -169,28 +174,19 @@ export const AgenticProgress = ({
   const [isOpen, setIsOpen] = useState(true);
   const dismissRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
-  // Build deduplicated phase list
+  // Build deduplicated phase list — every phase appears at most once.
+  // The agent loop may revisit retrieval/synthesis/verification nodes
+  // across iterations; showing each repeat would produce a confusing
+  // timeline (e.g. "Gathering sources" x6).
   const phases = useMemo(() => {
     if (!agentSteps?.length) return [] as string[];
-    const dedupPhases = new Set([
-      "Analyzing query",
-      "Thinking",
-      "Reflecting",
-      "Finalizing answer",
-      "Generating answer",
-      "Calculating confidence",
-    ]);
     const seen = new Set<string>();
     const unique: string[] = [];
     for (const step of agentSteps) {
       const phase = NODE_PHASE[step.node];
       if (!phase) continue;
-      if (dedupPhases.has(phase)) {
-        if (!seen.has(phase)) {
-          seen.add(phase);
-          unique.push(phase);
-        }
-      } else {
+      if (!seen.has(phase)) {
+        seen.add(phase);
         unique.push(phase);
       }
     }
@@ -205,6 +201,31 @@ export const AgenticProgress = ({
       toolObservations ?? []
     );
   }, [toolCalls, toolObservations]);
+
+  // Unified timeline: phases with tool cards inserted right after
+  // "Gathering sources" (where retrieval tools belong chronologically).
+  // If there's no "Gathering sources" phase, tools fall through to the end.
+  const timeline = useMemo(() => {
+    type Entry =
+      | { kind: "phase"; phase: string; phaseIdx: number }
+      | { kind: "tool"; pair: ToolCallPair; toolIdx: number };
+    const entries: Entry[] = [];
+    const gatheringIdx = phases.indexOf("Gathering sources");
+    phases.forEach((phase, i) => {
+      entries.push({ kind: "phase", phase, phaseIdx: i });
+      if (i === gatheringIdx) {
+        toolPairs.forEach((pair, ti) => {
+          entries.push({ kind: "tool", pair, toolIdx: ti });
+        });
+      }
+    });
+    if (gatheringIdx === -1) {
+      toolPairs.forEach((pair, ti) => {
+        entries.push({ kind: "tool", pair, toolIdx: ti });
+      });
+    }
+    return entries;
+  }, [phases, toolPairs]);
 
   // Auto-collapse after streaming ends
   useEffect(() => {
@@ -229,7 +250,7 @@ export const AgenticProgress = ({
 
   if (phases.length === 0 && toolPairs.length === 0) return null;
 
-  // Determine which phase is currently active (last one while streaming)
+  // Determine which phase is currently active (last phase while streaming)
   const currentPhaseIdx = isStreaming ? phases.length - 1 : -1;
 
   return (
@@ -239,29 +260,32 @@ export const AgenticProgress = ({
           {isStreaming ? <Shimmer duration={1.5}>Agent working…</Shimmer> : "Agent timeline"}
         </ChainOfThoughtHeader>
         <ChainOfThoughtContent>
-          {/* Phase steps */}
-          {phases.map((phase, i) => {
-            const isActive = i === currentPhaseIdx;
-            const isComplete = i < currentPhaseIdx || !isStreaming;
-            const Icon = PHASE_ICONS[phase] ?? BrainIcon;
-            return (
-              <ChainOfThoughtStep
-                key={`${phase}-${i}`}
-                icon={Icon}
-                label={
-                  isActive ? (
-                    <Shimmer duration={1.5}>{`${phase}…`}</Shimmer>
-                  ) : (
-                    phase
-                  )
-                }
-                status={isComplete ? "complete" : isActive ? "active" : "pending"}
-              />
-            );
-          })}
+          {timeline.map((entry) => {
+            if (entry.kind === "phase") {
+              const phase = entry.phase;
+              const i = entry.phaseIdx;
+              const isActive = i === currentPhaseIdx;
+              const isComplete = i < currentPhaseIdx || !isStreaming;
+              const Icon = PHASE_ICONS[phase] ?? BrainIcon;
+              return (
+                <ChainOfThoughtStep
+                  key={`phase-${phase}-${i}`}
+                  icon={Icon}
+                  label={
+                    isActive ? (
+                      <Shimmer duration={1.5}>{`${phase}…`}</Shimmer>
+                    ) : (
+                      phase
+                    )
+                  }
+                  status={isComplete ? "complete" : isActive ? "active" : "pending"}
+                />
+              );
+            }
 
-          {/* Tool call cards */}
-          {toolPairs.map((pair, i) => {
+            // Tool card entry
+            const pair = entry.pair;
+            const i = entry.toolIdx;
             const toolName = getToolName(pair.call);
             const label = getToolLabel(pair.call);
             const state = getToolState(pair);

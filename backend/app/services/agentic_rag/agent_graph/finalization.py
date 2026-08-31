@@ -26,6 +26,7 @@ from app.services.agentic_rag.prompts import (
 from app.services.agentic_rag.schemas import LastAnswerObject, Plan
 from app.services.agentic_rag.token_budget import count_tokens
 from app.services.agentic_rag.utils import format_context_string, group_docs_by_document, normalize_citations
+from app.services.infrastructure import is_cancelled
 from app.services.settings_service import get_setting
 
 from .compaction import _compact_if_needed
@@ -111,6 +112,9 @@ async def _stream_final_answer(
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ]):
+            if ctx.chat_id is not None and is_cancelled(ctx.chat_id):
+                logger.info("[finalize_node] cancel detected, aborting LLM stream | chat_id=%d", ctx.chat_id)
+                break
             # Capture provider-reported usage when the backend sends
             # it, so reported tokens are measured rather than guessed.
             chunk_usage = getattr(chunk, "usage_metadata", None)

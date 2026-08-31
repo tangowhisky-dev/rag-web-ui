@@ -12,7 +12,7 @@ function generateId(): string {
   });
 }
 
-import { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback, use } from "react";
 
 import { useRouter } from "next/navigation";
 import Image from "next/image";
@@ -882,7 +882,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
 
   const handleSubmit = async (overrideInput?: string) => {
 
-    const trimmedInput = (overrideInput ?? input).trim();
+    const trimmedInput = (typeof overrideInput === "string" ? overrideInput : input).trim();
     if (!trimmedInput || isLoading) {
       return;
     }
@@ -1460,6 +1460,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
   );
 }
 
-export default function ChatPage({ params }: { params: { id: string } }) {
-  return <ChatPageInner params={params} />;
+export default function ChatPage({ params }: { params: Promise<{ id: string }> }) {
+  const resolvedParams = use(params);
+  return <ChatPageInner params={resolvedParams} />;
 }

@@ -8,6 +8,7 @@ POST /datastores/{id}/select-folder   — select/unselect all files in a folder
 All endpoints are admin-only and enforce organisation scope.
 """
 
+import logging
 import os
 
 from fastapi import Depends, HTTPException
@@ -20,6 +21,8 @@ from app.models.user import User
 from app.api.api_v1.datastores import router, _datastore_in_scope
 from app.api.api_v1.datastores.schemas import SaveSelectionRequest, SelectFolderRequest
 from app.api.api_v1.datastores.crud import _get_datastore_or_404
+
+logger = logging.getLogger(__name__)
 
 
 @router.get("/datastores/{datastore_id}/browse")
@@ -106,15 +109,20 @@ def save_selection(
     """Save document selection changes.
 
     Paths in *unselect* have their ingested data (Qdrant, MySQL chunks,
-    Neo4j nodes) deleted and is_selected set to false. Files on disk
-    are never deleted.  Folder paths are expanded to all contained files.
+    Neo4j nodes) deleted immediately and is_selected set to false.
+    Files on disk are never deleted.  Folder paths are expanded to all
+    contained files.
 
     Paths in *select* have is_selected set to true (or a Document
-    record created if none exists). They will be ingested on the next
-    scan.  Folder paths are expanded to all contained files.
+    record created if none exists).  Ingestion is NOT triggered here —
+    selected files are processed later:
+      - Manual datastores: on the next manual scan (Process button).
+      - Auto-process datastores: on the next interval tick, which
+        detects orphan selected documents (is_selected=True, no chunks,
+        no task) and ingests them.
     """
     admin_org_ids = get_admin_org_ids(db, current_user)
-    _get_datastore_or_404(db, datastore_id)
+    ds = _get_datastore_or_404(db, datastore_id)
     if not _datastore_in_scope(db, datastore_id, admin_org_ids):
         raise HTTPException(status_code=404, detail="DataStore not found")
 

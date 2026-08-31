@@ -475,12 +475,19 @@ export default function DatastoreBrowsePage() {
     return () => clearTimeout(debounce);
   }, [fetchData, search]);
 
-  // Compute dirty changes — includes both file-level and folder-level
+  // Compute dirty changes — file-level only.
+  //
+  // dirtyFolders is NOT used for counting — it's only used by the save
+  // handler to collapse individual file paths back into folder paths
+  // for efficiency.  This means:
+  //   - Unselecting a 15-file folder shows "15 items" (the real file
+  //     count), not "1 item" (the folder path).
+  //   - Toggling a folder off then back on shows 0 changes (each file
+  //     is back to its original state), not "1 item".
   const dirtyChanges = useMemo(() => {
     const toSelect: string[] = [];
     const toUnselect: string[] = [];
 
-    // File-level changes
     for (const [path, selected] of dirtyMap) {
       const original = originalMap.get(path);
       if (original === undefined) continue;
@@ -490,14 +497,8 @@ export default function DatastoreBrowsePage() {
       }
     }
 
-    // Folder-level changes (sent as folder paths; backend expands them)
-    for (const [folderPath, selected] of dirtyFolders) {
-      if (selected) toSelect.push(folderPath);
-      else toUnselect.push(folderPath);
-    }
-
     return { toSelect, toUnselect };
-  }, [dirtyMap, originalMap, dirtyFolders]);
+  }, [dirtyMap, originalMap]);
 
   const hasChanges = dirtyChanges.toSelect.length > 0 || dirtyChanges.toUnselect.length > 0;
 
@@ -651,20 +652,20 @@ export default function DatastoreBrowsePage() {
   const handleSave = useCallback(async () => {
     setSaving(true);
     try {
-      // For folder paths, send the folder path directly — backend expands.
-      // For file paths, resolve to absolute_path via pathToAbsolute map.
+      // Resolve a file path to its absolute path for the backend.
+      // We send individual file paths (not collapsed folder paths)
+      // because the backend's expand_folder_paths expects absolute
+      // paths and we only have relative folder paths in dirtyFolders.
+      // The file count is typically small enough that sending individual
+      // paths is fine, and it avoids the path resolution mismatch.
       const resolvePath = (p: string): string => {
-        // Folder paths are sent as-is (backend expands them)
-        if (dirtyFolders.has(p)) return p;
-        // Look up absolute path from our map (populated from browse + folder expansion)
         const abs = pathToAbsoluteRef.current.get(p);
         if (abs) return abs;
-        // Fallback: check current page items
         const item = data?.items.find(i => i.path === p);
         if (item?.absolute_path) return item.absolute_path;
-        // Last resort: return as-is
         return p;
       };
+
       const body = {
         select: dirtyChanges.toSelect.map(resolvePath),
         unselect: dirtyChanges.toUnselect.map(resolvePath),
@@ -685,7 +686,7 @@ export default function DatastoreBrowsePage() {
     } finally {
       setSaving(false);
     }
-  }, [dirtyFolders, data, dirtyChanges, fetchData, datastoreId, toast, setSaving, setDirtyMap, setDirtyFolders, setExpandedFolders, setConfirmOpen]);
+  }, [data, dirtyChanges, fetchData, datastoreId, toast, setSaving, setDirtyMap, setDirtyFolders, setExpandedFolders, setConfirmOpen]);
 
   // Discard changes
   const discardChanges = useCallback(() => {

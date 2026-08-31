@@ -51,6 +51,8 @@ export default function EChartsDiagram({ code }: EChartsDiagramProps) {
         if (!instance) {
           instance = echarts.init(dom, undefined, { renderer: 'canvas' });
           echartsInstanceRef.current = instance;
+          // Expose instance on DOM element for export (getDataURL)
+          (dom as any).__echarts_instance__ = instance;
         }
         if (cancelled) {
           instance.dispose();

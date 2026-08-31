@@ -23,6 +23,7 @@ from app.services.agentic_rag.prompts import (
 from app.services.agentic_rag.redis_memory import get_redis_memory
 from app.services.agentic_rag.token_budget import count_tokens
 from app.services.agentic_rag.tool_context import ToolContext
+from app.services.infrastructure import is_cancelled
 
 logger = logging.getLogger(__name__)
 
@@ -257,6 +258,9 @@ async def run_agent_loop(
     state = _LoopState(message_id)
 
     async for chunk in graph.astream(initial_state, config, stream_mode=["updates", "custom"]):
+        if chat_id is not None and is_cancelled(chat_id):
+            logger.info("[agent_runner] cancel detected, stopping graph | chat_id=%d", chat_id)
+            break
         kind, payload = chunk if isinstance(chunk, tuple) else ("updates", chunk)
 
         if kind == "custom":

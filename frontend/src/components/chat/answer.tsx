@@ -708,7 +708,10 @@ export const Answer: FC<{
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   const handleCopy = useCallback(() => {
-    navigator.clipboard.writeText(parsedContent.answerText.trim()).then(() => {
+    const text = parsedContent.answerText
+      .replace(/```echarts\s*\n[\s\S]*?\n```/g, "")
+      .trim();
+    navigator.clipboard.writeText(text).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     });
@@ -727,9 +730,33 @@ export const Answer: FC<{
   const handleExport = useCallback(async (format: "pdf" | "word" | "image") => {
     if (!messageId || !chatId) return;
     const ext = format === "word" ? "docx" : format === "image" ? "png" : "pdf";
-    const url = `/api/chat/${chatId}/messages/${messageId}/export?format=${format}`;
+
+    // Collect rendered chart PNGs from this message's content only.
+    // ECharts instances are stored on the DOM element; getDataURL
+    // produces a base64 PNG data URL.
+    const charts: string[] = [];
+    if (contentRef.current) {
+      const containers = contentRef.current.querySelectorAll(".echarts-diagram");
+      containers.forEach((el) => {
+        const instance = (el as any).__echarts_instance__;
+        if (instance && typeof instance.getDataURL === "function") {
+          try {
+            charts.push(instance.getDataURL({ type: "png", pixelRatio: 2 }));
+          } catch {
+            // skip if chart not ready
+          }
+        }
+      });
+    }
+
+    const url = `/api/chat/${chatId}/messages/${messageId}/export`;
     try {
-      const res = await fetch(url, { credentials: "include" });
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ format, charts }),
+      });
       if (await handleAuthRedirect(res)) return;
       if (!res.ok) throw new Error(`Export failed: ${res.status}`);
       const blob = await res.blob();
@@ -819,14 +846,16 @@ export const Answer: FC<{
       
       {parsedContent.answerText && (
         <CitationLinkContext.Provider value={citationCtxValue}>
-          <Markdown
-            key={`${citations.length > 0 ? "with-citations" : "no-citations"}-${renderKey}`}
-            remarkPlugins={[remarkGfm, remarkMath]}
-            rehypePlugins={[rehypeHighlight, [rehypeKatex, { throwOnError: false }]]}
-            components={markdownComponents}
-          >
-            {parsedContent.answerText}
-          </Markdown>
+          <div className="prose prose-sm dark:prose-invert max-w-none">
+            <Markdown
+              key={`${citations.length > 0 ? "with-citations" : "no-citations"}-${renderKey}`}
+              remarkPlugins={[remarkGfm, remarkMath]}
+              rehypePlugins={[rehypeHighlight, [rehypeKatex, { throwOnError: false }]]}
+              components={markdownComponents}
+            >
+              {parsedContent.answerText}
+            </Markdown>
+          </div>
         </CitationLinkContext.Provider>
       )}
       

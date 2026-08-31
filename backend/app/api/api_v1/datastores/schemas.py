@@ -105,6 +105,8 @@ class DataStoreResponse(BaseModel):
     scan_progress: Optional[dict] = None
     # Pending changes detected but not yet processed (event-driven queue)
     pending_changes: int = 0
+    # Selected files waiting for ingestion (no chunks, no task yet)
+    pending_ingestion: int = 0
     # Timestamp of the last successful recovery scan
     last_recovered_at: Optional[str] = None
     # Whether changes are currently being processed (event-driven ingestion)
