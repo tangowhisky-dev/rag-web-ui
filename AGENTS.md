@@ -216,7 +216,9 @@ When the user corrects your approach, append a one-line rule here before ending 
 - React 19 `react-hooks/refs` rule: never write `ref.current = value` during render. Move ref writes into `useEffect`.
 - React 19 `react-hooks/preserve-manual-memoization` rule: add all `setState` functions from `useState` to `useCallback` dependency arrays (the compiler infers them as deps).
 - React 19 `react-hooks/static-components` rule: never assign a function call returning a component to a capitalized variable during render. Use a module-scope wrapper component instead.
-- `tailwind.config.ts` must be `tailwind.config.mts` to avoid Node.js `MODULE_TYPELESS_PACKAGE_JSON` warning.
+- `tailwind.config.ts` must be `tailwind.config.mjs` to avoid Node.js `MODULE_TYPELESS_PACKAGE_JSON` warning.
+- Don't run the complete backend test suite unless there was a major refactor / code changes touching multiple pipelines or execution paths. For smaller changes, only run the relevant test files. The full suite takes ~25 minutes.
+- SPLADE truncation patch: `prithivida/Splade_PP_en_v1` ships with `max_length=128` in `tokenizer_config.json` but the BERT model supports 512. `get_sparse_embedder()` in `backend/app/services/infrastructure/utils.py` overrides truncation to 512 after loading. If `SPLADE_MODEL` is changed to a non-BERT sparse model (BM25, MiniCOIL, Bm42), audit the new model's tokenizer config and adjust or remove the override — those models have different limits or no token limit at all. Existing Qdrant points indexed at 128 tokens need re-ingestion to benefit from the full 512-token window.
 
 ---
 

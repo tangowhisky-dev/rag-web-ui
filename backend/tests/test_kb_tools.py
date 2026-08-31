@@ -321,8 +321,12 @@ def test_kb_read_section_not_found_returns_full():
 
 def test_kb_read_truncates_to_max_tokens():
     from app.services.agentic_rag.tools.kb_read import KbReadTool, KbReadInput
-    # Large content — 10000 chars
-    markdown = "A" * 10000
+    from app.services.agentic_rag import token_budget
+    # Reset calibration to default so the test is order-independent.
+    token_budget._calibration_ratio = token_budget.CHARS_PER_TOKEN
+    token_budget._calibrated = False
+    # Large content — 100000 chars, well above any calibration ratio
+    markdown = "A" * 100000
     doc = _StubDoc(converted_markdown=markdown)
     ctx = _StubToolContext([doc])
 

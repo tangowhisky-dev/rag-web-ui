@@ -128,6 +128,19 @@ _LM_STUDIO_BASE = os.environ.get("LM_STUDIO_BASE_URL", "http://192.168.1.3:2244/
 _LM_STUDIO_KEY = os.environ.get("LM_STUDIO_API_KEY", "dummy")
 GENERATION_MODEL = os.environ.get("GENERATION_MODEL", "google/gemma-4-26b-a4b")
 
+
+def _lm_studio_available() -> bool:
+    """Check if LM Studio is reachable."""
+    import urllib.request
+    try:
+        urllib.request.urlopen(_LM_STUDIO_BASE + "/models", timeout=3)
+        return True
+    except Exception:
+        return False
+
+_LM_STUDIO_AVAILABLE = _lm_studio_available()
+pytestmark = pytest.mark.skipif(not _LM_STUDIO_AVAILABLE, reason="LM Studio not reachable")
+
 def get_llm_client():
     from openai import OpenAI
     from app.db.session import SessionLocal
@@ -269,8 +282,8 @@ def embed_dense(texts: List[str]) -> List[List[float]]:
     from app.services.settings_service import get_setting
     db = SessionLocal()
     try:
-        api_key = get_setting(db, "EMBEDDING_API_KEY", None) or "not-required"
-        api_base = get_setting(db, "EMBEDDING_API_BASE", None)
+        api_key = get_setting(db, "EMBEDDING_API_KEY", None) or _LM_STUDIO_KEY
+        api_base = get_setting(db, "EMBEDDING_API_BASE", None) or _LM_STUDIO_BASE
         model = get_setting(db, "DENSE_EMBEDDINGS_MODEL", None)
     finally:
         db.close()
@@ -328,20 +341,16 @@ def test_llm_replacement_quality():
 
     print("\nReplacing abbreviations in chunks with LLM + glossary context...\n")
 
-    llm_replaced_chunks = []
     for i, chunk in enumerate(TEST_CHUNKS):
         found = find_abbrs_in_text(chunk)
         det_replaced = expand_replace_det(chunk)
         llm_replaced = llm_replace_with_glossary(chunk)
-        llm_replaced_chunks.append(llm_replaced)
 
         print(f"Chunk {i}: '{chunk[:70]}...'")
         print(f"  Abbreviations found: {list(found.keys())}")
         print(f"  Det replace:  {det_replaced[:120]}...")
         print(f"  LLM replace:  {llm_replaced[:120]}...")
         print()
-
-    return llm_replaced_chunks
 
 # ─── TEST 2: LLM Query Replacement Quality ─────────────────────────────────
 
@@ -356,17 +365,13 @@ def test_llm_query_replacement():
 
     print(f"\nLLM-replacing {len(abbr_queries)} abbreviation queries...\n")
 
-    llm_queries = {}
     for query in abbr_queries:
         llm_q = llm_replace_query_with_glossary(query)
         det_suffix = expand_query_suffix(query)
-        llm_queries[query] = llm_q
         print(f"  Original:    '{query}'")
         print(f"  LLM replace: '{llm_q}'")
         print(f"  Det suffix:  '{det_suffix[:80]}...'")
         print()
-
-    return llm_queries
 
 # ─── TEST 3: Dense Retrieval Comparison ────────────────────────────────────
 

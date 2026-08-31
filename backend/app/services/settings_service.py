@@ -106,7 +106,8 @@ def _validate_numeric(key: str, value: Any, defn: SettingDef, cast, type_name: s
     try:
         v = cast(value)
     except (TypeError, ValueError):
-        raise ValueError(f"{key} must be a {type_name}, got {value!r}")
+        article = "an" if type_name[0] in "aeiou" else "a"
+        raise ValueError(f"{key} must be {article} {type_name}, got {value!r}")
     if defn.min_value is not None and v < defn.min_value:
         raise ValueError(f"{key} must be >= {defn.min_value}, got {v}")
     if defn.max_value is not None and v > defn.max_value:

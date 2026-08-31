@@ -42,6 +42,19 @@ CHAT_MODELS = ["google/gemma-4-26b-a4b", "qwen/qwen3.5-9b"]
 CSV_PATH = "/app/assets/abbreviations_enhanced.csv"
 RESULTS_PATH = "/app/assets/abbr_bidirectional_results.json"
 
+# Skip all tests in this file when LM Studio is not reachable.
+import pytest as _pytest
+import urllib.request as _urlreq
+
+def _lm_studio_available() -> bool:
+    try:
+        _urlreq.urlopen(LM_STUDIO_URL + "/models", timeout=3)
+        return True
+    except Exception:
+        return False
+
+pytestmark = _pytest.mark.skipif(not _lm_studio_available(), reason="LM Studio not reachable")
+
 # ─── Load abbreviation CSV ──────────────────────────────────────────────────
 
 def load_abbreviations():
@@ -116,7 +129,7 @@ def expand_query_glossary_suffix(query: str) -> str:
     found = find_abbrs_in_text(query)
     if not found:
         return query
-    lines = [f"{a} = {', '.join(f)}" for a, f in sorted(found.items(), key=lambda x: x.lower())]
+    lines = [f"{a} = {', '.join(f)}" for a, f in sorted(found.items(), key=lambda x: x[0].lower())]
     return f"{query}\n\n[Abbreviation Glossary]\n" + "\n".join(lines)
 
 def expand_query_bidirectional_glossary(query: str) -> str:
@@ -133,7 +146,7 @@ def expand_query_bidirectional_glossary(query: str) -> str:
             merged[abbr] = forms
     if not merged:
         return query
-    lines = [f"{a} = {', '.join(f)}" for a, f in sorted(merged.items(), key=lambda x: x.lower())]
+    lines = [f"{a} = {', '.join(f)}" for a, f in sorted(merged.items(), key=lambda x: x[0].lower())]
     return f"{query}\n\n[Abbreviation Glossary]\n" + "\n".join(lines)
 
 def expand_query_bidirectional_space(query: str) -> str:

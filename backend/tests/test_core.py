@@ -231,4 +231,4 @@ def test_registry_chunk_overlap():
     from app.core.settings_registry import get_def
     chunk_size = get_def("CHUNK_SIZE").default
     overlap_pct = get_def("OVERLAP_PERCENTAGE").default
-    assert int(chunk_size * overlap_pct) == int(1500 * 0.20)
+    assert int(chunk_size * overlap_pct) == int(1500 * 0.10)

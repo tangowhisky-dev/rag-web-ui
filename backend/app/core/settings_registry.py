@@ -89,6 +89,11 @@ _APP_ONLY = [
                "str", None, scope="app", reload="ingest",
                description="LLM for graph extraction during ingestion. Super admin only.",
                model_picker=True, api_base_ref="GRAPHRAG_API_BASE", api_key_ref="GRAPHRAG_API_KEY"),
+    SettingDef("GRAPHRAG_MAX_TOKENS", "GraphRAG", "Max output tokens per extraction batch",
+               "int", 8192, scope="app", reload="ingest", min_value=256,
+               description="Caps the graph LLM's output per extraction call. "
+                           "Entity/relation JSON for a single batch typically needs 1000-3000 tokens. "
+                           "Set lower for small-context local models, higher for large documents with many entities."),
     SettingDef("MEMORY_ENABLED", "System", "Enable Redis long-term memory",
                "bool", True, scope="app", reload="restart",
                description="Redis checkpointer singleton; restart required."),

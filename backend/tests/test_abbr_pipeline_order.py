@@ -43,6 +43,19 @@ GEN_MODEL = CHAT_MODELS[0]      # gemma-4-26b for generation
 CSV_PATH = "/app/assets/abbreviations_enhanced.csv"
 RESULTS_PATH = "/app/assets/abbr_pipeline_order_results.json"
 
+# Skip all tests in this file when LM Studio is not reachable.
+import pytest as _pytest
+import urllib.request as _urlreq
+
+def _lm_studio_available() -> bool:
+    try:
+        _urlreq.urlopen(LM_STUDIO_URL + "/models", timeout=3)
+        return True
+    except Exception:
+        return False
+
+pytestmark = _pytest.mark.skipif(not _lm_studio_available(), reason="LM Studio not reachable")
+
 # ─── Load abbreviation CSV ──────────────────────────────────────────────────
 
 def load_abbreviations():
@@ -101,7 +114,7 @@ def expand_bidir_glossary(query: str) -> str:
             merged[abbr] = forms
     if not merged:
         return query
-    lines = [f"{a} = {', '.join(f)}" for a, f in sorted(merged.items(), key=lambda x: x.lower())]
+    lines = [f"{a} = {', '.join(f)}" for a, f in sorted(merged.items(), key=lambda x: x[0].lower())]
     return f"{query}\n\n[Abbreviation Glossary]\n" + "\n".join(lines)
 
 def expand_bidir_space(query: str) -> str:

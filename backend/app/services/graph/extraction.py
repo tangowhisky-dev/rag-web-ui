@@ -116,6 +116,7 @@ def _get_extractor_and_writer():
         graph_model = get_setting(_db, "GRAPHRAG_LLM", None) or get_setting(_db, "OPENAI_MODEL", None)
         api_key = get_setting(_db, "GRAPHRAG_API_KEY", None) or get_setting(_db, "OPENAI_API_KEY", None)
         api_base = get_setting(_db, "GRAPHRAG_API_BASE", None) or get_setting(_db, "OPENAI_API_BASE", None)
+        max_tokens = int(get_setting(_db, "GRAPHRAG_MAX_TOKENS", None) or 8192)
     finally:
         _db.close()
 
@@ -126,6 +127,7 @@ def _get_extractor_and_writer():
         model_name=graph_model,
         model_params={
             "temperature": 0,
+            "max_tokens": max_tokens,
         },
         base_url=api_base,
         api_key=api_key,
@@ -145,7 +147,7 @@ def _get_extractor_and_writer():
         batch_size=500,
     )
 
-    logger.info("GraphService[llm]: extractor+writer built with model=%s", graph_model)
+    logger.info("GraphService[llm]: extractor+writer built with model=%s max_tokens=%d", graph_model, max_tokens)
     return _setup._global_extractor, _setup._global_writer
 
 

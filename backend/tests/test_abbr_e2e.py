@@ -118,12 +118,6 @@ def test_1_lookup_and_expansion():
         glossary2 = build_glossary_from_texts([text, "The DA approved resupply"], lookup)
         assert "CO" in glossary2, "Glossary from texts should contain CO"
         assert "DA" in glossary2, "Glossary from texts should contain DA"
-
-        print("PASS: test_1_lookup_and_expansion")
-        return True
-    except AssertionError as e:
-        print(f"FAIL: test_1_lookup_and_expansion: {e}")
-        return False
     finally:
         db.close()
 
@@ -139,9 +133,6 @@ def test_2_empty_lookup_no_expansion():
     assert expand_query_suffix(text, empty) == text, "Empty lookup should not expand query"
     assert build_glossary(text, empty) == "", "Empty lookup should produce empty glossary"
 
-    print("PASS: test_2_empty_lookup_no_expansion")
-    return True
-
 
 def test_3_ingestion_expansion():
     """Test that ingestion expands chunk_text and stores original_text in metadata."""
@@ -155,8 +146,7 @@ def test_3_ingestion_expansion():
         # Find a KB with documents
         kb = db.query(KnowledgeBase).first()
         if not kb:
-            print("SKIP: test_3_ingestion_expansion (no KB found)")
-            return True
+            pytest.skip("No KB found")
 
         # Check if any chunks have original_text in metadata
         chunks = db.query(DocumentChunk).filter(
@@ -164,8 +154,7 @@ def test_3_ingestion_expansion():
         ).limit(5).all()
 
         if not chunks:
-            print("SKIP: test_3_ingestion_expansion (no chunks found)")
-            return True
+            pytest.skip("No chunks found")
 
         # Check if any chunk has [Abbreviation Glossary] in chunk_text
         has_expansion = any("[Abbreviation Glossary]" in (c.chunk_text or "") for c in chunks)
@@ -173,30 +162,16 @@ def test_3_ingestion_expansion():
             # Verify original_text is in metadata
             chunk_with_exp = next(c for c in chunks if "[Abbreviation Glossary]" in (c.chunk_text or ""))
             meta = chunk_with_exp.chunk_metadata or {}
-            if "original_text" in meta:
-                print(f"PASS: test_3_ingestion_expansion (found expanded chunk with original_text)")
-                return True
-            else:
-                print(f"FAIL: test_3_ingestion_expansion (expanded chunk missing original_text in metadata)")
-                return False
+            assert "original_text" in meta, "Expanded chunk missing original_text in metadata"
         else:
             # Chunks may have been ingested before expansion was enabled
             # Let's verify the expansion function works on existing chunk text
             lookup = build_lookup(db, kb.org_id)
             if lookup.is_empty:
-                print("SKIP: test_3_ingestion_expansion (no abbreviation lists for this org)")
-                return True
+                pytest.skip("No abbreviation lists for this org")
             test_text = "The CO ordered the bns to wdr."
             expanded = expand_suffix(test_text, lookup)
-            if expanded != test_text:
-                print(f"PASS: test_3_ingestion_expansion (expansion function works, no pre-existing expanded chunks)")
-                return True
-            else:
-                print(f"FAIL: test_3_ingestion_expansion (expansion function did not expand text)")
-                return False
-    except Exception as e:
-        print(f"FAIL: test_3_ingestion_expansion: {e}")
-        return False
+            assert expanded != test_text, "Expansion function did not expand text"
     finally:
         db.close()
 
@@ -219,15 +194,6 @@ def test_4_query_expansion_node():
         eq = result["expanded_query"]
         assert "Battalions" in eq or "bns" in eq, f"Expanded query should contain expansion: {eq}"
         assert "bns wdr from position" in eq, "Original query should be preserved in expanded query"
-
-        print(f"PASS: test_4_query_expansion_node (expanded: {eq[:80]}...)")
-        return True
-    except AssertionError as e:
-        print(f"FAIL: test_4_query_expansion_node: {e}")
-        return False
-    except Exception as e:
-        print(f"FAIL: test_4_query_expansion_node: {e}")
-        return False
     finally:
         db.close()
 
@@ -273,15 +239,6 @@ def test_5_generation_glossary():
             "Glossary should contain CO mapping"
         assert "DA =" in context, \
             "Glossary should contain DA mapping"
-
-        print(f"PASS: test_5_generation_glossary")
-        return True
-    except AssertionError as e:
-        print(f"FAIL: test_5_generation_glossary: {e}")
-        return False
-    except Exception as e:
-        print(f"FAIL: test_5_generation_glossary: {e}")
-        return False
     finally:
         db.close()
 
@@ -303,30 +260,16 @@ def test_6_disable_expansion():
         upsert_app_setting(db, "ABBREVIATION_EXPANSION_ENABLED", False, user_id=1)
         _invalidate_cache()
 
-        lookup_disabled = build_lookup(db, None)
-        assert lookup_disabled.is_empty, "Lookup should be empty when disabled"
-
-        # Re-enable
-        upsert_app_setting(db, "ABBREVIATION_EXPANSION_ENABLED", True, user_id=1)
-        _invalidate_cache()
+        try:
+            lookup_disabled = build_lookup(db, None)
+            assert lookup_disabled.is_empty, "Lookup should be empty when disabled"
+        finally:
+            # Re-enable to avoid leaving it disabled
+            upsert_app_setting(db, "ABBREVIATION_EXPANSION_ENABLED", True, user_id=1)
+            _invalidate_cache()
 
         lookup_reenabled = build_lookup(db, None)
         assert not lookup_reenabled.is_empty, "Lookup should be non-empty when re-enabled"
-
-        print("PASS: test_6_disable_expansion")
-        return True
-    except AssertionError as e:
-        print(f"FAIL: test_6_disable_expansion: {e}")
-        # Re-enable to avoid leaving it disabled
-        try:
-            upsert_app_setting(db, "ABBREVIATION_EXPANSION_ENABLED", True, user_id=1)
-            _invalidate_cache()
-        except:
-            pass
-        return False
-    except Exception as e:
-        print(f"FAIL: test_6_disable_expansion: {e}")
-        return False
     finally:
         db.close()
 
@@ -343,8 +286,7 @@ def test_7_api_endpoints():
     )
     token = resp.json().get("access_token")
     if not token:
-        print("SKIP: test_7_api_endpoints (could not login)")
-        return True
+        pytest.skip("Could not login as super_admin")
 
     headers = {"Authorization": f"Bearer {token}"}
 
@@ -388,23 +330,29 @@ def test_7_api_endpoints():
     assert resp.status_code == 200, f"Re-enable list failed: {resp.status_code}"
     assert resp.json()["is_enabled"] == True, "List should be re-enabled"
 
-    print("PASS: test_7_api_endpoints")
-    return True
-
 
 def main():
     print("=" * 70)
     print("ABBREVIATION EXPANSION END-TO-END TEST")
     print("=" * 70)
 
+    tests = [
+        test_1_lookup_and_expansion,
+        test_2_empty_lookup_no_expansion,
+        test_3_ingestion_expansion,
+        test_4_query_expansion_node,
+        test_5_generation_glossary,
+        test_6_disable_expansion,
+        test_7_api_endpoints,
+    ]
+
     results = []
-    results.append(test_1_lookup_and_expansion())
-    results.append(test_2_empty_lookup_no_expansion())
-    results.append(test_3_ingestion_expansion())
-    results.append(test_4_query_expansion_node())
-    results.append(test_5_generation_glossary())
-    results.append(test_6_disable_expansion())
-    results.append(test_7_api_endpoints())
+    for test in tests:
+        try:
+            test()
+            results.append(True)
+        except Exception:
+            results.append(False)
 
     print("\n" + "=" * 70)
     passed = sum(1 for r in results if r)

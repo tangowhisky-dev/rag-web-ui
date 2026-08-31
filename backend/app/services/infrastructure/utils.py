@@ -89,6 +89,33 @@ def get_sparse_embedder() -> SparseTextEmbedding:
                     model_name=settings.SPLADE_MODEL,
                     cache_dir=settings.FASTEMBED_CACHE_DIR,
                 )
+                # ── SPLADE truncation patch ──────────────────────────────
+                # ANOMALY: prithivida/Splade_PP_en_v1 ships with two limits
+                # in tokenizer_config.json:
+                #   max_length:        128   (HF default, conservative)
+                #   model_max_length:  512   (BERT's actual capacity)
+                # fastembed's load_tokenizer() takes min(512, 128) = 128 and
+                # calls tokenizer.enable_truncation(max_length=128).
+                #
+                # 128 tokens (~600 chars) is shorter than our default
+                # CHUNK_SIZE of 1500 chars.  With the title prepended
+                # (f"{title}\n\n{chunk_text}" in _upsert_to_qdrant), a
+                # typical chunk is 260-315 tokens.  SPLADE silently
+                # truncated at 128, dropping ~50% of every chunk from the
+                # sparse index.  Keywords in the second half of a chunk
+                # were invisible to sparse retrieval.
+                #
+                # The underlying BERT model supports 512 position embeddings.
+                # We override the truncation to 512 after loading.  This
+                # covers our full chunk size with room to spare.
+                #
+                # ⚠ If SPLADE_MODEL is changed to a non-BERT sparse model
+                # (e.g. BM25, MiniCOIL, Bm42), this patch may be wrong —
+                # those models have different token limits or no token
+                # limit at all.  Audit the new model's tokenizer_config.json
+                # and adjust or remove this override accordingly.
+                _sparse_embedder.model.tokenizer.enable_truncation(max_length=512)
+                logger.info("SPLADE truncation raised to 512 tokens (was 128)")
     return _sparse_embedder
 
 

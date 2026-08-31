@@ -173,6 +173,19 @@ _LM_STUDIO_KEY = os.environ.get("LM_STUDIO_API_KEY", "dummy")
 _DENSE_MODEL = os.environ.get("DENSE_EMBEDDINGS_MODEL", "qwen/qwen3-embedding-0.6b")
 GENERATION_MODEL = os.environ.get("GENERATION_MODEL", "google/gemma-4-26b-a4b")
 
+# Skip all tests in this file when LM Studio is not reachable.
+import pytest as _pytest
+import urllib.request as _urlreq
+
+def _lm_studio_available() -> bool:
+    try:
+        _urlreq.urlopen(_LM_STUDIO_BASE + "/models", timeout=3)
+        return True
+    except Exception:
+        return False
+
+pytestmark = _pytest.mark.skipif(not _lm_studio_available(), reason="LM Studio not reachable")
+
 def get_dense_embedder():
     from openai import OpenAI
     from app.db.session import SessionLocal
