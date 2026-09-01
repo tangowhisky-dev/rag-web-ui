@@ -217,14 +217,18 @@ class ChangesMixin:
             db.close()
 
     def _process_orphan_selected(self, datastore_id: int) -> None:
-        """Find and ingest selected documents that have no ProcessingTask
-        and no chunks.
+        """Find and ingest selected documents that need ingestion on an
+        auto-process datastore.
 
-        These are files that were selected via the datastore browser
-        (save-selection endpoint) on an auto-process datastore.  The
-        watcher only processes filesystem events, so without this check
-        these files would never be ingested until a manual scan is
-        triggered.
+        Picks up two categories:
+        1. Selected documents with no ProcessingTask and no chunks — files
+           selected via the datastore browser that were never ingested.
+        2. Selected documents with a failed ProcessingTask and no chunks —
+           files whose ingestion failed (API down, OOM, conversion error)
+           and need retry.  Without this, failed tasks on auto-process
+           datastores are never retried because the manual scan path
+           (which has _requeue_stuck_documents) is blocked for auto-process
+           datastores.
 
         Called by the batch timer on each interval tick.
         """
@@ -233,6 +237,7 @@ class ChangesMixin:
 
         db: _Session = SessionLocal()
         try:
+            # Category 1: no ProcessingTask at all, no chunks
             orphans = (
                 db.query(Document)
                 .outerjoin(ProcessingTask, ProcessingTask.document_id == Document.id)
@@ -244,19 +249,41 @@ class ChangesMixin:
                 )
                 .all()
             )
+
+            # Category 2: has a failed task, no chunks
+            failed_docs = (
+                db.query(Document)
+                .join(ProcessingTask, ProcessingTask.document_id == Document.id)
+                .filter(
+                    Document.data_store_id == datastore_id,
+                    Document.is_selected == True,  # noqa: E712
+                    ProcessingTask.status == "failed",
+                    ~Document.chunks.any(),
+                )
+                .all()
+            )
         finally:
             db.close()
 
-        if not orphans:
+        # Deduplicate by document id (a doc could theoretically appear in
+        # both queries if it has a failed task that was deleted and recreated)
+        seen_ids: set = set()
+        to_process = []
+        for doc in [*orphans, *failed_docs]:
+            if doc.id not in seen_ids:
+                seen_ids.add(doc.id)
+                to_process.append(doc)
+
+        if not to_process:
             return
 
         logger.info(
-            "[WATCHER] orphan_selected_found datastore_id=%d count=%d",
-            datastore_id, len(orphans),
+            "[WATCHER] orphan_selected_found datastore_id=%d orphans=%d failed=%d",
+            datastore_id, len(orphans), len(failed_docs),
         )
 
         futures = []
-        for doc in orphans:
+        for doc in to_process:
             try:
                 future = self._handle_file(doc.file_path, datastore_id, "modified")
                 if future is not None:
