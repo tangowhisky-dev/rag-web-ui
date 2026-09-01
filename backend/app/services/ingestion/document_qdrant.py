@@ -41,7 +41,6 @@ logger = logging.getLogger(__name__)
 
 _EMBED_BATCH_SIZE = 32
 _EMBED_CONCURRENCY = 4   # concurrent dense embedding API calls
-_SPARSE_EMBED_BATCH_SIZE = 4  # SPLADE ONNX is memory-heavy: 32 texts = 1.75GB, 4 texts = 500MB
 _QDRANT_UPSERT_BATCH = 100
 
 
@@ -224,8 +223,8 @@ async def _embed_sparse_batch(
     loop = asyncio.get_event_loop()
     sparse_embs: list = []
     embedder = get_sparse_embedder()
-    for batch_start in range(0, len(texts), _SPARSE_EMBED_BATCH_SIZE):
-        batch = texts[batch_start : batch_start + _SPARSE_EMBED_BATCH_SIZE]
+    for batch_start in range(0, len(texts), _EMBED_BATCH_SIZE):
+        batch = texts[batch_start : batch_start + _EMBED_BATCH_SIZE]
         batch_sparse = await loop.run_in_executor(
             None, lambda b=batch: list(embedder.embed(b))
         )
