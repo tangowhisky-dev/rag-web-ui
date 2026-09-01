@@ -762,11 +762,12 @@ class ScanMixin:
         Each task covers: parse → embed → Qdrant upsert.  Graph build runs
         in a separate daemon thread and does not block the scan.
 
-        Uses a total deadline of 10 minutes (not per-task) so a dead
-        worker doesn't block the scan for N×10 minutes.  When a future
-        times out or fails, the progress counter is still incremented so
-        the UI doesn't freeze, and the task is marked as failed in the DB
-        so the next scan can re-queue it.
+        Uses a per-future timeout of 10 minutes (enough for any single file
+        including OCR) with a total cap of 4 hours (prevents infinite
+        blocking if the worker pool is dead).  When a future times out or
+        fails, the progress counter is still incremented so the UI doesn't
+        freeze, and the task is marked as failed in the DB so the next
+        scan can re-queue it.
         """
         if not ingestion_futures:
             return
@@ -776,14 +777,16 @@ class ScanMixin:
             scan_id, datastore_id, len(ingestion_futures),
         )
 
-        deadline = time_module.monotonic() + 600  # 10 min total
+        per_future_timeout = 600  # 10 min per file (covers large PDFs + OCR)
+        total_deadline = time_module.monotonic() + 14400  # 4 hour total cap
+
         for future in ingestion_futures:
-            remaining = deadline - time_module.monotonic()
-            if remaining <= 0:
-                # Deadline exhausted — mark remaining futures as errors
+            total_remaining = total_deadline - time_module.monotonic()
+            if total_remaining <= 0:
+                # Total cap exhausted — mark remaining futures as errors
                 logger.error(
-                    "[WATCHER] ingestion_deadline_exhausted scan_id=%d — marking remaining tasks as failed",
-                    scan_id,
+                    "[WATCHER] ingestion_total_cap_exhausted scan_id=%d — marking remaining %d tasks as failed",
+                    scan_id, len(ingestion_futures) - ingestion_futures.index(future),
                 )
                 future.cancel()
                 self._mark_task_failed_for_future(future, datastore_id)
@@ -791,8 +794,10 @@ class ScanMixin:
                 self._update_scan_progress(datastore_id, 1)
                 continue
 
+            # Use the smaller of per-future timeout and total remaining
+            timeout = min(per_future_timeout, total_remaining)
             try:
-                future.result(timeout=remaining)
+                future.result(timeout=timeout)
                 # Success — progress was already incremented by the
                 # _on_scan_ingestion_done callback.
             except TimeoutError:

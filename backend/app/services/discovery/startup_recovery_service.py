@@ -362,25 +362,27 @@ class StartupRecoveryService:
         return len(result.deleted_files)
 
     def _wait_for_ingestion(self, ingestion_futures, scan_id: int, datastore_id: int, initial_count: int) -> int:
-        """Wait for all ingestion futures with a single 10-minute total deadline.
+        """Wait for all ingestion futures with per-future timeout and total cap.
 
-        Same pattern as DataStoreWatcher._wait_for_ingestion: a total
-        deadline prevents N×10 minute blocking when a worker dies.  On
+        Same pattern as DataStoreWatcher._wait_for_ingestion: 10 minutes
+        per future (enough for large PDFs with OCR), 4 hour total cap
+        (prevents infinite blocking if the worker pool is dead).  On
         timeout/error, the task is marked failed so the next scan or
         interval tick can re-queue it.
         """
         import time as _time
         completed_count = initial_count
         self._active_scans[scan_id]["processed_files"] = completed_count
-        deadline = _time.monotonic() + 600  # 10 min total
+        per_future_timeout = 600  # 10 min per file
+        total_deadline = _time.monotonic() + 14400  # 4 hour total cap
 
         for future, fpath in ingestion_futures:
             if not self._running:
                 break
-            remaining = deadline - _time.monotonic()
-            if remaining <= 0:
+            total_remaining = total_deadline - _time.monotonic()
+            if total_remaining <= 0:
                 logger.error(
-                    "[RECOVERY] deadline_exhausted scan_id=%s — marking remaining tasks as failed",
+                    "[RECOVERY] total_cap_exhausted scan_id=%s — marking remaining tasks as failed",
                     scan_id,
                 )
                 future.cancel()
@@ -388,12 +390,13 @@ class StartupRecoveryService:
                 completed_count += 1
                 self._active_scans[scan_id]["processed_files"] = completed_count
                 self._update_datastore_scan_fields(
-                    datastore_id, processed=completed_count, status="running",
+                    datastore_id, processed=completed_count,
                 )
                 continue
 
+            timeout = min(per_future_timeout, total_remaining)
             try:
-                future.result(timeout=remaining)
+                future.result(timeout=timeout)
             except Exception as e:
                 logger.error(
                     "[RECOVERY] ingestion_failed scan_id=%s path=%s: %s",

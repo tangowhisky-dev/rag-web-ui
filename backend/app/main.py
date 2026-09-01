@@ -7,6 +7,7 @@ from app.core.security import get_password_hash
 from app.core.storage import init_storage
 from app.db.session import SessionLocal
 from app.models.knowledge import ProcessingTask, Document
+from app.models.datastore import DataStore
 from app.models.organisation import Organisation
 from app.models.user import User, UserRole
 from app.services.datastore_watcher import DataStoreWatcher
@@ -218,6 +219,22 @@ async def lifespan(app: FastAPI):
             db.commit()
             logger.warning(
                 f"Startup: reset {len(stuck)} stuck task(s) — {pending_count} to pending, {failed_count} to failed"
+            )
+
+        # Clear stale "running" scan status from datastores where a scan
+        # was interrupted by a worker crash/OOM.  Without this, the scan
+        # endpoint returns 409 "A scan is already running" forever because
+        # _check_db_scan_running sees last_scan_status == "running" and
+        # no scan thread is alive to clear it.
+        stale_ds = db.query(DataStore).filter(DataStore.last_scan_status == "running").all()
+        if stale_ds:
+            for ds in stale_ds:
+                ds.last_scan_status = "error"
+                ds.last_scan_error = "Scan interrupted by backend restart"
+            db.commit()
+            logger.warning(
+                f"Startup: cleared {len(stale_ds)} stale running scan(s) — "
+                f"set to error so manual scan can be re-triggered"
             )
     finally:
         db.close()
