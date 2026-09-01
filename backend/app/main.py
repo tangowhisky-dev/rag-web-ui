@@ -207,7 +207,7 @@ async def lifespan(app: FastAPI):
             failed_count = 0
             for t in stuck:
                 doc = db.query(Document).filter(Document.id == t.document_id).first() if t.document_id else None
-                if doc and doc.knowledge_base_id is not None:
+                if doc:
                     t.status = "pending"
                     t.error_message = "Worker restarted while task was in progress — ready for retry"
                     pending_count += 1

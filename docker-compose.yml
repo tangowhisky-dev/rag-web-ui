@@ -22,12 +22,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    restart: on-failure
-    deploy:
-      restart_policy:
-        condition: on-failure
-        delay: 5s
-        max_attempts: 3
+    restart: unless-stopped
 
   frontend:
     build: ./frontend

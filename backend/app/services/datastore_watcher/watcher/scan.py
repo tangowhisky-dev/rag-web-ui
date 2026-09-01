@@ -760,31 +760,91 @@ class ScanMixin:
         """Wait for all ingestion tasks to complete before marking scan done.
 
         Each task covers: parse → embed → Qdrant upsert.  Graph build runs
-        in a separate daemon thread and does not block the scan.  10 minutes
-        per file covers large PDFs with OCR; a timeout is a real hang (API
-        down, DB locked), not a slow graph build.
+        in a separate daemon thread and does not block the scan.
+
+        Uses a total deadline of 10 minutes (not per-task) so a dead
+        worker doesn't block the scan for N×10 minutes.  When a future
+        times out or fails, the progress counter is still incremented so
+        the UI doesn't freeze, and the task is marked as failed in the DB
+        so the next scan can re-queue it.
         """
-        if ingestion_futures:
-            logger.info(
-                "[WATCHER] waiting_for_ingestion scan_id=%d datastore_id=%d tasks=%d",
-                scan_id, datastore_id, len(ingestion_futures),
+        if not ingestion_futures:
+            return
+
+        logger.info(
+            "[WATCHER] waiting_for_ingestion scan_id=%d datastore_id=%d tasks=%d",
+            scan_id, datastore_id, len(ingestion_futures),
+        )
+
+        deadline = time_module.monotonic() + 600  # 10 min total
+        for future in ingestion_futures:
+            remaining = deadline - time_module.monotonic()
+            if remaining <= 0:
+                # Deadline exhausted — mark remaining futures as errors
+                logger.error(
+                    "[WATCHER] ingestion_deadline_exhausted scan_id=%d — marking remaining tasks as failed",
+                    scan_id,
+                )
+                future.cancel()
+                self._mark_task_failed_for_future(future, datastore_id)
+                summary["errors"] += 1
+                self._update_scan_progress(datastore_id, 1)
+                continue
+
+            try:
+                future.result(timeout=remaining)
+                # Success — progress was already incremented by the
+                # _on_scan_ingestion_done callback.
+            except TimeoutError:
+                logger.error(
+                    "[WATCHER] ingestion_task_timeout scan_id=%d — cancelling future",
+                    scan_id,
+                )
+                future.cancel()
+                self._mark_task_failed_for_future(future, datastore_id)
+                summary["errors"] += 1
+                self._update_scan_progress(datastore_id, 1)
+            except Exception as e:
+                logger.error(
+                    "[WATCHER] ingestion_task_failed scan_id=%d: %s",
+                    scan_id, e,
+                )
+                self._mark_task_failed_for_future(future, datastore_id)
+                summary["errors"] += 1
+                self._update_scan_progress(datastore_id, 1)
+
+    def _mark_task_failed_for_future(self, future: Future, datastore_id: int) -> None:
+        """Best-effort: mark the ProcessingTask for a failed/timed-out future as 'failed'.
+
+        The future itself doesn't carry the task_id, but the task was
+        submitted via _submit_ingestion which stores task_id in the
+        future's context.  We query the DB for processing tasks on this
+        datastore that are still in 'processing' state and mark them
+        failed — the next scan will re-queue them via _requeue_stuck_documents.
+        """
+        db = SessionLocal()
+        try:
+            stuck = (
+                db.query(ProcessingTask)
+                .filter(
+                    ProcessingTask.data_store_id == datastore_id,
+                    ProcessingTask.status == "processing",
+                )
+                .all()
             )
-            for future in ingestion_futures:
-                try:
-                    future.result(timeout=600)  # 10 minutes per task
-                except TimeoutError:
-                    logger.error(
-                        "[WATCHER] ingestion_task_timeout scan_id=%d — cancelling future",
-                        scan_id,
-                    )
-                    future.cancel()
-                    summary["errors"] += 1
-                except Exception as e:
-                    logger.error(
-                        "[WATCHER] ingestion_task_failed scan_id=%d: %s",
-                        scan_id, e,
-                    )
-                    summary["errors"] += 1
+            for t in stuck:
+                t.status = "failed"
+                t.error_message = "Ingestion timed out or worker died"
+            if stuck:
+                db.commit()
+                logger.info(
+                    "[WATCHER] marked_stuck_tasks_failed datastore_id=%d count=%d",
+                    datastore_id, len(stuck),
+                )
+        except Exception as e:
+            logger.warning("[WATCHER] mark_stuck_failed error: %s", e)
+        finally:
+            db.close()
 
     def _matches_pattern(self, filepath: str, pattern: str = "*") -> bool:
         """Check if a filepath matches the scan pattern. Delegates to shared utility."""
