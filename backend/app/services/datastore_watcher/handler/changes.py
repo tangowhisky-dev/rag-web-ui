@@ -294,9 +294,14 @@ class ChangesMixin:
                     doc.id, doc.file_path, e,
                 )
 
-        # Wait for ingestion to complete so the UI reflects actual state
-        for f in futures:
-            try:
-                f.result(timeout=3600)
-            except Exception as e:
-                logger.error("[WATCHER] orphan_future_error: %s", e)
+        # Don't block the batch timer thread waiting for ingestion to
+        # complete.  Futures run in the executor's thread pool; the UI
+        # polls for processing/pending_ingestion status every 3 seconds.
+        # Blocking here prevents the next interval tick from firing and
+        # delays processing of new filesystem events.  Failed files are
+        # retried on the next tick via the failed-task query above.
+        if futures:
+            logger.info(
+                "[WATCHER] orphan_ingestion_submitted datastore_id=%d count=%d",
+                datastore_id, len(futures),
+            )
