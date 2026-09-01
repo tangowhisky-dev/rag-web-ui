@@ -98,12 +98,13 @@ class ChangesMixin:
         """Callback after scan-submitted ingestion completes.
 
         Delegates to _on_ingestion_done for logging, then increments the
-        scan's processed counter so the UI progress reflects actual
-        completion rather than mere submission.
+        scan's processed counter — but only for successful completions.
+        Failed/timed-out futures are counted by _wait_for_ingestion to
+        avoid double-counting.
         """
         self._on_ingestion_done(future, task_id, event_path)
-        # Only increment progress if the scan is still running.
-        # If cancelled, _cancel_scan already set status to "cancelled" and
-        # we don't want to muddy the progress counter.
+        if future.exception() is not None:
+            # Failed — _wait_for_ingestion will increment the counter
+            return
         if not self._is_scan_cancelled(datastore_id):
             self._update_scan_progress(datastore_id, 1)

@@ -301,8 +301,17 @@ class StartupRecoveryService:
         self, datastore_id: int, total_files: int | None = None,
         processed: int | None = None, status: str | None = None,
     ) -> None:
-        """Update DataStore last_scan_* fields so the UI Status column
-        reflects recovery progress in real time."""
+        """Update DataStore last_scan_* fields.
+
+        Recovery does NOT set last_scan_status — that field belongs to
+        manual scans and the UI uses it to show scan progress.  Recovery
+        progress is shown in the separate Recovery column via the
+        recovery-status endpoint.  Overwriting last_scan_status would
+        make the UI show a fake "running" scan with the wrong denominator.
+
+        We only update last_scan_total_files (for the Files column display)
+        and last_scan_processed (for the completed-scan summary).
+        """
         db: Session = SessionLocal()
         try:
             ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
@@ -312,13 +321,9 @@ class StartupRecoveryService:
                 ds.last_scan_total_files = total_files
             if processed is not None:
                 ds.last_scan_processed = processed
-            if status is not None:
-                ds.last_scan_status = status
-                # Set last_scan_at when recovery starts so the UI doesn't
-                # show "Completed never" — last_scan_at was null because
-                # recovery never set it (only manual scans did).
-                if status == "running" and ds.last_scan_at is None:
-                    ds.last_scan_at = datetime.now(timezone.utc)
+            # Set last_scan_at if it was never set (new datastore)
+            if ds.last_scan_at is None:
+                ds.last_scan_at = datetime.now(timezone.utc)
             db.commit()
         except Exception as e:
             logger.warning("[RECOVERY] Failed to update scan fields: %s", e)
@@ -357,26 +362,113 @@ class StartupRecoveryService:
         return len(result.deleted_files)
 
     def _wait_for_ingestion(self, ingestion_futures, scan_id: int, datastore_id: int, initial_count: int) -> int:
+        """Wait for all ingestion futures with a single 10-minute total deadline.
+
+        Same pattern as DataStoreWatcher._wait_for_ingestion: a total
+        deadline prevents N×10 minute blocking when a worker dies.  On
+        timeout/error, the task is marked failed so the next scan or
+        interval tick can re-queue it.
+        """
+        import time as _time
         completed_count = initial_count
         self._active_scans[scan_id]["processed_files"] = completed_count
+        deadline = _time.monotonic() + 600  # 10 min total
+
         for future, fpath in ingestion_futures:
             if not self._running:
                 break
+            remaining = deadline - _time.monotonic()
+            if remaining <= 0:
+                logger.error(
+                    "[RECOVERY] deadline_exhausted scan_id=%s — marking remaining tasks as failed",
+                    scan_id,
+                )
+                future.cancel()
+                self._mark_recovery_task_failed(datastore_id)
+                completed_count += 1
+                self._active_scans[scan_id]["processed_files"] = completed_count
+                self._update_datastore_scan_fields(
+                    datastore_id, processed=completed_count, status="running",
+                )
+                continue
+
             try:
-                future.result(timeout=600)
+                future.result(timeout=remaining)
             except Exception as e:
                 logger.error(
                     "[RECOVERY] ingestion_failed scan_id=%s path=%s: %s",
                     scan_id, fpath, e,
                 )
+                self._mark_recovery_task_failed(datastore_id)
             completed_count += 1
             self._active_scans[scan_id]["processed_files"] = completed_count
             self._update_datastore_scan_fields(
-                datastore_id,
-                processed=completed_count,
-                status="running",
+                datastore_id, processed=completed_count, status="running",
             )
         return completed_count
+
+    def _mark_recovery_task_failed(self, datastore_id: int) -> None:
+        """Mark processing tasks for a datastore as failed (best-effort)."""
+        db = SessionLocal()
+        try:
+            stuck = (
+                db.query(ProcessingTask)
+                .filter(
+                    ProcessingTask.data_store_id == datastore_id,
+                    ProcessingTask.status == "processing",
+                )
+                .all()
+            )
+            for t in stuck:
+                t.status = "failed"
+                t.error_message = "Recovery ingestion timed out or worker died"
+            if stuck:
+                db.commit()
+        except Exception as e:
+            logger.warning("[RECOVERY] mark_failed error: %s", e)
+        finally:
+            db.close()
+
+    def _requeue_failed_tasks(self, datastore_id: int) -> list:
+        """Re-queue selected documents with failed/pending tasks and no chunks.
+
+        These are files that haven't changed on disk (so discovery doesn't
+        classify them as new/modified) but whose ingestion failed.  Without
+        this, they would never be retried by recovery.
+        """
+        from concurrent.futures import Future
+        db = SessionLocal()
+        try:
+            # Selected docs with failed or pending tasks and no chunks
+            stuck = (
+                db.query(Document)
+                .join(ProcessingTask, ProcessingTask.document_id == Document.id)
+                .filter(
+                    Document.data_store_id == datastore_id,
+                    Document.is_selected == True,  # noqa: E712
+                    ProcessingTask.status.in_(("pending", "failed")),
+                    ~Document.chunks.any(),
+                )
+                .all()
+            )
+        finally:
+            db.close()
+
+        if not stuck:
+            return []
+
+        futures = []
+        for doc in stuck:
+            try:
+                future = self.process_new_file(doc.file_path, datastore_id)
+                if future is not None:
+                    futures.append((future, doc.file_path))
+            except Exception as e:
+                logger.error(
+                    "[RECOVERY] requeue_error doc_id=%s path=%s: %s",
+                    doc.id, doc.file_path, e,
+                )
+        return futures
 
     def _finalize_recovery(self, datastore_id: int, scan_id: int, total_to_process: int, completed_count: int) -> None:
         self._active_scans[scan_id]["status"] = "complete"
@@ -390,9 +482,9 @@ class StartupRecoveryService:
             ds_record = db2.query(DataStore).filter(DataStore.id == datastore_id).first()
             if ds_record:
                 ds_record.last_recovered_at = recovered_at
-                ds_record.last_scan_processed = completed_count
-                ds_record.last_scan_status = "completed"
-                ds_record.last_scan_at = recovered_at
+                # Do NOT overwrite last_scan_status or last_scan_processed —
+                # those belong to manual scans.  Recovery progress is shown
+                # in the Recovery column via the recovery-status endpoint.
                 db2.commit()
                 logger.info(
                     "[RECOVERY] recovery_timestamp_set datastore_id=%s last_recovered_at=%s",
@@ -487,6 +579,21 @@ class StartupRecoveryService:
 
             ingestion_futures = self._queue_ingestion_files(result, datastore_id)
             deleted_count = self._handle_deletions_phase(result, datastore_id, scan_id)
+
+            # Re-queue selected documents with failed/pending tasks and no
+            # chunks — these are unchanged files whose ingestion failed
+            # (API down, OOM, conversion error) and were not picked up by
+            # discovery because the file hasn't changed on disk.
+            requeued_futures = self._requeue_failed_tasks(datastore_id)
+            ingestion_futures.extend(requeued_futures)
+            if requeued_futures:
+                total_to_process += len(requeued_futures)
+                self._active_scans[scan_id]["total_files"] = total_to_process
+                logger.info(
+                    "[RECOVERY] requeued_failed_tasks datastore_id=%s count=%d",
+                    datastore_id, len(requeued_futures),
+                )
+
             completed_count = self._wait_for_ingestion(ingestion_futures, scan_id, datastore_id, deleted_count)
 
             self._finalize_recovery(datastore_id, scan_id, total_to_process, completed_count)
@@ -602,7 +709,21 @@ class StartupRecoveryService:
                         datastore_id, file_path, doc.id,
                     )
             else:
-                # Brand-new file — no Document record at all
+                # Brand-new file — no Document record at all.
+                # Check auto_process_enabled to decide is_selected:
+                # auto-process datastores auto-select new files (matching
+                # the watcher's _ingest_file behavior).  Manual datastores
+                # should not ingest new files during recovery — the user
+                # must select them first via the datastore browser.
+                ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
+                auto_select = ds.auto_process_enabled if ds else False
+                if not auto_select:
+                    logger.info(
+                        "[RECOVERY] skip_new_file_manual_ds path=%s — not selected",
+                        file_path,
+                    )
+                    return None
+
                 doc = Document(
                     file_path=file_path,
                     file_name=file_name,
@@ -610,6 +731,7 @@ class StartupRecoveryService:
                     content_type=_guess_content_type(file_name),
                     file_hash=file_hash,
                     data_store_id=datastore_id,
+                    is_selected=True,
                     created_at=datetime.now(timezone.utc),
                     updated_at=datetime.now(timezone.utc),
                 )

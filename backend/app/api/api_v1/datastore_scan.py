@@ -562,11 +562,16 @@ def _check_db_scan_running(db: Session, datastore_id: int) -> None:
 def _apply_scan_results_to_db(
     ds_local, result: dict, latest_file_count: int, db_session: Session,
 ) -> None:
-    """Update datastore DB record with scan results."""
+    """Update datastore DB record with scan results.
+
+    last_scan_processed is NOT overwritten here — it was incremented
+    atomically during the scan by _update_scan_progress for each
+    selected file that completed.  Overwriting it with total_files_discovered
+    (all files on disk) would show 8000/8000 instead of 700/700.
+    """
     ds_local.last_scan_at = datetime.now(timezone.utc)
     ds_local.last_scan_status = "completed" if result.get("errors", 0) == 0 else "error"
     ds_local.last_scan_total_files = latest_file_count
-    ds_local.last_scan_processed = result.get("scanned", 0)
     ds_local.last_scan_new = result.get("new", 0)
     ds_local.last_scan_modified = result.get("modified", 0)
     ds_local.last_scan_skipped = result.get("skipped", 0)
