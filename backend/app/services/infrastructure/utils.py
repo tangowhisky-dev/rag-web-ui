@@ -51,11 +51,7 @@ def get_qdrant_client() -> QdrantClient:
     if _qdrant_client is None:
         with _singleton_lock:
             if _qdrant_client is None:
-                _qdrant_client = QdrantClient(
-                    host=settings.QDRANT_HOST,
-                    port=settings.QDRANT_PORT,
-                    timeout=60,  # 60s per request — fails fast on network outage
-                )
+                _qdrant_client = QdrantClient(host=settings.QDRANT_HOST, port=settings.QDRANT_PORT)
     return _qdrant_client
 
 
