@@ -102,10 +102,6 @@ async def _embed_texts_batch(
     progress_cb=None,
     progress_start: int = 0,
     progress_end: int = 100,
-    openai_client: Optional[AsyncOpenAI] = None,
-    embed_model: Optional[str] = None,
-    global_offset: int = 0,
-    global_total: int = 0,
 ) -> List[List[float]]:
     """Compute dense embeddings via the OpenAI-compatible API, in batches.
 
@@ -113,37 +109,26 @@ async def _embed_texts_batch(
     progress_cb(pct, msg) is called after each batch completes, with pct mapped
     between progress_start and progress_end so callers can slot this into a
     larger bar.
-
-    If openai_client and embed_model are provided, they are used instead of
-    creating a new client.  This avoids repeated connection pool setup when
-    called from a streaming loop (e.g. _upsert_to_qdrant processes chunks in
-    batches of 100).
-
-    global_offset and global_total are used for progress messages so the user
-    sees "Embedding chunks 300/910" instead of "Embedding chunks 100/100"
-    when called from a streaming loop.
     """
-    owns_client = openai_client is None
-    if owns_client:
-        # Embeddings API key/base are super_admin-only (app scope).
-        from app.services.settings_service import get_setting
-        from app.db.session import SessionLocal
-        _db = SessionLocal()
-        try:
-            api_key = get_setting(_db, "EMBEDDING_API_KEY", None) or get_setting(_db, "OPENAI_API_KEY", None)
-            api_base = get_setting(_db, "EMBEDDING_API_BASE", None) or get_setting(_db, "OPENAI_API_BASE", None)
-            embed_model = get_setting(_db, "DENSE_EMBEDDINGS_MODEL", None)
-        finally:
-            _db.close()
-        # Local servers don't require a key; supply a placeholder when unset.
-        if not api_key:
-            api_key = "not-required"
-        openai_client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=api_base,
-            timeout=60.0,       # 60s per call — fails fast on network outage
-            max_retries=2,      # 2 retries on transient errors (5xx, timeout)
-        )
+    # Embeddings API key/base are super_admin-only (app scope).
+    from app.services.settings_service import get_setting
+    from app.db.session import SessionLocal
+    _db = SessionLocal()
+    try:
+        api_key = get_setting(_db, "EMBEDDING_API_KEY", None) or get_setting(_db, "OPENAI_API_KEY", None)
+        api_base = get_setting(_db, "EMBEDDING_API_BASE", None) or get_setting(_db, "OPENAI_API_BASE", None)
+        embed_model = get_setting(_db, "DENSE_EMBEDDINGS_MODEL", None)
+    finally:
+        _db.close()
+    # Local servers don't require a key; supply a placeholder when unset.
+    if not api_key:
+        api_key = "not-required"
+    client = AsyncOpenAI(
+        api_key=api_key,
+        base_url=api_base,
+        timeout=60.0,       # 60s per call — fails fast on network outage
+        max_retries=2,      # 2 retries on transient errors (5xx, timeout)
+    )
 
     try:
         # Slice into batches
@@ -154,32 +139,27 @@ async def _embed_texts_batch(
         sem = asyncio.Semaphore(_EMBED_CONCURRENCY)
         done_count = 0
 
-        # For progress messages: show global position if available, else local
-        report_total = global_total if global_total else len(texts)
-
         async def _embed_one(batch_idx: int, batch: List[str]) -> List[List[float]]:
             nonlocal done_count
             async with sem:
-                response = await openai_client.embeddings.create(input=batch, model=embed_model)
+                response = await client.embeddings.create(input=batch, model=embed_model)
             # Report progress outside the semaphore so slow batches don't block it
             done_count += 1
             if progress_cb is not None:
                 frac = done_count / total_batches
                 pct = int(progress_start + frac * (progress_end - progress_start))
-                local_done = batch_idx * _EMBED_BATCH_SIZE + len(batch)
-                done = min(global_offset + local_done, report_total)
-                progress_cb(pct, f"Embedding chunks {done}/{report_total}…")
+                done = min(batch_idx * _EMBED_BATCH_SIZE + len(batch), len(texts))
+                progress_cb(pct, f"Embedding chunks {done}/{len(texts)}…")
             return [r.embedding for r in response.data]
 
         results = await asyncio.gather(
             *[_embed_one(i, b) for i, b in enumerate(batches)]
         )
     finally:
-        if owns_client:
-            # Close the AsyncOpenAI client before returning so httpx connection
-            # pool cleanup happens on the live event loop, not after loop close.
-            # Without this, GC triggers aclose() on a dead loop → "Event loop is closed".
-            await openai_client.close()
+        # Close the AsyncOpenAI client before returning so httpx connection
+        # pool cleanup happens on the live event loop, not after loop close.
+        # Without this, GC triggers aclose() on a dead loop → "Event loop is closed".
+        await client.close()
 
     # Flatten in order
     all_embeddings: List[List[float]] = []
@@ -268,20 +248,13 @@ async def _upsert_to_qdrant(
 ) -> None:
     """Compute both vector types and upsert all points to Qdrant.
 
-    Processes chunks in stream batches of _QDRANT_UPSERT_BATCH (100) to
-    bound memory usage.  For each stream batch, dense and sparse embeddings
-    are computed concurrently via asyncio.gather, then upserted to Qdrant
-    immediately.  This keeps peak memory proportional to the batch size
-    rather than the total chunk count — a 910-chunk PDF peaks at 100
-    chunks worth of embeddings instead of all 910.
-
-    progress_cb is called after each dense embedding sub-batch with the
-    current progress percentage (mapped from progress_start to progress_end)
-    and a message.
+    Dense and sparse embeddings are computed concurrently to halve wall time.
+    progress_cb is called after each dense embedding batch with the current
+    progress percentage (mapped from progress_start to progress_end) and a
+    message.
     """
     if not chunk_payloads:
         return
-
     # Prepend document title to chunk text for embedding. The title enriches
     # both dense and sparse vectors with document-level semantics without
     # polluting the stored chunk_text. The stored payload keeps clean text.
@@ -293,79 +266,44 @@ async def _upsert_to_qdrant(
         else:
             texts.append(chunk_text)
 
+    # Run dense and sparse embeddings concurrently
+    dense_embs, sparse_embs = await asyncio.gather(
+        _embed_texts_batch(
+            texts,
+            progress_cb=progress_cb,
+            progress_start=progress_start,
+            progress_end=progress_end,
+        ),
+        _embed_sparse_batch(texts, pt=pt),
+    )
+    if pt:
+        pt.ping()  # signal progress after embeddings complete
+
+    # Build point structs and upsert in batches, yielding the event loop between
+    # each batch via asyncio.sleep(0). Pure-Python object construction holds the
+    # GIL even inside run_in_executor, so we must yield explicitly to let poll
+    # requests through — otherwise the event loop is blocked for 10-30 seconds
+    # while 2795 PointStruct objects are built, causing ECONNRESET on the frontend.
     loop = asyncio.get_event_loop()
     client = get_qdrant_client()
     collection_name = _get_qdrant_collection_name(data_store_id, kb_id)
     _ensure_qdrant_collection(client, collection_name)
-
     n = len(chunk_payloads)
-    total_stream_batches = (n + _QDRANT_UPSERT_BATCH - 1) // _QDRANT_UPSERT_BATCH
+    for batch_start in range(0, n, _QDRANT_UPSERT_BATCH):
+        batch_end = min(batch_start + _QDRANT_UPSERT_BATCH, n)
+        batch_chunks = chunk_payloads[batch_start:batch_end]
+        batch_dense = dense_embs[batch_start:batch_end]
+        batch_sparse = sparse_embs[batch_start:batch_end]
 
-    # Create one AsyncOpenAI client for the entire streaming loop to avoid
-    # repeated connection pool setup/teardown.
-    from app.services.settings_service import get_setting
-    from app.db.session import SessionLocal
-    _db = SessionLocal()
-    try:
-        api_key = get_setting(_db, "EMBEDDING_API_KEY", None) or get_setting(_db, "OPENAI_API_KEY", None)
-        api_base = get_setting(_db, "EMBEDDING_API_BASE", None) or get_setting(_db, "OPENAI_API_BASE", None)
-        embed_model = get_setting(_db, "DENSE_EMBEDDINGS_MODEL", None)
-    finally:
-        _db.close()
-    if not api_key:
-        api_key = "not-required"
-    openai_client = AsyncOpenAI(
-        api_key=api_key,
-        base_url=api_base,
-        timeout=60.0,
-        max_retries=2,
-    )
+        def _build_upsert_batch(bc=batch_chunks, bd=batch_dense, bs=batch_sparse):
+            pts = _build_qdrant_points(bc, bd, bs, kb_id, document_id, file_name, data_store_id)
+            client.upsert(collection_name=collection_name, points=pts)
 
-    try:
-        for stream_idx in range(total_stream_batches):
-            batch_start = stream_idx * _QDRANT_UPSERT_BATCH
-            batch_end = min(batch_start + _QDRANT_UPSERT_BATCH, n)
-            batch_texts = texts[batch_start:batch_end]
-            batch_chunks = chunk_payloads[batch_start:batch_end]
-
-            # Map progress across stream batches: each stream batch gets an
-            # equal slice of the progress_start..progress_end range.
-            stream_frac_start = stream_idx / total_stream_batches
-            stream_frac_end = (stream_idx + 1) / total_stream_batches
-            sub_progress_start = int(progress_start + stream_frac_start * (progress_end - progress_start))
-            sub_progress_end = int(progress_start + stream_frac_end * (progress_end - progress_start))
-
-            # Run dense and sparse embeddings concurrently for this stream batch
-            dense_embs, sparse_embs = await asyncio.gather(
-                _embed_texts_batch(
-                    batch_texts,
-                    openai_client=openai_client,
-                    embed_model=embed_model,
-                    progress_cb=progress_cb,
-                    progress_start=sub_progress_start,
-                    progress_end=sub_progress_end,
-                    global_offset=batch_start,
-                    global_total=n,
-                ),
-                _embed_sparse_batch(batch_texts, pt=pt),
-            )
-            if pt:
-                pt.ping()
-
-            # Build point structs and upsert this stream batch
-            def _build_upsert_batch(bc=batch_chunks, bd=dense_embs, bs=sparse_embs):
-                pts = _build_qdrant_points(bc, bd, bs, kb_id, document_id, file_name, data_store_id)
-                client.upsert(collection_name=collection_name, points=pts)
-
-            await loop.run_in_executor(None, _build_upsert_batch)
-            if pt:
-                pt.ping()
-            await asyncio.sleep(0)  # yield — let poll requests through
-
-            # Embeddings go out of scope here, freeing memory before the next
-            # stream batch allocates new ones.
-    finally:
-        await openai_client.close()
+        await loop.run_in_executor(None, _build_upsert_batch)
+        if pt:
+            pt.ping()  # signal progress after each upsert batch
+        # Yield the event loop so poll requests can be served between batches
+        await asyncio.sleep(0)
 
 
 class UploadResult(BaseModel):
