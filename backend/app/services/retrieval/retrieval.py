@@ -583,7 +583,7 @@ def semantic_dedup(docs: list[dict], threshold: float) -> list[dict]:
             if kept_norm == 0:
                 continue
             sim = float(np.dot(vec_np, kept_np) / (vec_norm * kept_norm))
-            if sim >= threshold:
+            if sim > threshold:
                 is_dup = True
                 break
         if not is_dup:
