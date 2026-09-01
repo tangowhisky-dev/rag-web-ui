@@ -729,9 +729,8 @@ export default function DataSourcesPage() {
                         );
                       }
                       if (ds.last_scan_status === 'paused') {
-                        const pct = ds.last_scan_total_files > 0
-                          ? Math.min((ds.last_scan_processed / Math.max(ds.last_scan_total_files, 1)) * 100, 100)
-                          : 0;
+                        const denom = ds.selected_files || ds.last_scan_total_files || 1;
+                        const pct = Math.min((ds.last_scan_processed / Math.max(denom, 1)) * 100, 100);
                         return (
                           <div className="space-y-2">
                             <div className="flex items-center gap-2">
@@ -744,16 +743,15 @@ export default function DataSourcesPage() {
                               ></div>
                             </div>
                             <div className="flex justify-between text-xs text-muted-foreground">
-                              <span>{ds.last_scan_processed} / {ds.last_scan_total_files}</span>
+                              <span>{ds.last_scan_processed} / {denom}</span>
                               <span>{pct.toFixed(0)}%</span>
                             </div>
                           </div>
                         );
                       }
                       if (ds.last_scan_status === 'running') {
-                        const pct = ds.last_scan_total_files > 0
-                          ? Math.min((ds.last_scan_processed / Math.max(ds.last_scan_total_files, 1)) * 100, 100)
-                          : 0;
+                        const denom = ds.selected_files || ds.last_scan_total_files || 1;
+                        const pct = Math.min((ds.last_scan_processed / Math.max(denom, 1)) * 100, 100);
                         const finalizing = pct >= 100;
                         return (
                           <div className="space-y-2">
@@ -768,7 +766,7 @@ export default function DataSourcesPage() {
                               ></div>
                             </div>
                             <div className="flex justify-between text-xs text-muted-foreground">
-                              <span>{ds.last_scan_processed} / {ds.last_scan_total_files}</span>
+                              <span>{ds.last_scan_processed} / {denom}</span>
                               <span>{pct.toFixed(0)}%</span>
                             </div>
                           </div>
