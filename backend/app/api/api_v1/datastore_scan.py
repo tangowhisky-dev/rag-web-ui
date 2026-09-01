@@ -622,6 +622,17 @@ async def trigger_datastore_scan(
             detail=f"DataStore folder does not exist: {ds.folder_path}",
         )
 
+    # Auto-process datastores are ingested by the watcher's interval
+    # timer — a manual scan would race with the timer's ingestion and
+    # corrupt progress counters.  The user must disable auto-process
+    # first if they want to trigger a manual scan.
+    if ds.auto_process_enabled:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot manually scan an auto-process datastore. "
+                   "Disable auto-process first, then trigger the scan.",
+        )
+
     # Check if a scan is already running for this datastore
     watcher = None
     try:

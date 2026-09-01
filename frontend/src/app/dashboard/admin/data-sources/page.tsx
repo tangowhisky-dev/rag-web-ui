@@ -902,6 +902,7 @@ export default function DataSourcesPage() {
                         {(() => {
                           const isRunning = ds.last_scan_status === 'running' || ds.scan_progress?.status === 'running' || (scanProgress[ds.id]?.status !== 'completed' && scanProgress[ds.id]?.status !== 'paused' && scanProgress[ds.id]);
                           const isPaused = ds.last_scan_status === 'paused' || scanProgress[ds.id]?.status === 'paused';
+                          const autoEnabled = ds.auto_process_enabled;
 
                           if (isRunning) {
                             return (
@@ -922,8 +923,8 @@ export default function DataSourcesPage() {
                                 variant="default"
                                 size="sm"
                                 onClick={() => handleTriggerScan(ds.id)}
-                                disabled={triggering.has(ds.id)}
-                                title="Resume processing"
+                                disabled={triggering.has(ds.id) || autoEnabled}
+                                title={autoEnabled ? 'Disable background processing to resume manually' : 'Resume processing'}
                               >
                                 Resume
                               </Button>
@@ -934,8 +935,8 @@ export default function DataSourcesPage() {
                               variant="outline"
                               size="sm"
                               onClick={() => handleTriggerScan(ds.id)}
-                              disabled={triggering.has(ds.id)}
-                              title="Trigger manual processing"
+                              disabled={triggering.has(ds.id) || autoEnabled}
+                              title={autoEnabled ? 'Disable background processing to trigger a manual scan' : 'Trigger manual processing'}
                             >
                               Process
                             </Button>
