@@ -778,7 +778,7 @@ class ScanMixin:
             scan_id, datastore_id, len(ingestion_futures),
         )
 
-        per_future_timeout = 600  # 10 min per file (covers large PDFs + OCR)
+        per_future_timeout = 1800  # 30 min per file — safety net for deadlocked workers
 
         for future in ingestion_futures:
             try:

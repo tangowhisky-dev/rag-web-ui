@@ -126,6 +126,8 @@ async def _embed_texts_batch(
     client = AsyncOpenAI(
         api_key=api_key,
         base_url=api_base,
+        timeout=60.0,       # 60s per call — fails fast on network outage
+        max_retries=2,      # 2 retries on transient errors (5xx, timeout)
     )
 
     try:
@@ -295,7 +297,21 @@ async def _upsert_to_qdrant(
 
         def _build_upsert_batch(bc=batch_chunks, bd=batch_dense, bs=batch_sparse):
             pts = _build_qdrant_points(bc, bd, bs, kb_id, document_id, file_name, data_store_id)
-            client.upsert(collection_name=collection_name, points=pts)
+            # Retry upsert on transient errors (timeout, connection reset).
+            # QdrantClient has no built-in retry, so we wrap it manually.
+            import time as _time
+            for attempt in range(3):
+                try:
+                    client.upsert(collection_name=collection_name, points=pts)
+                    return
+                except Exception as e:
+                    if attempt < 2:
+                        _time.sleep(2 ** attempt)  # 1s, 2s backoff
+                        logger.warning(
+                            "qdrant_upsert_retry attempt=%d error=%s", attempt + 2, e,
+                        )
+                    else:
+                        raise
 
         await loop.run_in_executor(None, _build_upsert_batch)
         if pt:

@@ -177,6 +177,7 @@ async def convert_document(
     file_name: str,
     enable_ocr: Optional[bool] = None,
     db: Session = None,
+    progress_cb: Optional[callable] = None,
 ) -> str:
     """Convert a file to markdown and store it in Document.converted_markdown.
 
@@ -204,7 +205,9 @@ async def convert_document(
 
         # Convert
         markdown_text = await loop.run_in_executor(
-            None, lambda: _convert_to_markdown(local_path, file_name, enable_ocr=enable_ocr)
+            None, lambda: _convert_to_markdown(
+                local_path, file_name, enable_ocr=enable_ocr, progress_cb=progress_cb,
+            )
         )
 
         # Cleanup pass
@@ -704,6 +707,7 @@ async def _convert_or_reuse_markdown(
             file_name=file_name,
             enable_ocr=enable_ocr,
             db=db,
+            progress_cb=_set_progress,  # pings ProgressTimeout between OCR pages
         )
     return markdown_text
 

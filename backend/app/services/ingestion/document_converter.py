@@ -270,7 +270,8 @@ def _detect_pdf_images(pdf_path: str) -> list:
 class MarkdownEngine(Protocol):
     """Swappable markdown conversion engine."""
 
-    def convert(self, abs_path: str, file_name: str, enable_ocr: Optional[bool]) -> str:
+    def convert(self, abs_path: str, file_name: str, enable_ocr: Optional[bool],
+                progress_cb: Optional[callable] = None) -> str:
         ...
 
 
@@ -290,11 +291,12 @@ class AnydocEngine:
 
     name = "anydoc"
 
-    def convert(self, abs_path: str, file_name: str, enable_ocr: Optional[bool]) -> str:
+    def convert(self, abs_path: str, file_name: str, enable_ocr: Optional[bool],
+                progress_cb: Optional[callable] = None) -> str:
         ext = os.path.splitext(abs_path)[1].lower()
 
         if ext == ".pdf":
-            markdown = self._convert_pdf(abs_path, enable_ocr)
+            markdown = self._convert_pdf(abs_path, enable_ocr, progress_cb=progress_cb)
         elif ext in _IMAGE_EXTENSIONS:
             markdown = self._convert_image(abs_path, enable_ocr)
         elif ext in _ANYDOC_EXTENSIONS:
@@ -319,7 +321,8 @@ class AnydocEngine:
 
     # ── PDF ────────────────────────────────────────────────────────────────
 
-    def _convert_pdf(self, abs_path: str, enable_ocr: Optional[bool]) -> str:
+    def _convert_pdf(self, abs_path: str, enable_ocr: Optional[bool],
+                     progress_cb: Optional[callable] = None) -> str:
         import pdf_inspector
         result = pdf_inspector.process_pdf(abs_path)
         markdown = result.markdown or ""
@@ -342,6 +345,10 @@ class AnydocEngine:
                         ocr_parts.append(f"\n\n## OCR for page {page_num}\n\n{text}")
                 except Exception as e:
                     logger.warning("[anydoc] page %d OCR failed: %s", page_num, e)
+                # Ping progress between OCR pages so the silence timeout
+                # doesn't kill long-running multi-page PDFs.
+                if progress_cb:
+                    progress_cb(5, f"OCR page {page_num}/{len(pages_needing_ocr)}…")
 
         # 2. OCR embedded raster images (diagrams, figures)
         big_images = _detect_pdf_images(abs_path)
@@ -521,7 +528,8 @@ class MarkitdownEngine:
                 db.close()
             return self._singleton
 
-    def convert(self, abs_path: str, file_name: str, enable_ocr: Optional[bool]) -> str:
+    def convert(self, abs_path: str, file_name: str, enable_ocr: Optional[bool],
+                progress_cb: Optional[callable] = None) -> str:
         if enable_ocr is False:
             md_instance = self._MarkItDown()
             logger.info("[markitdown] OCR disabled for this document (per-document override)")
@@ -1032,7 +1040,10 @@ def extract_title(markdown_text: str, file_name: str, abs_path: str | None = Non
     return _clean_filename_to_title(file_name)
 
 
-def _convert_to_markdown(abs_path: str, file_name: str, enable_ocr: Optional[bool] = None) -> str:
+def _convert_to_markdown(
+    abs_path: str, file_name: str, enable_ocr: Optional[bool] = None,
+    progress_cb: Optional[callable] = None,
+) -> str:
     """Convert any supported file to clean Markdown text.
 
     enable_ocr: tri-state override.
@@ -1040,11 +1051,14 @@ def _convert_to_markdown(abs_path: str, file_name: str, enable_ocr: Optional[boo
       True  → force OCR on (requires VISION_MODEL to be configured)
       False → force OCR off for this document regardless of global setting
 
+    progress_cb: optional callable(pct, msg) called between OCR pages
+    so the ProgressTimeout silence watchdog doesn't kill long PDFs.
+
     Delegates to the active MarkdownEngine.  Falls back to raw UTF-8 if
     the engine raises.
     """
     try:
-        return _get_engine().convert(abs_path, file_name, enable_ocr)
+        return _get_engine().convert(abs_path, file_name, enable_ocr, progress_cb=progress_cb)
     except Exception as e:
         logger.warning("[converter] %s engine failed for %s (%s) — falling back to raw text",
                        _get_engine().name, file_name, e)

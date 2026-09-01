@@ -372,7 +372,7 @@ class StartupRecoveryService:
         """
         completed_count = initial_count
         self._active_scans[scan_id]["processed_files"] = completed_count
-        per_future_timeout = 600  # 10 min per file
+        per_future_timeout = 1800  # 30 min per file — safety net for deadlocked workers
 
         for future, fpath in ingestion_futures:
             if not self._running:
