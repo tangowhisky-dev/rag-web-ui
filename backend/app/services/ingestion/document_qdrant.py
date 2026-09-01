@@ -214,17 +214,25 @@ async def _embed_sparse_batch(
     texts: List[str],
     pt=None,
 ) -> list:
-    """Compute sparse (BM25) embeddings in batches, yielding the event loop.
+    """Compute sparse (SPLADE) embeddings in batches, yielding the event loop.
 
-    fastembed BM25 tokenization is Python/numpy — does NOT release the GIL.
-    Batch it with asyncio.sleep(0) yields between batches so poll requests
-    get served.
+    Batch size is read from SPARSE_EMBED_BATCH_SIZE app setting (default 16).
+    Each batch allocates ONNX inference buffers proportional to batch size:
+    ~500MB at 16 texts, ~1.7GB at 32.  Lower the setting if OOM kills occur.
     """
+    from app.services.settings_service import get_setting
+    from app.db.session import SessionLocal
+    _db = SessionLocal()
+    try:
+        batch_size = get_setting(_db, "SPARSE_EMBED_BATCH_SIZE", None) or 16
+    finally:
+        _db.close()
+
     loop = asyncio.get_event_loop()
     sparse_embs: list = []
     embedder = get_sparse_embedder()
-    for batch_start in range(0, len(texts), _EMBED_BATCH_SIZE):
-        batch = texts[batch_start : batch_start + _EMBED_BATCH_SIZE]
+    for batch_start in range(0, len(texts), batch_size):
+        batch = texts[batch_start : batch_start + batch_size]
         batch_sparse = await loop.run_in_executor(
             None, lambda b=batch: list(embedder.embed(b))
         )

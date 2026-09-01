@@ -122,6 +122,11 @@ _APP_ONLY = [
                "int", 8, scope="app", reload="restart", min_value=1, max_value=32,
                description="Max concurrent document ingestion tasks (convert → embed → store). "
                            "Raise for fast networks / local SSD; lower for slow CIFS/SMB mounts."),
+    SettingDef("SPARSE_EMBED_BATCH_SIZE", "Ingestion", "Sparse embedding batch size",
+               "int", 16, scope="app", reload="ingest", min_value=1, max_value=64,
+               description="Batch size for SPLADE ONNX sparse embedding inference. "
+                           "Each batch allocates ~500MB at 16 texts, ~1.7GB at 32. "
+                           "Lower if OOM kills occur during ingestion; raise for speed on hosts with more RAM."),
 
     # System — process-level services
     SettingDef("WATCHER_ENABLED", "System", "Enable file watcher",
