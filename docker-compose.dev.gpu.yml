@@ -86,7 +86,4 @@ services:
     environment:
       - FASTEMBED_USE_GPU=true
       - NVIDIA_VISIBLE_DEVICES=all
-      - LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/lib/x86_64-linux-gnu
-    volumes:
-      - ${HOME}/cuda-libs:/usr/local/cuda/lib64:ro
     runtime: nvidia
