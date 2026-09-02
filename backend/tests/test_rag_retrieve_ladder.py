@@ -44,10 +44,10 @@ def _patch_pipeline(monkeypatch_target, level_outcomes):
     async def fake_dense(state, db, kb_ids, org_id, file_markdown, min_score=None, doc_ids=None):
         return {}
 
-    async def fake_sparse(state, db, kb_ids, org_id, file_markdown, min_score=None, doc_ids=None):
+    async def fake_sparse(state, db, kb_ids, org_id, file_markdown, min_score=None, doc_ids=None, extra_queries=None):
         return {}
 
-    async def fake_exact(state, db, kb_ids, org_id, file_markdown, min_score=None, doc_ids=None):
+    async def fake_exact(state, db, kb_ids, org_id, file_markdown, min_score=None, doc_ids=None, extra_queries=None):
         return {}
 
     def fake_merge(state, file_markdown, db=None, org_id=None):
@@ -100,8 +100,6 @@ def _run_rag_retrieve(level_outcomes, graph_expand=True, adaptive_enabled=True,
             return get_def("ADAPTIVE_RETRIEVAL_THRESHOLD").default
         if key == "ADAPTIVE_RETRIEVAL_RERANKER_THRESHOLD":
             return get_def("ADAPTIVE_RETRIEVAL_RERANKER_THRESHOLD").default
-        if key == "RETRIEVAL_RELAX_LEVEL2_RERANKER_THRESHOLD":
-            return get_def("RETRIEVAL_RELAX_LEVEL2_RERANKER_THRESHOLD").default
         if key == "DENSE_MIN_SCORE":
             return get_def("DENSE_MIN_SCORE").default
         if key == "SPARSE_MIN_SCORE":
@@ -135,7 +133,6 @@ def test_ladder_stops_at_level_0_when_sufficient():
     outcomes = [
         {"pre": (5, 0.9), "post": (5, 0.9)},  # level 0: already sufficient
         {"pre": (5, 0.9), "post": (5, 0.9)},
-        {"pre": (5, 0.9), "post": (5, 0.9)},
     ]
     result = _run_rag_retrieve(outcomes)
     assert result["result"]["sufficient"] is True
@@ -148,11 +145,10 @@ def test_ladder_escalates_through_all_levels_when_never_sufficient():
     outcomes = [
         {"pre": (0, 0.0), "post": (0, 0.0)},
         {"pre": (0, 0.0), "post": (1, 0.1)},
-        {"pre": (1, 0.1), "post": (1, 0.1)},
     ]
     result = _run_rag_retrieve(outcomes)
     assert result["result"]["sufficient"] is False
-    assert result["result"]["levels_tried"] == 3
+    assert result["result"]["levels_tried"] == 2
 
 
 def test_ladder_uses_graph_expansion_only_when_insufficient():

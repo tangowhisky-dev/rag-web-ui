@@ -85,13 +85,17 @@ def get_knowledge_bases(
             ).all()
         }
 
-    # Batch-count documents per datastore (avoids N+1)
+    # Batch-count processed documents per datastore (documents with chunks
+    # are available for retrieval; unprocessed docs don't count).
     from sqlalchemy import func as sa_func
     doc_counts: dict[int, int] = {}
     if all_ds_ids:
         count_rows = (
             db.query(Document.data_store_id, sa_func.count(Document.id))
-            .filter(Document.data_store_id.in_(all_ds_ids))
+            .filter(
+                Document.data_store_id.in_(all_ds_ids),
+                Document.chunks.any(),
+            )
             .group_by(Document.data_store_id)
             .all()
         )
@@ -177,13 +181,17 @@ def get_knowledge_base(
         DataStore.is_active == True
     ).all()
 
-    # Batch-count documents per datastore (avoids N+1)
+    # Batch-count processed documents per datastore (documents with chunks
+    # are available for retrieval; unprocessed docs don't count).
     from sqlalchemy import func as sa_func
     doc_counts: dict[int, int] = {}
     if linked_ds_ids:
         count_rows = (
             db.query(Document.data_store_id, sa_func.count(Document.id))
-            .filter(Document.data_store_id.in_(linked_ds_ids))
+            .filter(
+                Document.data_store_id.in_(linked_ds_ids),
+                Document.chunks.any(),
+            )
             .group_by(Document.data_store_id)
             .all()
         )

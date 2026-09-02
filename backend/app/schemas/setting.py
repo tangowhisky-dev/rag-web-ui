@@ -6,6 +6,7 @@ class SettingItem(BaseModel):
     """A single setting with metadata for API responses."""
     key: str
     value: Any
+    default: Optional[Any] = None            # registry default (Tier 0 fallback)
     value_type: str
     category: str
     label: str

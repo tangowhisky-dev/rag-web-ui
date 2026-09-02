@@ -180,7 +180,7 @@ def test_reset_all_org_settings(db_session):
     """Resetting all org overrides clears every org row."""
     org = _create_org(db_session)
     upsert_org_setting(db_session, org.id, "RETRIEVAL_TOP_K", 100)
-    upsert_org_setting(db_session, org.id, "RERANKER_ENABLED", False)
+    upsert_org_setting(db_session, org.id, "DENSE_MIN_SCORE", 0.9)
 
     reset_all_org_settings(db_session, org.id)
 
@@ -208,12 +208,12 @@ def test_validate_float():
 
 
 def test_validate_bool_from_string():
-    assert validate_value("RERANKER_ENABLED", "true") is True
-    assert validate_value("RERANKER_ENABLED", "false") is False
+    assert validate_value("COMPACTION_ENABLED", "true") is True
+    assert validate_value("COMPACTION_ENABLED", "false") is False
 
 
 def test_validate_bool_from_bool():
-    assert validate_value("RERANKER_ENABLED", True) is True
+    assert validate_value("COMPACTION_ENABLED", True) is True
 
 
 def test_validate_unknown_key():

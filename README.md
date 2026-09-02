@@ -211,7 +211,6 @@ MATCH (c:Chunk)-[:FROM_CHUNK]-(e:__Entity__ {name: "Apple"}) RETURN c, e
 | `RETRIEVAL_EXACT_ENABLED` | Enable/disable MySQL FTS leg | `true` |
 | `QDRANT_MMR_DIVERSITY` | Qdrant native MMR diversity (0=pure relevance, 1=pure diversity) | `0.3` |
 | `DEDUP_SEMANTIC_THRESHOLD` | Cosine similarity for semantic dedup (1.0=disabled) | `0.95` |
-| `RERANKER_ENABLED` | Enable cross-encoder reranker | `true` |
 | `RERANKER_MODEL` | HuggingFace cross-encoder model | `Xenova/ms-marco-MiniLM-L-12-v2` |
 | `RERANKER_SCORE_THRESHOLD` | Minimum logit to pass reranker (default retrieval) | `-2.0` |
 

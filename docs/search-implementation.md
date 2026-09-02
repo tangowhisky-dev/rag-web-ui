@@ -33,7 +33,7 @@ rag_retrieve tool — _run_retrieval_pass()
     ▼ (optional: RETRIEVAL_GRAPH_ENABLED)
 neo4j_expansion_node — expand_docs_via_graph()
     │
-    ▼ (optional: RERANKER_ENABLED)
+    ▼
 reranking_node — cross-encoder reranking (score_threshold configurable)
     │
     ▼
@@ -184,7 +184,7 @@ def rerank(query, docs, score_threshold=None):
     ...
 ```
 
-Reranker is a HuggingFace cross-encoder (`Xenova/ms-marco-MiniLM-L-12-v2`) running on CPU via ONNX Runtime. It re-scores all candidates against the query and filters by threshold; no cap on number of results. Disabled by setting `RERANKER_ENABLED=false`.
+Reranker is a HuggingFace cross-encoder (`Xenova/ms-marco-MiniLM-L-12-v2`) running on CPU via ONNX Runtime. It re-scores all candidates against the query and filters by threshold; no cap on number of results.
 
 ---
 
@@ -201,7 +201,6 @@ Reranker is a HuggingFace cross-encoder (`Xenova/ms-marco-MiniLM-L-12-v2`) runni
 | `EXACT_MIN_SCORE` | `0.5` | Minimum FTS score for exact leg |
 | `QDRANT_MMR_DIVERSITY` | `0.3` | Qdrant native MMR diversity (0=pure relevance, 1=pure diversity) |
 | `DEDUP_SEMANTIC_THRESHOLD` | `0.95` | Cosine similarity for semantic dedup (1.0=disabled) |
-| `RERANKER_ENABLED` | `true` | Enable cross-encoder reranker |
 | `RERANKER_SCORE_THRESHOLD` | `-2.0` | Minimum logit to pass reranker |
 
 Disabling a leg affects retrieval only. Ingestion always writes to all three stores.

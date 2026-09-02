@@ -249,9 +249,9 @@ export function DocumentList({ knowledgeBaseId, refreshKey }: DocumentListProps)
             <FileText className="w-10 h-10 text-muted-foreground" />
           </div>
           <div className="space-y-2">
-            <h3 className="text-xl font-semibold">No documents yet</h3>
+            <h3 className="text-xl font-semibold">No documents</h3>
             <p className="text-muted-foreground">
-              Upload your first document to start building your knowledge base.
+              Upload document(s) to build/ enhance your knowledge base.
             </p>
           </div>
         </div>

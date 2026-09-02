@@ -15,7 +15,7 @@ Query flow (ENTITY_CENTRIC queries only):
 
 Integration:
   retrieval.py calls extract_expand_boost(query, docs, kb_ids) after RRF fusion
-  for ENTITY_CENTRIC queries when ENTITY_AWARE_ENABLED=true.
+  for ENTITY_CENTRIC queries.
 """
 
 import json

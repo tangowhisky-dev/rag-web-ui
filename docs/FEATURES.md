@@ -172,7 +172,6 @@ When queries are entity-centric, the system uses named entity recognition to boo
 
 **Configuration:**
 ```env
-ENTITY_AWARE_ENABLED=true
 ENTITY_BOOST_FACTOR=1.5
 ```
 
@@ -218,7 +217,6 @@ The system can automatically grade answer quality based on faithfulness to retri
 
 **Configuration:**
 ```env
-ANSWER_QUALITY_GRADING_ENABLED=true
 AGENT_QUALITY_THRESHOLD=0.7
 ```
 

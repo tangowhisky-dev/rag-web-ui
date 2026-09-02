@@ -403,8 +403,9 @@ async def _rewrite_query(
     return original_query, None
 
 
-# Graduated relaxation ladder. Level 0 is the normal, tightest pass. Each
-# subsequent level loosens leg minimums and the reranker filter threshold.
+# Graduated relaxation ladder. Level 0 is the normal, tightest pass. Level 1
+# loosens leg minimums and the reranker filter threshold. After both levels
+# fail, the query is rewritten once and the 2-level ladder re-runs.
 # `min_score=None` means "use the leg's default from settings".
 # Resolved per-request via the settings service (org-overridable).
 def _relaxation_levels(db, org_id) -> list[dict[str, Any]]:
@@ -425,12 +426,6 @@ def _relaxation_levels(db, org_id) -> list[dict[str, Any]]:
             "exact_min_score": exact_min * 0.5,
             "rerank_threshold": get_setting(db, "ADAPTIVE_RETRIEVAL_RERANKER_THRESHOLD", org_id),
         },
-        {
-            "dense_min_score": 0.0,
-            "sparse_min_score": 0.0,
-            "exact_min_score": 0.0,
-            "rerank_threshold": get_setting(db, "RETRIEVAL_RELAX_LEVEL2_RERANKER_THRESHOLD", org_id),
-        },
     ]
 
 
@@ -450,8 +445,8 @@ async def _expand_synonyms(query: str, ctx: ToolContext) -> tuple[str, list[str]
     from app.services.agentic_rag.llm_factory import build_chat_llm
     from app.services.settings_service import get_setting
 
-    n = get_setting(ctx.db, "SYNONYM_VARIANTS", ctx.org_id) or 3
-    cache_ttl = get_setting(ctx.db, "SYNONYM_CACHE_TTL", ctx.org_id) or 300
+    n = get_setting(ctx.db, "SYNONYM_VARIANTS", ctx.org_id)
+    cache_ttl = get_setting(ctx.db, "SYNONYM_CACHE_TTL", ctx.org_id)
 
     # Check Redis cache
     cache_key = f"synonyms:{ctx.org_id}:{hashlib.sha256(query.encode()).hexdigest()}"
@@ -575,7 +570,7 @@ async def _run_retrieval_pass(
                 (d.get("metadata", {}).get("_reranker_score", 0.0) for d in scored_docs),
                 default=0.0,
             )
-            fast_accept = get_setting(ctx.db, "ADAPTIVE_RETRIEVAL_FAST_ACCEPT_SCORE", ctx.org_id) or 0.7
+            fast_accept = get_setting(ctx.db, "ADAPTIVE_RETRIEVAL_FAST_ACCEPT_SCORE", ctx.org_id)
             if best_score >= fast_accept:
                 logger.info("[rag_retrieve] fast-accept: best reranker score %.3f >= %.2f, skipping dense leg",
                             best_score, fast_accept)

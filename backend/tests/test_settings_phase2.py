@@ -198,14 +198,14 @@ def test_super_admin_bulk_update(client, db):
         "/api/admin/settings",
         json={"settings": [
             {"key": "RETRIEVAL_TOP_K", "value": 15},
-            {"key": "RERANKER_ENABLED", "value": False},
+            {"key": "DENSE_MIN_SCORE", "value": 0.6},
         ]},
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 200
     results = {r["key"]: r for r in resp.json()["results"]}
     assert results["RETRIEVAL_TOP_K"]["status"] == "ok"
-    assert results["RERANKER_ENABLED"]["status"] == "ok"
+    assert results["DENSE_MIN_SCORE"]["status"] == "ok"
 
 
 def test_super_admin_effective_snapshot(client, db):
@@ -351,14 +351,14 @@ def test_admin_bulk_update_org_settings(client, db):
         f"/api/admin/orgs/{root.id}/settings",
         json={"settings": [
             {"key": "RETRIEVAL_TOP_K", "value": 25},
-            {"key": "RERANKER_ENABLED", "value": False},
+            {"key": "DENSE_MIN_SCORE", "value": 0.6},
         ]},
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 200
     results = {r["key"]: r for r in resp.json()["results"]}
     assert results["RETRIEVAL_TOP_K"]["status"] == "ok"
-    assert results["RERANKER_ENABLED"]["status"] == "ok"
+    assert results["DENSE_MIN_SCORE"]["status"] == "ok"
 
 
 def test_admin_delete_all_org_settings(client, db):
@@ -371,7 +371,7 @@ def test_admin_delete_all_org_settings(client, db):
         f"/api/admin/orgs/{root.id}/settings",
         json={"settings": [
             {"key": "RETRIEVAL_TOP_K", "value": 25},
-            {"key": "RERANKER_ENABLED", "value": False},
+            {"key": "DENSE_MIN_SCORE", "value": 0.6},
         ]},
         headers={"Authorization": f"Bearer {token}"},
     )

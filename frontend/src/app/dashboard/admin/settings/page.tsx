@@ -22,6 +22,7 @@ import { ModelPicker } from '@/components/settings/model-picker';
 interface SettingItem {
   key: string;
   value: any;
+  default: any;
   value_type: string;
   category: string;
   label: string;
@@ -278,6 +279,11 @@ function SettingField({
           </Label>
           {setting.description && (
             <p className="text-xs text-muted-foreground mt-0.5">{setting.description}</p>
+          )}
+          {setting.default !== null && setting.default !== undefined && !setting.secret && (
+            <p className="text-xs text-muted-foreground mt-0.5">
+              Default: <code className="font-mono">{String(setting.default)}</code>
+            </p>
           )}
           {hasError && preflightIssue && (
             <p className="text-xs text-red-600 dark:text-red-400 mt-0.5 flex items-center gap-1">

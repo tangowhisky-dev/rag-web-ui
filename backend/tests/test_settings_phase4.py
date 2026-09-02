@@ -148,11 +148,6 @@ def test_graphrag_retrieval_hops_is_org_overridable():
     assert is_org_overridable("GRAPHRAG_RETRIEVAL_HOPS")
 
 
-def test_reranker_enabled_is_org_overridable():
-    from app.core.settings_registry import is_org_overridable
-    assert is_org_overridable("RERANKER_ENABLED")
-
-
 def test_dense_embeddings_model_is_app_only():
     from app.core.settings_registry import is_org_overridable
     assert not is_org_overridable("DENSE_EMBEDDINGS_MODEL")

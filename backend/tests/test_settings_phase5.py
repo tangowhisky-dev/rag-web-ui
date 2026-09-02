@@ -169,11 +169,6 @@ def test_context_reserved_generation_is_org_overridable():
     assert is_org_overridable("CONTEXT_RESERVED_GENERATION")
 
 
-def test_answer_quality_grading_enabled_is_org_overridable():
-    from app.core.settings_registry import is_org_overridable
-    assert is_org_overridable("ANSWER_QUALITY_GRADING_ENABLED")
-
-
 def test_processing_timeout_silence_s_is_org_overridable():
     from app.core.settings_registry import is_org_overridable
     assert is_org_overridable("PROCESSING_TIMEOUT_SILENCE_S")
@@ -204,7 +199,7 @@ def test_get_setting_falls_back_on_mock_session():
     mock_db = MagicMock()
     # MagicMock returns MagicMock for .query().filter().first()
     # which will fail during _decode
-    val = get_setting(mock_db, "RERANKER_ENABLED", None)
+    val = get_setting(mock_db, "RERANKER_SCORE_THRESHOLD", None)
     # Should fall back to registry default
     from app.core.settings_registry import get_def
-    assert val == get_def("RERANKER_ENABLED").default
+    assert val == get_def("RERANKER_SCORE_THRESHOLD").default

@@ -95,8 +95,9 @@ def applicable_tools(ctx: "ToolContext") -> list:
     if not has_data:
         tools = _filter_tools_by_name(tools, ("chart_generate", "extract_data"))
 
-    has_kb = bool(state.get("kb_ids")) if state is not None else False
-    if not has_kb:
-        tools = _filter_tools_by_name(tools, ("kb_grep", "kb_read", "kb_outline", "kb_metadata"))
+    # KB tools (kb_grep, kb_read, kb_outline, kb_metadata) are always
+    # available — every chat has KBs linked (ChatCreate requires
+    # knowledge_base_ids), and rag_retrieve is already unfiltered.
+    # Each KB tool handles empty kb_ids gracefully via enforce_rbac.
 
     return tools

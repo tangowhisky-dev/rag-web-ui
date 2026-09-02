@@ -124,11 +124,6 @@ def test_adaptive_retrieval_reranker_threshold_is_org_overridable():
     assert is_org_overridable("ADAPTIVE_RETRIEVAL_RERANKER_THRESHOLD")
 
 
-def test_retrieval_relax_level2_reranker_threshold_is_org_overridable():
-    from app.core.settings_registry import is_org_overridable
-    assert is_org_overridable("RETRIEVAL_RELAX_LEVEL2_RERANKER_THRESHOLD")
-
-
 def test_openai_api_key_is_org_overridable():
     """OPENAI_API_KEY is org-overridable (encrypted in DB)."""
     from app.core.settings_registry import is_org_overridable

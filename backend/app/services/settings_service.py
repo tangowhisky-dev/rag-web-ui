@@ -377,6 +377,7 @@ def get_app_setting_with_meta(db: Session, key: str) -> dict:
     return {
         "key": key,
         "value": display_value,
+        "default": defn.default,
         "value_type": defn.value_type,
         "category": defn.category,
         "label": defn.label,
@@ -425,6 +426,7 @@ def get_org_setting_with_meta(db: Session, org_id: int, key: str) -> dict:
     return {
         "key": key,
         "value": display_effective,
+        "default": defn.default,
         "value_type": defn.value_type,
         "category": defn.category,
         "label": defn.label,
