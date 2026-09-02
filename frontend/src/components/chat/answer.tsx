@@ -964,14 +964,14 @@ export const Answer: FC<{
 
       {/* ── Follow-up suggestions ─────────────────────────────────────────── */}
       {!isStreaming && lastAnswerObject?.followups && Array.isArray(lastAnswerObject.followups) && lastAnswerObject.followups.length > 0 && onFollowUp && (
-        <div className="mt-3 not-prose">
-          {typeof lastAnswerObject.retry_strategy === "string" && lastAnswerObject.retry_strategy && (
-            <span className="text-xs text-muted-foreground mr-2">
-              {lastAnswerObject.retry_strategy === "widen" ? "Try a broader search:" :
-               lastAnswerObject.retry_strategy === "narrow" ? "Try a narrower search:" :
-               lastAnswerObject.retry_strategy === "pinpoint" ? "Look up this exact ID:" : ""}
-            </span>
-          )}
+        <div className="mt-4 not-prose">
+          <p className="text-sm text-foreground/80 mb-2">
+            {typeof lastAnswerObject.retry_strategy === "string" && lastAnswerObject.retry_strategy
+              ? (lastAnswerObject.retry_strategy === "widen" ? "Try a broader search:" :
+                 lastAnswerObject.retry_strategy === "narrow" ? "Try a narrower search:" :
+                 lastAnswerObject.retry_strategy === "pinpoint" ? "Look up this exact ID:" : "")
+              : "Do you want me to explore further:"}
+          </p>
           <Suggestions>
             {(lastAnswerObject.followups as string[]).map((s: string, i: number) => (
               <Suggestion key={i} suggestion={s} onClick={onFollowUp} />
