@@ -13,6 +13,7 @@ import time
 from typing import Optional
 
 from app.models.chat import Message
+from app.services.agentic_rag.kb_profile import profile_kb, merge_profiles
 from app.services.agentic_rag.nodes import _agent_step
 from app.services.agentic_rag.schemas import LastAnswerObject
 
@@ -49,6 +50,16 @@ async def load_context_node(state, ctx) -> dict:
                 )
             except Exception as exc:
                 logger.warning("[load_context] memory search failed: %s", exc)
+
+        # Load KB profiles (per-KB, cached in Redis, merged into a single dict).
+        kb_profile: dict = {}
+        kb_ids = state.get("kb_ids", [])
+        if kb_ids:
+            try:
+                per_kb = [await profile_kb(ctx.org_id, kb_id, ctx.db) for kb_id in kb_ids]
+                kb_profile = merge_profiles([p for p in per_kb if p])
+            except Exception as exc:
+                logger.warning("[load_context] KB profile load failed: %s", exc)
 
         return {
             "last_answer_object": last_obj,
@@ -88,4 +99,5 @@ async def load_context_node(state, ctx) -> dict:
             "clarification_response": "",
             "needs_clarification": False,
             "resolution_provenance": None,
+            "kb_profile": kb_profile,
         }

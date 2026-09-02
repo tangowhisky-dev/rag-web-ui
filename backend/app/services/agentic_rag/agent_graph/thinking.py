@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 
+from app.services.agentic_rag.kb_profile import format_profile_summary
 from app.services.agentic_rag.llm_factory import build_chat_llm
 from app.services.agentic_rag.nodes import _agent_step, history_to_text, select_recent_history
 from app.services.agentic_rag.prompts import AGENT_SYSTEM_PROMPT, THINK_SYSTEM_PROMPT
@@ -44,6 +45,7 @@ def _build_think_prompt(
     observations: list,
     plan,
     tools_text: str,
+    kb_profile_text: str = "",
 ) -> str:
     # Include last_answer_object summary so "summarize it" / "chart it" work.
     lao_text = ""
@@ -74,6 +76,7 @@ def _build_think_prompt(
         f"User message: {original}\n"
         f"Retrieval query: {query}\n"
         + (f"[Abbreviation Glossary]\n{glossary}\n\n" if glossary else "")
+        + (f"{kb_profile_text}\n\n" if kb_profile_text else "")
         + (f"Earlier conversation summary:\n{summary_text}\n" if summary_text else "")
         + f"Conversation history (recent turns):\n{history_text or '  (none)'}\n"
         f"Previous answer context:\n{lao_text or '  (none)'}\n"
@@ -123,10 +126,12 @@ def _rebuild_think_after_compaction(state, compaction_local, ctx, iteration, max
     recent = select_recent_history(state.get("messages", []), max_pairs=get_setting(ctx.db, "AGENT_HISTORY_PAIRS", ctx.org_id))
     history_text = history_to_text(recent)
     summary_text = state.get("compaction_summary") or ""
+    kb_profile_text = format_profile_summary(state.get("kb_profile", {}))
     user = _build_think_prompt(
         iteration, max_iter, original, query, glossary, summary_text,
         history_text, state.get("last_answer_object"),
         state.get("reflection_final"), observations, plan, tools_text,
+        kb_profile_text,
     )
     return state, observations, user
 
@@ -163,10 +168,12 @@ async def think_node(state, ctx) -> dict:
         glossary = state.get("abbreviation_glossary", "")
 
         system = AGENT_SYSTEM_PROMPT + "\n\n" + THINK_SYSTEM_PROMPT
+        kb_profile_text = format_profile_summary(state.get("kb_profile", {}))
         user = _build_think_prompt(
             iteration, max_iter, original, query, glossary, summary_text,
             history_text, state.get("last_answer_object"),
             state.get("reflection_final"), observations, plan, tools_text,
+            kb_profile_text,
         )
 
         # Runtime compaction: check if the prompt exceeds the context budget.

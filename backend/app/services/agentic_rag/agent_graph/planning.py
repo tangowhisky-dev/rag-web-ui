@@ -12,6 +12,7 @@ import json
 import logging
 
 from app.models.chat import ChatFile
+from app.services.agentic_rag.kb_profile import format_profile_summary
 from app.services.agentic_rag.llm_factory import build_chat_llm
 from app.services.agentic_rag.nodes import _agent_step
 from app.services.agentic_rag.prompts import AGENT_SYSTEM_PROMPT, PLAN_SYSTEM_PROMPT
@@ -23,12 +24,13 @@ from .helpers import _extract_json_block, _writer
 logger = logging.getLogger(__name__)
 
 
-def _build_plan_user_prompt(original, rewritten, clarification, glossary, last_summary, recalled_text, file_meta):
+def _build_plan_user_prompt(original, rewritten, clarification, glossary, last_summary, recalled_text, file_meta, kb_profile_text=""):
     return (
         f"User message: {original}\n"
         f"Retrieval query: {rewritten}\n"
         + (f"User clarification: {clarification}\n" if clarification else "")
         + (f"[Abbreviation Glossary]\n{glossary}\n\n" if glossary else "")
+        + (f"{kb_profile_text}\n\n" if kb_profile_text else "")
         + f"Previous answer summary: {last_summary}\n"
         f"Recalled long-term memory (context only, not evidence):\n{recalled_text}\n\n"
         f"Attached files: {json.dumps(file_meta)}\n\n"
@@ -106,7 +108,8 @@ async def plan_node(state, ctx) -> dict:
         # Glossary was built once by expand_query_node — reuse it.
         glossary = state.get("abbreviation_glossary", "")
 
-        user = _build_plan_user_prompt(original, rewritten, clarification, glossary, last_summary, recalled_text, file_meta)
+        kb_profile_text = format_profile_summary(state.get("kb_profile", {}))
+        user = _build_plan_user_prompt(original, rewritten, clarification, glossary, last_summary, recalled_text, file_meta, kb_profile_text)
 
         plan = await _invoke_plan_llm(ctx, system, user, rewritten)
 

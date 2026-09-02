@@ -56,6 +56,9 @@ class AgentState(MessagesState):
     # Negated terms extracted by rewrite_query_node via regex (e.g. "but not Linux" → ["Linux"]).
     # Used by rag_retrieve for post-filtering and by finalize_node as a generation guardrail.
     excluded_terms: Annotated[List[str], _last_value] = []
+    # KB profile loaded by load_context_node (doc count, fields, content types, date range).
+    # Injected into plan/think/rewrite prompts so the agent has KB context without calling kb_metadata.
+    kb_profile: Annotated[dict, _last_value] = {}
 
     # ── Per-leg retrieval state (separated for observability) ───────────
     dense_docs: Annotated[List[dict], accumulate] = []
