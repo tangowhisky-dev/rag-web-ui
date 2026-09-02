@@ -429,10 +429,6 @@ class TestPromptInstructions:
         from app.services.agentic_rag.prompts import REWRITE_SYSTEM_PROMPT
         assert "[Abbreviation Glossary]" in REWRITE_SYSTEM_PROMPT
 
-    def test_rewrite_prompt_has_do_not_remove_instruction(self):
-        from app.services.agentic_rag.prompts import REWRITE_SYSTEM_PROMPT
-        assert "Do NOT remove or strip" in REWRITE_SYSTEM_PROMPT
-
     def test_plan_prompt_has_glossary_instruction(self):
         from app.services.agentic_rag.prompts import PLAN_SYSTEM_PROMPT
         assert "[Abbreviation Glossary]" in PLAN_SYSTEM_PROMPT

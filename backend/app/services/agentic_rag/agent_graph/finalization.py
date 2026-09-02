@@ -96,13 +96,11 @@ def _build_finalize_prompt(
 
     system = FINALIZE_GUARDRAIL_PROMPT + "\n\n" + answer_prompt
 
-    # Priority order is explicit: retrieved documents are the
-    # evidence, the conversation is the intent. Without this block
-    # conversational instructions ("shorter", "in a table",
-    # "compare with your last answer") are unanswerable.
-    parts = [f"User query: {query}\n\n"]
-    if retrieval_query and retrieval_query != query:
-        parts.append(f"Resolved retrieval query: {retrieval_query}\n\n")
+    # Order: stable → volatile for prefix cache reuse.
+    # Compaction summary changes rarely (only when compaction fires).
+    # History grows by 1 pair per turn — the old prefix cache-hits.
+    # Retrieved context, tool results, query all change every turn.
+    parts: list[str] = []
     if summary_text:
         parts.append(f"Earlier conversation summary:\n{summary_text}\n\n")
     if history_text:
@@ -110,11 +108,14 @@ def _build_finalize_prompt(
             "Conversation so far (intent only — cite nothing from here):\n"
             f"{history_text}\n\n"
         )
-    parts.append(f"Retrieved context (the only citable evidence):\n{context_text}\n\n")
-    if non_rag_text:
-        parts.append(f"Tool results:\n{non_rag_text}\n\n")
     if excluded_terms:
         parts.append(f"User excluded topics: {', '.join(excluded_terms)}. Do not discuss these.\n\n")
+    if non_rag_text:
+        parts.append(f"Tool results:\n{non_rag_text}\n\n")
+    parts.append(f"Retrieved context (the only citable evidence):\n{context_text}\n\n")
+    if retrieval_query and retrieval_query != query:
+        parts.append(f"Resolved retrieval query: {retrieval_query}\n\n")
+    parts.append(f"User query: {query}\n\n")
     parts.append("Provide a concise, accurate answer.")
     user = "".join(parts)
 

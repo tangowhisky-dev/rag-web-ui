@@ -21,6 +21,7 @@ import logging
 
 from app.services.agentic_rag.llm_factory import build_chat_llm
 from app.services.agentic_rag.nodes import _agent_step
+from app.services.agentic_rag.prompts import TOOL_CORRECTION_PROMPT
 from app.services.agentic_rag.schemas import Observation
 from app.services.agentic_rag.tools import applicable_tools
 from app.services.settings_service import get_setting
@@ -79,13 +80,12 @@ async def _correct_tool_args(
         schema = tool.args_schema.model_json_schema()
     except Exception:
         pass
-    prompt = (
-        f"The {tool_name} tool failed with this error:\n{error}\n\n"
-        f"Original arguments: {json.dumps(original_args, default=str)}\n\n"
-        f"Tool schema: {json.dumps(schema, default=str)}\n\n"
-        f"Generate corrected arguments as a JSON object matching the schema.\n"
-        f"{_correction_hints(tool_name, error)}\n"
-        "Return ONLY the JSON object, no explanation."
+    prompt = TOOL_CORRECTION_PROMPT.format(
+        tool_name=tool_name,
+        error=error,
+        original_args=json.dumps(original_args, default=str),
+        schema=json.dumps(schema, default=str),
+        hints=_correction_hints(tool_name, error),
     )
     try:
         llm = build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)

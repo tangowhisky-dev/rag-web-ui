@@ -38,6 +38,7 @@ from app.services.agentic_rag.nodes import (
     sparse_retrieval_node,
 )
 from app.services.agentic_rag.tool_context import ToolContext, enforce_rbac, write_audit
+from app.services.agentic_rag.prompts import SUFFICIENCY_CHECK_PROMPT, RETRIEVAL_REWRITE_PROMPT, SYNONYM_EXPANSION_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -271,22 +272,6 @@ def _extract_balanced(text: str, chars: tuple[str, str]) -> str | None:
 
 # ── LLM-based sufficiency check ──────────────────────────────────────────────
 
-_SUFFICIENCY_PROMPT = """\
-User question: {query}
-
-Retrieved document excerpts:
-{previews}
-
-Do these documents contain sufficient information to fully answer the user's question?
-Judge by actual content, not topic similarity. A document about the right topic that \
-does not contain the specific answer is NOT sufficient.
-
-Return ONLY a JSON object:
-{{"sufficient": true/false, "missing": "what's missing if not sufficient, or empty string"}}
-
-If the documents are sufficient, set "missing" to an empty string.
-"""
-
 
 async def _llm_sufficiency_check(
     query: str,
@@ -307,17 +292,22 @@ async def _llm_sufficiency_check(
     # bounded. The sufficiency check needs to see the full picture — limiting
     # to top-5 can miss chunks from a second document that are needed to
     # answer a multi-document query.
+    from app.services.agentic_rag.prompts import SUFFICIENCY_CHECK_USER_PROMPT
+
     previews = []
     for i, doc in enumerate(docs):
         content = str(doc.get("page_content", ""))[:500]
         previews.append(f"[Doc {i + 1}] {content}")
-    prompt = _SUFFICIENCY_PROMPT.format(query=query, previews="\n".join(previews))
+    user_prompt = SUFFICIENCY_CHECK_USER_PROMPT.format(query=query, previews="\n".join(previews))
 
     _emit_progress("sufficiency_check", "Evaluating retrieval sufficiency …")
 
     try:
         llm = build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)
-        response = await llm.ainvoke([{"role": "user", "content": prompt}])
+        response = await llm.ainvoke([
+            {"role": "system", "content": SUFFICIENCY_CHECK_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ])
         block = _extract_json_block(str(response.content))
         if block:
             result = json.loads(block)
@@ -337,26 +327,6 @@ async def _llm_sufficiency_check(
 
 
 # ── Query rewriting ──────────────────────────────────────────────────────────
-
-_REWRITE_PROMPT = """\
-The query "{query}" did not retrieve sufficient documents from the knowledge base.
-Missing information: {missing}
-
-Top results that were found but insufficient:
-{top_snippets}
-
-Analyze why these results don't answer the question. Consider:
-- Is the query too vague? What specific terms would match better?
-- Is the user asking for a specific document by title, date, or file type?
-  If so, suggest a filter.
-- Should the query be split into a search term + a metadata filter?
-
-Return ONLY a JSON object:
-{{"rewritten_query": "new search terms", "filter_suggestion": {{"title_contains": "...", "created_after": "YYYY-MM-DD"}} | null, "reasoning": "why"}}
-
-If no filter is needed, set "filter_suggestion" to null.
-"""
-
 
 _ALLOWED_FILTER_KEYS = {"title_contains", "file_name_contains", "content_type", "created_after", "created_before", "document_ids"}
 
@@ -415,7 +385,7 @@ async def _rewrite_query(
     _emit_progress("query_rewrite", "Rewriting query for better retrieval …")
 
     top_snippets = _build_failure_snippets(failed_docs)
-    prompt = _REWRITE_PROMPT.format(
+    prompt = RETRIEVAL_REWRITE_PROMPT.format(
         query=original_query,
         missing=missing or "unknown",
         top_snippets=top_snippets,
@@ -477,7 +447,6 @@ async def _expand_synonyms(query: str, ctx: ToolContext) -> tuple[str, list[str]
     import hashlib
     import json as _json
 
-    from app.services.agentic_rag.prompts import SYNONYM_EXPANSION_PROMPT
     from app.services.agentic_rag.llm_factory import build_chat_llm
     from app.services.settings_service import get_setting
 

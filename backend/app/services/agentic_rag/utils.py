@@ -521,7 +521,7 @@ async def _call_rewriter(
     """Single rewriter LLM call. Raises on provider failure."""
     from app.services.agentic_rag.prompts import REWRITE_INTENT_SUFFIX
 
-    system_msg = REWRITE_SYSTEM_PROMPT.format(memory_section="")
+    system_msg = REWRITE_SYSTEM_PROMPT
     if kb_profile_text:
         system_msg += "\n" + REWRITE_INTENT_SUFFIX
 

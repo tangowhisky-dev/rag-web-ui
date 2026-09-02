@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from app.services.agentic_rag.tools.base import BaseAgentTool
 from app.services.agentic_rag.tool_context import ToolContext, enforce_rbac, write_audit
 from app.services.agentic_rag.llm_factory import build_chat_llm
+from app.services.agentic_rag.prompts import SUMMARIZE_ANSWER_PROMPT
 from app.services.agentic_rag.schemas import LastAnswerObject
 from app.models.chat import Message, ChatFile
 
@@ -81,9 +82,10 @@ class SummarizeAnswerTool(BaseAgentTool):
         text = _resolve_source_text(ctx, input_obj)
         text = text[:4000]
 
-        prompt = (
-            f"Summarize the following text into at most {input_obj.max_points} "
-            f"{input_obj.format}s. Be concise and preserve key facts.\n\n{text}"
+        prompt = SUMMARIZE_ANSWER_PROMPT.format(
+            max_points=input_obj.max_points,
+            format=input_obj.format,
+            text=text,
         )
 
         try:

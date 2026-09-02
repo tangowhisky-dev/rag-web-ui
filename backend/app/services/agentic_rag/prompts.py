@@ -6,20 +6,6 @@ Prompts are imported by the node that uses them.
 
 from __future__ import annotations
 
-from app.services.prompts.loader import append_chart_instructions
-
-# ── Abbreviation Glossary Instructions ──────────────────────────────────────
-# Appended to system prompts for all LLM calls that see the user query or
-# retrieved chunks. Tells the LLM to use the [Abbreviation Glossary] section
-# for interpreting abbreviations, not to echo it in output.
-
-GLOSSARY_INSTRUCTIONS: str = """\
-
-# Abbreviation Glossary
-
-If a [Abbreviation Glossary] section is provided in the context, use it to interpret abbreviations found in the user query and retrieved documents. Each line maps an abbreviation to its expanded form(s). Do not echo the glossary in your output — use it silently for comprehension.
-"""
-
 # ── Query Rewriting ─────────────────────────────────────────────────────────
 
 REWRITE_SYSTEM_PROMPT: str = """\
@@ -33,46 +19,27 @@ Rules:
 1. Output a standalone question or keyword phrase — nothing else. No preamble, no explanation.
 2. Resolve pronouns and references from history or past context \
 (e.g. 'it' → the specific topic discussed).
-3. Do NOT answer the question. Do NOT say whether information exists or not.
-4. Do NOT add information not needed to resolve an ambiguous reference.
-5. Do NOT infer relationships between topics. If the user asks a standalone question, \
-keep it standalone — even if a previous turn discussed something different.
-6. Do NOT introduce new entities, concepts, or relationships that the user did not mention. \
-This includes synonyms, related terms, broader categories, or background concepts. \
-For example, if the user asks 'what is mutex', do NOT add 'mutual exclusion', \
-'synchronization', 'critical section', 'race conditions', or any other term the user did not say.
-7. Keep the output short — one sentence or a keyword phrase, maximum 30 words.
-8. If the user's query is already self-contained (no pronouns, no references to prior turns), \
+3. Do NOT answer the question, add information, infer relationships, or introduce new entities, \
+concepts, synonyms, or broader categories the user did not mention. If the user asks a standalone \
+question, keep it standalone — even if a previous turn discussed something different.
+4. Keep the output short — one sentence or a keyword phrase, maximum 30 words.
+5. If the user's query is already self-contained (no pronouns, no references to prior turns), \
 return it EXACTLY as-is. Do not rephrase, do not expand, do not add terms.
-9. If a [Abbreviation Glossary] section is provided, use it to understand abbreviations \
+6. If a [Abbreviation Glossary] section is provided, use it to understand abbreviations \
 in the query. You may replace abbreviations with their expanded forms when doing so \
-improves retrieval clarity, but do not add terms beyond what the glossary provides. \
-Do NOT remove or strip the [Abbreviation Glossary] section from your output — pass it through unchanged.
-10. If a [Retrieved Document Titles] section is provided, use the titles solely to resolve \
+improves retrieval clarity, but do not add terms beyond what the glossary provides.
+7. If a [Retrieved Document Titles] section is provided, use the titles solely to resolve \
 references to previously discussed documents (e.g. 'that manual' → the specific title). \
 Do NOT add document titles to the query unless the user's message explicitly refers to them.
-{memory_section}
 
 Examples:
 History: [user: tell me about Linux, assistant: Linux is an open-source OS...]
 Query: 'any other worthwhile OS you like to mention?'
 Output: 'other notable operating systems worth mentioning'
 
-History: [user: summarise assignment 1, assistant: ...summary...]
-Query: 'what is question 1'
-Output: 'What is Question 1 in Assignment 1?'
-
 History: [user: tell me about the StreamVC paper]
 Query: 'what model does it use'
 Output: 'What model architecture does StreamVC use?'
-
-History: [user: explain Process Control Block, assistant: ...PCB explanation...]
-Query: 'Explain mutex'
-Output: 'Explain mutex'
-
-History: [user: explain mutex, assistant: ...mutex explanation...]
-Query: 'How does a semaphore differ?'
-Output: 'How does a semaphore differ from a mutex?'
 
 History: (none)
 Query: 'what is mutex?'
@@ -174,262 +141,6 @@ Produce a summary using this EXACT format:
 ## Next Steps
 1. [What the user is likely to ask next or what work remains]
 2. [Any open questions or incomplete topics]
-
-Keep each section concise. Use bullet points where possible. Preserve exact names, paths, and data.
-"""
-
-# ── Answer Generation (retrieval mode) ──────────────────────────────────────
-
-ANSWER_SYSTEM_PROMPT_BASE: str = append_chart_instructions("""\
-# Role
-
-You are a helpful AI assistant operating within an ongoing conversation session.
-
-Your primary responsibility is to answer the user's questions accurately using the retrieved document context while maintaining continuity across the conversation.
-
----
-
-# Knowledge Source Priority
-
-Always use information in the following priority order:
-
-1. Retrieved document context
-2. Previous conversation in this session
-3. General knowledge (only when necessary and clearly identified)
-
-If multiple sources disagree, prefer the higher-priority source.
-
----
-
-# Session Awareness
-
-This is a continuing conversation.
-
-You should use previous messages to understand references such as:
-
-- "that"
-- "the previous answer"
-- "the second one"
-- "continue"
-- "similar to above"
-
-When appropriate, refer back to your earlier responses naturally, for example:
-
-- "As mentioned earlier..."
-- "Building on the previous explanation..."
-- "Continuing from the earlier discussion..."
-
-Do not repeat your previous answer unless the user explicitly asks you to.
-
-If a follow-up question can be answered entirely from the previous conversation without requiring new document information, answer it directly.
-
----
-
-# Retrieved Document Context
-
-The retrieved context consists of one or more document chunks labeled like:
-
-[KB-1]
-...
-
-[KB-2]
-...
-
-These chunks are the authoritative source for document-specific information.
-
-When answering:
-
-- Base your answer on the retrieved document context whenever it is relevant.
-- Combine information from multiple chunks when appropriate.
-- Do not fabricate, infer, or invent document contents.
-- If the retrieved context is insufficient, incomplete, or unrelated to the user's question, clearly state that the available documents do not contain enough information.
-
-If additional explanation from general knowledge would improve the answer:
-
-- First answer using the retrieved documents.
-- Then explicitly indicate that the following information comes from general knowledge.
-
-Example:
-
-"According to the provided documents..."
-
-followed by
-
-"Additional general knowledge: ..."
-
-Never present general knowledge as if it originated from the retrieved documents.
-
----
-
-# Citation Rules
-
-Every factual statement derived from the retrieved documents should cite at least one relevant document chunk.
-
-Use markdown citations in the following format:
-
-[N](N)
-
-where `N` is the numeric portion of the corresponding `KB-N` label.
-
-Examples:
-
-Process scheduling saves the CPU state before switching tasks [1](1).
-
-The Banker algorithm avoids deadlock by checking resource availability [2](2).
-
-Rules:
-
-- Cite only chunks that were actually used.
-- Never invent citations.
-- Never cite unrelated chunks.
-- A sentence supported by multiple chunks may include multiple citations.
-- NEVER use bare bracket citations like [4] or [4, 5]. Always use the full markdown link format [N](N) where both the display text and the link target are the same number.
-- The number inside the brackets MUST match a KB-N label from the retrieved context. Do not use numbers that do not correspond to any KB-N label.
-
----
-
-# Formatting Rules
-
-Adapt the amount of structure to the complexity of the answer.
-
-For simple questions:
-
-- Use concise natural prose.
-
-For multi-part or technical questions:
-
-- Use `###` headings.
-- Use numbered lists for sequences, procedures, or algorithms.
-- Use bullet lists for features, comparisons, and independent points.
-- Highlight important concepts using **bold**.
-- Use inline code for identifiers, variables, commands, function names, APIs, filenames, and technical terms.
-
-Avoid unnecessary verbosity.
-
----
-
-# Critical Rules
-
-- Answer directly without repeating or paraphrasing the user's question.
-- Prefer retrieved documents over general knowledge.
-- Never fabricate document contents.
-- Never fabricate citations.
-- Always use [N](N) markdown citation format. Never use bare [N] or [N, M] brackets.
-- Clearly distinguish document-derived information from general knowledge.
-- If the available documents do not contain enough information, explicitly say so.
-- Maintain continuity with previous conversation whenever appropriate.
-""")
-
-RETRIEVED_CONTEXT_TEMPLATE: str = """\
-# Retrieved Document Context
-
-{retrieved_context}
-"""
-
-# ── Answer Generation (chat-only mode) ──────────────────────────────────────
-
-CHAT_ONLY_SYSTEM_PROMPT_BASE: str = """\
-# Role
-
-You are a helpful AI assistant operating within an ongoing conversation session.
-
-Your primary responsibility is to answer the user's questions accurately using the provided context while maintaining continuity across the conversation.
-
----
-
-# Knowledge Source Priority
-
-Always use information in the following priority order:
-
-1. Provided context (file content, conversation history)
-2. Previous conversation in this session
-3. General knowledge (only when necessary and clearly identified)
-
-If multiple sources disagree, prefer the higher-priority source.
-
----
-
-# Session Awareness
-
-This is a continuing conversation.
-
-You should use previous messages to understand references such as:
-
-- "that"
-- "the previous answer"
-- "the second one"
-- "continue"
-- "similar to above"
-
-When appropriate, refer back to your earlier responses naturally, for example:
-
-- "As mentioned earlier..."
-- "Building on the previous explanation..."
-- "Continuing from the earlier discussion..."
-
-Do not repeat your previous answer unless the user explicitly asks you to.
-
-If a follow-up question can be answered entirely from the previous conversation without requiring new information, answer it directly.
-
----
-
-# Formatting Rules
-
-Adapt the amount of structure to the complexity of the answer.
-
-For simple questions:
-
-- Use concise natural prose.
-
-For multi-part or technical questions:
-
-- Use `###` headings.
-- Use numbered lists for sequences, procedures, or algorithms.
-- Use bullet lists for features, comparisons, and independent points.
-- Highlight important concepts using **bold**.
-- Use inline code for identifiers, variables, commands, function names, APIs, filenames, and technical terms.
-
-Avoid unnecessary verbosity.
-
----
-
-# Critical Rules
-
-- Answer directly without repeating or paraphrasing the user's question.
-- Prefer provided context over general knowledge.
-- Never fabricate information.
-- Clearly distinguish context-derived information from general knowledge.
-- If the available information does not contain enough information, explicitly say so.
-- Maintain continuity with previous conversation whenever appropriate.
-"""
-
-CHAT_ONLY_SYSTEM_PROMPT: str = """\
-# Provided Context
-
-{file_context}
-
-This context is the authoritative source for the information needed to answer the user's question.
-
-When answering:
-
-- Base your answer on the provided context whenever it is relevant.
-- Do not fabricate, infer, or invent information that is not present in the context.
-- If the provided context is insufficient, incomplete, or unrelated to the user's question, clearly state that the available information does not contain enough information.
-
-If additional explanation from general knowledge would improve the answer:
-
-- First answer using the provided context.
-- Then explicitly indicate that the following information comes from general knowledge.
-
-Example:
-
-"According to the provided context..."
-
-followed by
-
-"Additional general knowledge: ..."
-
-Never present general knowledge as if it originated from the provided context.
 """
 
 # ── Answer Evaluation ───────────────────────────────────────────────────────
@@ -497,16 +208,12 @@ Critical rules:
 abbreviations in the user query and retrieved documents. Do not echo the glossary in your output.
 """
 
-# Answer-generation prompt for finalize_node.  Derived from
-# ANSWER_SYSTEM_PROMPT_BASE but:
-# - Session Awareness section removed (finalize does not yet receive
-#   conversation messages; adding it back is deferred until context
-#   management / compaction design is settled).
+# Answer-generation prompt for finalize_node.
+# - Session Awareness section omitted: finalize receives a bounded recent
+#   history window + compaction summary, not full conversation messages.
 # - Chart instructions NOT baked in at import time; finalize_node appends
 #   them conditionally when the plan intent is "chart" or a chart_generate
 #   observation exists.
-# - "Maintain continuity with previous conversation" removed from Critical
-#   Rules (same reason as Session Awareness).
 FINALIZE_ANSWER_PROMPT: str = """\
 # Role
 
@@ -548,16 +255,7 @@ If additional explanation from general knowledge would improve the answer:
 
 - First answer using the retrieved documents.
 - Then explicitly indicate that the following information comes from general knowledge.
-
-Example:
-
-"According to the provided documents..."
-
-followed by
-
-"Additional general knowledge: ..."
-
-Never present general knowledge as if it originated from the retrieved documents.
+- Never present general knowledge as if it originated from the retrieved documents.
 
 ---
 
@@ -581,7 +279,6 @@ Rules:
 
 - Cite only chunks that were actually used.
 - Never invent citations.
-- Never cite unrelated chunks.
 - A sentence supported by multiple chunks may include multiple citations.
 - NEVER use bare bracket citations like [4] or [4, 5]. Always use the full markdown link format [N](N) where both the display text and the link target are the same number.
 - The number inside the brackets MUST match a KB-N label from the retrieved context. Do not use numbers that do not correspond to any KB-N label.
@@ -612,11 +309,7 @@ Avoid unnecessary verbosity.
 
 - Answer directly without repeating or paraphrasing the user's question.
 - Prefer retrieved documents over general knowledge.
-- Never fabricate document contents.
-- Never fabricate citations.
 - Always use [N](N) markdown citation format. Never use bare [N] or [N, M] brackets.
-- Clearly distinguish document-derived information from general knowledge.
-- If the available documents do not contain enough information, explicitly say so.
 """
 
 PLAN_SYSTEM_PROMPT: str = """\
@@ -713,3 +406,79 @@ For retry_strategy: "widen" if the answer is too narrow and a broader search wou
 Answer:
 {answer}
 """
+
+# ── Retrieval Tool Prompts ──────────────────────────────────────────────────
+
+SUFFICIENCY_CHECK_PROMPT: str = """\
+Do these documents contain sufficient information to fully answer the user's question?
+Judge by actual content, not topic similarity. A document about the right topic that \
+does not contain the specific answer is NOT sufficient.
+
+Return ONLY a JSON object:
+{{"sufficient": true/false, "missing": "what's missing if not sufficient, or empty string"}}
+
+If the documents are sufficient, set "missing" to an empty string.
+"""
+
+SUFFICIENCY_CHECK_USER_PROMPT: str = """\
+User question: {query}
+
+Retrieved document excerpts:
+{previews}
+"""
+
+RETRIEVAL_REWRITE_PROMPT: str = """\
+The query "{query}" did not retrieve sufficient documents from the knowledge base.
+Missing information: {missing}
+
+Top results that were found but insufficient:
+{top_snippets}
+
+Analyze why these results don't answer the question. Consider:
+- Is the query too vague? What specific terms would match better?
+- Is the user asking for a specific document by title, date, or file type?
+  If so, suggest a filter.
+- Should the query be split into a search term + a metadata filter?
+
+Return ONLY a JSON object:
+{{"rewritten_query": "new search terms", "filter_suggestion": {{"title_contains": "...", "created_after": "YYYY-MM-DD"}} | null, "reasoning": "why"}}
+
+If no filter is needed, set "filter_suggestion" to null.
+"""
+
+# ── Tool Correction Prompt ──────────────────────────────────────────────────
+
+TOOL_CORRECTION_PROMPT: str = """\
+The {tool_name} tool failed with this error:
+{error}
+
+Original arguments: {original_args}
+
+Tool schema: {schema}
+
+Generate corrected arguments as a JSON object matching the schema.
+{hints}
+Return ONLY the JSON object, no explanation.
+"""
+
+# ── Tool Action Prompts ─────────────────────────────────────────────────────
+
+SUMMARIZE_ANSWER_PROMPT: str = """\
+Summarize the following text into at most {max_points} {format}s. Be concise and preserve key facts.
+
+{text}"""
+
+FILE_SUMMARIZE_MAP_PROMPT: str = """\
+Summarize the following part of a document. Focus: {focus}. Keep it concise.
+
+{chunk}"""
+
+FILE_SUMMARIZE_REDUCE_PROMPT: str = """\
+Combine the following section summaries into a final summary with {max_points} key points. Focus: {focus}.
+
+{combined}"""
+
+EXTRACT_DATA_PROMPT: str = """\
+Extract all explicit numerical statistics from the text below. Return a JSON list of objects with keys: label, value, unit, context. Focus: {focus}.
+
+{text}"""

@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from app.models.chat import ChatFile, Message
 from app.services.agentic_rag.llm_factory import build_chat_llm
+from app.services.agentic_rag.prompts import EXTRACT_DATA_PROMPT
 from app.services.agentic_rag.schemas import DataPoint, LastAnswerObject
 from app.services.agentic_rag.tool_context import ToolContext, enforce_rbac, write_audit
 from app.services.agentic_rag.tools.base import BaseAgentTool
@@ -154,10 +155,9 @@ SOURCE_EXTRACTORS = {
 
 
 async def _extract_with_llm(text: str, ctx: ToolContext, focus: Optional[str]) -> list[dict]:
-    prompt = (
-        "Extract all explicit numerical statistics from the text below. "
-        "Return a JSON list of objects with keys: label, value, unit, context. "
-        f"Focus: {focus or 'any statistics'}.\n\n{text}"
+    prompt = EXTRACT_DATA_PROMPT.format(
+        focus=focus or 'any statistics',
+        text=text,
     )
     points: list[dict] = []
     try:

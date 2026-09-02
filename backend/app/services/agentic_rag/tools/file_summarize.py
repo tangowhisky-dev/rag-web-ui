@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from app.models.chat import ChatFile
 from app.services.agentic_rag.llm_factory import build_chat_llm
+from app.services.agentic_rag.prompts import FILE_SUMMARIZE_MAP_PROMPT, FILE_SUMMARIZE_REDUCE_PROMPT
 from app.services.agentic_rag.tool_context import ToolContext, enforce_rbac, write_audit
 from app.services.agentic_rag.token_budget import count_tokens
 from app.services.agentic_rag.tools.base import BaseAgentTool
@@ -52,10 +53,8 @@ def _resolve_file(ctx: ToolContext, file_id: Optional[int]) -> tuple:
 
 async def _summarize_chunks(llm, chunks: list[str], focus: Optional[str]) -> list[str]:
     async def _summarize_chunk(chunk: str, idx: int) -> str:
-        prompt = (
-            f"Summarize the following part of a document. "
-            f"Focus: {focus or 'key points'}. Keep it concise.\n\n{chunk}"
-        )
+        prompt = FILE_SUMMARIZE_MAP_PROMPT.format(
+                focus=focus or 'key points', chunk=chunk)
         try:
             resp = await llm.ainvoke([{"role": "user", "content": prompt}])
             return str(resp.content).strip()
@@ -99,10 +98,10 @@ class FileSummarizeTool(BaseAgentTool):
         chunk_summaries = await _summarize_chunks(llm, chunks, input_obj.focus)
 
         combined = "\n\n".join(s for s in chunk_summaries if s)
-        reduce_prompt = (
-            f"Combine the following section summaries into a final summary with "
-            f"{input_obj.max_points or 10} key points. "
-            f"Focus: {input_obj.focus or 'key points'}.\n\n{combined}"
+        reduce_prompt = FILE_SUMMARIZE_REDUCE_PROMPT.format(
+            max_points=input_obj.max_points or 10,
+            focus=input_obj.focus or 'key points',
+            combined=combined,
         )
 
         try:

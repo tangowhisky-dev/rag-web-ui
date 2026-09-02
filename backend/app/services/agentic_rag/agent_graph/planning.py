@@ -25,15 +25,18 @@ logger = logging.getLogger(__name__)
 
 
 def _build_plan_user_prompt(original, rewritten, clarification, glossary, last_summary, recalled_text, file_meta, kb_profile_text=""):
+    # Order: stable → volatile for prefix cache reuse.
+    # KB profile is stable within a KB. File metadata is stable within a chat.
+    # Glossary is stable within a turn. Last summary / recalled / query change every turn.
     return (
-        f"User message: {original}\n"
-        f"Retrieval query: {rewritten}\n"
-        + (f"User clarification: {clarification}\n" if clarification else "")
+        (f"{kb_profile_text}\n\n" if kb_profile_text else "")
+        + f"Attached files: {json.dumps(file_meta)}\n\n"
         + (f"[Abbreviation Glossary]\n{glossary}\n\n" if glossary else "")
-        + (f"{kb_profile_text}\n\n" if kb_profile_text else "")
         + f"Previous answer summary: {last_summary}\n"
         f"Recalled long-term memory (context only, not evidence):\n{recalled_text}\n\n"
-        f"Attached files: {json.dumps(file_meta)}\n\n"
+        + (f"User clarification: {clarification}\n" if clarification else "")
+        + f"Retrieval query: {rewritten}\n"
+        f"User message: {original}\n"
         "Produce a plan JSON matching the schema."
     )
 

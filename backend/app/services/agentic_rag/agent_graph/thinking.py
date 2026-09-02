@@ -73,7 +73,6 @@ def _build_think_prompt(
     )
 
     return (
-        f"Iteration: {iteration}/{max_iter}\n"
         f"User message: {original}\n"
         f"Retrieval query: {query}\n"
         + (f"[Abbreviation Glossary]\n{glossary}\n\n" if glossary else "")
@@ -82,11 +81,12 @@ def _build_think_prompt(
         + (f"Earlier conversation summary:\n{summary_text}\n" if summary_text else "")
         + f"Conversation history (recent turns):\n{history_text or '  (none)'}\n"
         f"Previous answer context:\n{lao_text or '  (none)'}\n"
+        f"Plan: {json.dumps(plan.model_dump() if isinstance(plan, Plan) else plan, default=str)}\n"
+        f"Available tools:\n{tools_text}\n\n"
         f"Verification feedback:\n{reflection_text or '  (none)'}\n"
         f"{tried_queries_text}"
-        f"Plan: {json.dumps(plan.model_dump() if isinstance(plan, Plan) else plan, default=str)}\n"
         f"Observations so far:\n{_observations_metadata_text(observations)}\n\n"
-        f"Available tools:\n{tools_text}\n\n"
+        f"Iteration: {iteration}/{max_iter}\n"
         "Emit either {\"tool_calls\": [...]} or {\"final_answer\": true}."
     )
 
