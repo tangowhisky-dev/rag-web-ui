@@ -494,12 +494,24 @@ async def _run_retrieval_pass(
             state.update(r)
 
     state.update(merge_node(state, file_markdown, ctx.db, ctx.org_id))
-    # Apply metadata sort after merge, before reranking.
-    if sort:
+
+    # Fast path: exact-only search with explicit sort skips the reranker
+    # quality gate. Exact FTS matches are already high-precision and the
+    # user explicitly wants sorted order, not relevance order.
+    if legs == ["exact"] and sort:
         merged = state.get("retrieved_docs", [])
         state["retrieved_docs"] = _sort_merged_docs(merged, sort)
+        return state
+
+    # Score all docs (quality gate — always runs), then filter by threshold.
     state.update(reranking_node(state))
     state.update(filter_node(state, threshold=level["rerank_threshold"]))
+
+    # Apply metadata sort AFTER filtering so user's explicit sort order
+    # is preserved instead of being overridden by reranker relevance score.
+    if sort:
+        scored = state.get("retrieved_docs", [])
+        state["retrieved_docs"] = _sort_merged_docs(scored, sort)
     return state
 
 
