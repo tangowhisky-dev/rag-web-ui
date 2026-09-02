@@ -25,7 +25,7 @@ from typing import List, Dict, Optional
 from langchain_core.documents import Document as LangchainDocument
 from openai import OpenAI as SyncOpenAI
 from qdrant_client import QdrantClient
-from qdrant_client.models import SparseVector, NearestQuery, Mmr
+from qdrant_client.models import SparseVector, NearestQuery, Mmr, Filter, FieldCondition, MatchAny
 from fastembed import SparseTextEmbedding
 from sqlalchemy import text, bindparam
 from sqlalchemy.orm import Session
@@ -109,6 +109,18 @@ class _Candidate:
 
 
 
+def _build_doc_id_filter(doc_ids: Optional[List[int]]) -> Optional[Filter]:
+    """Build a Qdrant payload filter restricting results to the given document_ids.
+
+    Returns None when doc_ids is None or empty (no filtering).
+    """
+    if not doc_ids:
+        return None
+    return Filter(must=[
+        FieldCondition(key="document_id", match=MatchAny(any=doc_ids))
+    ])
+
+
 def _qdrant_payload_to_doc(payload: dict) -> LangchainDocument:
     chunk_text = payload.get("chunk_text", "")
     metadata = {k: v for k, v in payload.items() if k != "chunk_text"}
@@ -118,7 +130,7 @@ def _qdrant_payload_to_doc(payload: dict) -> LangchainDocument:
 # ── Search legs ───────────────────────────────────────────────────────────────
 
 @with_retry_sync(max_attempts=3)
-def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: Session, candidates: int, org_id: Optional[int] = None, min_score: Optional[float] = None) -> Dict[str, _Candidate]:
+def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: Session, candidates: int, org_id: Optional[int] = None, min_score: Optional[float] = None, doc_ids: Optional[List[int]] = None) -> Dict[str, _Candidate]:
     """Qdrant cosine-similarity search using the dense (OpenAI) embedding.
 
     Searches both KB collections (kb_{kb_id}) and DataStore collections (ds_{datastore_id}).
@@ -152,6 +164,11 @@ def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
     min_score = get_setting(db, "DENSE_MIN_SCORE", org_id) if min_score is None else min_score
     if min_score > 0.0:
         logger.info("[DENSE] applying min_cosine=%.2f", min_score)
+
+    # Build Qdrant payload filter from doc_ids (metadata pre-filter).
+    qdrant_filter = _build_doc_id_filter(doc_ids) if doc_ids else None
+    if qdrant_filter:
+        logger.info("[DENSE] filtering to %d document_ids", len(doc_ids))
 
     def _process_hits(hits, collection_name: str):
         nonlocal rank
@@ -193,6 +210,7 @@ def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
                 limit=candidates,
                 with_payload=True,
                 with_vectors=True,
+                query_filter=qdrant_filter,
             ).points
         except Exception as e:
             logger.warning("dense_search: Qdrant query failed for kb_%d: %s", kb_id, e)
@@ -211,6 +229,7 @@ def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
                 limit=candidates,
                 with_payload=True,
                 with_vectors=True,
+                query_filter=qdrant_filter,
             ).points
         except Exception as e:
             logger.warning("dense_search: Qdrant query failed for ds_%d: %s", ds_id, e)
@@ -223,7 +242,7 @@ def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
 
 
 @with_retry_sync(max_attempts=3)
-def _sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: Session, candidates: int, org_id: Optional[int] = None, min_score: Optional[float] = None) -> Dict[str, _Candidate]:
+def _sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: Session, candidates: int, org_id: Optional[int] = None, min_score: Optional[float] = None, doc_ids: Optional[List[int]] = None) -> Dict[str, _Candidate]:
     """Qdrant learned-sparse search (SPLADE via FastEmbed).
 
     Searches both KB collections (kb_{kb_id}) and DataStore collections (ds_{datastore_id}).
@@ -257,6 +276,11 @@ def _sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: 
     min_score = get_setting(db, "SPARSE_MIN_SCORE", org_id) if min_score is None else min_score
     if min_score > -float("inf"):
         logger.info("[SPARSE] applying min_score=%.2f", min_score)
+
+    # Build Qdrant payload filter from doc_ids (metadata pre-filter).
+    qdrant_filter = _build_doc_id_filter(doc_ids) if doc_ids else None
+    if qdrant_filter:
+        logger.info("[SPARSE] filtering to %d document_ids", len(doc_ids))
 
     def _process_hits(hits, collection_name: str):
         nonlocal rank
@@ -299,6 +323,7 @@ def _sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: 
                 limit=candidates,
                 with_payload=True,
                 with_vectors=True,
+                query_filter=qdrant_filter,
             ).points
         except Exception as e:
             logger.warning("sparse_search: Qdrant query failed for kb_%d: %s", kb_id, e)
@@ -316,6 +341,7 @@ def _sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: 
                 limit=candidates,
                 with_payload=True,
                 with_vectors=True,
+                query_filter=qdrant_filter,
             ).points
         except Exception as e:
             logger.warning("sparse_search: Qdrant query failed for ds_%d: %s", ds_id, e)
@@ -358,6 +384,9 @@ def _enrich_meta_from_row(meta: dict, row) -> None:
     # Store modified_at from the JOIN for recency-aware dedup.
     if hasattr(row, "modified_at") and row.modified_at:
         meta["_modified_at"] = row.modified_at.isoformat() if hasattr(row.modified_at, "isoformat") else str(row.modified_at)
+    # Store created_at for sort-by-recency in rag_retrieve filters.
+    if hasattr(row, "created_at") and row.created_at:
+        meta["_created_at"] = row.created_at.isoformat() if hasattr(row.created_at, "isoformat") else str(row.created_at)
 
 
 def _normalize_metadata(raw_meta, row) -> dict:
@@ -366,20 +395,21 @@ def _normalize_metadata(raw_meta, row) -> dict:
     return meta
 
 
-def _run_fts_query_with_retry(query: str, kb_ids: List[int], datastore_ids: List[int], kb_sql, ds_sql, candidates: int):
+def _run_fts_query_with_retry(query: str, kb_ids: List[int], datastore_ids: List[int], kb_sql, ds_sql, candidates: int, doc_id_params: Optional[dict] = None):
     from app.db.session import SessionLocal
 
     kb_rows = []
     ds_rows = []
+    doc_id_params = doc_id_params or {}
 
     for attempt in range(3):
         fresh_db: Session | None = None
         try:
             fresh_db = SessionLocal()
             if kb_ids:
-                kb_rows = fresh_db.execute(kb_sql, {"query": query, "kb_ids": kb_ids, "candidates": candidates}).fetchall()
+                kb_rows = fresh_db.execute(kb_sql, {"query": query, "kb_ids": kb_ids, "candidates": candidates, **doc_id_params}).fetchall()
             if datastore_ids:
-                ds_rows = fresh_db.execute(ds_sql, {"query": query, "ds_ids": datastore_ids, "candidates": candidates}).fetchall()
+                ds_rows = fresh_db.execute(ds_sql, {"query": query, "ds_ids": datastore_ids, "candidates": candidates, **doc_id_params}).fetchall()
             return kb_rows, ds_rows
         except Exception as e:
             logger.warning("exact_search: MySQL FTS query failed (attempt %d): %s", attempt + 1, e)
@@ -426,7 +456,7 @@ def _filter_and_dedup_rows(all_rows, min_score: float) -> Dict[str, _Candidate]:
 
 
 @with_retry_sync(max_attempts=3)
-def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: Session, candidates: int, org_id: Optional[int] = None, min_score: Optional[float] = None) -> Dict[str, _Candidate]:
+def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: Session, candidates: int, org_id: Optional[int] = None, min_score: Optional[float] = None, doc_ids: Optional[List[int]] = None) -> Dict[str, _Candidate]:
     """MySQL InnoDB FULLTEXT search — exact keyword / BM25 scoring, server-side.
     
     Searches both KB documents and DataStore documents.
@@ -443,21 +473,28 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
     if not query.strip():
         return {}
 
+    # Build optional doc_id filter clause for MySQL queries.
+    doc_id_clause = " AND d.id IN :doc_ids" if doc_ids else ""
+    doc_id_params = {"doc_ids": tuple(doc_ids)} if doc_ids else {}
+    if doc_ids:
+        logger.info("[EXACT] filtering to %d document_ids", len(doc_ids))
+
     # Query KB documents — JOIN documents for modified_at and title.
     # Title matches get 2x weight: a chunk from a document whose title
     # matches the query is more relevant than one matching only in body.
     kb_sql = text(
-        """
+        f"""
         SELECT dc.chunk_text, dc.chunk_metadata, dc.kb_id, dc.document_id, dc.chunk_index,
                dc.file_name, d.title,
                COALESCE(d.modified_at, d.created_at) AS modified_at,
+               d.created_at AS created_at,
                (MATCH(dc.chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE)
                 + COALESCE(MATCH(d.title) AGAINST(:query IN NATURAL LANGUAGE MODE), 0) * 2.0
                ) AS fts_score
         FROM   document_chunks dc
         JOIN   documents d ON dc.document_id = d.id
         WHERE  dc.kb_id IN :kb_ids
-          AND  dc.data_store_id IS NULL
+          AND  dc.data_store_id IS NULL{doc_id_clause}
           AND  (MATCH(dc.chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE) > 0
                 OR MATCH(d.title) AGAINST(:query IN NATURAL LANGUAGE MODE) > 0)
         ORDER  BY fts_score DESC
@@ -467,16 +504,17 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
 
     # Query DataStore documents — same title-weighted scoring
     ds_sql = text(
-        """
+        f"""
         SELECT dc.chunk_text, dc.chunk_metadata, dc.kb_id, dc.document_id, dc.chunk_index,
                dc.file_name, d.title,
                COALESCE(d.modified_at, d.created_at) AS modified_at,
+               d.created_at AS created_at,
                (MATCH(dc.chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE)
                 + COALESCE(MATCH(d.title) AGAINST(:query IN NATURAL LANGUAGE MODE), 0) * 2.0
                ) AS fts_score
         FROM   document_chunks dc
         JOIN   documents d ON dc.document_id = d.id
-        WHERE  dc.data_store_id IN :ds_ids
+        WHERE  dc.data_store_id IN :ds_ids{doc_id_clause}
           AND  (MATCH(dc.chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE) > 0
                 OR MATCH(d.title) AGAINST(:query IN NATURAL LANGUAGE MODE) > 0)
         ORDER  BY fts_score DESC
@@ -487,7 +525,7 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
     logger.info("[EXACT] MySQL FTS query | query=%r | kb_ids=%s | ds_ids=%s | candidates=%d", 
                 query[:120], kb_ids, datastore_ids, candidates)
 
-    rows = _run_fts_query_with_retry(query, kb_ids, datastore_ids, kb_sql, ds_sql, candidates)
+    rows = _run_fts_query_with_retry(query, kb_ids, datastore_ids, kb_sql, ds_sql, candidates, doc_id_params)
     if rows is None:
         return {}
     kb_rows, ds_rows = rows
@@ -620,12 +658,13 @@ def dense_search_docs(
     org_id: Optional[int] = None,
     top_k: Optional[int] = None,
     min_score: Optional[float] = None,
+    doc_ids: Optional[List[int]] = None,
 ) -> List[LangchainDocument]:
     """Run only the dense leg and return its ranked candidate docs."""
     candidates = top_k or get_setting(db, "RETRIEVAL_TOP_K", org_id)
     pool = candidates * _LEG_POOL_MULTIPLIER
     return _candidates_to_docs(
-        _dense_search(query, kb_ids, datastore_ids, db, pool, org_id, min_score=min_score), "dense"
+        _dense_search(query, kb_ids, datastore_ids, db, pool, org_id, min_score=min_score, doc_ids=doc_ids), "dense"
     )
 
 
@@ -637,12 +676,13 @@ def sparse_search_docs(
     org_id: Optional[int] = None,
     top_k: Optional[int] = None,
     min_score: Optional[float] = None,
+    doc_ids: Optional[List[int]] = None,
 ) -> List[LangchainDocument]:
     """Run only the sparse leg and return its ranked candidate docs."""
     candidates = top_k or get_setting(db, "RETRIEVAL_TOP_K", org_id)
     pool = candidates * _LEG_POOL_MULTIPLIER
     return _candidates_to_docs(
-        _sparse_search(query, kb_ids, datastore_ids, db, pool, org_id, min_score=min_score), "sparse"
+        _sparse_search(query, kb_ids, datastore_ids, db, pool, org_id, min_score=min_score, doc_ids=doc_ids), "sparse"
     )
 
 
@@ -654,10 +694,11 @@ def exact_search_docs(
     org_id: Optional[int] = None,
     top_k: Optional[int] = None,
     min_score: Optional[float] = None,
+    doc_ids: Optional[List[int]] = None,
 ) -> List[LangchainDocument]:
     """Run only the exact (MySQL FTS) leg and return its ranked candidate docs."""
     candidates = top_k or get_setting(db, "RETRIEVAL_TOP_K", org_id)
     pool = candidates * _LEG_POOL_MULTIPLIER
     return _candidates_to_docs(
-        _exact_search(query, kb_ids, datastore_ids, db, pool, org_id, min_score=min_score), "exact"
+        _exact_search(query, kb_ids, datastore_ids, db, pool, org_id, min_score=min_score, doc_ids=doc_ids), "exact"
     )

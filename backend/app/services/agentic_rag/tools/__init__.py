@@ -14,6 +14,7 @@ from .file_extract_table import FileExtractTableTool
 from .file_read import FileReadTool
 from .file_summarize import FileSummarizeTool
 from .kb_grep import KbGrepTool
+from .kb_metadata import KbMetadataTool
 from .kb_outline import KbOutlineTool
 from .kb_read import KbReadTool
 from .rag_retrieve import RagRetrieveTool
@@ -32,6 +33,7 @@ _TOOL_CLASSES = [
     KbGrepTool,
     KbReadTool,
     KbOutlineTool,
+    KbMetadataTool,
 ]
 
 ALL_TOOLS = _TOOL_CLASSES
@@ -95,6 +97,6 @@ def applicable_tools(ctx: "ToolContext") -> list:
 
     has_kb = bool(state.get("kb_ids")) if state is not None else False
     if not has_kb:
-        tools = _filter_tools_by_name(tools, ("kb_grep", "kb_read", "kb_outline"))
+        tools = _filter_tools_by_name(tools, ("kb_grep", "kb_read", "kb_outline", "kb_metadata"))
 
     return tools

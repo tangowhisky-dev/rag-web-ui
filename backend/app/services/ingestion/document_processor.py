@@ -372,6 +372,12 @@ def _build_single_chunk(
         source_metadata["title"] = doc_title
     if not abbr_lookup.is_empty and expanded_text != original_text:
         source_metadata["original_text"] = original_text
+    # Store document-level metadata in the Qdrant payload so retrieval
+    # can filter/sort on these fields without a MySQL round-trip.
+    source_metadata["_created_at"] = document.created_at.isoformat() if document.created_at else None
+    source_metadata["_modified_at"] = (document.modified_at or document.created_at).isoformat() if (document.modified_at or document.created_at) else None
+    source_metadata["_content_type"] = document.content_type
+    source_metadata["_file_size"] = document.file_size
     db_chunk = DocumentChunk(
         id=chunk_id,
         document_id=document.id,

@@ -41,13 +41,13 @@ def _patch_pipeline(monkeypatch_target, level_outcomes):
     def _make_docs(n):
         return [{"page_content": f"doc{i}", "metadata": {"content_hash": f"h{i}"}} for i in range(n)]
 
-    async def fake_dense(state, db, kb_ids, org_id, file_markdown, min_score=None):
+    async def fake_dense(state, db, kb_ids, org_id, file_markdown, min_score=None, doc_ids=None):
         return {}
 
-    async def fake_sparse(state, db, kb_ids, org_id, file_markdown, min_score=None):
+    async def fake_sparse(state, db, kb_ids, org_id, file_markdown, min_score=None, doc_ids=None):
         return {}
 
-    async def fake_exact(state, db, kb_ids, org_id, file_markdown, min_score=None):
+    async def fake_exact(state, db, kb_ids, org_id, file_markdown, min_score=None, doc_ids=None):
         return {}
 
     def fake_merge(state, file_markdown, db=None, org_id=None):

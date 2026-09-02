@@ -9,7 +9,7 @@ import {
 } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
 import type { LucideIcon } from "lucide-react";
-import { BrainIcon, ChevronDownIcon, DotIcon, SparklesIcon } from "lucide-react";
+import { ChevronDownIcon, DotIcon, SparklesIcon } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
 import { createContext, memo, useContext, useMemo } from "react";
 

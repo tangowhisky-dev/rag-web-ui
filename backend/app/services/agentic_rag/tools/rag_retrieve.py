@@ -21,6 +21,7 @@ from typing import Any, Optional
 
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
+from sqlalchemy import or_, and_
 
 from app.core.config import settings
 from app.services.agentic_rag.llm_factory import build_chat_llm
@@ -62,6 +63,93 @@ def _emit_progress(phase: str, message: str, **extra: Any) -> None:
         writer(payload)
 
 
+def _resolve_filter_to_doc_ids(
+    db: Any,
+    kb_ids: list[int],
+    filters: dict | None,
+) -> list[int] | None:
+    """Translate metadata filters to a list of document_ids via MySQL.
+
+    Returns None when no filters are provided (search all docs).
+    Returns an empty list if filters match zero documents.
+    """
+    if not filters:
+        return None
+
+    from app.models.knowledge import Document
+    from datetime import datetime as _dt
+
+    q = db.query(Document.id).filter(
+        or_(
+            Document.knowledge_base_id.in_(kb_ids),
+            and_(Document.knowledge_base_id.is_(None), Document.data_store_id.isnot(None)),
+        )
+    )
+
+    if filters.get("title_contains"):
+        q = q.filter(Document.title.ilike(f"%{filters['title_contains']}%"))
+    if filters.get("file_name_contains"):
+        q = q.filter(Document.file_name.ilike(f"%{filters['file_name_contains']}%"))
+    if filters.get("content_type"):
+        q = q.filter(Document.content_type == filters["content_type"])
+    if filters.get("created_after"):
+        try:
+            after = _dt.fromisoformat(filters["created_after"])
+            q = q.filter(Document.created_at >= after)
+        except (ValueError, TypeError):
+            pass
+    if filters.get("created_before"):
+        try:
+            before = _dt.fromisoformat(filters["created_before"])
+            q = q.filter(Document.created_at <= before)
+        except (ValueError, TypeError):
+            pass
+    if filters.get("document_ids"):
+        q = q.filter(Document.id.in_(filters["document_ids"]))
+
+    return [r[0] for r in q.limit(200).all()]
+
+
+def _sort_merged_docs(docs: list[dict], sort: dict | None) -> list[dict]:
+    """Sort merged docs by a metadata field. Falls back to original order on errors."""
+    if not sort or not sort.get("field") or not docs:
+        return docs
+    field = sort["field"]
+    reverse = sort.get("direction", "desc") == "desc"
+    meta_key = f"_{field}"
+
+    def _sort_key(doc: dict) -> str:
+        return doc.get("metadata", {}).get(meta_key, "") or ""
+
+    try:
+        return sorted(docs, key=_sort_key, reverse=reverse)
+    except Exception:
+        return docs
+
+
+def _empty_result(input_obj: RagRetrieveInput, t0: float, reason: str) -> dict:
+    """Build an empty-result response when filters match nothing."""
+    latency_ms = round((time.monotonic() - t0) * 1000)
+    return {
+        "ok": True,
+        "result": {
+            "docs": [],
+            "confidence": 0.0,
+            "confidence_level": "none",
+            "query_used": input_obj.query,
+            "original_query": input_obj.query,
+            "query_rewritten": False,
+            "legs_run": input_obj.legs or ["dense", "sparse", "exact"],
+            "levels_tried": 0,
+            "sufficient": False,
+            "missing": reason,
+            "filters_applied": input_obj.filters,
+        },
+        "error": None,
+        "tokens": 0,
+    }
+
+
 class RagRetrieveInput(BaseModel):
     """Input schema for rag_retrieve."""
 
@@ -74,6 +162,26 @@ class RagRetrieveInput(BaseModel):
     min_confidence: Optional[float] = Field(
         default=None,
         description="Confidence bar (0-1) below which the graduated relaxation ladder kicks in. Defaults to settings.ADAPTIVE_RETRIEVAL_THRESHOLD/100.",
+    )
+    filters: Optional[dict] = Field(
+        default=None,
+        description=(
+            "Metadata filters to narrow retrieval before scoring. "
+            "All conditions are AND-combined. Supported keys: "
+            "title_contains (str), file_name_contains (str), "
+            "content_type (str, e.g. 'application/pdf'), "
+            "created_after (ISO date string), created_before (ISO date string), "
+            "document_ids (list[int]). "
+            'Example: {"title_contains": "Weekly Update", "created_after": "2026-06-01"}'
+        ),
+    )
+    sort: Optional[dict] = Field(
+        default=None,
+        description=(
+            "Sort merged results by metadata field before reranking. "
+            'Example: {"field": "created_at", "direction": "desc"}. '
+            "Use when the query implies recency or ordering ('latest', 'most recent')."
+        ),
     )
 
 
@@ -219,39 +327,95 @@ _REWRITE_PROMPT = """\
 The query "{query}" did not retrieve sufficient documents from the knowledge base.
 Missing information: {missing}
 
-Rewrite the query to improve retrieval. Consider:
-- Using different terminology or synonyms
-- Simplifying overly complex phrasing
-- Removing unnecessary qualifiers
-- Breaking a multi-part question into a simpler form
+Top results that were found but insufficient:
+{top_snippets}
 
-Return ONLY the rewritten query string, no explanation, no quotes.
+Analyze why these results don't answer the question. Consider:
+- Is the query too vague? What specific terms would match better?
+- Is the user asking for a specific document by title, date, or file type?
+  If so, suggest a filter.
+- Should the query be split into a search term + a metadata filter?
+
+Return ONLY a JSON object:
+{{"rewritten_query": "new search terms", "filter_suggestion": {{"title_contains": "...", "created_after": "YYYY-MM-DD"}} | null, "reasoning": "why"}}
+
+If no filter is needed, set "filter_suggestion" to null.
 """
+
+
+_ALLOWED_FILTER_KEYS = {"title_contains", "file_name_contains", "content_type", "created_after", "created_before", "document_ids"}
+
+
+def _build_failure_snippets(failed_docs: list | None) -> str:
+    """Build top-3 doc snippets for the rewrite prompt."""
+    if not failed_docs:
+        return "(no documents were returned)"
+    snippets = []
+    for doc in failed_docs[:3]:
+        content = str(doc.get("page_content", ""))[:200]
+        title = doc.get("metadata", {}).get("title", "")
+        snippets.append(f"[{title}] {content}" if title else content)
+    return "\n".join(snippets)
+
+
+def _parse_rewrite_response(raw: str, original_query: str) -> tuple[str, dict | None]:
+    """Parse the LLM rewrite response into (rewritten_query, filter_suggestion).
+
+    Handles both JSON and plain-text responses. Returns (original, None) if
+    the response is empty or identical to the original query.
+    """
+    block = _extract_json_block(raw)
+    if block:
+        result = json.loads(block)
+        rewritten = str(result.get("rewritten_query", "")).strip().strip('"').strip("'").strip()
+        filter_suggestion = result.get("filter_suggestion")
+        if isinstance(filter_suggestion, dict):
+            filter_suggestion = {k: v for k, v in filter_suggestion.items() if k in _ALLOWED_FILTER_KEYS} or None
+        else:
+            filter_suggestion = None
+        if rewritten and rewritten.lower() != original_query.lower():
+            return rewritten, filter_suggestion
+        if filter_suggestion:
+            return original_query, filter_suggestion
+        return original_query, None
+    # Fallback: treat raw response as plain rewritten query.
+    rewritten = raw.strip('"').strip("'").strip()
+    if rewritten and rewritten.lower() != original_query.lower():
+        return rewritten, None
+    return original_query, None
 
 
 async def _rewrite_query(
     original_query: str,
     missing: str,
     ctx: ToolContext,
-) -> str:
+    failed_docs: list | None = None,
+) -> tuple[str, dict | None]:
     """Rewrite a query that failed to retrieve sufficient docs.
 
-    Returns the rewritten query, or the original if rewriting fails or
-    produces an identical string.
+    Returns ``(rewritten_query, filter_suggestion)``. The filter_suggestion
+    is a dict suitable for `_resolve_filter_to_doc_ids`, or None when no
+    filter is needed. Falls back to ``(original_query, None)`` on failure.
     """
     _emit_progress("query_rewrite", "Rewriting query for better retrieval …")
 
-    prompt = _REWRITE_PROMPT.format(query=original_query, missing=missing or "unknown")
+    top_snippets = _build_failure_snippets(failed_docs)
+    prompt = _REWRITE_PROMPT.format(
+        query=original_query,
+        missing=missing or "unknown",
+        top_snippets=top_snippets,
+    )
     try:
         llm = build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)
         response = await llm.ainvoke([{"role": "user", "content": prompt}])
-        rewritten = str(response.content).strip().strip('"').strip("'").strip()
-        if rewritten and rewritten.lower() != original_query.lower():
-            logger.info("[rag_retrieve] query rewritten: '%s' -> '%s'", original_query, rewritten)
-            return rewritten
+        raw = str(response.content).strip()
+        rewritten, filter_suggestion = _parse_rewrite_response(raw, original_query)
+        if rewritten != original_query or filter_suggestion:
+            logger.info("[rag_retrieve] query rewritten: '%s' -> '%s' filter=%s", original_query, rewritten, filter_suggestion)
+            return rewritten, filter_suggestion
     except Exception as exc:
         logger.warning("[rag_retrieve] query rewrite failed: %s", exc)
-    return original_query
+    return original_query, None
 
 
 # Graduated relaxation ladder. Level 0 is the normal, tightest pass. Each
@@ -293,6 +457,8 @@ async def _run_retrieval_pass(
     file_markdown: Optional[str],
     legs: list[str],
     level: dict[str, Any],
+    doc_ids: Optional[list[int]] = None,
+    sort: Optional[dict] = None,
 ) -> dict:
     """Run one dense+sparse+exact+rerank+filter pass at a given relaxation level.
 
@@ -314,11 +480,11 @@ async def _run_retrieval_pass(
 
     coros = []
     if "dense" in legs:
-        coros.append(dense_retrieval_node(state, ctx.db, kb_ids, org_id, file_markdown, min_score=level["dense_min_score"]))
+        coros.append(dense_retrieval_node(state, ctx.db, kb_ids, org_id, file_markdown, min_score=level["dense_min_score"], doc_ids=doc_ids))
     if "sparse" in legs:
-        coros.append(sparse_retrieval_node(state, ctx.db, kb_ids, org_id, file_markdown, min_score=level["sparse_min_score"]))
+        coros.append(sparse_retrieval_node(state, ctx.db, kb_ids, org_id, file_markdown, min_score=level["sparse_min_score"], doc_ids=doc_ids))
     if "exact" in legs:
-        coros.append(exact_retrieval_node(state, ctx.db, kb_ids, org_id, file_markdown, min_score=level["exact_min_score"]))
+        coros.append(exact_retrieval_node(state, ctx.db, kb_ids, org_id, file_markdown, min_score=level["exact_min_score"], doc_ids=doc_ids))
 
     leg_results = await asyncio.gather(*coros, return_exceptions=True)
     for r in leg_results:
@@ -328,6 +494,10 @@ async def _run_retrieval_pass(
             state.update(r)
 
     state.update(merge_node(state, file_markdown, ctx.db, ctx.org_id))
+    # Apply metadata sort after merge, before reranking.
+    if sort:
+        merged = state.get("retrieved_docs", [])
+        state["retrieved_docs"] = _sort_merged_docs(merged, sort)
     state.update(reranking_node(state))
     state.update(filter_node(state, threshold=level["rerank_threshold"]))
     return state
@@ -343,6 +513,8 @@ async def _run_relaxation_ladder(
     levels: list[dict[str, Any]],
     min_confidence: float,
     graph_expand: bool,
+    doc_ids: Optional[list[int]] = None,
+    sort: Optional[dict] = None,
 ) -> tuple[dict[str, Any], list, float, int, bool, str]:
     """Run the relaxation ladder for a single query string.
 
@@ -357,7 +529,7 @@ async def _run_relaxation_ladder(
 
     for i, level in enumerate(levels):
         levels_tried = i + 1
-        state = await _run_retrieval_pass(ctx, query, kb_ids, org_id, file_markdown, legs, level)
+        state = await _run_retrieval_pass(ctx, query, kb_ids, org_id, file_markdown, legs, level, doc_ids=doc_ids, sort=sort)
         docs = state.get("retrieved_docs", [])
         confidence = float(state.get("retrieval_confidence", 0.0))
 
@@ -392,6 +564,55 @@ async def _run_relaxation_ladder(
     return state, docs, confidence, levels_tried, sufficient, missing
 
 
+def _confidence_level(confidence: float) -> str:
+    """Map a 0-1 confidence score to a label."""
+    if confidence > 0.7:
+        return "high"
+    if confidence > 0.3:
+        return "medium"
+    return "low"
+
+
+async def _try_rewrite_retry(
+    ctx: ToolContext,
+    input_obj: RagRetrieveInput,
+    docs: list,
+    missing: str,
+    kb_ids: list[int],
+    org_id: Optional[int],
+    file_markdown: Optional[str],
+    legs: list[str],
+    levels: list[dict[str, Any]],
+    min_confidence: float,
+    doc_ids: list[int] | None,
+) -> tuple[str, dict, list, float, int, bool, str, list[int] | None]:
+    """Attempt a rewrite+retry when the first pass was insufficient.
+
+    Returns (query_used, state, docs, confidence, levels_tried, sufficient, missing, doc_ids).
+    If the rewrite doesn't change the query, returns the original values unchanged.
+    """
+    rewritten, filter_suggestion = await _rewrite_query(input_obj.query, missing, ctx, docs)
+    if rewritten == input_obj.query and not filter_suggestion:
+        return input_obj.query, {}, docs, 0.0, 0, False, missing, doc_ids
+
+    merged_filters = dict(input_obj.filters or {})
+    if filter_suggestion:
+        merged_filters.update(filter_suggestion)
+        doc_ids = _resolve_filter_to_doc_ids(ctx.db, kb_ids, merged_filters)
+
+    _emit_progress(
+        "query_rewrite",
+        "Retrying with rewritten query …",
+        rewritten_query=rewritten,
+        original_query=input_obj.query,
+    )
+    state, docs, confidence, levels_tried, sufficient, missing = await _run_relaxation_ladder(
+        ctx, rewritten, kb_ids, org_id, file_markdown, legs, levels,
+        min_confidence, input_obj.graph_expand, doc_ids=doc_ids, sort=input_obj.sort,
+    )
+    return rewritten, state, docs, confidence, levels_tried, sufficient, missing, doc_ids
+
+
 async def _rag_retrieve(ctx: ToolContext, input_obj: RagRetrieveInput) -> dict:
     t0 = time.monotonic()
     rbac = enforce_rbac(ctx, kb_ids=input_obj.kb_ids)
@@ -399,9 +620,7 @@ async def _rag_retrieve(ctx: ToolContext, input_obj: RagRetrieveInput) -> dict:
     if not kb_ids and ctx.state is not None:
         kb_ids = ctx.state.get("kb_ids", [])
     org_id = ctx.org_id
-    file_markdown = None
-    if ctx.state is not None:
-        file_markdown = ctx.state.get("file_markdown", None)
+    file_markdown = ctx.state.get("file_markdown") if ctx.state else None
 
     legs = input_obj.legs or ["dense", "sparse", "exact"]
     from app.services.settings_service import get_setting
@@ -411,6 +630,14 @@ async def _rag_retrieve(ctx: ToolContext, input_obj: RagRetrieveInput) -> dict:
         else get_setting(ctx.db, "ADAPTIVE_RETRIEVAL_THRESHOLD", ctx.org_id) / 100.0
     )
 
+    # Resolve metadata filters to document_ids via MySQL.
+    doc_ids = _resolve_filter_to_doc_ids(ctx.db, kb_ids, input_obj.filters)
+    if doc_ids is not None:
+        _emit_progress("filtering", f"Filtering to {len(doc_ids)} matching documents …")
+        if not doc_ids:
+            logger.info("[rag_retrieve] filters matched 0 documents — returning empty")
+            return _empty_result(input_obj, t0, "filters matched 0 documents")
+
     all_levels = _relaxation_levels(ctx.db, ctx.org_id)
     adaptive_enabled = get_setting(ctx.db, "ADAPTIVE_RETRIEVAL_ENABLED", ctx.org_id)
     levels = all_levels if adaptive_enabled else all_levels[:1]
@@ -418,39 +645,24 @@ async def _rag_retrieve(ctx: ToolContext, input_obj: RagRetrieveInput) -> dict:
     # ── Pass 1: relaxation ladder with the original query ──────────────
     state, docs, confidence, levels_tried, sufficient, missing = await _run_relaxation_ladder(
         ctx, input_obj.query, kb_ids, org_id, file_markdown, legs, levels,
-        min_confidence, input_obj.graph_expand,
+        min_confidence, input_obj.graph_expand, doc_ids=doc_ids, sort=input_obj.sort,
     )
 
     # ── Pass 2: if still insufficient, rewrite the query and re-run ────
     query_used = input_obj.query
     query_rewritten = False
     if not sufficient and missing:
-        rewritten = await _rewrite_query(input_obj.query, missing, ctx)
-        if rewritten != input_obj.query:
-            query_used = rewritten
-            query_rewritten = True
-            _emit_progress(
-                "query_rewrite",
-                "Retrying with rewritten query …",
-                rewritten_query=rewritten,
-                original_query=input_obj.query,
-            )
-            state, docs, confidence, levels_tried, sufficient, missing = await _run_relaxation_ladder(
-                ctx, rewritten, kb_ids, org_id, file_markdown, legs, levels,
-                min_confidence, input_obj.graph_expand,
-            )
+        query_used, state, docs, confidence, levels_tried, sufficient, missing, doc_ids = await _try_rewrite_retry(
+            ctx, input_obj, docs, missing, kb_ids, org_id, file_markdown, legs, levels, min_confidence, doc_ids,
+        )
+        query_rewritten = query_used != input_obj.query
 
-    confidence_level = "low"
-    if confidence > 0.7:
-        confidence_level = "high"
-    elif confidence > 0.3:
-        confidence_level = "medium"
-
+    conf_level = _confidence_level(confidence)
     latency_ms = round((time.monotonic() - t0) * 1000)
     result_summary = {
         "doc_count": len(docs),
         "confidence": confidence,
-        "confidence_level": confidence_level,
+        "confidence_level": conf_level,
         "levels_tried": levels_tried,
         "sufficient": sufficient,
         "query_rewritten": query_rewritten,
@@ -471,7 +683,7 @@ async def _rag_retrieve(ctx: ToolContext, input_obj: RagRetrieveInput) -> dict:
         "result": {
             "docs": docs,
             "confidence": confidence,
-            "confidence_level": confidence_level,
+            "confidence_level": conf_level,
             "query_used": query_used,
             "original_query": input_obj.query,
             "query_rewritten": query_rewritten,
@@ -479,6 +691,8 @@ async def _rag_retrieve(ctx: ToolContext, input_obj: RagRetrieveInput) -> dict:
             "levels_tried": levels_tried,
             "sufficient": sufficient,
             "missing": missing if not sufficient else "",
+            "filters_applied": input_obj.filters,
+            "sort_applied": input_obj.sort,
         },
         "error": None,
         "tokens": len(str(docs)) // 4,

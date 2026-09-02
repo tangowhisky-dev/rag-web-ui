@@ -52,6 +52,7 @@ class TestToolRegistry:
             "kb_grep",
             "kb_read",
             "kb_outline",
+            "kb_metadata",
         }
         assert names == expected
 

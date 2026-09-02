@@ -25,11 +25,9 @@ import {
   WrenchIcon,
   BookOpenIcon,
   ScanTextIcon,
-  CompassIcon,
   ScanSearchIcon,
-  MicroscopeIcon,
-  InspectIcon,
   ZoomInIcon,
+  DatabaseIcon,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
@@ -93,6 +91,7 @@ const PHASE_ICONS: Record<string, LucideIcon> = {
 // Map tool names to icons
 const TOOL_ICONS: Record<string, LucideIcon> = {
   rag_retrieve: ScanSearchIcon,
+  kb_metadata: DatabaseIcon,
   kb_grep: ScanTextIcon,
   kb_outline: BookOpenIcon,
   kb_read: FileTextIcon,

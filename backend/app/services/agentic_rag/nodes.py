@@ -514,6 +514,7 @@ async def dense_retrieval_node(
     org_id: int | None = None,
     file_markdown: str | None = None,
     min_score: Optional[float] = None,
+    doc_ids: Optional[List[int]] = None,
 ) -> dict:
     """Run the dense retrieval leg for the current subtask."""
     with _agent_step("dense_retrieval"):
@@ -529,7 +530,7 @@ async def dense_retrieval_node(
             writer({"event": "progress", "phase": "dense_retrieval", "message": "Running dense vector retrieval..."})
 
         try:
-            docs = dense_search_docs(query=query, kb_ids=kb_ids, datastore_ids=datastore_ids, db=db, org_id=org_id, min_score=min_score)
+            docs = dense_search_docs(query=query, kb_ids=kb_ids, datastore_ids=datastore_ids, db=db, org_id=org_id, min_score=min_score, doc_ids=doc_ids)
             failed = False
         except Exception as exc:
             logger.warning("[DENSE_RETRIEVAL] failed: %s", exc)
@@ -559,6 +560,7 @@ async def sparse_retrieval_node(
     org_id: int | None = None,
     file_markdown: str | None = None,
     min_score: Optional[float] = None,
+    doc_ids: Optional[List[int]] = None,
 ) -> dict:
     """Run the sparse retrieval leg for the current subtask."""
     with _agent_step("sparse_retrieval"):
@@ -574,7 +576,7 @@ async def sparse_retrieval_node(
             writer({"event": "progress", "phase": "sparse_retrieval", "message": "Running sparse keyword retrieval..."})
 
         try:
-            docs = sparse_search_docs(query=query, kb_ids=kb_ids, datastore_ids=datastore_ids, db=db, org_id=org_id, min_score=min_score)
+            docs = sparse_search_docs(query=query, kb_ids=kb_ids, datastore_ids=datastore_ids, db=db, org_id=org_id, min_score=min_score, doc_ids=doc_ids)
             failed = False
         except Exception as exc:
             logger.warning("[SPARSE_RETRIEVAL] failed: %s", exc)
@@ -604,6 +606,7 @@ async def exact_retrieval_node(
     org_id: int | None = None,
     file_markdown: str | None = None,
     min_score: Optional[float] = None,
+    doc_ids: Optional[List[int]] = None,
 ) -> dict:
     """Run the exact (MySQL FTS) retrieval leg for the current subtask."""
     with _agent_step("exact_retrieval"):
@@ -619,7 +622,7 @@ async def exact_retrieval_node(
             writer({"event": "progress", "phase": "exact_retrieval", "message": "Running exact full-text retrieval..."})
 
         try:
-            docs = exact_search_docs(query=query, kb_ids=kb_ids, datastore_ids=datastore_ids, db=db, org_id=org_id, min_score=min_score)
+            docs = exact_search_docs(query=query, kb_ids=kb_ids, datastore_ids=datastore_ids, db=db, org_id=org_id, min_score=min_score, doc_ids=doc_ids)
             failed = False
         except Exception as exc:
             logger.warning("[EXACT_RETRIEVAL] failed: %s", exc)
