@@ -59,6 +59,10 @@ class AgentState(MessagesState):
     # KB profile loaded by load_context_node (doc count, fields, content types, date range).
     # Injected into plan/think/rewrite prompts so the agent has KB context without calling kb_metadata.
     kb_profile: Annotated[dict, _last_value] = {}
+    # Query intent (suggested filters/sort/legs) extracted by rewrite_query_node.
+    # Folded into the existing rewrite LLM call — no separate node. null when no KB profile
+    # or when the LLM output is malformed (after one retry).
+    query_intent: Annotated[Optional[dict], _last_value] = None
 
     # ── Per-leg retrieval state (separated for observability) ───────────
     dense_docs: Annotated[List[dict], accumulate] = []

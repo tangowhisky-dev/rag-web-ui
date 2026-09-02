@@ -79,6 +79,26 @@ Query: 'what is mutex?'
 Output: 'what is mutex?'
 """
 
+# Suffix appended to REWRITE_SYSTEM_PROMPT when a [KB Profile] section is
+# available. Asks the LLM to also extract search intent (filters/sort/legs)
+# on a second line, alongside the rewritten query on the first line.
+REWRITE_INTENT_SUFFIX: str = """\
+
+If a [KB Profile] section is provided, also extract search intent:
+1. Suggest filters ONLY when the query clearly implies a metadata constraint:
+   - "latest weekly update" → filters={{"title_contains":"Weekly Update"}}, sort={{"field":"created_at","direction":"desc"}}
+   - "PDF documents about networking" → filters={{"content_type":"application/pdf"}}
+   - "documents from June" → filters={{"created_after":"2026-06-01","created_before":"2026-06-30"}}
+2. Suggest sort ONLY when the query implies ordering (latest, newest, oldest, most recent).
+3. Suggest legs=["exact","sparse"] for literal lookups (filenames, IDs, exact titles). Use null for conceptual queries.
+4. If no filters/sort/legs are implied, return null for all.
+5. Do NOT invent field names — use only the fields listed in [KB Profile].
+
+Output the rewritten query on the first line, then a JSON object on the second line:
+{query}
+{{"suggested_filters": {{...}}|null, "suggested_sort": {{...}}|null, "suggested_legs": [...]|null, "reasoning": "..."}}
+"""
+
 # ── Compaction / Summarization ──────────────────────────────────────────────
 
 COMPACTION_SYSTEM_PROMPT: str = """\

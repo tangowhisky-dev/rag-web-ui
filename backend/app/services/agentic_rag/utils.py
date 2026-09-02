@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
-from typing import Any, List
+from typing import Any, List, Optional
 
 from app.services.agentic_rag.prompts import REWRITE_SYSTEM_PROMPT
+
+logger = logging.getLogger(__name__)
 
 
 def estimate_context_tokens(text: str) -> int:
@@ -331,22 +334,31 @@ async def resolve_retrieval_query(
     openai_api_base: str = "",
     glossary: str = "",
     retrieved_titles: list[str] | None = None,
-) -> tuple[str, dict]:
+    kb_profile_text: str = "",
+) -> tuple[str, dict, Optional[dict]]:
     """Resolve *query* into a standalone retrieval string.
 
-    Returns ``(retrieval_query, provenance)``. ``provenance`` records whether
+    Returns ``(retrieval_query, provenance, query_intent)``. ``provenance`` records whether
     resolution ran and, when it did, which tokens it introduced — so a bad
-    rewrite is auditable rather than silently authoritative.
+    rewrite is auditable rather than silently authoritative. ``query_intent``
+    is a dict with suggested_filters/suggested_sort/suggested_legs, or None
+    when no KB profile was provided or the LLM output was malformed.
 
     Falls back to *query* on skip, timeout, LLM error, or failed provenance
     validation. The retrieval query is never allowed to become free text the
     pipeline cannot account for.
+
+    When kb_profile_text is provided, the LLM is asked to output the rewritten
+    query on the first line and a JSON intent object on the second line. If
+    the JSON is malformed, one retry is attempted with a corrective instruction.
+    If the retry also fails, query_intent is set to None and the pipeline
+    continues with just the rewritten query.
     """
     provenance_sources = provenance_sources or []
     has_history = bool(recent_history)
 
     if not needs_reference_resolution(query, has_history):
-        return query, {"resolved": False, "reason": "self_contained"}
+        return query, {"resolved": False, "reason": "self_contained"}, None
 
     try:
         raw_rewrite = await _call_rewriter(
@@ -358,13 +370,43 @@ async def resolve_retrieval_query(
             openai_api_base=openai_api_base,
             glossary=glossary,
             retrieved_titles=retrieved_titles,
+            kb_profile_text=kb_profile_text,
         )
     except Exception as exc:  # network, timeout, provider error
-        return query, {"resolved": False, "reason": f"resolver_failed: {exc}"}
+        return query, {"resolved": False, "reason": f"resolver_failed: {exc}"}, None
 
-    standalone = _clean_rewrite(raw_rewrite) or query
+    # When intent extraction is enabled, parse the two-line output.
+    query_intent = None
+    if kb_profile_text:
+        standalone_raw, intent_raw = _parse_rewrite_with_intent(raw_rewrite)
+        if intent_raw is None:
+            # Malformed output — retry once with corrective instruction.
+            logger.warning("[rewrite_query] malformed intent output, retrying")
+            try:
+                raw_retry = await _call_rewriter(
+                    query=query,
+                    recent_history=recent_history,
+                    api_base=api_base,
+                    query_model=query_model,
+                    openai_api_key=openai_api_key,
+                    openai_api_base=openai_api_base,
+                    glossary=glossary,
+                    retrieved_titles=retrieved_titles,
+                    kb_profile_text=kb_profile_text,
+                    retry_reason="Your previous response did not match the required format. Output the rewritten query on the first line, then a valid JSON object on the second line. Do not wrap in markdown fences. Do not add any text after the JSON.",
+                )
+                standalone_raw, intent_raw = _parse_rewrite_with_intent(raw_retry)
+            except Exception as exc:
+                logger.warning("[rewrite_query] retry failed: %s", exc)
+                standalone_raw, intent_raw = raw_rewrite, None
+        if intent_raw is not None:
+            query_intent = _validate_query_intent(intent_raw)
+        standalone = _clean_rewrite(standalone_raw) or query
+    else:
+        standalone = _clean_rewrite(raw_rewrite) or query
+
     if standalone == query:
-        return query, {"resolved": False, "reason": "unchanged"}
+        return query, {"resolved": False, "reason": "unchanged"}, query_intent
 
     ok, unsupported = validate_resolution_provenance(
         original_query=query,
@@ -377,13 +419,58 @@ async def resolve_retrieval_query(
             "reason": "provenance_rejected",
             "unsupported_terms": unsupported,
             "rejected_query": standalone,
-        }
+        }, query_intent
 
     return standalone, {
         "resolved": True,
         "reason": "reference_resolved",
         "original_query": original_query,
-    }
+    }, query_intent
+
+
+def _parse_rewrite_with_intent(raw: str) -> tuple[str, Optional[str]]:
+    """Parse two-line output: rewritten query on line 1, JSON on line 2.
+
+    Returns (query_line, intent_json_str_or_None).
+    Falls back to treating the entire output as the query if no JSON is found.
+    """
+    if not raw:
+        return raw, None
+    # Strip markdown fences if present
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```[a-z]*\n?", "", cleaned)
+        cleaned = re.sub(r"\n?```$", "", cleaned)
+    lines = cleaned.split("\n")
+    if len(lines) < 2:
+        return cleaned, None
+    # Find the first line that looks like JSON (starts with {)
+    query_line = lines[0].strip()
+    json_line = None
+    for line in lines[1:]:
+        stripped = line.strip()
+        if stripped.startswith("{"):
+            json_line = stripped
+            break
+    if json_line is None:
+        return cleaned, None
+    return query_line, json_line
+
+
+def _validate_query_intent(intent_raw: str) -> Optional[dict]:
+    """Parse and validate the intent JSON string. Returns dict or None."""
+    try:
+        import json
+        obj = json.loads(intent_raw)
+        if not isinstance(obj, dict):
+            return None
+        # Validate keys — only accept known fields
+        valid_keys = {"suggested_filters", "suggested_sort", "suggested_legs", "reasoning"}
+        if not all(k in valid_keys for k in obj.keys()):
+            return None
+        return obj
+    except (json.JSONDecodeError, TypeError):
+        return None
 
 
 def _clean_rewrite(raw_rewrite: str) -> str:
@@ -428,9 +515,15 @@ async def _call_rewriter(
     openai_api_base: str,
     glossary: str = "",
     retrieved_titles: list[str] | None = None,
+    kb_profile_text: str = "",
+    retry_reason: str = "",
 ) -> str:
     """Single rewriter LLM call. Raises on provider failure."""
+    from app.services.agentic_rag.prompts import REWRITE_INTENT_SUFFIX
+
     system_msg = REWRITE_SYSTEM_PROMPT.format(memory_section="")
+    if kb_profile_text:
+        system_msg += "\n" + REWRITE_INTENT_SUFFIX
 
     messages: list[dict] = [{"role": "system", "content": system_msg}]
     from langchain_core.messages import HumanMessage, AIMessage
@@ -446,6 +539,10 @@ async def _call_rewriter(
     if retrieved_titles:
         titles_text = "\n".join(f"- {t}" for t in retrieved_titles)
         user_content += f"\n\n[Retrieved Document Titles]\n{titles_text}"
+    if kb_profile_text:
+        user_content += f"\n\n{kb_profile_text}"
+    if retry_reason:
+        user_content += f"\n\n[Retry] {retry_reason}"
     messages.append({"role": "user", "content": user_content})
 
     from openai import AsyncOpenAI as _AsyncOAI
@@ -454,7 +551,8 @@ async def _call_rewriter(
         model=query_model or "default",
         # 60 tokens truncated rewrites mid-phrase; the prompt caps output at
         # 30 words, so 160 leaves headroom without inviting an essay.
-        max_tokens=160,
+        # When intent extraction is enabled, we need more tokens for the JSON line.
+        max_tokens=320 if kb_profile_text else 160,
         messages=messages,
         temperature=0,
         stream=False,

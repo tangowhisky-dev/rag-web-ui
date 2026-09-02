@@ -379,7 +379,11 @@ async def rewrite_query_node(
         if retrieved_titles:
             provenance_sources.extend(retrieved_titles)
 
-        rewritten, provenance = await resolve_retrieval_query(
+        # Build KB profile text for intent extraction (folded into rewrite call).
+        from app.services.agentic_rag.kb_profile import format_profile_summary
+        kb_profile_text = format_profile_summary(state.get("kb_profile", {}))
+
+        rewritten, provenance, query_intent = await resolve_retrieval_query(
             query=resolver_input,
             original_query=query,
             recent_history=recent_history,
@@ -390,6 +394,7 @@ async def rewrite_query_node(
             openai_api_base=api_base,
             glossary=glossary,
             retrieved_titles=retrieved_titles,
+            kb_profile_text=kb_profile_text,
         )
 
         if provenance.get("reason") == "provenance_rejected":
@@ -410,8 +415,12 @@ async def rewrite_query_node(
         if excluded:
             logger.debug("[rewrite_query] extracted excluded_terms: %s", excluded)
 
-        return {"rewritten_query": rewritten, "resolution_provenance": provenance,
-                "excluded_terms": excluded}
+        result = {"rewritten_query": rewritten, "resolution_provenance": provenance,
+                  "excluded_terms": excluded}
+        if query_intent is not None:
+            logger.debug("[rewrite_query] extracted query_intent: %s", query_intent)
+            result["query_intent"] = query_intent
+        return result
 
 
 # ---------------------------------------------------------------------------

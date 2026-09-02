@@ -92,6 +92,27 @@ class Plan(BaseModel):
     clarification_question: Optional[str] = Field(default=None, description="Question to ask the user.")
 
 
+class QueryIntent(BaseModel):
+    """Suggested filters/sort extracted from the query by rewrite_query_node.
+
+    Folded into the existing rewrite LLM call — no separate node or extra latency.
+    Only populated when a KB profile is available and the LLM produces valid JSON.
+    """
+    suggested_filters: Optional[dict] = Field(
+        default=None,
+        description="Metadata filters for rag_retrieve (title_contains, file_name_contains, content_type, created_after, created_before, document_ids).",
+    )
+    suggested_sort: Optional[dict] = Field(
+        default=None,
+        description="Sort spec for rag_retrieve: {field, direction}.",
+    )
+    suggested_legs: Optional[List[str]] = Field(
+        default=None,
+        description="Retrieval legs to run: subset of ['dense', 'sparse', 'exact']. null = let the agent decide.",
+    )
+    reasoning: str = Field(default="", description="Why these filters/sort/legs were suggested.")
+
+
 class Observation(BaseModel):
     """Result of one tool call appended to the agent state."""
 

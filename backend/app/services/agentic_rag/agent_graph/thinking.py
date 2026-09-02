@@ -46,6 +46,7 @@ def _build_think_prompt(
     plan,
     tools_text: str,
     kb_profile_text: str = "",
+    query_intent: dict | None = None,
 ) -> str:
     # Include last_answer_object summary so "summarize it" / "chart it" work.
     lao_text = ""
@@ -77,6 +78,7 @@ def _build_think_prompt(
         f"Retrieval query: {query}\n"
         + (f"[Abbreviation Glossary]\n{glossary}\n\n" if glossary else "")
         + (f"{kb_profile_text}\n\n" if kb_profile_text else "")
+        + (f"[Query Intent] {json.dumps(query_intent)}\n\n" if query_intent else "")
         + (f"Earlier conversation summary:\n{summary_text}\n" if summary_text else "")
         + f"Conversation history (recent turns):\n{history_text or '  (none)'}\n"
         f"Previous answer context:\n{lao_text or '  (none)'}\n"
@@ -127,11 +129,12 @@ def _rebuild_think_after_compaction(state, compaction_local, ctx, iteration, max
     history_text = history_to_text(recent)
     summary_text = state.get("compaction_summary") or ""
     kb_profile_text = format_profile_summary(state.get("kb_profile", {}))
+    query_intent = state.get("query_intent")
     user = _build_think_prompt(
         iteration, max_iter, original, query, glossary, summary_text,
         history_text, state.get("last_answer_object"),
         state.get("reflection_final"), observations, plan, tools_text,
-        kb_profile_text,
+        kb_profile_text, query_intent,
     )
     return state, observations, user
 
@@ -169,11 +172,12 @@ async def think_node(state, ctx) -> dict:
 
         system = AGENT_SYSTEM_PROMPT + "\n\n" + THINK_SYSTEM_PROMPT
         kb_profile_text = format_profile_summary(state.get("kb_profile", {}))
+        query_intent = state.get("query_intent")
         user = _build_think_prompt(
             iteration, max_iter, original, query, glossary, summary_text,
             history_text, state.get("last_answer_object"),
             state.get("reflection_final"), observations, plan, tools_text,
-            kb_profile_text,
+            kb_profile_text, query_intent,
         )
 
         # Runtime compaction: check if the prompt exceeds the context budget.
