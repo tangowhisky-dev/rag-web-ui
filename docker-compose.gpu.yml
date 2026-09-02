@@ -86,4 +86,14 @@ services:
     environment:
       - FASTEMBED_USE_GPU=true
       - NVIDIA_VISIBLE_DEVICES=all
+      - LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/lib/x86_64-linux-gnu
+    volumes:
+      - /usr/local/cuda-13.1:/usr/local/cuda:ro
+      - /usr/lib/x86_64-linux-gnu/libcudnn.so.9:/usr/lib/x86_64-linux-gnu/libcudnn.so.9:ro
+      - /usr/lib/x86_64-linux-gnu/libcudnn_graph.so.9:/usr/lib/x86_64-linux-gnu/libcudnn_graph.so.9:ro
+      - /usr/lib/x86_64-linux-gnu/libcudnn_engines_runtime_compiled.so.9:/usr/lib/x86_64-linux-gnu/libcudnn_engines_runtime_compiled.so.9:ro
+      - /usr/lib/x86_64-linux-gnu/libcudnn_engines_precompiled.so.9:/usr/lib/x86_64-linux-gnu/libcudnn_engines_precompiled.so.9:ro
+      - /usr/lib/x86_64-linux-gnu/libcudnn_heuristic.so.9:/usr/lib/x86_64-linux-gnu/libcudnn_heuristic.so.9:ro
+      - /usr/lib/x86_64-linux-gnu/libcudnn_cnn.so.9:/usr/lib/x86_64-linux-gnu/libcudnn_cnn.so.9:ro
+      - /usr/lib/x86_64-linux-gnu/libcudnn_ops.so.9:/usr/lib/x86_64-linux-gnu/libcudnn_ops.so.9:ro
     runtime: nvidia
