@@ -25,6 +25,7 @@ from sqlalchemy import or_, and_
 
 from app.core.config import settings
 from app.services.agentic_rag.llm_factory import build_chat_llm
+from app.services.settings_service import get_setting
 from app.services.agentic_rag.nodes import (
     _content_contains_exclusion,
     dense_retrieval_node,
@@ -562,22 +563,74 @@ async def _run_retrieval_pass(
         except Exception as exc:
             logger.warning("[rag_retrieve] synonym expansion skipped: %s", exc)
 
-    coros = []
-    if "dense" in legs:
-        coros.append(dense_retrieval_node(state, ctx.db, kb_ids, org_id, file_markdown, min_score=level["dense_min_score"], doc_ids=doc_ids))
-    if "sparse" in legs:
-        coros.append(sparse_retrieval_node(state, ctx.db, kb_ids, org_id, file_markdown, min_score=level["sparse_min_score"], doc_ids=doc_ids, extra_queries=extra_queries))
-    if "exact" in legs:
-        coros.append(exact_retrieval_node(state, ctx.db, kb_ids, org_id, file_markdown, min_score=level["exact_min_score"], doc_ids=doc_ids, extra_queries=extra_queries))
+    # Phase 3: Conditional dense leg — run exact+sparse first, check if
+    # their reranker scores are high enough to skip the dense embedding API call.
+    non_dense_legs = [l for l in legs if l != "dense"]
+    run_dense = "dense" in legs
 
-    leg_results = await asyncio.gather(*coros, return_exceptions=True)
-    for r in leg_results:
-        if isinstance(r, Exception):
-            logger.warning("[rag_retrieve] leg failed: %s", r)
-        else:
-            state.update(r)
+    if run_dense and non_dense_legs:
+        # Run exact+sparse first (without dense)
+        coros_nd = []
+        if "sparse" in legs:
+            coros_nd.append(sparse_retrieval_node(state, ctx.db, kb_ids, org_id, file_markdown, min_score=level["sparse_min_score"], doc_ids=doc_ids, extra_queries=extra_queries))
+        if "exact" in legs:
+            coros_nd.append(exact_retrieval_node(state, ctx.db, kb_ids, org_id, file_markdown, min_score=level["exact_min_score"], doc_ids=doc_ids, extra_queries=extra_queries))
 
-    state.update(merge_node(state, file_markdown, ctx.db, ctx.org_id))
+        nd_results = await asyncio.gather(*coros_nd, return_exceptions=True)
+        for r in nd_results:
+            if isinstance(r, Exception):
+                logger.warning("[rag_retrieve] non-dense leg failed: %s", r)
+            else:
+                state.update(r)
+
+        # Merge + rerank the exact+sparse results to get a quality score
+        state.update(merge_node(state, file_markdown, ctx.db, ctx.org_id))
+        pre_docs = state.get("retrieved_docs", [])
+        if pre_docs:
+            state.update(reranking_node(state))
+            scored_docs = state.get("all_scored_docs", [])
+            best_score = max((d.get("_reranker_score", 0.0) for d in scored_docs), default=0.0)
+            fast_accept = get_setting(ctx.db, "ADAPTIVE_RETRIEVAL_FAST_ACCEPT_SCORE", ctx.org_id) or 0.7
+            if best_score >= fast_accept:
+                logger.info("[rag_retrieve] fast-accept: best reranker score %.3f >= %.2f, skipping dense leg",
+                            best_score, fast_accept)
+                run_dense = False
+            else:
+                logger.debug("[rag_retrieve] best reranker score %.3f < %.2f, running dense leg",
+                             best_score, fast_accept)
+                # Reset state for the full run (dense + exact + sparse)
+                # Keep the exact/sparse docs but re-merge with dense results
+                # by resetting the merged state and running all legs together.
+                # Actually, simpler: just run dense separately and merge.
+                state["retrieved_docs"] = []
+                state["all_scored_docs"] = []
+
+        if run_dense:
+            # Run dense leg separately and merge with existing exact/sparse docs
+            dense_result = await dense_retrieval_node(state, ctx.db, kb_ids, org_id, file_markdown, min_score=level["dense_min_score"], doc_ids=doc_ids)
+            state.update(dense_result)
+            # Re-merge all docs (dense + exact + sparse)
+            # Reset per-leg docs to force merge to include all
+            state["retrieved_docs"] = []
+            state.update(merge_node(state, file_markdown, ctx.db, ctx.org_id))
+    else:
+        # No dense in legs, or no non-dense legs — run all concurrently
+        coros = []
+        if "dense" in legs:
+            coros.append(dense_retrieval_node(state, ctx.db, kb_ids, org_id, file_markdown, min_score=level["dense_min_score"], doc_ids=doc_ids))
+        if "sparse" in legs:
+            coros.append(sparse_retrieval_node(state, ctx.db, kb_ids, org_id, file_markdown, min_score=level["sparse_min_score"], doc_ids=doc_ids, extra_queries=extra_queries))
+        if "exact" in legs:
+            coros.append(exact_retrieval_node(state, ctx.db, kb_ids, org_id, file_markdown, min_score=level["exact_min_score"], doc_ids=doc_ids, extra_queries=extra_queries))
+
+        leg_results = await asyncio.gather(*coros, return_exceptions=True)
+        for r in leg_results:
+            if isinstance(r, Exception):
+                logger.warning("[rag_retrieve] leg failed: %s", r)
+            else:
+                state.update(r)
+
+        state.update(merge_node(state, file_markdown, ctx.db, ctx.org_id))
 
     # Fast path: exact-only search with explicit sort skips the reranker
     # quality gate. Exact FTS matches are already high-precision and the
@@ -589,6 +642,8 @@ async def _run_retrieval_pass(
         return state
 
     # Score all docs (quality gate — always runs), then filter by threshold.
+    # Note: if the conditional dense path already reranked, this reranks
+    # the combined set (dense + exact + sparse) which is correct.
     state.update(reranking_node(state))
     state.update(filter_node(state, threshold=level["rerank_threshold"]))
 

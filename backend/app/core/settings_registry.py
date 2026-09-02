@@ -230,6 +230,9 @@ _ORG_OVERRIDABLE = [
     SettingDef("SYNONYM_CACHE_TTL", "Retrieval", "Synonym cache TTL (s)",
                "int", 300, scope="org", reload="next_request", min_value=0, max_value=3600,
                description="Redis TTL for cached synonym expansions. 0 = no caching."),
+    SettingDef("ADAPTIVE_RETRIEVAL_FAST_ACCEPT_SCORE", "Retrieval", "Adaptive fast-accept score",
+               "float", 0.7, scope="org", reload="next_request", min_value=0.0, max_value=1.0,
+               description="If the best reranker score from exact+sparse legs is >= this threshold, skip the dense leg. 0.0 = always run dense."),
 
     # Adaptive retrieval
     SettingDef("ADAPTIVE_RETRIEVAL_ENABLED", "Adaptive Retrieval", "Enable adaptive retrieval",
