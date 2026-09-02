@@ -53,7 +53,11 @@ def _get_cross_encoder():
                 os.makedirs(cache_dir, exist_ok=True)
 
                 logger.debug("Reranker: loading model=%s cache_dir=%s", model_name, cache_dir)
-                _cross_encoder = TextCrossEncoder(model_name=model_name, cache_dir=cache_dir)
+                _cross_encoder = TextCrossEncoder(
+                    model_name=model_name,
+                    cache_dir=cache_dir,
+                    cuda=os.getenv("FASTEMBED_USE_GPU", "false").lower() == "true",
+                )
                 logger.debug("Reranker: model loaded")
 
     return _cross_encoder

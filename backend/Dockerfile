@@ -16,9 +16,20 @@ RUN apt-get update && apt-get install -y \
 # Copy requirements file
 COPY requirements.txt .
 
-# Install Python packages
+# GPU support: build with --build-arg USE_GPU=true to install fastembed-gpu
+# (onnxruntime-gpu) instead of fastembed (onnxruntime). The two are mutually
+# exclusive — fastembed-gpu replaces fastembed and adds CUDAExecutionProvider.
+# Requires NVIDIA Container Toolkit on the host and a GPU device reservation
+# in docker-compose (see docker-compose.gpu.yml).
+ARG USE_GPU=false
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements.txt
+    if [ "$USE_GPU" = "true" ]; then \
+        pip install -r requirements.txt && \
+        pip uninstall -y fastembed onnxruntime && \
+        pip install fastembed-gpu; \
+    else \
+        pip install -r requirements.txt; \
+    fi
 
 # Copy entrypoint script first
 COPY entrypoint.sh .

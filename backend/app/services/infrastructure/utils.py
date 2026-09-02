@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import threading
 from typing import Any, Optional
 
@@ -88,6 +89,7 @@ def get_sparse_embedder() -> SparseTextEmbedding:
                 _sparse_embedder = SparseTextEmbedding(
                     model_name=settings.SPLADE_MODEL,
                     cache_dir=settings.FASTEMBED_CACHE_DIR,
+                    cuda=os.getenv("FASTEMBED_USE_GPU", "false").lower() == "true",
                 )
                 # ── SPLADE truncation patch ──────────────────────────────
                 # ANOMALY: prithivida/Splade_PP_en_v1 ships with two limits

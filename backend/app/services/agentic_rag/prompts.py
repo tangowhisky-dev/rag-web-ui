@@ -280,8 +280,15 @@ Rules:
 - Cite only chunks that were actually used.
 - Never invent citations.
 - A sentence supported by multiple chunks may include multiple citations.
-- NEVER use bare bracket citations like [4] or [4, 5]. Always use the full markdown link format [N](N) where both the display text and the link target are the same number.
 - The number inside the brackets MUST match a KB-N label from the retrieved context. Do not use numbers that do not correspond to any KB-N label.
+
+**NEVER use bare bracket citations.** The following are all WRONG:
+
+- [4]          ← missing the parenthetical link
+- [4, 5]       ← missing parenthetical, comma-separated
+- [KB-4]       ← do not include the "KB-" prefix in citations
+
+Always use the full markdown link format [N](N) where both the display text and the link target are the same number.
 
 ---
 

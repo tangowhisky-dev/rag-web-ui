@@ -1,0 +1,89 @@
+# GPU override for production — use with:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml build
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# What this does
+# ─────────────────────────────────────────────────────────────────────────────
+# Accelerates the two ONNX-based inference models that run inside the backend
+# container by switching from onnxruntime (CPU) to onnxruntime-gpu (CUDA):
+#
+#   1. SPLADE sparse embedder (prithivida/Splade_PP_en_v1)
+#      - Used for sparse retrieval in every rag_retrieve call
+#      - Encodes the query into a sparse vector for Qdrant sparse search
+#
+#   2. Cross-encoder reranker (Xenova/ms-marco-MiniLM-L-12-v2)
+#      - Used to re-score (query, chunk) pairs after RRF merging
+#      - Runs on every retrieval pass (up to 2 passes per query + rewrite retry)
+#
+# Both models are loaded once as singletons and reused across all requests.
+# On GPU they use CUDAExecutionProvider; on CPU they use CPUExecutionProvider.
+# This override does NOT affect:
+#   - Dense embedding generation (uses an external OpenAI-compatible API)
+#   - LLM inference (uses an external OpenAI-compatible API)
+#   - Qdrant vector search (runs in the separate qdrant container)
+#   - Neo4j graph operations (runs in the separate neo4j container)
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# Host prerequisites
+# ─────────────────────────────────────────────────────────────────────────────
+# - NVIDIA GPU with CUDA 12.x support
+# - NVIDIA drivers installed on the host (nvidia-smi must work)
+# - NVIDIA Container Toolkit (nvidia-docker2) installed on the host
+#     https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
+# - Docker Engine 19.03+ (required for --gpus / deploy.resources support)
+# - CuDNN 9.x (required by onnxruntime-gpu >= 1.19.0)
+#     Ubuntu: sudo apt-get install -y cudnn-cuda-12
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# What this file changes
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. Build arg USE_GPU=true → Dockerfile installs fastembed-gpu (which pulls
+#    onnxruntime-gpu) instead of fastembed (which pulls onnxruntime).
+#    The two packages are mutually exclusive — fastembed-gpu replaces fastembed.
+#
+# 2. Environment FASTEMBED_USE_GPU=true → the backend passes cuda=True to
+#    SparseTextEmbedding and TextCrossEncoder at model load time, requesting
+#    CUDAExecutionProvider from the ONNX runtime.
+#
+# 3. GPU device reservation → docker compose passes all NVIDIA GPUs into the
+#    container so onnxruntime-gpu can access them.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# Usage
+# ─────────────────────────────────────────────────────────────────────────────
+# Build (must rebuild to swap the pip package):
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml build backend
+#
+# Start:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+#
+# Verify GPU is in use inside the container:
+#   docker exec rag-web-ui-backend-1 python -c \
+#     "import onnxruntime; print(onnxruntime.get_available_providers())"
+#   # Should print: ['CUDAExecutionProvider', 'CPUExecutionProvider']
+#
+# Stop:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml down
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# Switching back to CPU
+# ─────────────────────────────────────────────────────────────────────────────
+# Rebuild without the override (no need to pass --build-arg manually):
+#   docker compose build backend
+#   docker compose up -d
+
+services:
+  backend:
+    build:
+      args:
+        USE_GPU: "true"
+    environment:
+      - FASTEMBED_USE_GPU=true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

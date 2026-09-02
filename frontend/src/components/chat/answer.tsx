@@ -965,7 +965,7 @@ export const Answer: FC<{
       {/* ── Follow-up suggestions ─────────────────────────────────────────── */}
       {!isStreaming && lastAnswerObject?.followups && Array.isArray(lastAnswerObject.followups) && lastAnswerObject.followups.length > 0 && onFollowUp && (
         <div className="mt-4 not-prose">
-          <p className="text-sm text-foreground/80 mb-2">
+          <p className="text-sm italic text-foreground/80 mb-2">
             {typeof lastAnswerObject.retry_strategy === "string" && lastAnswerObject.retry_strategy
               ? (lastAnswerObject.retry_strategy === "widen" ? "Try a broader search:" :
                  lastAnswerObject.retry_strategy === "narrow" ? "Try a narrower search:" :

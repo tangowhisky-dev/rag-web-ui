@@ -208,8 +208,7 @@ def normalize_citations(answer: str, docs: list) -> tuple[str, list[int]]:
     # copied the context label verbatim.  The "KB-" prefix is unambiguous
     # (never appears in prose/code/URLs), so this is safe.  Negative
     # lookahead (?!\() prevents double-matching the parenthetical variants
-    # already handled above.  Bare [N] without "KB-" is intentionally NOT
-    # handled — it's too common in code, URLs, and prose.
+    # already handled above.
     answer = re.sub(
         r"\[(KB-\d+(?:[,\s]+KB-\d+)*)\](?!\()",
         lambda m: "".join(
@@ -219,6 +218,33 @@ def normalize_citations(answer: str, docs: list) -> tuple[str, list[int]]:
         answer,
         flags=re.IGNORECASE,
     )
+    # Bare [N] without KB- prefix or parenthetical — the model used a
+    # shorthand citation.  Convert to [N](N) only when N is a valid doc
+    # index (1..max_index) so we don't touch [0], array indices in code,
+    # or unrelated numbers in prose.  Code blocks are protected by
+    # splitting them out before processing and restoring afterwards.
+    _max = len(docs)
+    if _max > 0:
+        # Split out fenced code blocks so bare [N] inside them is untouched.
+        _code_segments: list[str] = []
+        def _extract_code(m: re.Match) -> str:
+            _code_segments.append(m.group(0))
+            return f"\x00CODE{len(_code_segments) - 1}\x00"
+        answer = re.sub(r"```[\s\S]*?```", _extract_code, answer)
+        answer = re.sub(r"`[^`]*`", _extract_code, answer)
+
+        answer = re.sub(
+            r"\[(\d{1,3})\](?!\()",
+            lambda m: f"[{m.group(1)}]({m.group(1)})" if 1 <= int(m.group(1)) <= _max else m.group(0),
+            answer,
+        )
+
+        # Restore code blocks.
+        answer = re.sub(
+            r"\x00CODE(\d+)\x00",
+            lambda m: _code_segments[int(m.group(1))],
+            answer,
+        )
 
     max_index = len(docs)
     valid_cited: list[int] = []

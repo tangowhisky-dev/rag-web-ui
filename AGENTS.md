@@ -164,6 +164,7 @@ Boris Cherny (creator of Claude Code) keeps his team's file around 100 lines. Un
 - Lint: `eslint .` (frontend, flat config in `eslint.config.mjs`)
 - Typecheck: TypeScript via `tsc --noEmit` (frontend, uses `tsconfig.json`)
 - Run locally: `docker compose up -d` (full stack), or `uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload` (backend dev), `next dev` (frontend dev)
+- Run with GPU: `docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d` (prod), `docker compose -f docker-compose.dev.yml -f docker-compose.dev.gpu.yml up -d` (dev). Requires NVIDIA Container Toolkit on the host. The GPU override installs `fastembed-gpu` (onnxruntime-gpu) and passes `FASTEMBED_USE_GPU=true` so the SPLADE sparse embedder and cross-encoder reranker use `CUDAExecutionProvider`. This only affects those two ONNX models — dense embeddings and LLM inference use an external OpenAI-compatible API and are not affected.
 
 Prefer single-file or single-test runs during iteration. Full suites are for the final verification pass.
 
@@ -219,6 +220,7 @@ When the user corrects your approach, append a one-line rule here before ending 
 - `tailwind.config.ts` must be `tailwind.config.mjs` to avoid Node.js `MODULE_TYPELESS_PACKAGE_JSON` warning.
 - Don't run the complete backend test suite unless there was a major refactor / code changes touching multiple pipelines or execution paths. For smaller changes, only run the relevant test files. The full suite takes ~25 minutes.
 - SPLADE truncation patch: `prithivida/Splade_PP_en_v1` ships with `max_length=128` in `tokenizer_config.json` but the BERT model supports 512. `get_sparse_embedder()` in `backend/app/services/infrastructure/utils.py` overrides truncation to 512 after loading. If `SPLADE_MODEL` is changed to a non-BERT sparse model (BM25, MiniCOIL, Bm42), audit the new model's tokenizer config and adjust or remove the override — those models have different limits or no token limit at all. Existing Qdrant points indexed at 128 tokens need re-ingestion to benefit from the full 512-token window.
+- GPU support: `fastembed` and `fastembed-gpu` are mutually exclusive (the latter pulls `onnxruntime-gpu` which replaces `onnxruntime`). The Dockerfile uses `ARG USE_GPU=false` to swap them at build time. The `docker-compose.gpu.yml` / `docker-compose.dev.gpu.yml` override files pass `USE_GPU=true` and `FASTEMBED_USE_GPU=true` env var. Both `SparseTextEmbedding` and `TextCrossEncoder` accept `cuda=True` to request `CUDAExecutionProvider`. This only affects the SPLADE sparse embedder and cross-encoder reranker — dense embeddings and LLM inference use an external OpenAI-compatible API. The host needs NVIDIA Container Toolkit (CUDA 12.x + CuDNN 9.x) for GPU passthrough.
 
 ---
 

@@ -218,8 +218,8 @@ def _setup_graph(monkeypatch, scripted_llm: _ScriptedLLM, ctx: ToolContext,
                             "resolved": True,
                             "reason": "reference_resolved",
                             "original_query": original_query,
-                        }
-        return query, {"resolved": False, "reason": "self_contained"}
+                        }, None
+        return query, {"resolved": False, "reason": "self_contained"}, None
 
     monkeypatch.setattr(
         "app.services.agentic_rag.utils.resolve_retrieval_query",

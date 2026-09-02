@@ -1,6 +1,5 @@
 "use client";
 
-import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { ComponentProps } from "react";
 import { useCallback } from "react";
@@ -17,7 +16,7 @@ export const Suggestions = ({
   </div>
 );
 
-export type SuggestionProps = Omit<ComponentProps<typeof Button>, "onClick"> & {
+export type SuggestionProps = Omit<ComponentProps<"button">, "onClick"> & {
   suggestion: string;
   onClick?: (suggestion: string) => void;
 };
@@ -26,8 +25,6 @@ export const Suggestion = ({
   suggestion,
   onClick,
   className,
-  variant = "outline",
-  size = "sm",
   children,
   ...props
 }: SuggestionProps) => {
@@ -36,15 +33,18 @@ export const Suggestion = ({
   }, [onClick, suggestion]);
 
   return (
-    <Button
-      className={cn("cursor-pointer rounded-full px-4", className)}
+    <button
+      className={cn(
+        "text-xs text-muted-foreground hover:text-foreground",
+        "border border-border/60 hover:border-border",
+        "rounded-lg px-3 py-1.5 transition-colors text-left cursor-pointer",
+        className,
+      )}
       onClick={handleClick}
-      size={size}
       type="button"
-      variant={variant}
       {...props}
     >
       {children || suggestion}
-    </Button>
+    </button>
   );
 };

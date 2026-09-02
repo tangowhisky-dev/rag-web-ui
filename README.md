@@ -63,6 +63,51 @@ Open **http://localhost:3000** — register an account and start uploading docum
 
 > **First run note:** The SPLADE model (~500 MB) downloads on first document ingestion. To pre-download: `python download_assets.py` (requires `pip install fastembed`).
 
+## GPU Acceleration (Optional)
+
+The SPLADE sparse embedder and cross-encoder reranker run locally as ONNX models inside the backend container. By default they use the CPU (`onnxruntime`). If you have an NVIDIA GPU (min 24 GB VRAM), you can switch to GPU acceleration (`onnxruntime-gpu` with `CUDAExecutionProvider`) for faster sparse embedding and reranking.
+
+This only affects the two local ONNX models — dense embeddings and LLM inference use an external OpenAI-compatible API and are not affected by this setting.
+
+### Without local GPU (default)
+
+```bash
+# Production
+docker compose up -d
+
+# Development
+docker compose -f docker-compose.dev.yml up -d
+```
+
+### With local GPU (min 24 GB)
+
+Requires NVIDIA Container Toolkit on the host. See `docker-compose.gpu.yml` for full prerequisites.
+
+```bash
+# Production
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml build
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+
+# Development
+docker compose -f docker-compose.dev.yml -f docker-compose.dev.gpu.yml build
+docker compose -f docker-compose.dev.yml -f docker-compose.dev.gpu.yml up -d
+```
+
+Verify GPU is in use:
+
+```bash
+docker exec rag-web-ui-backend-1 python -c \
+  "import onnxruntime; print(onnxruntime.get_available_providers())"
+# Should print: ['CUDAExecutionProvider', 'CPUExecutionProvider']
+```
+
+To switch back to CPU, rebuild without the GPU override:
+
+```bash
+docker compose build backend
+docker compose up -d
+```
+
 ## Configuration
 
 Copy `.env.example` to `.env` and set these values:
