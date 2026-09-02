@@ -450,6 +450,79 @@ def _relaxation_levels(db, org_id) -> list[dict[str, Any]]:
     ]
 
 
+async def _expand_synonyms(query: str, ctx: ToolContext) -> tuple[str, list[str]]:
+    """Expand query with spell-corrected + synonym variants via LLM.
+
+    Uses the same `query` LLM role as rewrite_query_node.
+    Cached in Redis (key: synonyms:{org_id}:{sha256(query)}).
+
+    Returns (corrected_query, synonyms). corrected_query is the spell-corrected
+    query (or original if no correction needed). synonyms is a list of
+    alternative terms (may be empty).
+    """
+    import hashlib
+    import json as _json
+
+    from app.services.agentic_rag.prompts import SYNONYM_EXPANSION_PROMPT
+    from app.services.agentic_rag.llm_factory import build_chat_llm
+    from app.services.settings_service import get_setting
+
+    n = get_setting(ctx.db, "SYNONYM_VARIANTS", ctx.org_id) or 3
+    cache_ttl = get_setting(ctx.db, "SYNONYM_CACHE_TTL", ctx.org_id) or 300
+
+    # Check Redis cache
+    cache_key = f"synonyms:{ctx.org_id}:{hashlib.sha256(query.encode()).hexdigest()}"
+    try:
+        import redis.asyncio as aioredis
+        r = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+        try:
+            cached = await r.get(cache_key)
+            if cached:
+                obj = _json.loads(cached)
+                return obj.get("corrected", query), obj.get("synonyms", [])
+        finally:
+            await r.aclose()
+    except Exception:
+        pass  # Redis unavailable — proceed without cache
+
+    # Call LLM with query role
+    try:
+        llm = build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)
+        prompt = SYNONYM_EXPANSION_PROMPT.format(n=n)
+        resp = await llm.ainvoke([
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": query},
+        ])
+        raw = resp.content if isinstance(resp.content, str) else str(resp.content)
+        # Parse JSON from response
+        import re as _re
+        json_match = _re.search(r'\{[^{}]*\}', raw, _re.DOTALL)
+        if not json_match:
+            return query, []
+        obj = _json.loads(json_match.group())
+        corrected = obj.get("corrected_query") or query
+        synonyms = obj.get("queries") or []
+        # Filter out empty strings and the original query
+        synonyms = [s for s in synonyms if s and s.lower() != query.lower() and s.lower() != corrected.lower()]
+    except Exception as exc:
+        logger.warning("[rag_retrieve] synonym expansion failed: %s", exc)
+        return query, []
+
+    # Cache result
+    try:
+        import redis.asyncio as aioredis
+        r = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+        try:
+            await r.setex(cache_key, cache_ttl, _json.dumps({"corrected": corrected, "synonyms": synonyms}))
+        finally:
+            await r.aclose()
+    except Exception:
+        pass
+
+    logger.debug("[rag_retrieve] synonyms for %r: corrected=%r, synonyms=%s", query, corrected, synonyms)
+    return corrected, synonyms
+
+
 async def _run_retrieval_pass(
     ctx: ToolContext,
     query: str,
@@ -479,13 +552,23 @@ async def _run_retrieval_pass(
     # The reranker uses rewritten_query (unexpanded) to preserve user intent.
     state.update(expand_query_node(state, db=ctx.db, org_id=ctx.org_id))
 
+    # Expand synonyms for sparse/exact legs (not dense — embeddings handle semantics).
+    # Uses the same query LLM role as rewrite_query_node. Cached in Redis.
+    extra_queries: list[str] = []
+    corrected_query = None
+    if "sparse" in legs or "exact" in legs:
+        try:
+            corrected_query, extra_queries = await _expand_synonyms(query, ctx)
+        except Exception as exc:
+            logger.warning("[rag_retrieve] synonym expansion skipped: %s", exc)
+
     coros = []
     if "dense" in legs:
         coros.append(dense_retrieval_node(state, ctx.db, kb_ids, org_id, file_markdown, min_score=level["dense_min_score"], doc_ids=doc_ids))
     if "sparse" in legs:
-        coros.append(sparse_retrieval_node(state, ctx.db, kb_ids, org_id, file_markdown, min_score=level["sparse_min_score"], doc_ids=doc_ids))
+        coros.append(sparse_retrieval_node(state, ctx.db, kb_ids, org_id, file_markdown, min_score=level["sparse_min_score"], doc_ids=doc_ids, extra_queries=extra_queries))
     if "exact" in legs:
-        coros.append(exact_retrieval_node(state, ctx.db, kb_ids, org_id, file_markdown, min_score=level["exact_min_score"], doc_ids=doc_ids))
+        coros.append(exact_retrieval_node(state, ctx.db, kb_ids, org_id, file_markdown, min_score=level["exact_min_score"], doc_ids=doc_ids, extra_queries=extra_queries))
 
     leg_results = await asyncio.gather(*coros, return_exceptions=True)
     for r in leg_results:

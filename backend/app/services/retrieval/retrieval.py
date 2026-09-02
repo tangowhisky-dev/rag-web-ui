@@ -668,6 +668,34 @@ def dense_search_docs(
     )
 
 
+def _rrf_fuse(ranked_lists: List[List[LangchainDocument]], k: int = 60) -> List[LangchainDocument]:
+    """Reciprocal Rank Fusion — fuse multiple ranked lists into one.
+
+    score(doc) = sum(1 / (k + rank(doc))) across all input lists.
+    Docs are deduplicated by content_hash; the highest-scoring copy wins.
+    """
+    if not ranked_lists:
+        return []
+    if len(ranked_lists) == 1:
+        return ranked_lists[0]
+
+    scores: Dict[str, float] = {}
+    best_doc: Dict[str, LangchainDocument] = {}
+
+    for ranked in ranked_lists:
+        for rank, doc in enumerate(ranked):
+            h = doc.metadata.get("content_hash") or content_hash(doc.page_content)
+            score = 1.0 / (k + rank)
+            scores[h] = scores.get(h, 0.0) + score
+            if h not in best_doc:
+                best_doc[h] = doc
+
+    fused = sorted(best_doc.values(), key=lambda d: scores.get(
+        d.metadata.get("content_hash") or content_hash(d.page_content), 0.0
+    ), reverse=True)
+    return fused
+
+
 def sparse_search_docs(
     query: str,
     kb_ids: List[int],
@@ -677,13 +705,29 @@ def sparse_search_docs(
     top_k: Optional[int] = None,
     min_score: Optional[float] = None,
     doc_ids: Optional[List[int]] = None,
+    extra_queries: Optional[List[str]] = None,
 ) -> List[LangchainDocument]:
-    """Run only the sparse leg and return its ranked candidate docs."""
+    """Run only the sparse leg and return its ranked candidate docs.
+
+    When extra_queries (synonyms) are provided, runs one search per query
+    and RRF-fuses the results.
+    """
     candidates = top_k or get_setting(db, "RETRIEVAL_TOP_K", org_id)
     pool = candidates * _LEG_POOL_MULTIPLIER
-    return _candidates_to_docs(
+    main_results = _candidates_to_docs(
         _sparse_search(query, kb_ids, datastore_ids, db, pool, org_id, min_score=min_score, doc_ids=doc_ids), "sparse"
     )
+    if not extra_queries:
+        return main_results
+    ranked_lists = [main_results]
+    for sq in extra_queries:
+        try:
+            ranked_lists.append(_candidates_to_docs(
+                _sparse_search(sq, kb_ids, datastore_ids, db, pool, org_id, min_score=min_score, doc_ids=doc_ids), "sparse"
+            ))
+        except Exception as exc:
+            logger.warning("[sparse_search] synonym query %r failed: %s", sq, exc)
+    return _rrf_fuse(ranked_lists)
 
 
 def exact_search_docs(
@@ -695,10 +739,26 @@ def exact_search_docs(
     top_k: Optional[int] = None,
     min_score: Optional[float] = None,
     doc_ids: Optional[List[int]] = None,
+    extra_queries: Optional[List[str]] = None,
 ) -> List[LangchainDocument]:
-    """Run only the exact (MySQL FTS) leg and return its ranked candidate docs."""
+    """Run only the exact (MySQL FTS) leg and return its ranked candidate docs.
+
+    When extra_queries (synonyms) are provided, runs one search per query
+    and RRF-fuses the results.
+    """
     candidates = top_k or get_setting(db, "RETRIEVAL_TOP_K", org_id)
     pool = candidates * _LEG_POOL_MULTIPLIER
-    return _candidates_to_docs(
+    main_results = _candidates_to_docs(
         _exact_search(query, kb_ids, datastore_ids, db, pool, org_id, min_score=min_score, doc_ids=doc_ids), "exact"
     )
+    if not extra_queries:
+        return main_results
+    ranked_lists = [main_results]
+    for sq in extra_queries:
+        try:
+            ranked_lists.append(_candidates_to_docs(
+                _exact_search(sq, kb_ids, datastore_ids, db, pool, org_id, min_score=min_score, doc_ids=doc_ids), "exact"
+            ))
+        except Exception as exc:
+            logger.warning("[exact_search] synonym query %r failed: %s", sq, exc)
+    return _rrf_fuse(ranked_lists)

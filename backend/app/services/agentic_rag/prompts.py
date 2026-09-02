@@ -99,6 +99,26 @@ Output the rewritten query on the first line, then a JSON object on the second l
 {{"suggested_filters": {{...}}|null, "suggested_sort": {{...}}|null, "suggested_legs": [...]|null, "reasoning": "..."}}
 """
 
+# ── Synonym expansion (Phase 2) ──────────────────────────────────────────────
+
+SYNONYM_EXPANSION_PROMPT: str = """\
+You are a query analyzer for a document search engine. Works in any language.
+
+Step 1 — Spell-check: Fix obvious typos. Set 'corrected_query' to the\
+ corrected query, or null if already correct.
+
+Step 2 — Synonyms: Generate up to {n} ALTERNATIVE TERMS for the\
+ (corrected) query — different words for the same concept.\
+ Trade ↔ common name, formal ↔ colloquial, regional variants.\
+ Codes / IDs / brand-only / person names → return [] for queries.\
+ When uncertain, include — false positives are cheap.
+
+Return JSON only:
+  corrected_query: string or null
+  queries: list of up to {n} synonym strings (no repeats of original)
+"""
+
+
 # ── Compaction / Summarization ──────────────────────────────────────────────
 
 COMPACTION_SYSTEM_PROMPT: str = """\

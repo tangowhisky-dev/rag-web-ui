@@ -224,6 +224,12 @@ _ORG_OVERRIDABLE = [
     SettingDef("ENTITY_BOOST_FACTOR", "Retrieval", "Entity boost factor",
                "float", 0.1, scope="org", reload="next_request", min_value=0.0,
                description="Score boost per entity mention. 0.1 = +10%."),
+    SettingDef("SYNONYM_VARIANTS", "Retrieval", "Synonym variants",
+               "int", 3, scope="org", reload="next_request", min_value=0, max_value=5,
+               description="Number of synonym/spell-correct variants generated per query for sparse/exact legs. 0 = disabled."),
+    SettingDef("SYNONYM_CACHE_TTL", "Retrieval", "Synonym cache TTL (s)",
+               "int", 300, scope="org", reload="next_request", min_value=0, max_value=3600,
+               description="Redis TTL for cached synonym expansions. 0 = no caching."),
 
     # Adaptive retrieval
     SettingDef("ADAPTIVE_RETRIEVAL_ENABLED", "Adaptive Retrieval", "Enable adaptive retrieval",
