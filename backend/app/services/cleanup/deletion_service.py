@@ -46,9 +46,9 @@ def _delete_kb_files(user_id: int, kb_id: int) -> None:
     kb_dir = Path(settings.UPLOAD_DIR) / "user_" / str(user_id) / f"kb_{kb_id}"
     if kb_dir.exists():
         shutil.rmtree(kb_dir)
-        logger.info("DeletionService: deleted KB directory %s", kb_dir)
+        logger.debug("DeletionService: deleted KB directory %s", kb_dir)
     else:
-        logger.info("DeletionService: KB directory not found (skip): %s", kb_dir)
+        logger.debug("DeletionService: KB directory not found (skip): %s", kb_dir)
 
 
 # ── Qdrant cleanup ───────────────────────────────────────────────────────────
@@ -61,7 +61,7 @@ def _delete_qdrant_for_kb(kb_id: int) -> None:
         qdrant = _get_qdrant()
         logger.warning("[DELETE] _delete_qdrant_for_kb: deleting collection %s", collection_name)
         qdrant.delete_collection(collection_name)
-        logger.info("DeletionService: deleted Qdrant collection %s", collection_name)
+        logger.debug("DeletionService: deleted Qdrant collection %s", collection_name)
     except Exception as e:
         logger.warning("DeletionService: Qdrant delete failed for kb_%d: %s", kb_id, e)
 
@@ -103,7 +103,7 @@ def _delete_qdrant_for_ds(db: Session, datastore_id: int) -> None:
             if collection_name in collections:
                 logger.warning("[DELETE] _delete_qdrant_for_ds: deleting collection %s", collection_name)
                 qdrant.delete_collection(collection_name)
-                logger.info("DeletionService: deleted Qdrant collection %s", collection_name)
+                logger.debug("DeletionService: deleted Qdrant collection %s", collection_name)
         except Exception as e:
             logger.warning("DeletionService: Qdrant collection delete failed: %s", e)
     except Exception as e:
@@ -123,7 +123,7 @@ def _delete_neo4j_for_kb(db: Session, kb_id: int) -> None:
         ]
         delete_graph_for_kb(kb_id=kb_id)
         purge_stale_graph_data(active_kb_ids=remaining_kb_ids)
-        logger.info("DeletionService: cleaned Neo4j graph for kb_%d", kb_id)
+        logger.debug("DeletionService: cleaned Neo4j graph for kb_%d", kb_id)
     except Exception as e:
         logger.warning("DeletionService: Neo4j delete failed for kb_%d: %s", kb_id, e)
 
@@ -168,7 +168,7 @@ def _delete_neo4j_for_ds(datastore_id: int) -> None:
                     DETACH DELETE e
                     """,
                 )
-            logger.info("DeletionService: cleaned Neo4j Chunk and Entity nodes for ds_%d", datastore_id)
+            logger.debug("DeletionService: cleaned Neo4j Chunk and Entity nodes for ds_%d", datastore_id)
     except Exception as e:
         logger.warning("DeletionService: Neo4j delete failed for ds_%d: %s", datastore_id, e)
 

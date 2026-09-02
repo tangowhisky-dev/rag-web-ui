@@ -129,7 +129,7 @@ def _trim_docs_to_budget(docs: list[dict], overflow_tokens: int) -> list[dict]:
 
     if not drop:
         return docs
-    logger.info("[_trim_docs_to_budget] dropped %d/%d chunks (~%d tokens)", len(drop), len(docs), freed)
+    logger.debug("[_trim_docs_to_budget] dropped %d/%d chunks (~%d tokens)", len(drop), len(docs), freed)
     return [d for i, d in enumerate(docs) if i not in drop]
 
 
@@ -145,7 +145,7 @@ def _compact_stage1_observations(state, budget):
         updates["observations"] = [{"__reset__": True}, *compacted_obs]
         local["observations"] = compacted_obs
         budget.used -= savings
-        logger.info("[_compact_if_needed] stage 1 (observations) saved %d tokens", savings)
+        logger.debug("[_compact_if_needed] stage 1 (observations) saved %d tokens", savings)
     return updates, local
 
 
@@ -160,7 +160,7 @@ def _compact_stage2_docs(state, budget):
         updates["retrieved_docs"] = trimmed
         local["retrieved_docs"] = trimmed
         budget.used -= max(freed, 0)
-        logger.info("[_compact_if_needed] stage 2 (evidence) saved %d tokens", freed)
+        logger.debug("[_compact_if_needed] stage 2 (evidence) saved %d tokens", freed)
     return updates, local
 
 
@@ -176,7 +176,7 @@ async def _compact_stage3_messages(state, ctx):
             updates["compaction_summary"] = summary
             local["messages"] = resolved
             local["compaction_summary"] = summary
-            logger.info("[_compact_if_needed] stage 3 (messages) summarized %d old messages",
+            logger.debug("[_compact_if_needed] stage 3 (messages) summarized %d old messages",
                         len(messages) - len(resolved) + 1)
     return updates, local
 
@@ -214,7 +214,7 @@ async def _compact_if_needed(
     if not budget.needs_compaction():
         return {}, {}
 
-    logger.info(
+    logger.debug(
         "[_compact_if_needed] over budget | used=%d threshold=%d — compacting",
         budget.used, budget.compaction_threshold,
     )

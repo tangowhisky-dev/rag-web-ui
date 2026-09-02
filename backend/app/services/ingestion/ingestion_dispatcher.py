@@ -181,14 +181,14 @@ def _maybe_start_graph_build(
     if task_status == "completed":
         if graph_request.data_store_id is not None:
             if is_datastore_deleted(graph_request.data_store_id):
-                logger.info(
+                logger.debug(
                     "graph_build_skipped task_id=%s — datastore %s deleted",
                     task_id, graph_request.data_store_id,
                 )
                 return
             graph_status = _get_graph_status(task_id)
             if graph_status == "failed":
-                logger.info(
+                logger.debug(
                     "graph_build_skipped task_id=%s — scan cancelled",
                     task_id,
                 )
@@ -239,7 +239,7 @@ def run_ingestion_in_thread(
 
         # Bail out early if the datastore was already deleted
         if ds_id_for_tracking is not None and is_datastore_deleted(ds_id_for_tracking):
-            logger.info(
+            logger.debug(
                 "ingestion_skipped task_id=%s — datastore %s deleted",
                 task_id, ds_id_for_tracking,
             )
@@ -272,7 +272,7 @@ def run_ingestion_in_thread(
 
         _clear_needs_reprocess(document_id)
 
-        logger.info(
+        logger.debug(
             "ingestion_completed task_id=%s path=%s",
             task_id, file_path,
         )
@@ -301,7 +301,7 @@ def _acquire_graph_thread_slot(
 ) -> bool:
     while True:
         if cancel_event.is_set():
-            logger.info(
+            logger.debug(
                 "graph_build_skipped task_id=%s — cancelled while waiting for thread slot",
                 req.task_id,
             )
@@ -315,25 +315,25 @@ def _acquire_graph_thread_slot(
 def _check_graph_build_eligible(req: GraphBuildRequest) -> bool:
     existing_status = _get_graph_status(req.task_id)
     if existing_status == _TASK_NOT_FOUND:
-        logger.info(
+        logger.debug(
             "graph_build_skipped task_id=%s — task no longer exists",
             req.task_id,
         )
         return False
     if existing_status == "failed":
-        logger.info(
+        logger.debug(
             "graph_build_skipped task_id=%s — already cancelled",
             req.task_id,
         )
         return False
     if req.data_store_id is not None and is_datastore_deleted(req.data_store_id):
-        logger.info(
+        logger.debug(
             "graph_build_skipped task_id=%s — datastore %s deleted",
             req.task_id, req.data_store_id,
         )
         return False
     if req.data_store_id is not None and _is_graph_ingestion_paused(req.data_store_id):
-        logger.info(
+        logger.debug(
             "graph_build_skipped task_id=%s — graph ingestion paused for datastore %s",
             req.task_id, req.data_store_id,
         )
@@ -375,13 +375,13 @@ def _execute_graph_build(req: GraphBuildRequest, cancel_event: threading.Event) 
 
         if skipped_batches is not None and skipped_batches > 0:
             _set_graph_status(req.task_id, "pending", error=None)
-            logger.info(
+            logger.debug(
                 "graph_build_partial task_id=%s document_id=%s skipped_batches=%d — marked pending for retry",
                 req.task_id, req.document_id, skipped_batches,
             )
         else:
             _set_graph_status(req.task_id, "completed", error=None)
-            logger.info(
+            logger.debug(
                 "graph_build_completed task_id=%s document_id=%s",
                 req.task_id, req.document_id,
             )
@@ -421,7 +421,7 @@ def run_graph_build_in_thread(req: GraphBuildRequest) -> None:
     """
     with _active_graph_lock:
         if req.task_id in _active_graph_builds:
-            logger.info(
+            logger.debug(
                 "graph_build_skipped task_id=%s — already in-flight",
                 req.task_id,
             )

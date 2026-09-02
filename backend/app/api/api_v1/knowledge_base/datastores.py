@@ -153,7 +153,7 @@ def link_datastore_to_kb(
     db.add(link)
     db.commit()
 
-    logger.info("Data source '%s' linked to knowledge base '%s' (kb_id=%d)", ds.name, kb.name, kb_id)
+    logger.debug("Data source '%s' linked to knowledge base '%s' (kb_id=%d)", ds.name, kb.name, kb_id)
     return {"message": f"Data source '{ds.name}' linked to knowledge base '{kb.name}'"}
 
 @router.delete("/{kb_id}/unlink-datastore/{data_store_id}")
@@ -188,5 +188,5 @@ def unlink_datastore_from_kb(
     db.commit()
 
     ds = db.query(DataStore).filter(DataStore.id == data_store_id).first()
-    logger.info("Data source '%s' unlinked from knowledge base '%s' (kb_id=%d)", ds.name if ds else data_store_id, kb.name, kb_id)
+    logger.debug("Data source '%s' unlinked from knowledge base '%s' (kb_id=%d)", ds.name if ds else data_store_id, kb.name, kb_id)
     return {"message": f"Data source unlinked from knowledge base '{kb.name}'"}

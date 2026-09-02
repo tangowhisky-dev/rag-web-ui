@@ -131,7 +131,7 @@ async def preview_document(file_path: str, chunk_size: int = None, chunk_overlap
         _chars_before = len(markdown_text)
         try:
             markdown_text = clean_markdown(markdown_text)
-            logger.info(
+            logger.debug(
                 "[CLEANUP] chars_before=%d chars_after=%d file=%s",
                 _chars_before, len(markdown_text), _fname,
             )
@@ -233,7 +233,7 @@ async def convert_document(
         document.conversion_error = None
         db.commit()
 
-        logger.info("[CONVERT] document_id=%s file=%s chars=%d title=%r",
+        logger.debug("[CONVERT] document_id=%s file=%s chars=%d title=%r",
                     document_id, file_name, len(markdown_text), doc_title)
         return markdown_text
 
@@ -290,7 +290,7 @@ async def _prepare_ingestion(
     if data_store_id is not None:
         from app.services.ingestion.ingestion_dispatcher import is_datastore_deleted
         if is_datastore_deleted(data_store_id):
-            logger.info("[INGEST] document_id=%s — datastore %s deleted, aborting",
+            logger.debug("[INGEST] document_id=%s — datastore %s deleted, aborting",
                         document_id, data_store_id)
             return None
 
@@ -311,7 +311,7 @@ async def _prepare_ingestion(
         separators=["\n\n", "\n", ". ", " ", ""],
     )
     chunks = await loop.run_in_executor(None, lambda: text_splitter.split_documents([doc]))
-    logger.info("[INGEST] document_id=%s chunks=%d", document_id, len(chunks))
+    logger.debug("[INGEST] document_id=%s chunks=%d", document_id, len(chunks))
 
     if not chunks:
         raise ValueError("Document produced no chunks after splitting.")
@@ -496,7 +496,7 @@ async def _update_search_indices(
         if upload:
             upload.status = "completed"
     db.commit()
-    logger.info("[INGEST] document_id=%s completed chunks=%d", document.id, len(qdrant_payloads))
+    logger.debug("[INGEST] document_id=%s completed chunks=%d", document.id, len(qdrant_payloads))
 
     # Return graph build request
     from app.services.settings_service import get_setting as _gs
@@ -593,13 +593,13 @@ def _prepare_file(
     """Handle file movement/copying for datastore vs KB."""
     if data_store_id is not None:
         permanent_path = file_path if file_path else temp_path
-        logger.info(f"Task {task_id}: DataStore file stays in place: {permanent_path}")
+        logger.debug(f"Task {task_id}: DataStore file stays in place: {permanent_path}")
     else:
         _permanent_path = f"user_{user_id}/kb_{kb_id}/{file_name}"
-        logger.info(f"Task {task_id}: Moving file to permanent storage")
+        logger.debug(f"Task {task_id}: Moving file to permanent storage")
         move_file(temp_path, _permanent_path)
         permanent_path = _permanent_path
-        logger.info(f"Task {task_id}: File moved to {permanent_path}")
+        logger.debug(f"Task {task_id}: File moved to {permanent_path}")
     return permanent_path
 
 
@@ -662,7 +662,7 @@ def _get_or_create_document(
             document.knowledge_base_id = kb_id if kb_id else None
             document.modified_at = _get_file_mtime(doc_file_path)
             db.commit()
-            logger.info(f"Task {task_id}: Updated document ID {document.id}")
+            logger.debug(f"Task {task_id}: Updated document ID {document.id}")
         else:
             logger.error(f"Task {task_id}: Document {document_id} not found")
             return None
@@ -680,7 +680,7 @@ def _get_or_create_document(
         db.add(document)
         db.commit()
         db.refresh(document)
-        logger.info(f"Task {task_id}: Document record created with ID {document.id}")
+        logger.debug(f"Task {task_id}: Document record created with ID {document.id}")
         return document, True
 
     return document, False
@@ -704,7 +704,7 @@ async def _convert_or_reuse_markdown(
         # Use existing converted_markdown (e.g. markdown was edited)
         _set_progress(5, "Re-ingesting edited markdown…")
         markdown_text = None  # ingest_document will read from Document.converted_markdown
-        logger.info(f"Task {task_id}: Skipping conversion, using existing markdown")
+        logger.debug(f"Task {task_id}: Skipping conversion, using existing markdown")
     else:
         _set_progress(5, "Converting document…")
         markdown_text = await convert_document(
@@ -730,9 +730,9 @@ def _rollback_document_on_failure(
             if not document.converted_markdown:
                 db.delete(document)
                 db.commit()
-                logger.info(f"Task {task_id}: Document record rolled back (no markdown)")
+                logger.debug(f"Task {task_id}: Document record rolled back (no markdown)")
             else:
-                logger.info(f"Task {task_id}: Keeping document — markdown exists")
+                logger.debug(f"Task {task_id}: Keeping document — markdown exists")
         except Exception as del_err:
             logger.warning(f"Task {task_id}: Could not delete document record: {del_err}")
 
@@ -761,13 +761,13 @@ def _cleanup_files_on_failure(
     if data_store_id is None and permanent_path is not None:
         try:
             delete_file(permanent_path)
-            logger.info(f"Task {task_id}: File cleaned up at {permanent_path}")
+            logger.debug(f"Task {task_id}: File cleaned up at {permanent_path}")
         except Exception:
             logger.warning(f"Task {task_id}: Failed to clean up file at {permanent_path}")
     if data_store_id is None and permanent_path is None and temp_path:
         try:
             delete_file(temp_path)
-            logger.info(f"Task {task_id}: Temp file cleaned up at {temp_path}")
+            logger.debug(f"Task {task_id}: Temp file cleaned up at {temp_path}")
         except Exception:
             pass
 
@@ -905,7 +905,7 @@ async def process_document_full(
         async with ProgressTimeout(silence_s, _on_timeout) as pt:
 
             local_temp_path = get_abs_path(temp_path)
-            logger.info(f"Task {task_id}: Using file at {local_temp_path}")
+            logger.debug(f"Task {task_id}: Using file at {local_temp_path}")
 
             # ── Step 1: Move to permanent storage (DataStore files stay in place) ───
             permanent_path = _prepare_file(
@@ -940,8 +940,8 @@ async def process_document_full(
                 pt=pt,
             )
 
-            logger.info("[PROGRESS_TIMEOUT] task_id=%s completed_ok=true", task_id)
-            logger.info(f"Task {task_id}: Processing completed successfully")
+            logger.debug("[PROGRESS_TIMEOUT] task_id=%s completed_ok=true", task_id)
+            logger.debug(f"Task {task_id}: Processing completed successfully")
             return graph_request
 
     except Exception as e:

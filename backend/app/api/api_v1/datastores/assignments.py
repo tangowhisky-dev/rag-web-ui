@@ -52,7 +52,7 @@ def assign_datastore_to_orgs(
         if admin_org_ids is not None:
             q = q.filter(OrganizationDataStore.org_id.in_(admin_org_ids))
         deleted = q.delete(synchronize_session=False)
-        logger.info(
+        logger.debug(
             "[DATASTORE] removed %d assignments in scope for id=%d",
             deleted, datastore_id,
         )
@@ -92,7 +92,7 @@ def assign_datastore_to_orgs(
         db.add(link)
 
     db.commit()
-    logger.info(
+    logger.debug(
         "[DATASTORE] assigned id=%d to orgs=%s",
         datastore_id,
         payload.org_ids,

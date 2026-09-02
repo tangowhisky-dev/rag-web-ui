@@ -82,14 +82,14 @@ def _delete_qdrant_points(
             collection_name = f"kb_{kb_id}"
         existing = {c.name for c in qdrant.get_collections().collections}
         if collection_name not in existing:
-            logger.info(f"Qdrant collection {collection_name} does not exist — skipping point deletion for document {document.id}")
+            logger.debug(f"Qdrant collection {collection_name} does not exist — skipping point deletion for document {document.id}")
         else:
             point_ids = [_chunk_id_to_point_id(cid) for cid in chunk_ids]
             qdrant.delete(
                 collection_name=collection_name,
                 points_selector=PointIdsList(points=point_ids),
             )
-            logger.info(f"Deleted {len(point_ids)} Qdrant points for document {document.id}")
+            logger.debug(f"Deleted {len(point_ids)} Qdrant points for document {document.id}")
     except Exception as e:
         cleanup_warnings.append(f"Qdrant cleanup warning: {str(e)}")
         logger.error(f"Failed to delete Qdrant points for document {document.id}: {e}")

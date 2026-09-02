@@ -90,7 +90,7 @@ class IngestMixin:
                     event_path,
                 )
                 return None
-            logger.info(
+            logger.debug(
                 "[WATCHER] file_processing datastore_id=%d path=%s event=%s",
                 datastore_id, event_path, event_type,
             )
@@ -108,7 +108,7 @@ class IngestMixin:
         datastore_id: int,
     ) -> Optional[Future]:
         if not existing.is_selected:
-            logger.info(
+            logger.debug(
                 "[WATCHER] file_unselected path=%s doc_id=%s — skipping",
                 event_path, existing.id,
             )
@@ -119,7 +119,7 @@ class IngestMixin:
                 DocumentChunk.document_id == existing.id
             ).count()
             if chunk_count > 0:
-                logger.info(
+                logger.debug(
                     "[WATCHER] no_change path=%s hash=%s datastore_id=%s doc_id=%s",
                     event_path,
                     hash_prefix,
@@ -128,7 +128,7 @@ class IngestMixin:
                 )
                 return None
             else:
-                logger.info(
+                logger.debug(
                     "[WATCHER] re_ingest_no_chunks path=%s doc_id=%s datastore_id=%s",
                     event_path,
                     existing.id,
@@ -138,7 +138,7 @@ class IngestMixin:
                     existing.id, event_path, file_hash, datastore_id, scan_id=0
                 )
         else:
-            logger.info(
+            logger.debug(
                 "[WATCHER] file_modified path=%s old_hash=%s new_hash=%s datastore_id=%s doc_id=%s",
                 event_path,
                 (existing.file_hash or "none")[:8],
@@ -188,7 +188,7 @@ class IngestMixin:
         db: Session = SessionLocal()
         from app.services.datastore_watcher.utils import acquire_file_lock, release_file_lock
         if not acquire_file_lock(db, datastore_id, event_path):
-            logger.info("[WATCHER] file_locked path=%s — skipping (another process holds lock)", event_path)
+            logger.debug("[WATCHER] file_locked path=%s — skipping (another process holds lock)", event_path)
             db.close()
             return
         try:
@@ -346,7 +346,7 @@ class IngestMixin:
             )
             return
 
-        logger.info(
+        logger.debug(
             "[WATCHER] ingestion_start datastore_id=%d path=%s doc_id=NEW",
             datastore_id, event_path,
         )
@@ -401,7 +401,7 @@ class IngestMixin:
             # Keep manifest in sync so discovery does not re-process this file
             self._upsert_manifest(db, datastore_id, event_path, file_hash, file_size)
 
-            logger.info(
+            logger.debug(
                 "[WATCHER] ingestion_started path=%s datastore_id=%s doc_id=%s task_id=%s",
                 event_path,
                 datastore_id,
@@ -473,7 +473,7 @@ class IngestMixin:
 
         content_type = CONTENT_TYPE_MAP.get(ext, "application/octet-stream")
 
-        logger.info(
+        logger.debug(
             "[WATCHER] ingestion_update_start datastore_id=%d path=%s doc_id=%d",
             datastore_id, event_path, document_id,
         )
@@ -515,7 +515,7 @@ class IngestMixin:
             # Keep manifest in sync with the new hash
             self._upsert_manifest(db, datastore_id, event_path, file_hash, file_size)
 
-            logger.info(
+            logger.debug(
                 "[WATCHER] update_started doc_id=%s path=%s",
                 document_id,
                 event_path,

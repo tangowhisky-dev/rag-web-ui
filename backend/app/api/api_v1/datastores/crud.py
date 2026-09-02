@@ -308,7 +308,7 @@ def update_datastore(
                 ds.id, e,
             )
     db.refresh(ds)
-    logger.info("[DATASTORE] updated id=%d", ds.id)
+    logger.debug("[DATASTORE] updated id=%d", ds.id)
     resp = _serialize_ds(ds)
     resp["assigned_orgs"] = _fetch_assigned_orgs(db, ds.id, admin_org_ids)
     return DataStoreResponse(**resp)
@@ -342,7 +342,7 @@ def delete_datastore(
         watcher = _get_watcher()
         if watcher and watcher.is_running:
             watcher._cancel_scan(datastore_id)
-            logger.info("[DATASTORE] stopped scan before delete id=%d", datastore_id)
+            logger.debug("[DATASTORE] stopped scan before delete id=%d", datastore_id)
     except Exception:
         logger.warning("[DATASTORE] failed to stop scan before delete id=%d", datastore_id)
 
@@ -350,7 +350,7 @@ def delete_datastore(
         from app.services.ingestion.ingestion_dispatcher import cancel_graph_builds_for_datastore
         cancelled_graphs = cancel_graph_builds_for_datastore(datastore_id)
         if cancelled_graphs:
-            logger.info("[DATASTORE] cancelled %d graph builds before delete id=%d", cancelled_graphs, datastore_id)
+            logger.debug("[DATASTORE] cancelled %d graph builds before delete id=%d", cancelled_graphs, datastore_id)
     except Exception:
         logger.warning("[DATASTORE] failed to cancel graph builds before delete id=%d", datastore_id)
 
@@ -375,7 +375,7 @@ def delete_datastore(
                 remaining, datastore_id,
             )
         elif remaining == 0:
-            logger.info("[DATASTORE] all ingestions finished before delete id=%d", datastore_id)
+            logger.debug("[DATASTORE] all ingestions finished before delete id=%d", datastore_id)
     except Exception:
         logger.warning("[DATASTORE] failed to wait for ingestions before delete id=%d", datastore_id)
 

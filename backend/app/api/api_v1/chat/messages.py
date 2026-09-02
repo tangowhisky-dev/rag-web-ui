@@ -384,7 +384,7 @@ async def create_message_with_file(
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
 
-    logger.info("[with-file] converted '%s' -> %d chars of markdown", filename, len(file_content))
+    logger.debug("[with-file] converted '%s' -> %d chars of markdown", filename, len(file_content))
 
     # -- Build augmented query -------------------------------------------------
     augmented_query = f"## File Context: {filename}\n\n{file_content}\n\n{message}"

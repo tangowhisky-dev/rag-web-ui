@@ -358,7 +358,7 @@ def _load_datastore(
         )
 
     if not ds.is_active:
-        logger.info("[DISCOVERY] datastore_inactive id=%d", datastore_id)
+        logger.debug("[DISCOVERY] datastore_inactive id=%d", datastore_id)
         return ds, {}, DiscoveryResult(
             datastore_id=datastore_id,
             datastore_name=ds.name,
@@ -449,7 +449,7 @@ def _collect_full_hash(
 ) -> tuple[list[dict[str, Any]], int]:
     """Hash every file — safety-net path for *force_full_hash* scans."""
     collected, skipped = _run_hash_workers(file_paths, config)
-    logger.info(
+    logger.debug(
         "[DISCOVERY] hashing_done datastore_id=%d collected=%d skipped=%d (force_full_hash=True)",
         datastore_id,
         len(collected),
@@ -519,7 +519,7 @@ def _collect_incremental(
     # network mounts. The manifest is populated incrementally as
     # each file is processed.
     if not manifest_map:
-        logger.info(
+        logger.debug(
             "[DISCOVERY] first_scan_skip_hashing datastore_id=%d total=%d skipped=%d",
             datastore_id,
             len(stat_results),
@@ -539,7 +539,7 @@ def _collect_incremental(
     # ── Compare stats against manifest ──────────────────────
     unchanged, candidates = _compare_stats(stat_results, manifest_map)
 
-    logger.info(
+    logger.debug(
         "[DISCOVERY] stat_done datastore_id=%d total=%d unchanged=%d candidates=%d skipped=%d",
         datastore_id,
         len(stat_results),
@@ -554,7 +554,7 @@ def _collect_incremental(
         hashed, hash_skipped = _run_hash_workers(candidates, config)
         skipped += hash_skipped
 
-        logger.info(
+        logger.debug(
             "[DISCOVERY] hashing_done datastore_id=%d hashed=%d skipped=%d",
             datastore_id,
             len(hashed),
@@ -601,7 +601,7 @@ def discover_datastore(
         if early_result is not None:
             return early_result
 
-        logger.info(
+        logger.debug(
             "[DISCOVERY] scanning_start datastore_id=%d folder=%s force_full_hash=%s",
             datastore_id,
             ds.folder_path,
@@ -610,7 +610,7 @@ def discover_datastore(
 
         # Walk the folder.
         file_paths = _walk_files(ds.folder_path)
-        logger.info(
+        logger.debug(
             "[DISCOVERY] files_walking datastore_id=%d count=%d",
             datastore_id,
             len(file_paths),
@@ -632,7 +632,7 @@ def discover_datastore(
             manifest_map, collected
         )
 
-        logger.info(
+        logger.debug(
             "[DISCOVERY] classification_done datastore_id=%d new=%d modified=%d deleted=%d",
             datastore_id,
             len(new_files),
@@ -662,7 +662,7 @@ def discover_datastore(
             elapsed_ms=elapsed,
         )
 
-        logger.info(
+        logger.debug(
             "[DISCOVERY] scan_complete datastore_id=%d elapsed_ms=%.1f new=%d modified=%d deleted=%d",
             result.datastore_id,
             result.elapsed_ms,
@@ -689,10 +689,10 @@ def discover_all(db: Session) -> list[DiscoveryResult]:
     active_ids = db.scalars(ids_stmt).all()
 
     if not active_ids:
-        logger.info("[DISCOVERY] no_active_datastores")
+        logger.debug("[DISCOVERY] no_active_datastores")
         return []
 
-    logger.info("[DISCOVERY] discovering_all count=%d", len(active_ids))
+    logger.debug("[DISCOVERY] discovering_all count=%d", len(active_ids))
 
     # Discover each datastore concurrently (each gets its own session).
     results: list[DiscoveryResult] = []
@@ -717,7 +717,7 @@ def discover_all(db: Session) -> list[DiscoveryResult]:
                     )
                 )
 
-    logger.info(
+    logger.debug(
         "[DISCOVERY] all_done total=%d", len(results)
     )
     return results

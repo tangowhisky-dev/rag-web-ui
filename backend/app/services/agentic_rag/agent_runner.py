@@ -259,7 +259,7 @@ async def run_agent_loop(
 
     async for chunk in graph.astream(initial_state, config, stream_mode=["updates", "custom"]):
         if chat_id is not None and is_cancelled(chat_id):
-            logger.info("[agent_runner] cancel detected, stopping graph | chat_id=%d", chat_id)
+            logger.debug("[agent_runner] cancel detected, stopping graph | chat_id=%d", chat_id)
             break
         kind, payload = chunk if isinstance(chunk, tuple) else ("updates", chunk)
 

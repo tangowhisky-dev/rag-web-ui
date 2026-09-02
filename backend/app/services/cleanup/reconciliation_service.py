@@ -48,7 +48,7 @@ def run_reconciliation() -> dict:
     try:
         active_kb_ids = [kb.id for kb in db.query(KnowledgeBase.id).all()]
         active_ds_ids = [ds.id for ds in db.query(DataStore.id).all()]
-        logger.info("[RECONCILE] active_kb_ids=%s active_ds_ids=%s", active_kb_ids, active_ds_ids)
+        logger.debug("[RECONCILE] active_kb_ids=%s active_ds_ids=%s", active_kb_ids, active_ds_ids)
     except Exception as e:
         logger.warning("[RECONCILE] Could not query active KB/DataStore IDs: %s", e)
         db.close()
@@ -77,7 +77,7 @@ def run_reconciliation() -> dict:
     except Exception as e:
         logger.warning("[RECONCILE] Neo4j pass failed: %s", e, exc_info=True)
 
-    logger.info("[RECONCILE] complete: %s", summary)
+    logger.debug("[RECONCILE] complete: %s", summary)
     return summary
 
 
@@ -106,7 +106,7 @@ def _reconcile_mysql(summary: dict) -> None:
             ).delete(synchronize_session=False)
             db.commit()
             summary["mysql"]["orphan_chunks"] = len(orphan_chunk_ids)
-            logger.info("[RECONCILE] MySQL: deleted %d orphan chunk rows", len(orphan_chunk_ids))
+            logger.debug("[RECONCILE] MySQL: deleted %d orphan chunk rows", len(orphan_chunk_ids))
 
         # Orphan tasks: document_id not null and not in documents
         orphan_task_ids = [
@@ -124,7 +124,7 @@ def _reconcile_mysql(summary: dict) -> None:
             ).delete(synchronize_session=False)
             db.commit()
             summary["mysql"]["orphan_tasks"] = len(orphan_task_ids)
-            logger.info("[RECONCILE] MySQL: deleted %d orphan task rows", len(orphan_task_ids))
+            logger.debug("[RECONCILE] MySQL: deleted %d orphan task rows", len(orphan_task_ids))
     finally:
         db.close()
 
@@ -142,12 +142,12 @@ def _drop_stale_collections(
 ) -> None:
     active_names = {f"{prefix}{id}" for id in active_ids}
     stale = [c for c in collections if c.startswith(prefix) and c not in active_names]
-    logger.info("[RECONCILE] Qdrant: active_%s_names=%s stale_%s_collections=%s", label, active_names, label, stale)
+    logger.debug("[RECONCILE] Qdrant: active_%s_names=%s stale_%s_collections=%s", label, active_names, label, stale)
     for cname in stale:
         try:
-            logger.info("[RECONCILE] Qdrant: dropping stale collection %s", cname)
+            logger.debug("[RECONCILE] Qdrant: dropping stale collection %s", cname)
             qdrant.delete_collection(cname)
-            logger.info("[RECONCILE] Qdrant: dropped stale collection %s", cname)
+            logger.debug("[RECONCILE] Qdrant: dropped stale collection %s", cname)
         except Exception as e:
             logger.warning("[RECONCILE] Qdrant: failed to drop %s: %s", cname, e)
     summary["qdrant"]["dropped_collections"] += len(stale)
@@ -183,7 +183,7 @@ def _reconcile_qdrant(summary: dict, active_kb_ids: List[int], active_ds_ids: Li
         logger.warning("[RECONCILE] Qdrant: could not list collections: %s", e)
         return
 
-    logger.info("[RECONCILE] Qdrant: collections=%s", collections)
+    logger.debug("[RECONCILE] Qdrant: collections=%s", collections)
 
     _drop_stale_collections(qdrant, collections, active_kb_ids, "kb_", "kb", summary)
     _drop_stale_collections(qdrant, collections, active_ds_ids, "ds_", "ds", summary)
@@ -276,7 +276,7 @@ def _purge_stale_datastore_nodes(driver, active_ds_ids: List[int], summary: dict
             stale_ds_ids = []
 
     if stale_ds_ids:
-        logger.info("[RECONCILE] Neo4j: found stale data_store_ids: %s", stale_ds_ids)
+        logger.debug("[RECONCILE] Neo4j: found stale data_store_ids: %s", stale_ds_ids)
         total_chunks = 0
         for stale_ds_id in stale_ds_ids:
             while True:
@@ -313,7 +313,7 @@ def _purge_stale_datastore_nodes(driver, active_ds_ids: List[int], summary: dict
                     )
 
         summary["neo4j"]["purged_datastores"] = len(stale_ds_ids)
-        logger.info("[RECONCILE] Neo4j: purged %d chunks across %d stale datastores", total_chunks, len(stale_ds_ids))
+        logger.debug("[RECONCILE] Neo4j: purged %d chunks across %d stale datastores", total_chunks, len(stale_ds_ids))
 
 
 def _reconcile_neo4j(summary: dict, active_kb_ids: List[int], active_ds_ids: List[int]) -> None:

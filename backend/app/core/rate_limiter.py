@@ -143,7 +143,7 @@ def _record_redis(r: redis.Redis, ip: str) -> int:
         backoff = _backoff_duration(level)
         now = time.time()
         r.setex(backoff_key, backoff, str(now + backoff))
-        logger.info(
+        logger.debug(
             "[RATE_LIMIT] backoff_set ip=%s attempts=%d level=%d backoff=%ds",
             ip, attempts, level, backoff,
         )
@@ -168,7 +168,7 @@ def _record_fallback(ip: str) -> int:
     if data["attempts"] >= MAX_LOGIN_ATTEMPTS and not data.get("backoff_until"):
         backoff = _backoff_duration(data["backoff_level"])
         data["backoff_until"] = now + backoff
-        logger.info(
+        logger.debug(
             "[RATE_LIMIT] backoff_set ip=%s attempts=%d level=%d backoff=%ds",
             ip, data["attempts"], data["backoff_level"], backoff,
         )

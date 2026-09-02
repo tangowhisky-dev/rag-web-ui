@@ -133,7 +133,7 @@ async def query(
     confidence_result = score_retrieval(docs, retrieval_info)
 
     latency_ms = int((time.monotonic() - t0) * 1000)
-    logger.info(
+    logger.debug(
         "[QUERY] question=%r | kb_ids=%s | docs=%d | confidence=%s | latency=%dms",
         body.question[:80], body.kb_ids, len(docs), confidence_result.level, latency_ms,
     )

@@ -35,7 +35,7 @@ class ChangesMixin:
         if not changes:
             return
 
-        logger.info(
+        logger.debug(
             "[WATCHER] batch_ready datastore_id=%d org_id=%s changes=%d",
             datastore_id,
             org_id,
@@ -86,7 +86,7 @@ class ChangesMixin:
                 exc,
             )
         else:
-            logger.info(
+            logger.debug(
                 "[WATCHER] ingestion_completed task_id=%s path=%s",
                 task_id,
                 event_path,

@@ -141,13 +141,13 @@ def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
     """
     from app.services.settings_service import get_setting
     embed_model = get_setting(db, "DENSE_EMBEDDINGS_MODEL", None)
-    logger.info("[DENSE] embedding request | model=%s | query=%r", embed_model, query[:120])
+    logger.debug("[DENSE] embedding request | model=%s | query=%r", embed_model, query[:120])
     response = get_openai_client().embeddings.create(
         input=query,
         model=embed_model,
     )
     query_vector = response.data[0].embedding
-    logger.info("[DENSE] embedding response | dim=%d | first5=%s",
+    logger.debug("[DENSE] embedding response | dim=%d | first5=%s",
                 len(query_vector), [round(v, 4) for v in query_vector[:5]])
 
     # Build MMR-wrapped query if diversity > 0.
@@ -155,7 +155,7 @@ def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
     diversity = get_setting(db, "QDRANT_MMR_DIVERSITY", org_id)
     if diversity > 0.0:
         query_obj = NearestQuery(nearest=query_vector, mmr=Mmr(diversity=diversity))
-        logger.info("[DENSE] using native MMR | diversity=%.2f", diversity)
+        logger.debug("[DENSE] using native MMR | diversity=%.2f", diversity)
     else:
         query_obj = query_vector
 
@@ -163,12 +163,12 @@ def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
     rank = 0
     min_score = get_setting(db, "DENSE_MIN_SCORE", org_id) if min_score is None else min_score
     if min_score > 0.0:
-        logger.info("[DENSE] applying min_cosine=%.2f", min_score)
+        logger.debug("[DENSE] applying min_cosine=%.2f", min_score)
 
     # Build Qdrant payload filter from doc_ids (metadata pre-filter).
     qdrant_filter = _build_doc_id_filter(doc_ids) if doc_ids else None
     if qdrant_filter:
-        logger.info("[DENSE] filtering to %d document_ids", len(doc_ids))
+        logger.debug("[DENSE] filtering to %d document_ids", len(doc_ids))
 
     def _process_hits(hits, collection_name: str):
         nonlocal rank
@@ -197,11 +197,11 @@ def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
             logger.debug("[DENSE]   rank=%d score=%.4f text=%r", rank, score, doc.page_content[:80])
             rank += 1
         if filtered:
-            logger.info("[DENSE] %s | filtered_by_score=%d", collection_name, filtered)
+            logger.debug("[DENSE] %s | filtered_by_score=%d", collection_name, filtered)
 
     # Search KB collections
     for kb_id in kb_ids:
-        logger.info("[DENSE] qdrant query | collection=kb_%d | using=dense | limit=%d", kb_id, candidates)
+        logger.debug("[DENSE] qdrant query | collection=kb_%d | using=dense | limit=%d", kb_id, candidates)
         try:
             hits = get_qdrant_client().query_points(
                 collection_name=f"kb_{kb_id}",
@@ -215,12 +215,12 @@ def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
         except Exception as e:
             logger.warning("dense_search: Qdrant query failed for kb_%d: %s", kb_id, e)
             continue
-        logger.info("[DENSE] qdrant response | kb_%d | hits=%d", kb_id, len(hits))
+        logger.debug("[DENSE] qdrant response | kb_%d | hits=%d", kb_id, len(hits))
         _process_hits(hits, f"kb_{kb_id}")
 
     # Search DataStore collections
     for ds_id in datastore_ids:
-        logger.info("[DENSE] qdrant query | collection=ds_%d | using=dense | limit=%d", ds_id, candidates)
+        logger.debug("[DENSE] qdrant query | collection=ds_%d | using=dense | limit=%d", ds_id, candidates)
         try:
             hits = get_qdrant_client().query_points(
                 collection_name=f"ds_{ds_id}",
@@ -234,10 +234,10 @@ def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
         except Exception as e:
             logger.warning("dense_search: Qdrant query failed for ds_%d: %s", ds_id, e)
             continue
-        logger.info("[DENSE] qdrant response | ds_%d | hits=%d", ds_id, len(hits))
+        logger.debug("[DENSE] qdrant response | ds_%d | hits=%d", ds_id, len(hits))
         _process_hits(hits, f"ds_{ds_id}")
 
-    logger.info("[DENSE] unique candidates=%d", len(result))
+    logger.debug("[DENSE] unique candidates=%d", len(result))
     return result
 
 
@@ -251,13 +251,13 @@ def _sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: 
     ``min_score`` overrides settings.SPARSE_MIN_SCORE for this call (used by the
     graduated relaxation ladder in rag_retrieve).
     """
-    logger.info("[SPARSE] SPLADE embed | model=%s | query=%r", settings.SPLADE_MODEL, query[:120])
+    logger.debug("[SPARSE] SPLADE embed | model=%s | query=%r", settings.SPLADE_MODEL, query[:120])
     sparse_emb = next(iter(get_sparse_embedder().embed([query])))
     query_sparse = SparseVector(
         indices=sparse_emb.indices.tolist(),
         values=sparse_emb.values.tolist(),
     )
-    logger.info("[SPARSE] SPLADE response | nnz=%d | top_terms_indices=%s | top_values=%s",
+    logger.debug("[SPARSE] SPLADE response | nnz=%d | top_terms_indices=%s | top_values=%s",
                 len(sparse_emb.indices),
                 sparse_emb.indices[:5].tolist(),
                 [round(v, 4) for v in sparse_emb.values[:5].tolist()])
@@ -267,7 +267,7 @@ def _sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: 
     diversity = get_setting(db, "QDRANT_MMR_DIVERSITY", org_id)
     if diversity > 0.0:
         query_obj = NearestQuery(nearest=query_sparse, mmr=Mmr(diversity=diversity))
-        logger.info("[SPARSE] using native MMR | diversity=%.2f", diversity)
+        logger.debug("[SPARSE] using native MMR | diversity=%.2f", diversity)
     else:
         query_obj = query_sparse
 
@@ -275,12 +275,12 @@ def _sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: 
     rank = 0
     min_score = get_setting(db, "SPARSE_MIN_SCORE", org_id) if min_score is None else min_score
     if min_score > -float("inf"):
-        logger.info("[SPARSE] applying min_score=%.2f", min_score)
+        logger.debug("[SPARSE] applying min_score=%.2f", min_score)
 
     # Build Qdrant payload filter from doc_ids (metadata pre-filter).
     qdrant_filter = _build_doc_id_filter(doc_ids) if doc_ids else None
     if qdrant_filter:
-        logger.info("[SPARSE] filtering to %d document_ids", len(doc_ids))
+        logger.debug("[SPARSE] filtering to %d document_ids", len(doc_ids))
 
     def _process_hits(hits, collection_name: str):
         nonlocal rank
@@ -310,11 +310,11 @@ def _sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: 
             logger.debug("[SPARSE]   rank=%d score=%.4f text=%r", rank, score, doc.page_content[:80])
             rank += 1
         if filtered:
-            logger.info("[SPARSE] %s | filtered_by_score=%d", collection_name, filtered)
+            logger.debug("[SPARSE] %s | filtered_by_score=%d", collection_name, filtered)
 
     # Search KB collections
     for kb_id in kb_ids:
-        logger.info("[SPARSE] qdrant query | collection=kb_%d | using=sparse | limit=%d", kb_id, candidates)
+        logger.debug("[SPARSE] qdrant query | collection=kb_%d | using=sparse | limit=%d", kb_id, candidates)
         try:
             hits = get_qdrant_client().query_points(
                 collection_name=f"kb_{kb_id}",
@@ -332,7 +332,7 @@ def _sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: 
 
     # Search DataStore collections
     for ds_id in datastore_ids:
-        logger.info("[SPARSE] qdrant query | collection=ds_%d | using=sparse | limit=%d", ds_id, candidates)
+        logger.debug("[SPARSE] qdrant query | collection=ds_%d | using=sparse | limit=%d", ds_id, candidates)
         try:
             hits = get_qdrant_client().query_points(
                 collection_name=f"ds_{ds_id}",
@@ -346,10 +346,10 @@ def _sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: 
         except Exception as e:
             logger.warning("sparse_search: Qdrant query failed for ds_%d: %s", ds_id, e)
             continue
-        logger.info("[SPARSE] qdrant response | ds_%d | hits=%d", ds_id, len(hits))
+        logger.debug("[SPARSE] qdrant response | ds_%d | hits=%d", ds_id, len(hits))
         _process_hits(hits, f"ds_{ds_id}")
 
-    logger.info("[SPARSE] unique candidates=%d", len(result))
+    logger.debug("[SPARSE] unique candidates=%d", len(result))
     return result
 
 
@@ -451,7 +451,7 @@ def _filter_and_dedup_rows(all_rows, min_score: float) -> Dict[str, _Candidate]:
                 exact_rank=rank,
             )
     if filtered:
-        logger.info("[EXACT] returned=%d | filtered_by_score=%d (min=%.2f)", len(result), filtered, min_score)
+        logger.debug("[EXACT] returned=%d | filtered_by_score=%d (min=%.2f)", len(result), filtered, min_score)
     return result
 
 
@@ -477,7 +477,7 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
     doc_id_clause = " AND d.id IN :doc_ids" if doc_ids else ""
     doc_id_params = {"doc_ids": tuple(doc_ids)} if doc_ids else {}
     if doc_ids:
-        logger.info("[EXACT] filtering to %d document_ids", len(doc_ids))
+        logger.debug("[EXACT] filtering to %d document_ids", len(doc_ids))
 
     # Query KB documents — JOIN documents for modified_at and title.
     # Title matches get 2x weight: a chunk from a document whose title
@@ -522,7 +522,7 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
         """
     ).bindparams(bindparam("ds_ids", expanding=True))
 
-    logger.info("[EXACT] MySQL FTS query | query=%r | kb_ids=%s | ds_ids=%s | candidates=%d", 
+    logger.debug("[EXACT] MySQL FTS query | query=%r | kb_ids=%s | ds_ids=%s | candidates=%d", 
                 query[:120], kb_ids, datastore_ids, candidates)
 
     rows = _run_fts_query_with_retry(query, kb_ids, datastore_ids, kb_sql, ds_sql, candidates, doc_id_params)
@@ -535,7 +535,7 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
     all_rows.sort(key=lambda r: r.fts_score or 0, reverse=True)
     all_rows = all_rows[:candidates]
 
-    logger.info("[EXACT] MySQL FTS response | rows=%d (kb=%d, ds=%d)", len(all_rows), len(kb_rows), len(ds_rows))
+    logger.debug("[EXACT] MySQL FTS response | rows=%d (kb=%d, ds=%d)", len(all_rows), len(kb_rows), len(ds_rows))
     if all_rows:
         for i, row in enumerate(all_rows[:5]):
             logger.debug("  exact[%d] fts_score=%.4f text=%r", i, row.fts_score, (row.chunk_text or "")[:80])

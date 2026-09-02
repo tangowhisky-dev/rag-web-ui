@@ -193,7 +193,7 @@ async def delete_document(
         # 5. Delete the physical file from local storage
         try:
             delete_file(document.file_path)
-            logger.info(f"Deleted file from storage: {document.file_path}")
+            logger.debug(f"Deleted file from storage: {document.file_path}")
         except Exception as e:
             cleanup_warnings.append(f"File storage cleanup warning: {str(e)}")
             logger.error(f"Failed to delete file {document.file_path}: {e}")
@@ -209,7 +209,7 @@ async def delete_document(
                     data_store_id=document.data_store_id,
                 ),
             )
-            logger.info(f"Deleted Neo4j graph nodes for document {doc_id}")
+            logger.debug(f"Deleted Neo4j graph nodes for document {doc_id}")
         except Exception as e:
             cleanup_warnings.append(f"Neo4j graph cleanup warning: {str(e)}")
             logger.error(f"Failed to delete Neo4j nodes for document {doc_id}: {e}")
@@ -218,7 +218,7 @@ async def delete_document(
         db.delete(document)
         db.commit()
 
-        logger.info(f"Document {doc_id} deleted from KB {kb_id}")
+        logger.debug(f"Document {doc_id} deleted from KB {kb_id}")
 
         response = {"message": f"Document '{document.file_name}' deleted successfully"}
         if cleanup_warnings:
@@ -311,7 +311,7 @@ async def retry_document_ingestion(
         )
     )
 
-    logger.info(f"Retry queued for document {doc_id} in KB {kb_id} (task {task.id})")
+    logger.debug(f"Retry queued for document {doc_id} in KB {kb_id} (task {task.id})")
     return {"message": "Retry queued", "task_id": task.id, "document_id": doc_id}
 
 

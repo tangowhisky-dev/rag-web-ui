@@ -76,7 +76,7 @@ async def _invoke_plan_llm(ctx, system, user, rewritten):
 def _check_clarification_budget(plan, state, ctx):
     needs_clarification = bool(getattr(plan, "needs_clarification", False))
     if needs_clarification and state.get("clarification_count", 0) >= get_setting(ctx.db, "AGENT_MAX_CLARIFICATIONS", ctx.org_id):
-        logger.info("[plan_node] clarification budget exhausted — proceeding without asking")
+        logger.debug("[plan_node] clarification budget exhausted — proceeding without asking")
         needs_clarification = False
         if isinstance(plan, Plan):
             plan.needs_clarification = False

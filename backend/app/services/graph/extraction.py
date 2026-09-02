@@ -147,7 +147,7 @@ def _get_extractor_and_writer():
         batch_size=500,
     )
 
-    logger.info("GraphService[llm]: extractor+writer built with model=%s max_tokens=%d", graph_model, max_tokens)
+    logger.debug("GraphService[llm]: extractor+writer built with model=%s max_tokens=%d", graph_model, max_tokens)
     return _setup._global_extractor, _setup._global_writer
 
 
@@ -275,7 +275,7 @@ async def _extract_with_llm(
     effective_chunks = chunks if cap <= 0 else chunks[:cap]
     effective_ids = qdrant_point_ids if cap <= 0 else qdrant_point_ids[:cap]
     if cap > 0 and len(chunks) > cap:
-        logger.info(
+        logger.debug(
             "GraphService[llm]: doc %d — capping graph extraction at %d/%d chunks (GRAPHRAG_MAX_CHUNKS=%d)",
             document_id, cap, len(chunks), cap,
         )
@@ -283,7 +283,7 @@ async def _extract_with_llm(
     batches = _build_extraction_batches(
         effective_chunks, effective_ids, neo4j_llm_context
     )
-    logger.info(
+    logger.debug(
         "GraphService[llm]: doc %d — %d chunks → %d extraction batches (NEO4J_LLM_CONTEXT=%d)",
         document_id, len(effective_chunks), len(batches), neo4j_llm_context,
     )
@@ -328,7 +328,7 @@ async def _extract_with_llm(
             examples="",
         )
         if _is_cancelled():
-            logger.info(
+            logger.debug(
                 "GraphService[llm]: doc %d batch %d — cancelled during LLM call, discarding result",
                 document_id, batch_idx,
             )
@@ -336,7 +336,7 @@ async def _extract_with_llm(
         if data_store_id is not None:
             from app.services.ingestion.ingestion_dispatcher import is_datastore_deleted
             if is_datastore_deleted(data_store_id):
-                logger.info(
+                logger.debug(
                     "GraphService[llm]: doc %d batch %d — datastore %s deleted during LLM call, discarding",
                     document_id, batch_idx, data_store_id,
                 )
@@ -425,7 +425,7 @@ async def _extract_with_llm(
     ) -> tuple[int, int]:
         nonlocal skipped_batches, completed_batches
         if _is_cancelled():
-            logger.info(
+            logger.debug(
                 "GraphService[llm]: doc %d batch %d — cancelled, skipping",
                 document_id, batch_idx,
             )
@@ -433,7 +433,7 @@ async def _extract_with_llm(
             return 0, 0
         acquired = await _acquire_global_llm_sem(cancel_event)
         if not acquired:
-            logger.info(
+            logger.debug(
                 "GraphService[llm]: doc %d batch %d — cancelled while waiting for LLM semaphore, skipping",
                 document_id, batch_idx,
             )
@@ -441,7 +441,7 @@ async def _extract_with_llm(
             return 0, 0
         try:
             if _is_cancelled():
-                logger.info(
+                logger.debug(
                     "GraphService[llm]: doc %d batch %d — cancelled while waiting for semaphore, skipping",
                     document_id, batch_idx,
                 )

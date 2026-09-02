@@ -200,7 +200,7 @@ class UserProfileStore:
                     communication_style=record.communication_style,
                     domain_focus=json.loads(record.domain_focus_json or "[]"),
                 )
-                logger.info(
+                logger.debug(
                     "[USER_PROFILE] loaded user_id=%d org_id=%d prefs=%d patterns=%d",
                     self.user_id, self.org_id,
                     sum(len(v) for v in profile.preferences.values()),
@@ -252,7 +252,7 @@ class UserProfileStore:
                 self.db.add(record)
 
             self.db.commit()
-            logger.info(
+            logger.debug(
                 "[USER_PROFILE] saved user_id=%d org_id=%d",
                 self.user_id, self.org_id,
             )

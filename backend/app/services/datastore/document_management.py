@@ -654,7 +654,7 @@ def delete_document_data(db: Session, document_id: int, datastore_id: int) -> di
     except Exception as e:
         logger.warning("[DOC_MGMT] Neo4j cleanup failed for doc %d: %s", doc_id, e)
 
-    logger.info(
+    logger.debug(
         "[DOC_MGMT] document_data_deleted doc_id=%d chunks=%d qdrant=%d graph=%d",
         doc_id, len(chunk_ids), qdrant_deleted, graph_deleted,
     )

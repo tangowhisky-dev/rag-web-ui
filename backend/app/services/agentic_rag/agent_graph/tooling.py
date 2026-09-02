@@ -144,7 +144,7 @@ async def _dispatch_tool_calls(
         writer({"event": "tool_call", "tool": name, "arguments": args, "label": label or name})
         prior = prior_signatures.get(_call_signature(name, args))
         if prior is not None:
-            logger.info("[tool_node] duplicate call skipped, reusing prior observation: tool=%s args=%s", name, args)
+            logger.debug("[tool_node] duplicate call skipped, reusing prior observation: tool=%s args=%s", name, args)
             coros.append(_reuse_prior(prior))
             continue
         cap = _tool_call_budget(ctx.db, ctx.org_id).get(name)
@@ -337,7 +337,7 @@ async def tool_node(state, ctx) -> dict:
         probe_state = {**state, **state_update, "observations": all_observations}
         ready, reasoning = _verify_execution(_build_execution_summary(probe_state))
         if ready:
-            logger.info("[tool_node] plan deterministically satisfied after this tool round \u2014 forcing finalize: %s", reasoning[:200])
+            logger.debug("[tool_node] plan deterministically satisfied after this tool round \u2014 forcing finalize: %s", reasoning[:200])
             state_update["force_finalize"] = True
 
         return state_update

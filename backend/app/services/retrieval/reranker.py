@@ -52,9 +52,9 @@ def _get_cross_encoder():
 
                 os.makedirs(cache_dir, exist_ok=True)
 
-                logger.info("Reranker: loading model=%s cache_dir=%s", model_name, cache_dir)
+                logger.debug("Reranker: loading model=%s cache_dir=%s", model_name, cache_dir)
                 _cross_encoder = TextCrossEncoder(model_name=model_name, cache_dir=cache_dir)
-                logger.info("Reranker: model loaded")
+                logger.debug("Reranker: model loaded")
 
     return _cross_encoder
 
@@ -110,7 +110,7 @@ def rerank(
 
     scored = sorted(zip(scores, docs), key=lambda x: x[0], reverse=True)
 
-    logger.info(
+    logger.debug(
         "Reranker: query=%r | input=%d | threshold=%.2f | score range=[%.3f, %.3f]",
         query[:80],
         len(docs),
@@ -121,7 +121,7 @@ def rerank(
 
     for rank, (score, doc) in enumerate(scored):
         snippet = doc.page_content[:80].replace("\n", " ")
-        # logger.info("  reranker[%d] score=%.4f text=%r", rank, score, snippet)
+        # logger.debug("  reranker[%d] score=%.4f text=%r", rank, score, snippet)
 
     result = []
     for score, doc in scored:
@@ -130,7 +130,7 @@ def rerank(
         doc.metadata["_reranker_score"] = round(score, 4)
         result.append(doc)
 
-    logger.info(
+    logger.debug(
         "Reranker: %d/%d chunks passed threshold=%.2f",
         len(result), len(scored), score_threshold,
     )
@@ -145,6 +145,6 @@ def preload_cross_encoder() -> None:
     """
     try:
         _get_cross_encoder()
-        logger.info("Cross-encoder reranker loaded: %s", settings.RERANKER_MODEL)
+        logger.debug("Cross-encoder reranker loaded: %s", settings.RERANKER_MODEL)
     except Exception as exc:
         logger.warning("Cross-encoder preload failed (will retry on first use): %s", exc)

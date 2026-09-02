@@ -91,7 +91,7 @@ async def build_graph_for_document(
     else:
         collection_name = f"kb_{kb_id}"
 
-    logger.info(
+    logger.debug(
         "GraphService[llm]: writing %d Chunk nodes for doc %d (kb=%s, ds=%s)",
         len(chunks), document_id, kb_id, data_store_id,
     )
@@ -124,7 +124,7 @@ async def build_graph_for_document(
 
     # Check if cancelled before starting expensive LLM extraction.
     if cancel_event is not None and cancel_event.is_set():
-        logger.info("GraphService[llm]: doc %d — cancelled before extraction", document_id)
+        logger.debug("GraphService[llm]: doc %d — cancelled before extraction", document_id)
         return 0
 
     # Extract entities and relationships.  Concurrency is controlled by the
@@ -144,7 +144,7 @@ async def build_graph_for_document(
         cancel_event=cancel_event,
     )
 
-    logger.info(
+    logger.debug(
         "GraphService[llm]: doc %d — %d entities, %d relations written to Neo4j (skipped_batches=%d)",
         document_id, total_entities, total_relations, skipped_batches,
     )

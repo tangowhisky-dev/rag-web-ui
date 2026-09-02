@@ -253,14 +253,14 @@ def expand_docs_via_graph(
             logger.debug("GraphService.expand: no graph-connected chunks found beyond current result set")
             return []
 
-        logger.info(
+        logger.debug(
             "GraphService.expand: found %d graph-connected chunks to fetch from Qdrant",
             len(expansion_targets),
         )
 
         expanded_docs = _fetch_expanded_docs_from_qdrant(expansion_targets)
 
-        logger.info(
+        logger.debug(
             "GraphService.expand: fetched %d graph-expanded docs from Qdrant",
             len(expanded_docs),
         )
@@ -368,7 +368,7 @@ def enrich_docs_with_graph(
 
         enriched.append(enriched_doc)
 
-    logger.info(
+    logger.debug(
         "GraphService.enrich: %d/%d docs enriched with entity triples",
         graph_hits, len(docs),
     )

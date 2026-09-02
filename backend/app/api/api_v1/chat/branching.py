@@ -241,7 +241,7 @@ async def submit_clarification(
     )
     graph = build_agent_graph(ctx)
 
-    logger.info(
+    logger.debug(
         "[CLARIFICATION] chat_id=%d clarification_id=%d resuming | user=%d",
         body.chat_id, clarification.id, current_user.id,
     )

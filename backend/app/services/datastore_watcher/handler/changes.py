@@ -79,7 +79,7 @@ class ChangesMixin:
             self._processing.add(datastore_id)
             changes = self.pending_changes.pop(datastore_id)
             org_id = self.folder_paths.get(datastore_id, (None,))[0]
-            logger.info(
+            logger.debug(
                 "[WATCHER] processing_pending datastore_id=%d changes=%d",
                 datastore_id, len(changes),
             )
@@ -104,7 +104,7 @@ class ChangesMixin:
 
         if changes:
             org_id = self.folder_paths.get(datastore_id, (None,))[0]
-            logger.info(
+            logger.debug(
                 "[WATCHER] force_process datastore_id=%d pending=%d",
                 datastore_id, len(changes),
             )
@@ -136,7 +136,7 @@ class ChangesMixin:
         if not changes:
             return
 
-        logger.info(
+        logger.debug(
             "[WATCHER] batch_ready datastore_id=%d org_id=%s changes=%d",
             datastore_id,
             org_id,
@@ -183,7 +183,7 @@ class ChangesMixin:
                 exc,
             )
         else:
-            logger.info(
+            logger.debug(
                 "[WATCHER] ingestion_completed task_id=%s path=%s",
                 task_id,
                 event_path,
@@ -277,7 +277,7 @@ class ChangesMixin:
         if not to_process:
             return
 
-        logger.info(
+        logger.debug(
             "[WATCHER] orphan_selected_found datastore_id=%d orphans=%d failed=%d",
             datastore_id, len(orphans), len(failed_docs),
         )
@@ -301,7 +301,7 @@ class ChangesMixin:
         # delays processing of new filesystem events.  Failed files are
         # retried on the next tick via the failed-task query above.
         if futures:
-            logger.info(
+            logger.debug(
                 "[WATCHER] orphan_ingestion_submitted datastore_id=%d count=%d",
                 datastore_id, len(futures),
             )

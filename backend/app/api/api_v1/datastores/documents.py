@@ -126,7 +126,7 @@ def update_document_markdown(
     doc.needs_reprocess = True
     db.commit()
 
-    logger.info(
+    logger.debug(
         "[EDITOR] markdown_saved doc_id=%s datastore_id=%s — earmarked for reprocessing",
         document_id, datastore_id,
     )

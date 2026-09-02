@@ -593,7 +593,7 @@ def filter_node(state: AgentState, threshold: Optional[float] = None, db: Any = 
             reverse=True,
         )
 
-        logger.info("[FILTER] threshold=%.2f | input=%d | passed=%d", threshold, len(docs), len(filtered))
+        logger.debug("[FILTER] threshold=%.2f | input=%d | passed=%d", threshold, len(docs), len(filtered))
 
         return {
             "retrieved_docs": filtered,

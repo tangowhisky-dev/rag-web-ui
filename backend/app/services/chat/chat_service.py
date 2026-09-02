@@ -250,7 +250,7 @@ async def _handle_thinking(event, ctx):
 async def _handle_interrupt(event, ctx):
     question = event.get("question", "")
     thread_id = event.get("thread_id", "")
-    logger.info(
+    logger.debug(
         "[CHAT] clarification interrupt | chat_id=%d thread_id=%s",
         ctx.chat_id, thread_id,
     )
@@ -333,7 +333,7 @@ def _create_user_message(
 async def _handle_identity_question(
     bot_message: Message, user_message_id: int, db: Session,
 ) -> AsyncGenerator[str, None]:
-    logger.info("[CHAT] identity shortcut — skipping RAG")
+    logger.debug("[CHAT] identity shortcut — skipping RAG")
     yield f'0:{json.dumps(_IDENTITY_RESPONSE)}\n'
     yield f'd:{{"finishReason":"stop","usage":{{"promptTokens":0,"completionTokens":0}},"messageId":{bot_message.id},"userMessageId":{user_message_id}}}\n'
     bot_message.content = _IDENTITY_RESPONSE
@@ -366,7 +366,7 @@ def _persist_response_metadata(
         bot_message.retrieval_score = ctx.retrieval_score
     try:
         db.commit()
-        logger.info(
+        logger.debug(
             "[CHAT] confidence persisted | chat_id=%d | level=%s score=%s final=%.3f",
             chat_id, ctx.confidence_level, ctx.confidence_score, ctx.final_confidence or 0,
         )
@@ -393,7 +393,7 @@ def _persist_citations(db: Session, chat_id: int, buffered_citations: list) -> N
                 )
             )
         db.commit()
-        logger.info(
+        logger.debug(
             "[CHAT] citations persisted | chat_id=%d | count=%d",
             chat_id, len(buffered_citations),
         )
@@ -410,7 +410,7 @@ async def _process_stream_events(
 ) -> AsyncGenerator[str, None]:
     async for event in stream_iter:
         if get_cancel_token(chat_id).is_set():
-            logger.info("[CHAT] cancelled | chat_id=%d | response_length=%d chars", chat_id, len(ctx.full_response))
+            logger.debug("[CHAT] cancelled | chat_id=%d | response_length=%d chars", chat_id, len(ctx.full_response))
             break
         event_type = event.get("event")
         handler = EVENT_HANDLERS.get(event_type)
@@ -427,7 +427,7 @@ def _finalize_stream(
     if get_cancel_token(chat_id).is_set():
         bot_message.content = ctx.full_response or "(generation stopped)"
         db.commit()
-        logger.info("[CHAT] partial response saved | chat_id=%d | chars=%d", chat_id, len(bot_message.content))
+        logger.debug("[CHAT] partial response saved | chat_id=%d | chars=%d", chat_id, len(bot_message.content))
         clear_cancel_token(chat_id)
         return
     _persist_response_metadata(bot_message, db, chat_id, ctx)
@@ -488,8 +488,8 @@ async def generate_response(
     file_markdown is forwarded to run_stream; the graph routes the query
     internally — no special-casing in this function.
     """
-    logger.info("=" * 70)
-    logger.info("[CHAT] chat_id=%s | kb_ids=%s | query=%r", chat_id, knowledge_base_ids, query)
+    logger.debug("=" * 70)
+    logger.debug("[CHAT] chat_id=%s | kb_ids=%s | query=%r", chat_id, knowledge_base_ids, query)
 
     _bot_message_id: int = 0
     _user_message_id: int = 0
@@ -529,7 +529,7 @@ async def generate_response(
         # rolling summary into the graph.
         prior_messages = messages["messages"][:-1]
 
-        logger.info("[CHAT] prior_messages=%d | delegating history to Redis checkpoint",
+        logger.debug("[CHAT] prior_messages=%d | delegating history to Redis checkpoint",
                     len(prior_messages))
 
         _bot_message_id = getattr(bot_message, "id", 0) or 0
@@ -564,7 +564,7 @@ async def generate_response(
         async for chunk in _process_stream_events(stream_iter, ctx, chat_id):
             yield chunk
 
-        logger.info("[CHAT] stream complete | response_length=%d chars", len(ctx.full_response))
+        logger.debug("[CHAT] stream complete | response_length=%d chars", len(ctx.full_response))
 
         _finalize_stream(bot_message, db, chat_id, ctx)
 

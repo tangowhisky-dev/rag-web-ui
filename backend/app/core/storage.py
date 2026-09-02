@@ -30,7 +30,7 @@ def save_file(object_path: str, content: bytes) -> None:
     abs_path = _base() / object_path
     abs_path.parent.mkdir(parents=True, exist_ok=True)
     abs_path.write_bytes(content)
-    logger.info(f"Saved file: {abs_path}")
+    logger.debug(f"Saved file: {abs_path}")
 
 
 async def save_file_stream(
@@ -52,7 +52,7 @@ async def save_file_stream(
             f.write(chunk)
             h.update(chunk)
             total += len(chunk)
-    logger.info(f"Saved file (streamed): {abs_path} ({total} bytes)")
+    logger.debug(f"Saved file (streamed): {abs_path} ({total} bytes)")
     return h.hexdigest(), total
 
 
@@ -62,7 +62,7 @@ def move_file(src_path: str, dst_path: str) -> None:
     dst = _base() / dst_path
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(src), str(dst))
-    logger.info(f"Moved file: {src} -> {dst}")
+    logger.debug(f"Moved file: {src} -> {dst}")
 
 
 def delete_file(object_path: str) -> None:
@@ -70,7 +70,7 @@ def delete_file(object_path: str) -> None:
     abs_path = _base() / object_path
     try:
         abs_path.unlink()
-        logger.info(f"Deleted file: {abs_path}")
+        logger.debug(f"Deleted file: {abs_path}")
     except FileNotFoundError:
         logger.warning(f"File not found (skip delete): {abs_path}")
 
@@ -85,9 +85,9 @@ def delete_kb_files(user_id: int, kb_id: int) -> None:
     kb_dir = _base() / f"user_{user_id}" / f"kb_{kb_id}"
     if kb_dir.exists():
         shutil.rmtree(kb_dir)
-        logger.info(f"Deleted KB directory: {kb_dir}")
+        logger.debug(f"Deleted KB directory: {kb_dir}")
     else:
-        logger.info(f"KB directory not found (nothing to delete): {kb_dir}")
+        logger.debug(f"KB directory not found (nothing to delete): {kb_dir}")
 
 
 def list_files(prefix: str) -> list[str]:
@@ -128,7 +128,7 @@ def save_ephemeral_file(chat_id: int, filename: str, content: bytes) -> str:
         candidate = d / f"{stem}_{counter}{suffix}"
         counter += 1
     candidate.write_bytes(content)
-    logger.info("[chat_files] saved ephemeral file: %s", candidate)
+    logger.debug("[chat_files] saved ephemeral file: %s", candidate)
     return str(candidate)
 
 
@@ -138,6 +138,6 @@ def delete_ephemeral_chat_files(chat_id: int) -> None:
     d = _base() / "ephemeral" / str(chat_id)
     if d.exists():
         shutil.rmtree(d)
-        logger.info("[chat_files] deleted ephemeral dir: %s", d)
+        logger.debug("[chat_files] deleted ephemeral dir: %s", d)
     else:
         logger.debug("[chat_files] ephemeral dir not found (skip): %s", d)

@@ -55,7 +55,7 @@ class DeleteMixin:
             )
         except UnexpectedResponse as e:
             if "404" in str(e):
-                logger.info(
+                logger.debug(
                     "[WATCHER] Qdrant vectors already gone for document_id=%s",
                     doc_id,
                 )
@@ -104,7 +104,7 @@ class DeleteMixin:
             db.query(DocumentChunk).filter(DocumentChunk.document_id == doc.id).delete()
             db.query(ProcessingTask).filter(ProcessingTask.document_id == doc.id).delete()
             db.delete(doc)
-            logger.info(
+            logger.debug(
                 "[WATCHER] document_deleted path=%s datastore_id=%s doc_id=%s",
                 event_path,
                 datastore_id,
@@ -128,7 +128,7 @@ class DeleteMixin:
             try:
                 from app.services.graph import delete_graph_for_document
                 delete_graph_for_document(kb_id=None, document_id=doc_id, data_store_id=datastore_id)
-                logger.info(
+                logger.debug(
                     "[WATCHER] Neo4j cleanup done for document_id=%s",
                     doc_id,
                 )
@@ -179,7 +179,7 @@ class DeleteMixin:
                     db.query(DocumentChunk).filter(DocumentChunk.document_id == doc.id).delete()
                     db.query(ProcessingTask).filter(ProcessingTask.document_id == doc.id).delete()
                     db.delete(doc)
-                    logger.info(
+                    logger.debug(
                         "[WATCHER] document_deleted path=%s kb_id=%s doc_id=%s",
                         event_path,
                         kb_id,
@@ -195,7 +195,7 @@ class DeleteMixin:
                 try:
                     from app.services.graph import delete_graph_for_document
                     delete_graph_for_document(kb_id=kb_id, document_id=doc_id)
-                    logger.info(
+                    logger.debug(
                         "[WATCHER] Neo4j cleanup done for kb_id=%s doc_id=%s",
                         kb_id, doc_id,
                     )
@@ -215,7 +215,7 @@ class DeleteMixin:
         For DataStore files: delete the document for this datastore and its Qdrant vectors.
         For KB files: delete from all KBs for the org and their Qdrant vectors.
         """
-        logger.info(
+        logger.debug(
             "[WATCHER] file_deleted path=%s datastore_id=%s",
             event_path,
             datastore_id,

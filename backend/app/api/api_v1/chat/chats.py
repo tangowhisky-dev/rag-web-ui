@@ -116,7 +116,7 @@ def search_chats(
         r.id for r in db.query(Chat.id).filter(_chat_owner_filter(current_user)).all()
     ]
     if not chat_ids:
-        logger.info("[SEARCH] query=%r result_count=0 latency_ms=0 mode=%s", q, mode)
+        logger.debug("[SEARCH] query=%r result_count=0 latency_ms=0 mode=%s", q, mode)
         return []
 
     from sqlalchemy import bindparam as _bp

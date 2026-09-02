@@ -261,11 +261,11 @@ async def reflect_final_node(state, ctx) -> dict:
         # Force ready when iteration cap OR wall-clock budget is reached — no
         # more retries possible/worthwhile.
         if not ready and (iteration >= max_iter or _wall_clock_exceeded(state)):
-            logger.info("[reflect_final_node] not ready but iteration/wall-clock cap reached (%d/%d) — forcing finalize", iteration, max_iter)
+            logger.debug("[reflect_final_node] not ready but iteration/wall-clock cap reached (%d/%d) — forcing finalize", iteration, max_iter)
             ready = True
             reasoning = f"Forced finalize at iteration/time cap. Pending issues: {reasoning}"
 
-        logger.info("[reflect_final_node] ready=%s reasoning=%s", ready, reasoning[:200])
+        logger.debug("[reflect_final_node] ready=%s reasoning=%s", ready, reasoning[:200])
 
         writer = _writer()
         writer({"event": "progress", "phase": "reflect_final", "ready": ready, "reasoning": reasoning})

@@ -86,7 +86,7 @@ class IngestionMixin:
                 logger.error("[WATCHER] requeue error for %s: %s", doc.file_path, e)
                 summary["errors"] += 1
         if requeued:
-            logger.info(
+            logger.debug(
                 "[WATCHER] requeued_stuck_tasks datastore_id=%d count=%d",
                 datastore_id, requeued,
             )
@@ -120,7 +120,7 @@ class IngestionMixin:
                 logger.error("[WATCHER] orphan_queue error for %s: %s", doc.file_path, e)
                 summary["errors"] += 1
         if orphan_queued:
-            logger.info(
+            logger.debug(
                 "[WATCHER] queued_orphan_selected datastore_id=%d count=%d",
                 datastore_id, orphan_queued,
             )
@@ -159,7 +159,7 @@ class IngestionMixin:
                 logger.error("[WATCHER] reprocess_queue error for %s: %s", doc.file_path, e)
                 summary["errors"] += 1
         if reprocess_queued:
-            logger.info(
+            logger.debug(
                 "[WATCHER] queued_needs_reprocess datastore_id=%d count=%d",
                 datastore_id, reprocess_queued,
             )
@@ -186,7 +186,7 @@ class IngestionMixin:
         # Acquire per-file advisory lock to prevent race with event-driven processing
         from app.services.datastore_watcher.utils import acquire_file_lock, release_file_lock
         if not acquire_file_lock(db, datastore_id, event_path):
-            logger.info("[WATCHER] file_locked path=%s — skipping (another process holds lock)", event_path)
+            logger.debug("[WATCHER] file_locked path=%s — skipping (another process holds lock)", event_path)
             db.close()
             return
         try:
@@ -227,7 +227,7 @@ class IngestionMixin:
             if existing:
                 # Skip if document was explicitly unselected by an admin
                 if not existing.is_selected:
-                    logger.info(
+                    logger.debug(
                         "[WATCHER] file_unselected path=%s doc_id=%s — skipping",
                         event_path, existing.id,
                     )
@@ -237,7 +237,7 @@ class IngestionMixin:
                 if existing.file_hash == file_hash:
                     # File unchanged - check if re-ingest was requested (markdown edited)
                     if existing.needs_reprocess:
-                        logger.info(
+                        logger.debug(
                             "[WATCHER] re_ingest_needs_reprocess path=%s doc_id=%s datastore_id=%s",
                             event_path, existing.id, datastore_id,
                         )
@@ -260,7 +260,7 @@ class IngestionMixin:
                         return
                     else:
                         # File unchanged but no chunks - re-ingest (ingestion likely failed)
-                        logger.info(
+                        logger.debug(
                             "[WATCHER] re_ingest_no_chunks path=%s doc_id=%s datastore_id=%s",
                             event_path,
                             existing.id,

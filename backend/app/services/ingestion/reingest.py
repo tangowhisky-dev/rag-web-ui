@@ -108,7 +108,7 @@ def reset_document_for_reingest(
 
     db.commit()
 
-    logger.info(
+    logger.debug(
         "[REINGEST] doc_id=%d chunks=%d qdrant=%d tasks=%d graph=%d",
         document_id, len(chunk_ids), qdrant_deleted, tasks_deleted, graph_deleted,
     )

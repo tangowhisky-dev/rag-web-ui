@@ -166,7 +166,7 @@ def search(
         ))
 
     latency_ms = int((time.monotonic() - t0) * 1000)
-    logger.info(
+    logger.debug(
         "[SEARCH] query=%r | kb_ids=%s | results=%d | latency=%dms",
         query[:80], body.kb_ids, len(results), latency_ms,
     )

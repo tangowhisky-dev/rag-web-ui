@@ -191,7 +191,7 @@ def extract_entities_from_query(query: str, db: Any = None, org_id: Any = None) 
         entities.append(Entity(name=name, type=etype))
 
     if entities:
-        logger.info(
+        logger.debug(
             "[ENTITY] extracted %d entities | query=%.80s | entities=%s",
             len(entities),
             query,
@@ -271,7 +271,7 @@ def expand_query_entities(
         logger.warning("[ENTITY] Neo4j expansion failed (non-fatal): %s", exc)
 
     if neighbors:
-        logger.info(
+        logger.debug(
             "[ENTITY] expanded %d query entities → %d Neo4j neighbors",
             len(entities), len(neighbors),
         )
@@ -342,7 +342,7 @@ def apply_entity_boost(
             ]
             boosted_count += 1
 
-    logger.info(
+    logger.debug(
         "[ENTITY] boost applied | boosted=%d/%d docs | factor=%.2f",
         boosted_count, len(docs), boost_factor,
     )

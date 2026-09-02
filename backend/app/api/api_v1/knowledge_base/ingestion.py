@@ -310,7 +310,7 @@ async def add_processing_tasks_to_queue(task_data, kb_id, user_id):
                 enable_ocr=data.get("enable_ocr"),
             )
         )
-    logger.info(f"Added {len(task_data)} document processing tasks to queue")
+    logger.debug(f"Added {len(task_data)} document processing tasks to queue")
 
 
 async def _process_and_graph(

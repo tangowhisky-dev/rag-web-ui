@@ -128,7 +128,7 @@ class RedisMemory:
         _db = SessionLocal()
         try:
             if not get_setting(_db, "MEMORY_ENABLED", None):
-                logger.info("[MEMORY] Memory persistence disabled; using in-memory fallback.")
+                logger.debug("[MEMORY] Memory persistence disabled; using in-memory fallback.")
                 self._checkpointer = MemorySaver()
                 self._store = InMemoryStore()
                 return
@@ -136,13 +136,13 @@ class RedisMemory:
             _db.close()
 
         if self._checkpointer is None:
-            logger.info("[MEMORY] Initialising Redis checkpointer | uri=%s", self._uri)
+            logger.debug("[MEMORY] Initialising Redis checkpointer | uri=%s", self._uri)
             try:
                 cp = AsyncRedisSaver(redis_url=self._uri)
                 self._checkpointer = await cp.__aenter__()
                 await self._checkpointer.asetup()
                 self._using_redis = True
-                logger.info("[MEMORY] Redis checkpointer ready")
+                logger.debug("[MEMORY] Redis checkpointer ready")
             except Exception as exc:
                 logger.warning(
                     "[MEMORY] Redis checkpointer init failed (%s); using in-memory fallback.",
@@ -151,7 +151,7 @@ class RedisMemory:
                 self._checkpointer = MemorySaver()
 
         if self._store is None:
-            logger.info("[MEMORY] Initialising Redis store | uri=%s", self._uri)
+            logger.debug("[MEMORY] Initialising Redis store | uri=%s", self._uri)
             # Embeddings API key/base are super_admin-only (app scope).
             from app.db.session import SessionLocal
             _db = SessionLocal()
@@ -179,7 +179,7 @@ class RedisMemory:
                 self._store = await st.__aenter__()
                 await self._store.setup()
                 self._using_redis = True
-                logger.info("[MEMORY] Redis semantic store ready | dims=%d", _get_embedding_dim())
+                logger.debug("[MEMORY] Redis semantic store ready | dims=%d", _get_embedding_dim())
             except Exception as exc:
                 logger.warning(
                     "[MEMORY] Redis semantic store init failed (%s); using in-memory fallback.",

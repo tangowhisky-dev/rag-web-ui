@@ -52,7 +52,7 @@ def delete_graph_for_document(
             """,
             doc_id=str(document_id),
         ).single()
-        logger.info(
+        logger.debug(
             "GraphService: deleted %d Chunk nodes for doc %d",
             rec["deleted"] if rec else 0, document_id,
         )
@@ -77,7 +77,7 @@ def delete_graph_for_document(
             kb_id=str(kb_id) if kb_id is not None else None,
             ds_id=str(data_store_id) if data_store_id is not None else None,
         ).single()
-        logger.info(
+        logger.debug(
             "GraphService: cleaned %d orphaned entity nodes after doc %d deletion",
             rec["cleaned"] if rec else 0, document_id,
         )
@@ -105,7 +105,7 @@ def delete_graph_for_kb(kb_id: int) -> None:
             """,
             kb_id=str(kb_id),
         ).single()
-        logger.info(
+        logger.debug(
             "GraphService: deleted %d inter-entity relationships for kb_%d",
             rec["deleted_rels"] if rec else 0, kb_id,
         )
@@ -121,7 +121,7 @@ def delete_graph_for_kb(kb_id: int) -> None:
             """,
             kb_id=str(kb_id),
         ).single()
-        logger.info(
+        logger.debug(
             "GraphService: deleted %d Chunk nodes (direct uploads only) for kb_%d",
             rec["deleted"] if rec else 0, kb_id,
         )
@@ -141,7 +141,7 @@ def delete_graph_for_kb(kb_id: int) -> None:
             """,
             kb_id=str(kb_id),
         ).single()
-        logger.info(
+        logger.debug(
             "GraphService: cleaned %d orphaned entity nodes after kb_%d deletion",
             rec["cleaned"] if rec else 0, kb_id,
         )
@@ -224,10 +224,10 @@ def purge_stale_graph_data(active_kb_ids: list[int]) -> None:
     if not stale_ids:
         return
 
-    logger.info("GraphService: found stale kb_ids in Neo4j not in MySQL: %s", stale_ids)
+    logger.debug("GraphService: found stale kb_ids in Neo4j not in MySQL: %s", stale_ids)
 
     for stale_id in stale_ids:
-        logger.info("GraphService: purging stale kb_%s in batches", stale_id)
+        logger.debug("GraphService: purging stale kb_%s in batches", stale_id)
 
         # Inter-entity rels stamped with this kb_id (usually small, single pass ok)
         with driver.session() as session:
@@ -235,13 +235,13 @@ def purge_stale_graph_data(active_kb_ids: list[int]) -> None:
                 "MATCH ()-[r {kb_id: $kb_id}]->() DELETE r RETURN count(r) AS n",
                 kb_id=stale_id,
             ).single()
-            logger.info("GraphService: purged %d inter-entity rels for stale kb_%s", r1["n"] if r1 else 0, stale_id)
+            logger.debug("GraphService: purged %d inter-entity rels for stale kb_%s", r1["n"] if r1 else 0, stale_id)
 
         # Chunk nodes in batches — each chunk can have hundreds of FROM_CHUNK
         # relationships, so deleting all at once blows the transaction memory limit.
         total_chunks = _batch_delete_chunks(driver, stale_id)
-        logger.info("GraphService: purged %d chunks for stale kb_%s", total_chunks, stale_id)
+        logger.debug("GraphService: purged %d chunks for stale kb_%s", total_chunks, stale_id)
 
         # Entity nodes scoped to this KB now orphaned — batch delete
         total_entities = _batch_delete_orphaned_entities(driver, stale_id)
-        logger.info("GraphService: purged %d orphaned entities for stale kb_%s", total_entities, stale_id)
+        logger.debug("GraphService: purged %d orphaned entities for stale kb_%s", total_entities, stale_id)

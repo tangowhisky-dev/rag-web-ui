@@ -71,7 +71,7 @@ class DispatchMixin:
             )
             return
         self._after_process(event.src_path)
-        logger.info(
+        logger.debug(
             "[WATCHER] event_detected path=%s datastore_id=%d event=created",
             event.src_path, datastore_id,
         )
@@ -90,7 +90,7 @@ class DispatchMixin:
             )
             return
         self._after_process(event.src_path)
-        logger.info(
+        logger.debug(
             "[WATCHER] event_detected path=%s datastore_id=%d event=modified",
             event.src_path, datastore_id,
         )
@@ -109,7 +109,7 @@ class DispatchMixin:
             )
             return
         self._after_process(event.src_path)
-        logger.info(
+        logger.debug(
             "[WATCHER] event_detected path=%s datastore_id=%d event=deleted",
             event.src_path, datastore_id,
         )
@@ -129,7 +129,7 @@ class DispatchMixin:
         if src_datastore_id is not None:
             if self._should_process(event.src_path):
                 self._after_process(event.src_path)
-                logger.info(
+                logger.debug(
                     "[WATCHER] event_detected path=%s datastore_id=%d event=moved_out",
                     event.src_path, src_datastore_id,
                 )
@@ -141,7 +141,7 @@ class DispatchMixin:
         if dest_datastore_id is not None:
             if self._should_process(event.dest_path):
                 self._after_process(event.dest_path)
-                logger.info(
+                logger.debug(
                     "[WATCHER] event_detected path=%s datastore_id=%d event=moved_in from=%s",
                     event.dest_path, dest_datastore_id, event.src_path,
                 )
@@ -154,7 +154,7 @@ class DispatchMixin:
                 )
         else:
             # File was moved to a path that doesn't belong to any datastore
-            logger.info(
+            logger.debug(
                 "[WATCHER] event_moved_out_of_watch path=%s datastore_id=%s reason=not_watched",
                 event.dest_path, src_datastore_id,
             )
@@ -182,7 +182,7 @@ class DispatchMixin:
                 return  # debounced
 
         # Delay processing by 1 second to allow file write to complete
-        logger.info(
+        logger.debug(
             "[WATCHER] event_queued path=%s event=%s reason=write_complete_delay",
             path, event_type,
         )

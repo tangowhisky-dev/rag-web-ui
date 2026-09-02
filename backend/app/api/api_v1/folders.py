@@ -27,7 +27,7 @@ def create_folder(
     db.add(folder)
     db.commit()
     db.refresh(folder)
-    logger.info("[FOLDER] action=create folder_id=%s user_id=%s", folder.id, current_user.id)
+    logger.debug("[FOLDER] action=create folder_id=%s user_id=%s", folder.id, current_user.id)
     return folder
 
 
@@ -55,7 +55,7 @@ def rename_folder(
         folder.name = folder_in.name
     db.commit()
     db.refresh(folder)
-    logger.info("[FOLDER] action=rename folder_id=%s user_id=%s", folder.id, current_user.id)
+    logger.debug("[FOLDER] action=rename folder_id=%s user_id=%s", folder.id, current_user.id)
     return folder
 
 
@@ -76,7 +76,7 @@ def delete_folder(
     ).update({"folder_id": None})
     db.delete(folder)
     db.commit()
-    logger.info("[FOLDER] action=delete folder_id=%s user_id=%s", folder_id, current_user.id)
+    logger.debug("[FOLDER] action=delete folder_id=%s user_id=%s", folder_id, current_user.id)
 
 
 @router.patch("/{folder_id}/chats/{chat_id}", response_model=dict)

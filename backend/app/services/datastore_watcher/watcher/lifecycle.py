@@ -66,7 +66,7 @@ class LifecycleMixin:
                 new_observer.schedule(self._handler, "/app/data", recursive=True)
                 with self._lock:
                     self._observer = new_observer
-                logger.info("[WATCHER] observer restarted successfully")
+                logger.debug("[WATCHER] observer restarted successfully")
 
                 # Trigger a scan for all active datastores to catch any
                 # file changes that happened while the observer was dead.
@@ -113,7 +113,7 @@ class LifecycleMixin:
                         "[WATCHER] post_restart_scan_failed datastore_id=%d: %s",
                         ds_id, e,
                     )
-            logger.info("[WATCHER] post_restart_scan_complete")
+            logger.debug("[WATCHER] post_restart_scan_complete")
 
         t = _threading.Thread(target=_scan_all, name="post-restart-scan", daemon=True)
         t.start()

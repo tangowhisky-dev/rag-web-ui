@@ -313,7 +313,7 @@ async def _llm_sufficiency_check(
             result = json.loads(block)
             sufficient = bool(result.get("sufficient", False))
             missing = str(result.get("missing", "")).strip()
-            logger.info(
+            logger.debug(
                 "[rag_retrieve] LLM sufficiency: sufficient=%s missing=%s",
                 sufficient, missing[:100] if missing else "(none)",
             )
@@ -396,7 +396,7 @@ async def _rewrite_query(
         raw = str(response.content).strip()
         rewritten, filter_suggestion = _parse_rewrite_response(raw, original_query)
         if rewritten != original_query or filter_suggestion:
-            logger.info("[rag_retrieve] query rewritten: '%s' -> '%s' filter=%s", original_query, rewritten, filter_suggestion)
+            logger.debug("[rag_retrieve] query rewritten: '%s' -> '%s' filter=%s", original_query, rewritten, filter_suggestion)
             return rewritten, filter_suggestion
     except Exception as exc:
         logger.warning("[rag_retrieve] query rewrite failed: %s", exc)
@@ -572,7 +572,7 @@ async def _run_retrieval_pass(
             )
             fast_accept = get_setting(ctx.db, "ADAPTIVE_RETRIEVAL_FAST_ACCEPT_SCORE", ctx.org_id)
             if best_score >= fast_accept:
-                logger.info("[rag_retrieve] fast-accept: best reranker score %.3f >= %.2f, skipping dense leg",
+                logger.debug("[rag_retrieve] fast-accept: best reranker score %.3f >= %.2f, skipping dense leg",
                             best_score, fast_accept)
                 run_dense = False
             else:
@@ -717,7 +717,7 @@ async def _run_relaxation_ladder(
         if sufficient:
             break
 
-        logger.info(
+        logger.debug(
             "[rag_retrieve] level %d insufficient (docs=%d confidence=%.2f missing=%s) — %s",
             i, len(docs), confidence, missing[:80] if missing else "(none)",
             "trying next relaxation level" if i < len(levels) - 1 else "no more levels",
@@ -797,7 +797,7 @@ async def _rag_retrieve(ctx: ToolContext, input_obj: RagRetrieveInput) -> dict:
     if doc_ids is not None:
         _emit_progress("filtering", f"Filtering to {len(doc_ids)} matching documents …")
         if not doc_ids:
-            logger.info("[rag_retrieve] filters matched 0 documents — returning empty")
+            logger.debug("[rag_retrieve] filters matched 0 documents — returning empty")
             return _empty_result(input_obj, t0, "filters matched 0 documents")
 
     all_levels = _relaxation_levels(ctx.db, ctx.org_id)

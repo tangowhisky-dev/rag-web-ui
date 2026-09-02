@@ -166,7 +166,7 @@ class DataStoreWatcher(
 
                 self._observer = PollingObserver(timeout=poll_interval)
                 self._observer.start()
-                logger.info(
+                logger.debug(
                     "[WATCHER] observer started (PollingObserver with "
                     "recursive=True, WATCH_POLL_INTERVAL=%ds, "
                     "WATCHER_USE_INOTIFY=%s)",
@@ -176,7 +176,7 @@ class DataStoreWatcher(
             else:
                 self._observer = Observer(timeout=poll_interval)
                 self._observer.start()
-                logger.info(
+                logger.debug(
                     "[WATCHER] observer started (Observer with recursive=True, "
                     "WATCHER_USE_INOTIFY=%s)",
                     settings.WATCHER_USE_INOTIFY,
@@ -210,7 +210,7 @@ class DataStoreWatcher(
                 logger.error("[WATCHER] failed to create /app/data: %s — watcher will not detect file changes", e)
                 return
         self._observer.schedule(self._handler, "/app/data", recursive=True)
-        logger.info("[WATCHER] observer registered on root=/app/data (recursive=True)")
+        logger.debug("[WATCHER] observer registered on root=/app/data (recursive=True)")
 
         self._sync_watchers_with_database()
 
@@ -224,7 +224,7 @@ class DataStoreWatcher(
         )
         self._health_thread.start()
 
-        logger.info("[WATCHER] service started")
+        logger.debug("[WATCHER] service started")
 
     def stop(self) -> None:
         """Stop the observer and shut down the thread pool."""
@@ -245,7 +245,7 @@ class DataStoreWatcher(
             self._handler.force_process_pending(datastore_id)
 
         self._executor.shutdown(wait=False, cancel_futures=True)
-        logger.info("[WATCHER] service stopped")
+        logger.debug("[WATCHER] service stopped")
 
     @property
     def is_running(self) -> bool:
@@ -279,7 +279,7 @@ class DataStoreWatcher(
         # org_id stays current after org reassignment.
         with self._datastore_paths_lock:
             if datastore_id in self._datastore_paths:
-                logger.info(
+                logger.debug(
                     "[WATCHER] add_datastore_already_watching datastore_id=%s — updating org_id",
                     datastore_id,
                 )
@@ -291,7 +291,7 @@ class DataStoreWatcher(
         with self._datastore_paths_lock:
             self._datastore_paths[datastore_id] = str(abs_path)
 
-        logger.info(
+        logger.debug(
             "[WATCHER] datastore_added datastore_id=%s path=%s interval=%dm",
             datastore_id,
             folder_path,
@@ -308,7 +308,7 @@ class DataStoreWatcher(
         # Remove from handler (flushes pending changes)
         self._handler.remove_folder(datastore_id)
 
-        logger.info("[WATCHER] datastore_removed datastore_id=%s", datastore_id)
+        logger.debug("[WATCHER] datastore_removed datastore_id=%s", datastore_id)
 
     def get_status(self) -> Dict[str, Any]:
         """Return current watcher state for the admin status endpoint."""

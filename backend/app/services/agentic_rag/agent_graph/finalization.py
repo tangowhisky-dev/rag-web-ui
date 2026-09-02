@@ -139,7 +139,7 @@ async def _stream_final_answer(
             {"role": "user", "content": user},
         ]):
             if ctx.chat_id is not None and is_cancelled(ctx.chat_id):
-                logger.info("[finalize_node] cancel detected, aborting LLM stream | chat_id=%d", ctx.chat_id)
+                logger.debug("[finalize_node] cancel detected, aborting LLM stream | chat_id=%d", ctx.chat_id)
                 break
             # Capture provider-reported usage when the backend sends
             # it, so reported tokens are measured rather than guessed.

@@ -169,7 +169,7 @@ def _get_vision_config() -> Optional[VisionConfig]:
         try:
             vision_model = get_setting(db, "VISION_MODEL", None)
             if not vision_model:
-                logger.info("[converter] OCR disabled — VISION_MODEL not set")
+                logger.debug("[converter] OCR disabled — VISION_MODEL not set")
                 return None
             api_key = (
                 get_setting(db, "VISION_API_KEY", None)
@@ -189,7 +189,7 @@ def _get_vision_config() -> Optional[VisionConfig]:
                 client=SyncOpenAI(api_key=api_key, base_url=api_base),
                 max_tokens=max_tokens,
             )
-            logger.info("[converter] OCR enabled — vision_model=%s base=%s max_tokens=%d", vision_model, api_base, max_tokens)
+            logger.debug("[converter] OCR enabled — vision_model=%s base=%s max_tokens=%d", vision_model, api_base, max_tokens)
             return _vision_config
         finally:
             db.close()
@@ -313,9 +313,9 @@ class AnydocEngine:
 
         cleaned = strip_reasoning_tags(markdown)
         if len(cleaned) < len(markdown):
-            logger.info("[anydoc] stripped %d chars of reasoning tags from %s",
+            logger.debug("[anydoc] stripped %d chars of reasoning tags from %s",
                         len(markdown) - len(cleaned), file_name)
-        logger.info("[anydoc] converted %s → %d chars of markdown (ocr=%s)",
+        logger.debug("[anydoc] converted %s → %d chars of markdown (ocr=%s)",
                     file_name, len(cleaned), enable_ocr is not False)
         return cleaned
 
@@ -336,7 +336,7 @@ class AnydocEngine:
         # 1. OCR pages flagged by pdf-inspector as scanned/image-based
         pages_needing_ocr = result.pages_needing_ocr or []
         if pages_needing_ocr:
-            logger.info("[anydoc] OCR'ing %d scanned pages in %s",
+            logger.debug("[anydoc] OCR'ing %d scanned pages in %s",
                         len(pages_needing_ocr), os.path.basename(abs_path))
             for page_num in pages_needing_ocr:
                 try:
@@ -353,7 +353,7 @@ class AnydocEngine:
         # 2. OCR embedded raster images (diagrams, figures)
         big_images = _detect_pdf_images(abs_path)
         if big_images:
-            logger.info("[anydoc] OCR'ing %d embedded images in %s",
+            logger.debug("[anydoc] OCR'ing %d embedded images in %s",
                         len(big_images), os.path.basename(abs_path))
 
             def _ocr_img(item):
@@ -520,10 +520,10 @@ class MarkitdownEngine:
                         llm_model=vision_model,
                         llm_prompt=_OCR_PROMPT,
                     )
-                    logger.info("[markitdown] OCR enabled — vision_model=%s base=%s", vision_model, api_base)
+                    logger.debug("[markitdown] OCR enabled — vision_model=%s base=%s", vision_model, api_base)
                 else:
                     self._singleton = self._MarkItDown()
-                    logger.info("[markitdown] OCR disabled — VISION_MODEL not set")
+                    logger.debug("[markitdown] OCR disabled — VISION_MODEL not set")
             finally:
                 db.close()
             return self._singleton
@@ -532,7 +532,7 @@ class MarkitdownEngine:
                 progress_cb: Optional[callable] = None) -> str:
         if enable_ocr is False:
             md_instance = self._MarkItDown()
-            logger.info("[markitdown] OCR disabled for this document (per-document override)")
+            logger.debug("[markitdown] OCR disabled for this document (per-document override)")
         elif enable_ocr is True:
             md_instance = self._get_singleton()
             config = _get_vision_config()
@@ -545,9 +545,9 @@ class MarkitdownEngine:
         markdown_text = result.text_content or ""
         cleaned = strip_reasoning_tags(markdown_text)
         if len(cleaned) < len(markdown_text):
-            logger.info("[markitdown] stripped %d chars of reasoning tags from %s",
+            logger.debug("[markitdown] stripped %d chars of reasoning tags from %s",
                         len(markdown_text) - len(cleaned), file_name)
-        logger.info("[markitdown] converted %s → %d chars of markdown (ocr=%s)",
+        logger.debug("[markitdown] converted %s → %d chars of markdown (ocr=%s)",
                     file_name, len(cleaned), enable_ocr is not False)
         return cleaned
 
@@ -580,7 +580,7 @@ def _get_engine() -> MarkdownEngine:
             db.close()
         engine_cls = _ENGINES.get(engine_name, AnydocEngine)
         _engine_instance = engine_cls()
-        logger.info("[converter] active engine: %s", _engine_instance.name)
+        logger.debug("[converter] active engine: %s", _engine_instance.name)
         return _engine_instance
 
 

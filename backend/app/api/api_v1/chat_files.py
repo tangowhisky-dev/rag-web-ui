@@ -75,7 +75,7 @@ async def _process_file(db_session_factory, file_id: int, tmp_path: str, filenam
             chat_file.markdown_content = markdown
             chat_file.token_count = token_count
             chat_file.status = "ready"
-            logger.info(
+            logger.debug(
                 "[chat_files] file_id=%d ready: %d tokens (%s)",
                 file_id, token_count, filename,
             )

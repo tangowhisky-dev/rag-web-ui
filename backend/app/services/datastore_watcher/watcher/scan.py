@@ -91,7 +91,7 @@ class ScanMixin:
                     # existing scan_id without re-adding it. This avoids the race
                     # condition where the scan thread re-init creates a new entry
                     # and the old entry (which SSE might be reading from) is lost.
-                    logger.info(
+                    logger.debug(
                         "[WATCHER] scan_already_initialized from POST handler scan_id=%d datastore_id=%d",
                         existing_scan[0], datastore_id,
                     )
@@ -109,7 +109,7 @@ class ScanMixin:
                         break
                 if stale_scan_id is not None:
                     self._active_scans.pop(stale_scan_id, None)
-                    logger.info(
+                    logger.debug(
                         "[WATCHER] cleanup_stale_scan_in_init scan_id=%d datastore_id=%d",
                         stale_scan_id, datastore_id,
                     )
@@ -132,7 +132,7 @@ class ScanMixin:
             # (which calls this scan endpoint) clears it.
             if ds.graph_ingestion_paused:
                 ds.graph_ingestion_paused = False
-                logger.info(
+                logger.debug(
                     "[WATCHER] graph_ingestion_resumed datastore_id=%d (cleared by scan init)",
                     datastore_id,
                 )
@@ -169,7 +169,7 @@ class ScanMixin:
                     .scalar()
                 ) or 0
                 ds.last_scan_processed = completed_count
-                logger.info(
+                logger.debug(
                     "[WATCHER] scan_resume scan_id=%d datastore_id=%d completed_before=%d total=%d",
                     scan_id, datastore_id, completed_count, selected_count,
                 )
@@ -197,7 +197,7 @@ class ScanMixin:
                     "skipped": 0,
                     "error_message": None,  # string error message from _complete_scan
                 }
-            logger.info(
+            logger.debug(
                 "[WATCHER] scan_init scan_id=%d datastore_id=%d selected_files=%d total_on_disk=%d status=running",
                 scan_id, datastore_id, selected_count, total_files_on_disk,
             )
@@ -205,7 +205,7 @@ class ScanMixin:
             with self._scan_futures_lock:
                 self._scan_futures[scan_id] = []
 
-            logger.info(
+            logger.debug(
                 "[WATCHER] added_scan_to_active_scans scan_id=%d datastore_id=%d",
                 scan_id, datastore_id,
             )
@@ -229,7 +229,7 @@ class ScanMixin:
             # the appropriate status. Do NOT overwrite it.
             current_status = ds.last_scan_status
             if current_status in ("paused", "idle"):
-                logger.info(
+                logger.debug(
                     "[WATCHER] complete_scan_skip datastore_id=%d status=%s — preserving",
                     datastore_id, current_status,
                 )
@@ -333,7 +333,7 @@ class ScanMixin:
             from app.services.ingestion.ingestion_dispatcher import cancel_graph_builds_for_datastore
             cancelled_graphs = cancel_graph_builds_for_datastore(datastore_id)
 
-            logger.info(
+            logger.debug(
                 "[WATCHER] scan_%s datastore_id=%d futures=%d graph_builds=%d",
                 "paused" if pause else "cancelled",
                 datastore_id, cancelled_futures, cancelled_graphs,
@@ -377,7 +377,7 @@ class ScanMixin:
                 with self._scan_futures_lock:
                     self._scan_futures.pop(sid, None)
         if stale_ids:
-            logger.info("[WATCHER] cleanup_stale_scans removed=%d", len(stale_ids))
+            logger.debug("[WATCHER] cleanup_stale_scans removed=%d", len(stale_ids))
 
     def _count_files_in_folder(self, folder_path: str, scan_pattern: str = "*") -> int:
         """Count files matching pattern in folder. Delegates to shared utility."""
@@ -594,7 +594,7 @@ class ScanMixin:
                                 reset_count += 1
                         if reset_count:
                             graph_db.commit()
-                            logger.info(
+                            logger.debug(
                                 "[WATCHER] graph_reset_failed scan_id=%d datastore_id=%d reset=%d",
                                 scan_id, datastore_id, reset_count,
                             )
@@ -613,7 +613,7 @@ class ScanMixin:
             scan_success = summary["errors"] == 0
             scan_error = f"{summary['errors']} file(s) failed ingestion" if not scan_success else None
             self._complete_scan(datastore_id, scan_success, error=scan_error)
-            logger.info(
+            logger.debug(
                 "[WATCHER] scan_complete scan_id=%d datastore_id=%d scanned=%d new=%d modified=%d skipped=%d errors=%d",
                 scan_id,
                 datastore_id,
@@ -680,14 +680,14 @@ class ScanMixin:
                 skipped_unselected += 1
 
         if skipped_unselected > 0:
-            logger.info(
+            logger.debug(
                 "[WATCHER] scan_filtered_unselected datastore_id=%d skipped=%d selected_to_process=%d",
                 datastore_id, skipped_unselected, len(filtered),
             )
 
         for fmeta in filtered:
             if self._is_scan_cancelled(datastore_id):
-                logger.info("[WATCHER] scan_cancelled mid-scan datastore_id=%d", datastore_id)
+                logger.debug("[WATCHER] scan_cancelled mid-scan datastore_id=%d", datastore_id)
                 self._complete_scan(datastore_id, False, "Scan cancelled by admin")
                 summary["errors"] = 1
                 return True
@@ -773,7 +773,7 @@ class ScanMixin:
         if not ingestion_futures:
             return
 
-        logger.info(
+        logger.debug(
             "[WATCHER] waiting_for_ingestion scan_id=%d datastore_id=%d tasks=%d",
             scan_id, datastore_id, len(ingestion_futures),
         )
@@ -827,7 +827,7 @@ class ScanMixin:
                 t.error_message = "Ingestion timed out or worker died"
             if stuck:
                 db.commit()
-                logger.info(
+                logger.debug(
                     "[WATCHER] marked_stuck_tasks_failed datastore_id=%d count=%d",
                     datastore_id, len(stuck),
                 )

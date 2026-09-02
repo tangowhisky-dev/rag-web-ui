@@ -209,7 +209,7 @@ def recovery_status_stream(
         while __import__('time').monotonic() - start_time < 5:
             scan, sid = _find_recovery_scan(recovery, datastore_id)
             if scan is not None:
-                logger.info(
+                logger.debug(
                     "[SSE] found recovery scan for datastore_id=%d scan_id=%d status=%s",
                     datastore_id, sid, scan.get("status"),
                 )
@@ -221,7 +221,7 @@ def recovery_status_stream(
             yield 'data: {"status": "waiting", "message": "Recovery scan starting..."}\n\n'
             await asyncio.sleep(0.5)
         else:
-            logger.info(
+            logger.debug(
                 "[SSE] recovery_scan_not_found_for_datastore datastore_id=%d",
                 datastore_id,
             )
@@ -233,7 +233,7 @@ def recovery_status_stream(
         scan, _ = _find_recovery_scan(recovery, datastore_id)
         if scan:
             initial_event = _build_recovery_event(scan)
-            logger.info(
+            logger.debug(
                 "[SSE] emitting_recovery_initial_event datastore_id=%d event=%s",
                 datastore_id, json.dumps(initial_event),
             )
@@ -251,7 +251,7 @@ def recovery_status_stream(
 
             if current_state != last_state:
                 event = _build_recovery_event(scan, status_default=None)
-                logger.info(
+                logger.debug(
                     "[SSE] emitting_recovery_event datastore_id=%d event=%s",
                     datastore_id, json.dumps(event),
                 )

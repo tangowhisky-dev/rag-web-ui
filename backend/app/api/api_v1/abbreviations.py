@@ -230,7 +230,7 @@ async def upload_abbreviation_list(
     db.refresh(lst)
 
     _invalidate_cache(org_id)
-    logger.info("[ABBREV] list uploaded id=%s name=%s rows=%d scope=%s", lst.id, name, len(rows), scope)
+    logger.debug("[ABBREV] list uploaded id=%s name=%s rows=%d scope=%s", lst.id, name, len(rows), scope)
     return UploadResponse(id=lst.id, name=lst.name, row_count=len(rows), message="Uploaded successfully")
 
 
@@ -276,7 +276,7 @@ def delete_abbreviation_list(
     db.delete(lst)
     db.commit()
     _invalidate_cache(org_id)
-    logger.info("[ABBREV] list deleted id=%s", list_id)
+    logger.debug("[ABBREV] list deleted id=%s", list_id)
 
 
 @router.get("/abbreviation-lists/{list_id}/abbreviations", response_model=AbbreviationPaginated)

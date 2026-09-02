@@ -52,7 +52,7 @@ class FolderMixin:
         # first filesystem event triggers _dispatch → _schedule_batch_timer.
         if min_interval_seconds > 0:
             self._schedule_batch_timer(datastore_id)
-        logger.info(
+        logger.debug(
             "[WATCHER] handler_folder_added datastore_id=%d path=%s",
             datastore_id, folder_path,
         )
@@ -65,7 +65,7 @@ class FolderMixin:
                 # Flush pending changes before removing the folder
                 changes = self.pending_changes.pop(datastore_id)
                 org_id = self.folder_paths.get(datastore_id, (None,))[0]
-                logger.info(
+                logger.debug(
                     "[WATCHER] handler_folder_removed datastore_id=%d flushing %d pending changes",
                     datastore_id, len(changes),
                 )
@@ -78,7 +78,7 @@ class FolderMixin:
                     )
             if datastore_id in self.folder_paths:
                 del self.folder_paths[datastore_id]
-        logger.info("[WATCHER] handler_folder_removed datastore_id=%s", datastore_id)
+        logger.debug("[WATCHER] handler_folder_removed datastore_id=%s", datastore_id)
 
     def _cancel_batch_timer(self, datastore_id: int) -> None:
         """Cancel the batch timer for a datastore if one is running."""

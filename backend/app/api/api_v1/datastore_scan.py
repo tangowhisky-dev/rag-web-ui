@@ -253,11 +253,11 @@ def scan_progress_stream(
         start_time = time.monotonic()
         while time.monotonic() - start_time < 5:
             if await request.is_disconnected():
-                logger.info("[SSE] client disconnected (wait phase) datastore_id=%d", datastore_id)
+                logger.debug("[SSE] client disconnected (wait phase) datastore_id=%d", datastore_id)
                 return
             scan_id, scan = _find_scan_for_datastore(watcher, datastore_id)
             if scan is not None:
-                logger.info(
+                logger.debug(
                     "[SSE] found scan for datastore_id=%d scan_id=%d status=%s",
                     datastore_id, scan_id, scan.get("status"),
                 )
@@ -269,7 +269,7 @@ def scan_progress_stream(
             yield 'data: {"status": "waiting", "message": "Scan starting..."}\n\n'
             await asyncio.sleep(0.5)
         else:
-            logger.info(
+            logger.debug(
                 "[SSE] scan_not_found_for_datastore datastore_id=%d",
                 datastore_id,
             )
@@ -289,7 +289,7 @@ def scan_progress_stream(
         _, scan = _find_scan_for_datastore(watcher, datastore_id)
         if scan:
             initial_event = _build_scan_event(scan)
-            logger.info(
+            logger.debug(
                 "[SSE] emitting_initial_event datastore_id=%d event=%s",
                 datastore_id, json.dumps(initial_event),
             )
@@ -300,7 +300,7 @@ def scan_progress_stream(
 
         while True:
             if await request.is_disconnected():
-                logger.info("[SSE] client disconnected datastore_id=%d", datastore_id)
+                logger.debug("[SSE] client disconnected datastore_id=%d", datastore_id)
                 break
 
             _, scan = _find_scan_for_datastore(watcher, datastore_id)
@@ -322,7 +322,7 @@ def scan_progress_stream(
             # Only emit if something changed since last event
             if current_state != last_state:
                 event = _build_scan_event(scan, default_status=None)
-                logger.info(
+                logger.debug(
                     "[SSE] emitting_event datastore_id=%d event=%s",
                     datastore_id, json.dumps(event),
                 )
@@ -433,7 +433,7 @@ def pause_graph_ingestion(
     from app.services.ingestion.ingestion_dispatcher import cancel_graph_builds_for_datastore
     cancelled = cancel_graph_builds_for_datastore(datastore_id)
 
-    logger.info(
+    logger.debug(
         "[DATASTORE] graph_ingestion_paused id=%d cancelled_graph_builds=%d",
         datastore_id, cancelled,
     )
@@ -489,7 +489,7 @@ def resume_graph_ingestion(
     recovery = StartupRecoveryService()
     recovery._retry_pending_graph_builds(datastore_id)
 
-    logger.info(
+    logger.debug(
         "[DATASTORE] graph_ingestion_resumed id=%d reset_failed=%d",
         datastore_id, reset_count,
     )
@@ -503,7 +503,7 @@ def resume_graph_ingestion(
 def _check_watcher_scan_running(watcher, datastore_id: int) -> None:
     """Raise 409 if a scan is already running in the watcher's active scans."""
     try:
-        logger.info(
+        logger.debug(
             "[DATASTORE] scan_check datastore_id=%d active_scans=%s",
             datastore_id, list(watcher._active_scans.items()),
         )
@@ -533,12 +533,12 @@ def _cleanup_stale_scans_for_datastore(watcher, datastore_id: int) -> None:
         if stale_scan_id is not None:
             watcher._active_scans.pop(stale_scan_id, None)
     if stale_scan_id is not None:
-        logger.info(
+        logger.debug(
             "[DATASTORE] cleanup_stale_scan scan_id=%d datastore_id=%d",
             stale_scan_id, datastore_id,
         )
     else:
-        logger.info(
+        logger.debug(
             "[DATASTORE] no_stale_scan_for_datastore datastore_id=%d active_scans=%s",
             datastore_id, list(watcher._active_scans.keys()),
         )
@@ -712,13 +712,13 @@ async def trigger_datastore_scan(
             ds_fresh = db_session.query(DataStore).filter(DataStore.id == datastore_id).first()
             current_status = ds_fresh.last_scan_status if ds_fresh else "unknown"
             if current_status in ("paused", "idle"):
-                logger.info(
+                logger.debug(
                     "[DATASTORE] scan_thread_exit id=%d status=%s — preserving status, not overwriting",
                     datastore_id, current_status,
                 )
             else:
                 _apply_scan_results_to_db(ds_local, result, latest_file_count, db_session)
-            logger.info(
+            logger.debug(
                 "[DATASTORE] scan_complete id=%d scanned=%d new=%d modified=%d skipped=%d errors=%d",
                 datastore_id,
                 result.get("scanned", 0),

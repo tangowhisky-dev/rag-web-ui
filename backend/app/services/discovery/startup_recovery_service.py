@@ -81,7 +81,7 @@ class StartupRecoveryService:
 
         Called from ``startup_event()`` after the database is ready.
         """
-        logger.info("[RECOVERY] StartupRecoveryService.start() invoked")
+        logger.debug("[RECOVERY] StartupRecoveryService.start() invoked")
         db: Session = SessionLocal()
         try:
             active = db.query(DataStore).filter(DataStore.is_active == True).all()  # noqa: E712
@@ -95,7 +95,7 @@ class StartupRecoveryService:
             db.close()
 
         if not active:
-            logger.info("[RECOVERY] No active DataStores found — skipping recovery")
+            logger.debug("[RECOVERY] No active DataStores found — skipping recovery")
             return
 
         for ds in active:
@@ -146,7 +146,7 @@ class StartupRecoveryService:
                     task_db.close()
 
             if should_discover:
-                logger.info(
+                logger.debug(
                     "[RECOVERY] recovery_start datastore_id=%s name=%s reason=%s",
                     ds.id, ds.name, reason,
                 )
@@ -168,7 +168,7 @@ class StartupRecoveryService:
             else:
                 # No discovery needed, but still retry pending graph builds
                 # from any previously completed scan.
-                logger.info(
+                logger.debug(
                     "[RECOVERY] skip_discovery datastore_id=%s name=%s — no interrupted work, checking graph builds only",
                     ds.id, ds.name,
                 )
@@ -176,7 +176,7 @@ class StartupRecoveryService:
 
     def stop(self) -> None:
         """Signal shutdown and stop accepting new work."""
-        logger.info("[RECOVERY] stop() invoked — setting _running=False")
+        logger.debug("[RECOVERY] stop() invoked — setting _running=False")
         self._running = False
         self.executor.shutdown(wait=False)
 
@@ -284,7 +284,7 @@ class StartupRecoveryService:
 
             if backfilled > 0:
                 db.commit()
-                logger.info(
+                logger.debug(
                     "[RECOVERY] conversion_status_backfill datastore_id=%s count=%d",
                     datastore_id, backfilled,
                 )
@@ -457,7 +457,7 @@ class StartupRecoveryService:
 
     def _finalize_recovery(self, datastore_id: int, scan_id: int, total_to_process: int, completed_count: int) -> None:
         self._active_scans[scan_id]["status"] = "complete"
-        logger.info(
+        logger.debug(
             "[RECOVERY] recovery_complete datastore_id=%s scan_id=%s total=%d processed=%d",
             datastore_id, scan_id, total_to_process, completed_count,
         )
@@ -471,7 +471,7 @@ class StartupRecoveryService:
                 # those belong to manual scans.  Recovery progress is shown
                 # in the Recovery column via the recovery-status endpoint.
                 db2.commit()
-                logger.info(
+                logger.debug(
                     "[RECOVERY] recovery_timestamp_set datastore_id=%s last_recovered_at=%s",
                     datastore_id, ds_record.last_recovered_at.isoformat(),
                 )
@@ -498,7 +498,7 @@ class StartupRecoveryService:
                     ds_record.last_recovered_at = recovered_at
                     self._active_scans[scan_id]["last_recovered_at"] = recovered_at.isoformat()
                     db3.commit()
-                    logger.info(
+                    logger.debug(
                         "[RECOVERY] recovery_timestamp_set datastore_id=%s last_recovered_at=%s reason=error",
                         datastore_id, ds_record.last_recovered_at.isoformat(),
                     )
@@ -535,7 +535,7 @@ class StartupRecoveryService:
             finally:
                 db.close()
 
-            logger.info(
+            logger.debug(
                 "[RECOVERY] discovery_complete datastore_id=%s scan_id=%s new=%d modified=%d deleted=%d total=%d elapsed_ms=%.1f",
                 datastore_id, scan_id,
                 len(result.new_files), len(result.modified_files),
@@ -574,7 +574,7 @@ class StartupRecoveryService:
             if requeued_futures:
                 total_to_process += len(requeued_futures)
                 self._active_scans[scan_id]["total_files"] = total_to_process
-                logger.info(
+                logger.debug(
                     "[RECOVERY] requeued_failed_tasks datastore_id=%s count=%d",
                     datastore_id, len(requeued_futures),
                 )
@@ -641,7 +641,7 @@ class StartupRecoveryService:
             if doc:
                 # Skip if document was explicitly unselected by an admin
                 if not doc.is_selected:
-                    logger.info(
+                    logger.debug(
                         "[RECOVERY] file_unselected path=%s doc_id=%s — skipping",
                         file_path, doc.id,
                     )
@@ -671,13 +671,13 @@ class StartupRecoveryService:
                         existing_task.error_message = None
                         existing_task.updated_at = datetime.now(timezone.utc)
                         task_id = int(existing_task.id)
-                        logger.info(
+                        logger.debug(
                             "[RECOVERY] reused_task task_id=%s doc_id=%s",
                             existing_task.id, doc.id,
                         )
                     else:
                         # Has an active task (pending/processing) — skip
-                        logger.info(
+                        logger.debug(
                             "[RECOVERY] skip_file_already_handled datastore_id=%s file_path=%s doc_id=%s task_id=%s",
                             datastore_id, file_path, doc.id, existing_task.id,
                         )
@@ -689,7 +689,7 @@ class StartupRecoveryService:
                     doc.updated_at = datetime.now(timezone.utc)
                     db.flush()
                     task_id = None  # signal below to create new task
-                    logger.info(
+                    logger.debug(
                         "[RECOVERY] ingestion_queued datastore_id=%s file_path=%s doc_id=%s (new)",
                         datastore_id, file_path, doc.id,
                     )
@@ -703,7 +703,7 @@ class StartupRecoveryService:
                 ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
                 auto_select = ds.auto_process_enabled if ds else False
                 if not auto_select:
-                    logger.info(
+                    logger.debug(
                         "[RECOVERY] skip_new_file_manual_ds path=%s — not selected",
                         file_path,
                     )
@@ -723,7 +723,7 @@ class StartupRecoveryService:
                 db.add(doc)
                 db.flush()
                 task_id = None
-                logger.info(
+                logger.debug(
                     "[RECOVERY] ingestion_queued datastore_id=%s file_path=%s doc_id=%s (new)",
                     datastore_id, file_path, doc.id,
                 )
@@ -824,7 +824,7 @@ class StartupRecoveryService:
                 exc,
             )
         else:
-            logger.info(
+            logger.debug(
                 "[RECOVERY] ingestion_completed task_id=%s path=%s",
                 task_id,
                 file_path,
@@ -884,7 +884,7 @@ class StartupRecoveryService:
         vectors, Neo4j graph, and manifest entry.  Silently skips if the
         Document is already gone (no orphaned records to clean).
         """
-        logger.info("[RECOVERY] deletion_start datastore_id=%s file_path=%s", datastore_id, file_path)
+        logger.debug("[RECOVERY] deletion_start datastore_id=%s file_path=%s", datastore_id, file_path)
         db: Session = SessionLocal()
         try:
             doc = (
@@ -893,7 +893,7 @@ class StartupRecoveryService:
                 .first()
             )
             if not doc:
-                logger.info(
+                logger.debug(
                     "[RECOVERY] deletion_skip datastore_id=%s file_path=%s reason=doc_not_found",
                     datastore_id, file_path,
                 )
@@ -916,7 +916,7 @@ class StartupRecoveryService:
             db.query(DocumentChunk).filter(DocumentChunk.document_id == doc.id).delete(synchronize_session=False)
             db.query(ProcessingTask).filter(ProcessingTask.document_id == doc.id).delete(synchronize_session=False)
             db.query(Document).filter(Document.id == doc.id).delete(synchronize_session=False)
-            logger.info("[RECOVERY] document_deleted datastore_id=%s doc_id=%s file_path=%s", datastore_id, doc_id, file_path)
+            logger.debug("[RECOVERY] document_deleted datastore_id=%s doc_id=%s file_path=%s", datastore_id, doc_id, file_path)
 
             # Delete DataStoreFileManifest entry
             manifest = (
@@ -926,7 +926,7 @@ class StartupRecoveryService:
             )
             if manifest:
                 db.delete(manifest)
-                logger.info("[RECOVERY] manifest_deleted datastore_id=%s file_path=%s", datastore_id, file_path)
+                logger.debug("[RECOVERY] manifest_deleted datastore_id=%s file_path=%s", datastore_id, file_path)
 
             db.commit()
 
@@ -942,7 +942,7 @@ class StartupRecoveryService:
                         collection_name=f"ds_{datastore_id}",
                         points_selector=models.PointIdsList(points=point_ids),
                     )
-                logger.info("[RECOVERY] deletion_done datastore_id=%s doc_id=%s reason=qdrant_vectors_deleted", datastore_id, doc_id)
+                logger.debug("[RECOVERY] deletion_done datastore_id=%s doc_id=%s reason=qdrant_vectors_deleted", datastore_id, doc_id)
             except Exception as e:
                 logger.warning("[RECOVERY] Qdrant delete failed for doc_id=%s: %s", doc_id, e)
 
@@ -950,7 +950,7 @@ class StartupRecoveryService:
             try:
                 from app.services.graph import delete_graph_for_document  # noqa: T100
                 delete_graph_for_document(kb_id=None, document_id=doc_id, data_store_id=datastore_id)
-                logger.info("[RECOVERY] deletion_done datastore_id=%s doc_id=%s reason=neo4j_cleanup", datastore_id, doc_id)
+                logger.debug("[RECOVERY] deletion_done datastore_id=%s doc_id=%s reason=neo4j_cleanup", datastore_id, doc_id)
             except Exception as e:
                 logger.warning("[RECOVERY] Neo4j cleanup failed for doc_id=%s: %s", doc_id, e)
 
@@ -1032,7 +1032,7 @@ class StartupRecoveryService:
                 task_id=task.id,
             )
             _start_graph_build_thread(req)
-            logger.info(
+            logger.debug(
                 "[RECOVERY] graph_retry_queued task_id=%s doc_id=%s",
                 task.id, doc.id,
             )
@@ -1053,7 +1053,7 @@ class StartupRecoveryService:
             # Check if graph ingestion is paused for this datastore
             ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
             if ds is not None and ds.graph_ingestion_paused:
-                logger.info(
+                logger.debug(
                     "[RECOVERY] graph_retry_skip datastore_id=%s — graph ingestion paused",
                     datastore_id,
                 )
@@ -1084,7 +1084,7 @@ class StartupRecoveryService:
         if not retryable:
             return
 
-        logger.info(
+        logger.debug(
             "[RECOVERY] graph_retry_start datastore_id=%s count=%d (skipped=%d)",
             datastore_id, len(retryable), len(tasks) - len(retryable),
         )

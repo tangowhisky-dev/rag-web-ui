@@ -49,7 +49,7 @@ def create_knowledge_base(
     db.add(kb)
     db.commit()
     db.refresh(kb)
-    logger.info(f"Knowledge base created: {kb.name} for user {current_user.id}")
+    logger.debug(f"Knowledge base created: {kb.name} for user {current_user.id}")
     return kb
 
 @router.get("", response_model=List[KnowledgeBaseResponse])
@@ -247,7 +247,7 @@ def update_knowledge_base(
     db.add(kb)
     db.commit()
     db.refresh(kb)
-    logger.info(f"Knowledge base updated: {kb.name} for user {current_user.id}")
+    logger.debug(f"Knowledge base updated: {kb.name} for user {current_user.id}")
     return kb
 
 @router.delete("/{kb_id}")
