@@ -26,6 +26,7 @@ import {
   TaskItem,
 } from "@/components/ai-elements/task";
 import { Shimmer } from "@/components/ai-elements/shimmer";
+import { Suggestions, Suggestion } from "@/components/ai-elements/suggestion";
 import {
   Popover,
   PopoverContent,
@@ -615,11 +616,16 @@ export const Answer: FC<{
   plan?: Record<string, unknown>;
   toolCalls?: Array<Record<string, unknown>>;
   toolObservations?: Array<Record<string, unknown>>;
-  lastAnswerObject?: Record<string, unknown>;
+  lastAnswerObject?: {
+    followups?: string[];
+    retry_strategy?: string;
+    suggestion?: string;
+    [key: string]: unknown;
+  };
   chartOption?: Record<string, unknown>;
   chartOptions?: Array<Record<string, unknown>>;
   onFollowUp?: (query: string) => void;
-}> = React.memo(({ messageId, chatId, markdown, citations = [], rewrittenQuery, confidence, confidenceScore, suggestion, failedLegs, agentSteps, taskList, progressMessages, isStreaming = false, onDelete, finalConfidence, finalConfidenceLevel, faithfulness, completeness, retrievalScore, toolCalls, toolObservations, chartOption, chartOptions, onFollowUp }) => {
+}> = React.memo(({ messageId, chatId, markdown, citations = [], rewrittenQuery, confidence, confidenceScore, suggestion, failedLegs, agentSteps, taskList, progressMessages, isStreaming = false, onDelete, finalConfidence, finalConfidenceLevel, faithfulness, completeness, retrievalScore, toolCalls, toolObservations, chartOption, chartOptions, lastAnswerObject, onFollowUp }) => {
   const [citationInfoMap, setCitationInfoMap] = useState<
     Record<string, CitationInfo>
   >({});
@@ -953,6 +959,24 @@ export const Answer: FC<{
               </span>
             )}
           </div>
+        </div>
+      )}
+
+      {/* ── Follow-up suggestions ─────────────────────────────────────────── */}
+      {!isStreaming && lastAnswerObject?.followups && Array.isArray(lastAnswerObject.followups) && lastAnswerObject.followups.length > 0 && onFollowUp && (
+        <div className="mt-3 not-prose">
+          {typeof lastAnswerObject.retry_strategy === "string" && lastAnswerObject.retry_strategy && (
+            <span className="text-xs text-muted-foreground mr-2">
+              {lastAnswerObject.retry_strategy === "widen" ? "Try a broader search:" :
+               lastAnswerObject.retry_strategy === "narrow" ? "Try a narrower search:" :
+               lastAnswerObject.retry_strategy === "pinpoint" ? "Look up this exact ID:" : ""}
+            </span>
+          )}
+          <Suggestions>
+            {(lastAnswerObject.followups as string[]).map((s: string, i: number) => (
+              <Suggestion key={i} suggestion={s} onClick={onFollowUp} />
+            ))}
+          </Suggestions>
         </div>
       )}
 

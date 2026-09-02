@@ -697,10 +697,18 @@ Extract a structured summary from the assistant answer below. Return valid JSON 
   "data": [{{"label": "...", "value": 123, "unit": "...", "context": "..."}}],
   "citations": [{{"document_id": 1, "chunk_index": 0}}],
   "chart_option": null or {{ ... }},
-  "followups": ["..."]
+  "followups": ["..."],
+  "suggestion": "one-line assessment of answer completeness, or empty string",
+  "retry_strategy": "widen|narrow|pinpoint|"
 }}
 
 If the answer contains no numbers, set data to []. If no chart, set chart_option to null. Keep key_points to at most 8 bullets.
+
+For followups: generate 1-3 specific follow-up questions the user might ask next based on the answer. Each should be a self-contained question. Empty list if the answer is definitive.
+
+For suggestion: one sentence assessing whether the answer fully addresses the query, and what might be missing. Empty string if the answer is complete.
+
+For retry_strategy: "widen" if the answer is too narrow and a broader search would help, "narrow" if the answer is too broad and the user should search more specifically, "pinpoint" if the user should look up an exact identifier, or empty string if no retry is needed.
 
 Answer:
 {answer}

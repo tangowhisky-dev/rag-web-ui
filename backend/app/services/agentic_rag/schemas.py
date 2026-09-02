@@ -68,6 +68,8 @@ class LastAnswerObject(BaseModel):
     chart_option: Optional[dict] = Field(default=None, description="Deprecated: first entry of chart_options, kept for backward compatibility with older stored messages.")
     chart_options: List[dict] = Field(default_factory=list, description="ECharts option JSON for each chart_generate call this turn, if any.")
     followups: List[str] = Field(default_factory=list, description="Suggested follow-up questions.")
+    suggestion: str = Field(default="", description="One-line assessment of answer completeness, or empty string.")
+    retry_strategy: str = Field(default="", description="Suggestion label: widen|narrow|pinpoint|")
 
 
 class Subtask(BaseModel):
