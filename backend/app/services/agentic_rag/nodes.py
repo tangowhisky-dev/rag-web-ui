@@ -206,6 +206,134 @@ def _lookup_cited_titles(lao: Any, db: Any) -> list[str]:
     return []
 
 
+# ---------------------------------------------------------------------------
+# Negation extraction (regex-only, DE/EN/FR/IT — ported from retrievalagent)
+# ---------------------------------------------------------------------------
+
+_NEGATION_PATTERNS = [
+    # German: "aber nicht (von) X", "nicht von X", "ohne X", "ausser X", "außer X", "keine X"
+    re.compile(
+        r"\baber\s+nicht\s+(?:(?:von|der|aus|mit|von\s+der)\s+)?([^\s,.;:!?]+(?:\s+[A-Za-z0-9][^\s,.;:!?]*){0,2})",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bnicht\s+(?:von|der|von der|aus|mit)\s+([^\s,.;:!?]+(?:\s+[A-Za-z0-9][^\s,.;:!?]*){0,2})",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bohne\s+([^\s,.;:!?]+(?:\s+[A-Za-z0-9][^\s,.;:!?]*){0,2})", re.IGNORECASE
+    ),
+    re.compile(
+        r"\b(?:auss?er|außer)\s+([^\s,.;:!?]+(?:\s+[A-Za-z0-9][^\s,.;:!?]*){0,2})",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bkeine?\s+([^\s,.;:!?]+(?:\s+[A-Za-z0-9][^\s,.;:!?]*){0,2})", re.IGNORECASE
+    ),
+    # English: "but not X", "not from X", "without X", "except X"
+    re.compile(
+        r"\bbut\s+not\s+(?:from\s+)?([^\s,.;:!?]+(?:\s+[A-Za-z0-9][^\s,.;:!?]*){0,2})",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bnot\s+from\s+([^\s,.;:!?]+(?:\s+[A-Za-z0-9][^\s,.;:!?]*){0,2})",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bwithout\s+([^\s,.;:!?]+(?:\s+[A-Za-z0-9][^\s,.;:!?]*){0,2})", re.IGNORECASE
+    ),
+    re.compile(
+        r"\bexcept\s+(?:for\s+)?([^\s,.;:!?]+(?:\s+[A-Za-z0-9][^\s,.;:!?]*){0,2})",
+        re.IGNORECASE,
+    ),
+    # French: "sans X", "mais pas X"
+    re.compile(
+        r"\bsans\s+([^\s,.;:!?]+(?:\s+[A-Za-z0-9][^\s,.;:!?]*){0,2})", re.IGNORECASE
+    ),
+    re.compile(
+        r"\bmais\s+pas\s+(?:de\s+)?([^\s,.;:!?]+(?:\s+[A-Za-z0-9][^\s,.;:!?]*){0,2})",
+        re.IGNORECASE,
+    ),
+    # Italian: "ma non X", "senza X"
+    re.compile(
+        r"\bma\s+non\s+([^\s,.;:!?]+(?:\s+[A-Za-z0-9][^\s,.;:!?]*){0,2})",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bsenza\s+([^\s,.;:!?]+(?:\s+[A-Za-z0-9][^\s,.;:!?]*){0,2})", re.IGNORECASE
+    ),
+]
+
+_NEGATION_STOP = frozenset({
+    "der", "die", "das", "den", "dem", "des", "ein", "eine", "einem", "einen",
+    "the", "a", "an", "of", "from", "this", "that", "these", "those",
+    "le", "la", "les", "un", "une", "du", "de", "il", "lo", "i", "gli", "una",
+})
+
+_NEGATION_HALT = frozenset({
+    "aber", "und", "oder", "but", "and", "or", "mais", "ou", "et", "ma", "o", "e",
+})
+
+
+def _extract_negation_terms(query: str) -> list[str]:
+    """Deterministic regex negation extractor (DE/EN/FR/IT).
+
+    Returns excluded terms (1-3 words each, stopwords stripped).
+    Zero latency, no LLM call.
+    """
+    if not query:
+        return []
+    raw: list[str] = []
+    seen_lc: set[str] = set()
+    for pat in _NEGATION_PATTERNS:
+        for m in pat.finditer(query):
+            term = (m.group(1) or "").strip(" ,.;:!?\"'()[]")
+            if not term:
+                continue
+            tokens = term.split()
+            while tokens and tokens[0].lower() in _NEGATION_STOP:
+                tokens = tokens[1:]
+            for i, tok in enumerate(tokens):
+                if tok.lower() in _NEGATION_HALT:
+                    tokens = tokens[:i]
+                    break
+            if not tokens:
+                continue
+            term = " ".join(tokens)
+            key = term.lower()
+            if key in seen_lc:
+                continue
+            seen_lc.add(key)
+            raw.append(term)
+    # Drop entries whose lowercased form has another extracted term as
+    # a whole-word prefix — the shorter form is the conservative target.
+    raw_sorted = sorted(raw, key=len)
+    out: list[str] = []
+    for term in raw_sorted:
+        tl = term.lower()
+        if any(tl != prev.lower() and tl.startswith(prev.lower() + " ") for prev in out):
+            continue
+        out.append(term)
+    return out
+
+
+def _content_contains_exclusion(text: str, value: str) -> bool:
+    """Check if text contains an excluded term (case-insensitive, camelCase-aware)."""
+    low = text.lower()
+    val = value.lower()
+    if val in low:
+        return True
+    spaced = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", value).lower()
+    if spaced != val and spaced in low:
+        return True
+    words = val.split()
+    if len(words) >= 3:
+        prefix2 = " ".join(words[:2])
+        if prefix2 in low:
+            return True
+    return False
+
+
 async def rewrite_query_node(
     state: AgentState,
     api_base: Optional[str] = None,
@@ -275,7 +403,15 @@ async def rewrite_query_node(
         if writer:
             writer({"event": "rewritten_query", "query": rewritten})
 
-        return {"rewritten_query": rewritten, "resolution_provenance": provenance}
+        # Extract negated terms via deterministic regex (zero latency, no LLM).
+        # Runs on the original user query, not the rewritten one — the user's
+        # exclusion intent is in their wording, not in the pronoun-resolved form.
+        excluded = _extract_negation_terms(original)
+        if excluded:
+            logger.debug("[rewrite_query] extracted excluded_terms: %s", excluded)
+
+        return {"rewritten_query": rewritten, "resolution_provenance": provenance,
+                "excluded_terms": excluded}
 
 
 # ---------------------------------------------------------------------------

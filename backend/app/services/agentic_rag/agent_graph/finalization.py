@@ -48,6 +48,7 @@ def _build_finalize_prompt(
     observations: list,
     glossary: str,
     ctx: "ToolContext",
+    excluded_terms: list[str] | None = None,
 ) -> tuple[str, str]:
     """Build the finalize system+user prompt. Returns (system, user)."""
     context_text = format_context_string(docs, file_markdown, db=ctx.db, org_id=ctx.org_id, query_glossary=glossary)
@@ -90,6 +91,8 @@ def _build_finalize_prompt(
     parts.append(f"Retrieved context (the only citable evidence):\n{context_text}\n\n")
     if non_rag_text:
         parts.append(f"Tool results:\n{non_rag_text}\n\n")
+    if excluded_terms:
+        parts.append(f"User excluded topics: {', '.join(excluded_terms)}. Do not discuss these.\n\n")
     parts.append("Provide a concise, accurate answer.")
     user = "".join(parts)
 
@@ -238,6 +241,7 @@ async def finalize_node(state, ctx) -> dict:
                 docs, state.get("file_markdown"), plan, chart_options,
                 query, retrieval_query, summary_text, history_text,
                 observations, state.get("abbreviation_glossary", ""), ctx,
+                excluded_terms=state.get("excluded_terms", []),
             )
 
             # Runtime compaction before the generation LLM call. trim_docs=True
@@ -257,6 +261,7 @@ async def finalize_node(state, ctx) -> dict:
                     docs, state.get("file_markdown"), plan, chart_options,
                     query, retrieval_query, summary_text, history_text,
                     observations, state.get("abbreviation_glossary", ""), ctx,
+                    excluded_terms=state.get("excluded_terms", []),
                 )
 
             final, answer_usage = await _stream_final_answer(ctx, system, user, writer)

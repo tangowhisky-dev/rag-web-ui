@@ -53,6 +53,9 @@ class AgentState(MessagesState):
     # Where each reference in rewritten_query was resolved from, or the
     # reason resolution was skipped/rejected.
     resolution_provenance: Annotated[Optional[dict], _last_value] = None
+    # Negated terms extracted by rewrite_query_node via regex (e.g. "but not Linux" → ["Linux"]).
+    # Used by rag_retrieve for post-filtering and by finalize_node as a generation guardrail.
+    excluded_terms: Annotated[List[str], _last_value] = []
 
     # ── Per-leg retrieval state (separated for observability) ───────────
     dense_docs: Annotated[List[dict], accumulate] = []

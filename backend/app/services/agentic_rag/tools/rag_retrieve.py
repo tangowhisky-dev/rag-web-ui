@@ -26,6 +26,7 @@ from sqlalchemy import or_, and_
 from app.core.config import settings
 from app.services.agentic_rag.llm_factory import build_chat_llm
 from app.services.agentic_rag.nodes import (
+    _content_contains_exclusion,
     dense_retrieval_node,
     exact_retrieval_node,
     expand_query_node,
@@ -501,6 +502,7 @@ async def _run_retrieval_pass(
     if legs == ["exact"] and sort:
         merged = state.get("retrieved_docs", [])
         state["retrieved_docs"] = _sort_merged_docs(merged, sort)
+        _apply_excluded_terms_filter(state, ctx)
         return state
 
     # Score all docs (quality gate — always runs), then filter by threshold.
@@ -512,7 +514,37 @@ async def _run_retrieval_pass(
     if sort:
         scored = state.get("retrieved_docs", [])
         state["retrieved_docs"] = _sort_merged_docs(scored, sort)
+
+    # Drop docs containing negated terms extracted by rewrite_query_node.
+    _apply_excluded_terms_filter(state, ctx)
     return state
+
+
+def _apply_excluded_terms_filter(state: dict, ctx: ToolContext) -> None:
+    """Post-filter retrieved docs by excluded_terms from AgentState.
+
+    Drops any doc whose page_content or title contains an excluded term.
+    No-op if excluded_terms is empty or ctx.state is unavailable.
+    """
+    excluded = []
+    if ctx.state:
+        excluded = ctx.state.get("excluded_terms", [])
+    if not excluded:
+        return
+    docs = state.get("retrieved_docs", [])
+    if not docs:
+        return
+    filtered = []
+    for doc in docs:
+        content = doc.get("page_content", "")
+        title = doc.get("metadata", {}).get("_title", "") or doc.get("metadata", {}).get("title", "")
+        text = f"{content} {title}"
+        if not any(_content_contains_exclusion(text, term) for term in excluded):
+            filtered.append(doc)
+    if len(filtered) != len(docs):
+        logger.debug("[rag_retrieve] excluded_terms filter: %d → %d docs (dropped %d containing: %s)",
+                     len(docs), len(filtered), len(docs) - len(filtered), excluded)
+    state["retrieved_docs"] = filtered
 
 
 async def _run_relaxation_ladder(
