@@ -159,7 +159,16 @@ class RagRetrieveInput(BaseModel):
     kb_ids: Optional[list[int]] = Field(default=None, description="Optional KB id override.")
     datastore_ids: Optional[list[int]] = Field(default=None)
     top_k: Optional[int] = Field(default=None)
-    legs: Optional[list[str]] = Field(default=None)
+    legs: Optional[list[str]] = Field(
+        default=None,
+        description=(
+            "Retrieval legs to run. Options: 'dense' (semantic vector search), "
+            "'sparse' (SPLADE keyword), 'exact' (MySQL fulltext). "
+            "Default: all three. Use ['exact','sparse'] for literal lookups "
+            "(filenames, IDs, exact titles). Use ['dense'] for conceptual queries. "
+            "The dense leg is automatically skipped if exact+sparse scores are high enough."
+        ),
+    )
     graph_expand: bool = Field(default=True)
     min_confidence: Optional[float] = Field(
         default=None,
@@ -194,7 +203,11 @@ class _RagRetrieveTool(BaseTool):
     ui_label: str = "Retrieving from knowledge base"
     description: str = (
         "Search the attached knowledge bases. Returns ranked document chunks, "
-        "confidence, and sufficiency. Use when the user needs facts from documents."
+        "confidence, and sufficiency. Use when the user needs facts from documents. "
+        "Supports metadata filters (title_contains, content_type, created_after/before, "
+        "document_ids), sort (by created_at or other metadata fields), and leg selection "
+        "(dense/sparse/exact). For literal lookups (filenames, IDs), use legs=['exact','sparse']. "
+        "For conceptual queries, use legs=['dense'] or omit (all legs run)."
     )
     args_schema: type[BaseModel] = RagRetrieveInput
     ctx: Optional[ToolContext] = Field(default=None, exclude=True)
