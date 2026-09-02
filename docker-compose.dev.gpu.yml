@@ -46,8 +46,13 @@
 #    SparseTextEmbedding and TextCrossEncoder at model load time, requesting
 #    CUDAExecutionProvider from the ONNX runtime.
 #
-# 3. GPU device reservation → docker compose passes all NVIDIA GPUs into the
-#    container so onnxruntime-gpu can access them.
+# 3. NVIDIA runtime → docker compose starts the container with the nvidia
+#    runtime, which passes GPU device nodes and CUDA libraries into the
+#    container so onnxruntime-gpu can access them. Uses
+#    NVIDIA_VISIBLE_DEVICES=all to expose every GPU.
+#    Note: deploy.resources.reservations.devices (CDI/--gpus) does NOT work
+#    with snap-installed Docker due to filesystem confinement. The nvidia
+#    runtime bypasses this limitation.
 #
 # ─────────────────────────────────────────────────────────────────────────────
 # Usage
@@ -80,10 +85,5 @@ services:
         USE_GPU: "true"
     environment:
       - FASTEMBED_USE_GPU=true
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+      - NVIDIA_VISIBLE_DEVICES=all
+    runtime: nvidia
