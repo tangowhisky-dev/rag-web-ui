@@ -602,7 +602,10 @@ async def _run_retrieval_pass(
         if pre_docs:
             state.update(reranking_node(state))
             scored_docs = state.get("all_scored_docs", [])
-            best_score = max((d.get("_reranker_score", 0.0) for d in scored_docs), default=0.0)
+            best_score = max(
+                (d.get("metadata", {}).get("_reranker_score", 0.0) for d in scored_docs),
+                default=0.0,
+            )
             fast_accept = get_setting(ctx.db, "ADAPTIVE_RETRIEVAL_FAST_ACCEPT_SCORE", ctx.org_id) or 0.7
             if best_score >= fast_accept:
                 logger.info("[rag_retrieve] fast-accept: best reranker score %.3f >= %.2f, skipping dense leg",

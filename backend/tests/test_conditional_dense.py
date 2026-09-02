@@ -16,7 +16,7 @@ def _make_docs(n: int, scores: list[float] | None = None) -> list[dict]:
     for i in range(n):
         d = {"page_content": f"doc_{i}", "metadata": {"content_hash": f"h_{i}"}}
         if scores:
-            d["_reranker_score"] = scores[i]
+            d["metadata"]["_reranker_score"] = scores[i]
         docs.append(d)
     return docs
 

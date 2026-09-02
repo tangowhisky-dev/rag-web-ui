@@ -36,6 +36,28 @@ from .observations import _non_retrieval_observations_text
 logger = logging.getLogger(__name__)
 
 
+def _log_duplicate_check(docs: list[dict]) -> None:
+    """Log duplicate chunks before final generation. Debug-only safeguard."""
+    if not docs:
+        return
+    from app.services.infrastructure import content_hash
+    seen: dict[str, int] = {}
+    dup_hashes: list[str] = []
+    for d in docs:
+        meta = d.get("metadata", {}) if isinstance(d, dict) else {}
+        h = meta.get("content_hash") or content_hash(d.get("page_content", ""))
+        seen[h] = seen.get(h, 0) + 1
+    duplicates = sum(count - 1 for count in seen.values() if count > 1)
+    dup_hashes = [h[:12] for h, c in seen.items() if c > 1]
+    if duplicates:
+        logger.warning(
+            "[finalize] DUPLICATE CHUNKS: %d duplicates in %d docs (hashes: %s)",
+            duplicates, len(docs), dup_hashes[:10],
+        )
+    else:
+        logger.debug("[finalize] no duplicate chunks in %d docs", len(docs))
+
+
 def _build_finalize_prompt(
     docs: list[dict],
     file_markdown,
@@ -215,6 +237,8 @@ async def finalize_node(state, ctx) -> dict:
         retrieval_query = state.get("rewritten_query", "") or query
         observations = state.get("observations", [])
         docs = state.get("retrieved_docs", [])
+        # Log duplicate chunk detection before final generation.
+        _log_duplicate_check(docs)
         # Group chunks by document so the LLM sees contiguous chunks from
         # the same document together, and citation indices map correctly.
         docs = group_docs_by_document(docs)

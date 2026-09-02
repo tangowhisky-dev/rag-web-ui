@@ -231,8 +231,8 @@ _ORG_OVERRIDABLE = [
                "int", 300, scope="org", reload="next_request", min_value=0, max_value=3600,
                description="Redis TTL for cached synonym expansions. 0 = no caching."),
     SettingDef("ADAPTIVE_RETRIEVAL_FAST_ACCEPT_SCORE", "Retrieval", "Adaptive fast-accept score",
-               "float", 0.7, scope="org", reload="next_request", min_value=0.0, max_value=1.0,
-               description="If the best reranker score from exact+sparse legs is >= this threshold, skip the dense leg. 0.0 = always run dense."),
+               "float", 0.7, scope="org", reload="next_request", min_value=0.0, max_value=20.0,
+               description="If the best reranker score from exact+sparse legs is >= this threshold, skip the dense leg. Reranker scores are logits (typically -10 to +10). 0.0 = always run dense. Default 0.7 = skip dense for any decent match."),
 
     # Adaptive retrieval
     SettingDef("ADAPTIVE_RETRIEVAL_ENABLED", "Adaptive Retrieval", "Enable adaptive retrieval",
