@@ -80,6 +80,23 @@ class Subtask(BaseModel):
     tool_hint: str = Field(default="any", description="Preferred tool name or 'any'.")
     depends_on: List[str] = Field(default_factory=list, description="Subtask ids that must complete first.")
     expected_output: str = Field(default="", description="What the agent expects to observe.")
+    # Per-subtask retrieval parameters. When the subtask uses rag_retrieve
+    # or kb_search_documents, these let the planner express a specific
+    # retrieval strategy per sub-query (e.g. subtask A searches for the
+    # latest weekly update, subtask B searches for the Q3 report).
+    # If null, the acting LLM decides based on the query and query_intent.
+    suggested_filters: Optional[dict] = Field(
+        default=None,
+        description="Metadata filters for this subtask's retrieval: {title_contains, content_type, created_after, created_before, document_ids}.",
+    )
+    suggested_sort: Optional[dict] = Field(
+        default=None,
+        description="Sort spec for this subtask: {field, direction}. Use {field: 'created_at', direction: 'desc'} for 'latest'/'most recent'.",
+    )
+    suggested_legs: Optional[List[str]] = Field(
+        default=None,
+        description="Retrieval legs for this subtask: subset of ['dense', 'sparse', 'exact']. Use ['exact','sparse'] for literal title lookups.",
+    )
 
 
 class Plan(BaseModel):

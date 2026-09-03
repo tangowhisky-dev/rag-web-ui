@@ -1,0 +1,774 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Retrieval Pipeline — Complete Flow Diagram</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-dim: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d29922;
+    --purple: #bc8cff;
+    --orange: #f0883e;
+    --cyan: #39d0d8;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 24px;
+    line-height: 1.5;
+  }
+  h1 {
+    font-size: 22px;
+    margin-bottom: 4px;
+    font-weight: 600;
+  }
+  .subtitle {
+    color: var(--text-dim);
+    font-size: 13px;
+    margin-bottom: 24px;
+  }
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    margin-bottom: 24px;
+    padding: 12px 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 12px;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .legend-box {
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
+    flex-shrink: 0;
+  }
+  .diagram {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0;
+    padding: 20px 0;
+  }
+  .node {
+    border: 1.5px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 20px;
+    min-width: 280px;
+    max-width: 420px;
+    text-align: center;
+    position: relative;
+    background: var(--surface);
+    transition: border-color 0.2s;
+  }
+  .node:hover { border-color: var(--accent); }
+  .node-title {
+    font-weight: 600;
+    font-size: 14px;
+    margin-bottom: 4px;
+  }
+  .node-desc {
+    font-size: 11px;
+    color: var(--text-dim);
+    line-height: 1.4;
+  }
+  .node-tag {
+    display: inline-block;
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    margin-top: 4px;
+    font-family: 'SF Mono', Monaco, monospace;
+  }
+
+  /* Node types */
+  .node-entry { border-color: var(--green); background: rgba(63,185,80,0.08); }
+  .node-entry .node-tag { background: rgba(63,185,80,0.2); color: var(--green); }
+
+  .node-llm { border-color: var(--purple); }
+  .node-llm .node-tag { background: rgba(188,140,255,0.2); color: var(--purple); }
+
+  .node-deterministic { border-color: var(--cyan); }
+  .node-deterministic .node-tag { background: rgba(57,208,216,0.2); color: var(--cyan); }
+
+  .node-tool { border-color: var(--orange); }
+  .node-tool .node-tag { background: rgba(240,136,62,0.2); color: var(--orange); }
+
+  .node-interrupt { border-color: var(--yellow); background: rgba(210,153,34,0.08); }
+  .node-interrupt .node-tag { background: rgba(210,153,34,0.2); color: var(--yellow); }
+
+  .node-terminal { border-color: var(--red); background: rgba(248,81,73,0.08); }
+  .node-terminal .node-tag { background: rgba(248,81,73,0.2); color: var(--red); }
+
+  /* Connectors */
+  .connector {
+    width: 2px;
+    height: 28px;
+    background: var(--border);
+    position: relative;
+  }
+  .connector::after {
+    content: '';
+    position: absolute;
+    bottom: -1px;
+    left: 50%;
+    transform: translateX(-50%);
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-top: 6px solid var(--border);
+  }
+  .connector-label {
+    position: absolute;
+    left: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 10px;
+    color: var(--text-dim);
+    white-space: nowrap;
+    background: var(--bg);
+    padding: 0 4px;
+  }
+
+  /* Branch container */
+  .branch {
+    display: flex;
+    gap: 40px;
+    align-items: flex-start;
+    position: relative;
+  }
+  .branch-connector {
+    width: 2px;
+    height: 28px;
+    background: var(--border);
+    margin: 0 auto;
+  }
+  .branch-connector::after {
+    content: '';
+    position: absolute;
+    bottom: -1px;
+    left: 50%;
+    transform: translateX(-50%);
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-top: 6px solid var(--border);
+  }
+  .branch-label {
+    font-size: 11px;
+    color: var(--text-dim);
+    text-align: center;
+    padding: 4px 8px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    margin-bottom: 8px;
+  }
+  .branch-column {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  .branch-line {
+    position: relative;
+    width: 100%;
+    display: flex;
+    justify-content: center;
+  }
+  .branch-line::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 25%;
+    right: 25%;
+    height: 2px;
+    background: var(--border);
+  }
+
+  /* Loop container */
+  .loop {
+    border: 2px dashed var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    margin: 8px 0;
+    position: relative;
+  }
+  .loop-label {
+    position: absolute;
+    top: -10px;
+    left: 20px;
+    background: var(--bg);
+    padding: 0 8px;
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+
+  /* Sub-pipeline inside rag_retrieve */
+  .sub-pipeline {
+    border: 1.5px solid rgba(240,136,62,0.3);
+    border-radius: 10px;
+    padding: 16px;
+    margin: 8px 0;
+    background: rgba(240,136,62,0.03);
+  }
+  .sub-pipeline-label {
+    font-size: 11px;
+    color: var(--orange);
+    margin-bottom: 12px;
+    text-align: center;
+    font-weight: 600;
+  }
+
+  /* Tools list */
+  .tools-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px;
+    padding: 12px;
+  }
+  .tool-item {
+    font-size: 11px;
+    padding: 6px 10px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    text-align: left;
+  }
+  .tool-item strong { color: var(--orange); }
+  .tool-item small { color: var(--text-dim); display: block; margin-top: 2px; }
+
+  .footnote {
+    margin-top: 32px;
+    padding: 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 12px;
+    color: var(--text-dim);
+    max-width: 800px;
+  }
+  .footnote strong { color: var(--text); }
+
+  .section-break {
+    width: 100%;
+    text-align: center;
+    margin: 20px 0 8px;
+    font-size: 12px;
+    color: var(--text-dim);
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 8px;
+  }
+</style>
+</head>
+<body>
+
+<h1>Retrieval Pipeline — Complete Flow Diagram</h1>
+<p class="subtitle">From user query to answer + follow-up suggestions. All nodes, conditional branches, and execution paths in the LangGraph agent.</p>
+
+<div class="legend">
+  <div class="legend-item"><div class="legend-box" style="background:rgba(63,185,80,0.3);border:1px solid var(--green)"></div>Entry point</div>
+  <div class="legend-item"><div class="legend-box" style="background:rgba(188,140,255,0.2);border:1px solid var(--purple)"></div>LLM call</div>
+  <div class="legend-item"><div class="legend-box" style="background:rgba(57,208,216,0.2);border:1px solid var(--cyan)"></div>Deterministic</div>
+  <div class="legend-item"><div class="legend-box" style="background:rgba(240,136,62,0.2);border:1px solid var(--orange)"></div>Tool dispatch</div>
+  <div class="legend-item"><div class="legend-box" style="background:rgba(210,153,34,0.2);border:1px solid var(--yellow)"></div>Interrupt (user pause)</div>
+  <div class="legend-item"><div class="legend-box" style="background:rgba(248,81,73,0.2);border:1px solid var(--red)"></div>Terminal</div>
+</div>
+
+<div class="diagram">
+
+  <!-- ENTRY -->
+  <div class="node node-entry">
+    <div class="node-title">User Query</div>
+    <div class="node-desc">User sends a message in the chat. The agent_runner initialises AgentState with original_query, kb_ids, file_markdown, messages, org_id, chat_id, message_id.</div>
+    <div class="node-tag">ENTRY</div>
+  </div>
+
+  <div class="connector"></div>
+
+  <!-- LOAD CONTEXT -->
+  <div class="node node-deterministic">
+    <div class="node-title">load_context</div>
+    <div class="node-desc">Loads previous LastAnswerObject from DB, recalls conversational memory from Redis, profiles linked KBs (doc count, fields, content types, date range). Resets all per-turn loop state (observations, iteration, force_finalize, etc.).</div>
+    <div class="node-tag">DETERMINISTIC · DB + Redis</div>
+  </div>
+
+  <div class="connector"></div>
+
+  <!-- EXPAND QUERY -->
+  <div class="node node-deterministic">
+    <div class="node-title">expand_query</div>
+    <div class="node-desc">Bidirectional abbreviation suffix expansion. Builds glossary from org abbreviation lookup. Runs BEFORE rewrite so the LLM sees expanded forms during pronoun resolution. No-op if no abbreviations configured.</div>
+    <div class="node-tag">DETERMINISTIC · DB</div>
+  </div>
+
+  <div class="connector"></div>
+
+  <!-- REWRITE QUERY -->
+  <div class="node node-llm">
+    <div class="node-title">rewrite_query</div>
+    <div class="node-desc">Resolves the user's message into a standalone retrieval query. Self-contained messages pass through (no LLM call). Otherwise: pronoun/reference resolution with provenance binding — rewrites may only use terms from expanded query, recent history, or previous answer. Also extracts negated terms (regex) and query intent (filters/sort/legs) in the same LLM call.</div>
+    <div class="node-tag">LLM (query role) · conditional</div>
+  </div>
+
+  <div class="connector"></div>
+
+  <!-- PLAN -->
+  <div class="node node-llm">
+    <div class="node-title">plan</div>
+    <div class="node-desc">Produces a structured Plan (intent, subtasks with tool_hints, needs_clarification, clarification_question). Inputs: original + rewritten query, glossary, KB profile, file metadata, recalled memory, previous answer summary. Falls back to JSON parse on structured-output failure. Enforces clarification budget.</div>
+    <div class="node-tag">LLM (query role) · structured output</div>
+  </div>
+
+  <div class="connector"></div>
+
+  <!-- route_plan branch -->
+  <div class="branch-label">route_plan: needs_clarification?</div>
+
+  <div class="branch">
+    <div class="branch-column">
+      <div class="branch-label" style="color: var(--yellow); border-color: var(--yellow);">YES</div>
+      <div class="connector"></div>
+      <div class="node node-interrupt">
+        <div class="node-title">clarify_interrupt</div>
+        <div class="node-desc">Pauses graph execution via LangGraph interrupt(). Sends clarification question to user. Resumes when user responds — the answer flows back through expand_query → rewrite_query → plan with the clarification folded in.</div>
+        <div class="node-tag">INTERRUPT · LangGraph</div>
+      </div>
+      <div class="connector"><span class="connector-label">→ expand_query (loop back)</span></div>
+    </div>
+    <div class="branch-column">
+      <div class="branch-label" style="color: var(--green); border-color: var(--green);">NO</div>
+      <div class="connector"></div>
+      <div class="node node-llm">
+        <div class="node-title">think</div>
+        <div class="node-desc">Decides next action: emit tool_calls or final_answer signal. Builds prompt from iteration, plan, observations, available tools, KB profile, query intent, verification feedback. Runs context compaction if prompt exceeds budget. Short-circuits without LLM if plan is deterministically satisfied or precomputed tool calls exist from reflect.</div>
+        <div class="node-tag">LLM (chat role) · tool-calling</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- AGENT LOOP -->
+  <div class="loop">
+    <div class="loop-label">AGENT LOOP (max AGENT_MAX_ITERATIONS, max AGENT_MAX_WALL_SECONDS)</div>
+
+    <!-- route_think branch -->
+    <div class="branch-label" style="margin-top: 12px;">route_think: iteration &lt; max AND tool_calls present?</div>
+
+    <div class="branch">
+      <div class="branch-column">
+        <div class="branch-label" style="color: var(--orange); border-color: var(--orange);">tool_calls present</div>
+        <div class="connector"></div>
+        <div class="node node-tool">
+          <div class="node-title">tool</div>
+          <div class="node-desc">Dispatches tool calls in parallel (when independent). Idempotency guard skips duplicate calls. Per-tool call budget enforced. Failed calls retried with backoff (transient) or correction LLM (argument errors). Merges rag_retrieve docs into state (deduplicated by content_hash). Runs deterministic execution check after each round — force_finalizes if plan satisfied.</div>
+          <div class="node-tag">TOOL DISPATCH · parallel</div>
+        </div>
+
+        <!-- Available tools -->
+        <div class="sub-pipeline" style="margin-top: 12px;">
+          <div class="sub-pipeline-label">AVAILABLE TOOLS (filtered by context)</div>
+          <div class="tools-grid">
+            <div class="tool-item"><strong>rag_retrieve</strong><small>3-leg KB search with relaxation ladder</small></div>
+            <div class="tool-item"><strong>kb_grep</strong><small>Regex/term search across KB docs</small></div>
+            <div class="tool-item"><strong>kb_read</strong><small>Read specific section of a KB doc</small></div>
+            <div class="tool-item"><strong>kb_outline</strong><small>Get heading structure of a KB doc</small></div>
+            <div class="tool-item"><strong>kb_metadata</strong><small>Inspect KB document metadata</small></div>
+            <div class="tool-item"><strong>code_execute</strong><small>RestrictedPython sandbox (if data needs computation)</small></div>
+            <div class="tool-item"><strong>extract_data</strong><small>Extract structured numbers from docs/answer (if data exists)</small></div>
+            <div class="tool-item"><strong>chart_generate</strong><small>Generate ECharts JSON from structured data (if data exists)</small></div>
+            <div class="tool-item"><strong>file_read</strong><small>Read attached file content (if file attached)</small></div>
+            <div class="tool-item"><strong>file_summarize</strong><small>Summarize attached file (if file attached)</small></div>
+            <div class="tool-item"><strong>file_extract_table</strong><small>Extract table from CSV/Excel/HTML in file (if file attached)</small></div>
+            <div class="tool-item"><strong>summarize_answer</strong><small>Summarize previous answer or file</small></div>
+          </div>
+        </div>
+
+        <!-- rag_retrieve sub-pipeline -->
+        <div class="sub-pipeline" style="margin-top: 12px;">
+          <div class="sub-pipeline-label">rag_retrieve INTERNAL PIPELINE</div>
+
+          <div class="node node-deterministic" style="margin: 8px auto;">
+            <div class="node-title">Metadata Filter Resolution</div>
+            <div class="node-desc">Resolve filters (title_contains, content_type, date range, document_ids) to MySQL document_ids. Empty = no match → return empty.</div>
+            <div class="node-tag">MySQL</div>
+          </div>
+
+          <div class="connector"></div>
+
+          <div class="node node-deterministic" style="margin: 8px auto;">
+            <div class="node-title">Abbreviation Expansion (re-run)</div>
+            <div class="node-desc">Expand abbreviations in the query for retrieval legs. Reranker uses unexpanded query to preserve user intent.</div>
+            <div class="node-tag">DETERMINISTIC</div>
+          </div>
+
+          <div class="connector"></div>
+
+          <div class="node node-llm" style="margin: 8px auto;">
+            <div class="node-title">Synonym + Spell-Correct Expansion</div>
+            <div class="node-desc">LLM generates corrected query + N synonym variants. Cached in Redis. Only for sparse/exact legs (embeddings handle semantics for dense).</div>
+            <div class="node-tag">LLM (query role) · Redis cached</div>
+          </div>
+
+          <div class="connector"></div>
+
+          <div class="branch-label">CONDITIONAL DENSE LEG</div>
+          <div class="node node-deterministic" style="margin: 8px auto;">
+            <div class="node-title">Run exact + sparse first</div>
+            <div class="node-desc">Run exact (MySQL FTS) + sparse (SPLADE) legs concurrently. Merge + rerank. If best reranker score ≥ fast-accept threshold → skip dense leg (saves embedding API call). Otherwise run dense leg separately and re-merge.</div>
+            <div class="node-tag">Qdrant + MySQL · parallel</div>
+          </div>
+
+          <div class="connector"></div>
+
+          <!-- 3 retrieval legs -->
+          <div class="branch" style="gap: 20px;">
+            <div class="branch-column">
+              <div class="branch-label" style="color: var(--accent); border-color: var(--accent);">DENSE</div>
+              <div class="connector"></div>
+              <div class="node node-deterministic" style="min-width: 180px;">
+                <div class="node-title">Dense Retrieval</div>
+                <div class="node-desc">Vector search via Qdrant. Embedding model (org-configurable). Conditional — skipped if exact+sparse scores are high enough.</div>
+                <div class="node-tag">Qdrant</div>
+              </div>
+            </div>
+            <div class="branch-column">
+              <div class="branch-label" style="color: var(--accent); border-color: var(--accent);">SPARSE</div>
+              <div class="connector"></div>
+              <div class="node node-deterministic" style="min-width: 180px;">
+                <div class="node-title">Sparse Retrieval</div>
+                <div class="node-desc">SPLADE sparse embeddings via FastEmbed. GPU-accelerated when available. Runs with synonym variants via RRF fusion.</div>
+                <div class="node-tag">Qdrant · FastEmbed</div>
+              </div>
+            </div>
+            <div class="branch-column">
+              <div class="branch-label" style="color: var(--accent); border-color: var(--accent);">EXACT</div>
+              <div class="connector"></div>
+              <div class="node node-deterministic" style="min-width: 180px;">
+                <div class="node-title">Exact Retrieval</div>
+                <div class="node-desc">MySQL fulltext search. High-precision literal matching. Runs with synonym variants.</div>
+                <div class="node-tag">MySQL FTS</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="connector"></div>
+
+          <div class="node node-deterministic" style="margin: 8px auto;">
+            <div class="node-title">Merge</div>
+            <div class="node-desc">RRF (Reciprocal Rank Fusion) merges dense + sparse + exact + synonym variant results. Deduplicates by content_hash.</div>
+            <div class="node-tag">RRF FUSION</div>
+          </div>
+
+          <div class="connector"></div>
+
+          <div class="node node-deterministic" style="margin: 8px auto;">
+            <div class="node-title">Reranking</div>
+            <div class="node-desc">Cross-encoder reranker (Xenova/ms-marco-MiniLM-L-12-v2 via FastEmbed). Scores ALL docs with -inf threshold so they can be re-filtered by adaptive reranking. GPU-accelerated when available.</div>
+            <div class="node-tag">FastEmbed · GPU</div>
+          </div>
+
+          <div class="connector"></div>
+
+          <div class="node node-deterministic" style="margin: 8px auto;">
+            <div class="node-title">Filter (reranker threshold)</div>
+            <div class="node-desc">Apply reranker score threshold from the current relaxation level. Apply metadata sort (if requested). Drop docs containing excluded/negated terms.</div>
+            <div class="node-tag">DETERMINISTIC</div>
+          </div>
+
+          <div class="connector"></div>
+
+          <div class="node node-llm" style="margin: 8px auto;">
+            <div class="node-title">Sufficiency Check</div>
+            <div class="node-desc">LLM evaluates whether retrieved docs are collectively sufficient to answer the query. Falls back to heuristic (≥3 docs + confidence &gt; threshold) on LLM failure.</div>
+            <div class="node-tag">LLM (query role)</div>
+          </div>
+
+          <div class="connector"></div>
+
+          <div class="branch-label">Sufficient?</div>
+          <div class="branch">
+            <div class="branch-column">
+              <div class="branch-label" style="color: var(--green); border-color: var(--green);">YES</div>
+              <div class="connector"></div>
+              <div class="node node-deterministic" style="min-width: 160px;">
+                <div class="node-title">Return docs</div>
+                <div class="node-desc">Return retrieved docs, confidence, sufficiency flag.</div>
+                <div class="node-tag">DONE</div>
+              </div>
+            </div>
+            <div class="branch-column">
+              <div class="branch-label" style="color: var(--yellow); border-color: var(--yellow);">NO</div>
+              <div class="connector"></div>
+              <div class="node node-deterministic" style="min-width: 160px;">
+                <div class="node-title">Graph Expansion</div>
+                <div class="node-desc">Neo4j graph relationship expansion. Finds related chunks via entity/topic edges. Only invoked when vector/sparse/exact legs are insufficient.</div>
+                <div class="node-tag">Neo4j</div>
+              </div>
+              <div class="connector"></div>
+              <div class="branch-label">Re-check sufficiency</div>
+              <div class="branch">
+                <div class="branch-column">
+                  <div class="branch-label" style="color: var(--green); border-color: var(--green);">YES</div>
+                  <div class="connector"></div>
+                  <div class="node node-deterministic" style="min-width: 120px;">
+                    <div class="node-title">Return</div>
+                    <div class="node-tag">DONE</div>
+                  </div>
+                </div>
+                <div class="branch-column">
+                  <div class="branch-label" style="color: var(--red); border-color: var(--red);">NO</div>
+                  <div class="connector"></div>
+                  <div class="branch-label">Next relaxation level?</div>
+                  <div class="branch">
+                    <div class="branch-column">
+                      <div class="branch-label" style="color: var(--green); border-color: var(--green);">YES</div>
+                      <div class="connector"></div>
+                      <div class="node node-deterministic" style="min-width: 120px;">
+                        <div class="node-title">Loosen thresholds</div>
+                        <div class="node-desc">Level 1: lower min scores, lower reranker threshold. Re-run all legs.</div>
+                        <div class="node-tag">LOOP</div>
+                      </div>
+                    </div>
+                    <div class="branch-column">
+                      <div class="branch-label" style="color: var(--red); border-color: var(--red);">NO (levels exhausted)</div>
+                      <div class="connector"></div>
+                      <div class="branch-label">Query rewrite retry?</div>
+                      <div class="branch">
+                        <div class="branch-column">
+                          <div class="branch-label" style="color: var(--green); border-color: var(--green);">YES (first time)</div>
+                          <div class="connector"></div>
+                          <div class="node node-llm" style="min-width: 140px;">
+                            <div class="node-title">Rewrite Query</div>
+                            <div class="node-desc">LLM rewrites query + suggests filters. Re-runs full 2-level relaxation ladder.</div>
+                            <div class="node-tag">LLM</div>
+                          </div>
+                        </div>
+                        <div class="branch-column">
+                          <div class="branch-label" style="color: var(--red); border-color: var(--red);">NO</div>
+                          <div class="connector"></div>
+                          <div class="node node-deterministic" style="min-width: 120px;">
+                            <div class="node-title">Return best effort</div>
+                            <div class="node-desc">Return whatever docs were found, even if insufficient.</div>
+                            <div class="node-tag">DONE</div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+        <!-- END rag_retrieve sub-pipeline -->
+
+        <!-- route_tool branch -->
+        <div class="connector"></div>
+        <div class="branch-label">route_tool: force_finalize?</div>
+        <div class="branch">
+          <div class="branch-column">
+            <div class="branch-label" style="color: var(--green); border-color: var(--green);">NO</div>
+            <div class="connector"></div>
+            <div class="node node-deterministic">
+              <div class="node-title">reflect</div>
+              <div class="node-desc">Periodic deterministic recovery rules (no LLM). Runs every AGENT_REFLECT_EVERY iterations. Injects precomputed tool calls for chart_generate/code_execute failures (e.g. extract_data fallback). No concrete rule fires → no-op, return to think.</div>
+              <div class="node-tag">DETERMINISTIC · no LLM</div>
+            </div>
+            <div class="connector"><span class="connector-label">→ think (loop back)</span></div>
+          </div>
+          <div class="branch-column">
+            <div class="branch-label" style="color: var(--red); border-color: var(--red);">YES</div>
+            <div class="connector"></div>
+            <div class="node node-deterministic">
+              <div class="node-title">reflect_final</div>
+              <div class="node-desc">Deterministic execution-completeness check. Verifies all plan subtasks have successful tool results, retrieval returned docs, no un-retried failures. Forces ready=true if iteration/wall-clock cap reached even when incomplete.</div>
+              <div class="node-tag">DETERMINISTIC</div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+      <!-- END tool branch column -->
+
+      <div class="branch-column">
+        <div class="branch-label" style="color: var(--red); border-color: var(--red);">no tool_calls OR max iter OR wall-clock exceeded</div>
+        <div class="connector"></div>
+        <div class="node node-deterministic">
+          <div class="node-title">reflect_final</div>
+          <div class="node-desc">Deterministic execution-completeness check. Verifies all plan subtasks have successful tool results, retrieval returned docs, no un-retried failures. Forces ready=true if iteration/wall-clock cap reached even when incomplete.</div>
+          <div class="node-tag">DETERMINISTIC</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- route_reflect_final branch -->
+    <div class="connector"></div>
+    <div class="branch-label">route_reflect_final: ready AND within budget?</div>
+    <div class="branch">
+      <div class="branch-column">
+        <div class="branch-label" style="color: var(--red); border-color: var(--red);">NOT ready (within budget)</div>
+        <div class="connector"><span class="connector-label">→ think (loop back)</span></div>
+      </div>
+      <div class="branch-column">
+        <div class="branch-label" style="color: var(--green); border-color: var(--green);">READY (or cap reached)</div>
+        <div class="connector"></div>
+      </div>
+    </div>
+
+  </div>
+  <!-- END AGENT LOOP -->
+
+  <!-- FINALIZE -->
+  <div class="connector"></div>
+  <div class="node node-llm">
+    <div class="node-title">finalize</div>
+    <div class="node-desc">Generates the final answer. Groups chunks by document for contiguous context. Builds finalize prompt with retrieved context (citable evidence only), conversation history, tool results, chart data. Streams answer tokens to UI. Substitutes chart markers. Normalizes citations to [N](N) format. Extracts LastAnswerObject (summary, key_points, data, citations, chart_options, followups, suggestion, retry_strategy) via a second LLM call. Runs context compaction if prompt exceeds budget (trims docs).</div>
+    <div class="node-tag">LLM (chat role) · streaming</div>
+  </div>
+
+  <div class="connector"></div>
+
+  <!-- ANSWER SCORING -->
+  <div class="node node-llm">
+    <div class="node-title">answer_scoring</div>
+    <div class="node-desc">Evaluates final answer quality: faithfulness (is every claim supported by cited evidence?), completeness (does the answer address the full query?), confidence_match (does stated confidence match evidence quality?). Computes final_confidence = 0.4 × retrieval_score + 0.3 × faithfulness + 0.3 × completeness. No automatic retry — UI decides based on scores.</div>
+    <div class="node-tag">LLM (evaluator)</div>
+  </div>
+
+  <div class="connector"></div>
+
+  <!-- SAVE MEMORY -->
+  <div class="node node-deterministic">
+    <div class="node-title">save_memory</div>
+    <div class="node-desc">Persists final answer, plan, LastAnswerObject (including followups + suggestion), tool call observations, confidence scores, and faithfulness/completeness metrics to the DB message row.</div>
+    <div class="node-tag">DETERMINISTIC · DB</div>
+  </div>
+
+  <div class="connector"></div>
+
+  <!-- TERMINAL -->
+  <div class="node node-terminal">
+    <div class="node-title">END (graph)</div>
+    <div class="node-desc">Graph execution complete. The final state has been checkpointed and the answer persisted to DB by save_memory.</div>
+    <div class="node-tag">TERMINAL</div>
+  </div>
+
+  <div class="section-break">SSE STREAM → FRONTEND RENDERING</div>
+
+  <!-- SSE event emission -->
+  <div class="node node-deterministic">
+    <div class="node-title">SSE Event: la: (last_answer)</div>
+    <div class="node-desc">streaming.py transforms the <code>last_answer</code> custom event from finalize_node into an <code>la:</code> SSE line. The payload contains <code>last_answer_object</code> with: summary, key_points, data, citations, chart_options, followups[], suggestion, retry_strategy.</div>
+    <div class="node-tag">SSE · streaming.py</div>
+  </div>
+
+  <div class="connector"></div>
+
+  <!-- Frontend parsing -->
+  <div class="node node-deterministic">
+    <div class="node-title">Frontend: parse la: event</div>
+    <div class="node-desc">page.tsx parses the <code>la:</code> SSE line, extracts <code>last_answer_object</code>, and stores it on the assistant message as <code>message.lastAnswerObject</code>. Also extracts <code>chartOption</code> and <code>chartOptions</code> from the same payload.</div>
+    <div class="node-tag">React · page.tsx</div>
+  </div>
+
+  <div class="connector"></div>
+
+  <!-- Conditional rendering -->
+  <div class="branch-label">answer.tsx: isStreaming done AND followups exist?</div>
+  <div class="branch">
+    <div class="branch-column">
+      <div class="branch-label" style="color: var(--green); border-color: var(--green);">YES</div>
+      <div class="connector"></div>
+      <div class="node node-deterministic">
+        <div class="node-title">Render Follow-up Suggestions</div>
+        <div class="node-desc">
+          <strong>Header text</strong> (based on retry_strategy):<br>
+          • <code>widen</code> → "Try a broader search:"<br>
+          • <code>narrow</code> → "Try a narrower search:"<br>
+          • <code>pinpoint</code> → "Look up this exact ID:"<br>
+          • empty → "Do you want me to explore further:"<br><br>
+          Each followup string from <code>lastAnswerObject.followups[]</code> is rendered as a clickable <code>&lt;Suggestion&gt;</code> button (border, muted text, hover highlight). Clicking calls <code>onFollowUp(suggestion)</code>.
+        </div>
+        <div class="node-tag">React · answer.tsx + suggestion.tsx</div>
+      </div>
+
+      <div class="connector"></div>
+
+      <!-- User clicks a suggestion -->
+      <div class="branch-label">User clicks a suggestion?</div>
+      <div class="branch">
+        <div class="branch-column">
+          <div class="branch-label" style="color: var(--green); border-color: var(--green);">YES</div>
+          <div class="connector"></div>
+          <div class="node node-entry">
+            <div class="node-title">handleFollowUp(query)</div>
+            <div class="node-desc">Calls <code>handleSubmit(suggestionText)</code> — sends the follow-up as a new user message. This starts a completely new turn: the graph re-enters at load_context with the suggestion as <code>original_query</code>, and the previous answer's LastAnswerObject is loaded as context for reference resolution.</div>
+            <div class="node-tag">→ NEW TURN (back to top)</div>
+          </div>
+        </div>
+        <div class="branch-column">
+          <div class="branch-label" style="color: var(--text-dim); border-color: var(--border);">NO</div>
+          <div class="connector"></div>
+          <div class="node node-terminal">
+            <div class="node-title">Done</div>
+            <div class="node-desc">Suggestions remain visible below the answer. User can click later or type their own next message.</div>
+            <div class="node-tag">IDLE</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="branch-column">
+      <div class="branch-label" style="color: var(--text-dim); border-color: var(--border);">NO (still streaming or no followups)</div>
+      <div class="connector"></div>
+      <div class="node node-deterministic">
+        <div class="node-title">No suggestions rendered</div>
+        <div class="node-desc">Suggestions are hidden while <code>isStreaming=true</code> (answer still being generated) or when <code>followups</code> is empty/undefined (definitive answer, LLM returned no follow-ups).</div>
+        <div class="node-tag">HIDDEN</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Also show confidence/suggestion rendering -->
+  <div class="section-break">PARALLEL: CONFIDENCE + SUGGESTION RENDERING</div>
+
+  <div class="node node-deterministic">
+    <div class="node-title">Confidence Badge + Suggestion Text</div>
+    <div class="node-desc">
+      While the answer streams, the confidence badge is rendered from <code>confidence_level</code> (very_high/high/medium/low/none). When <code>confidence === "none"</code> AND <code>suggestion</code> text exists, an amber warning box is shown above the answer with the suggestion text (e.g. "Retrieval returned no documents..."). The suggestion text also appears inside the collapsible ConfidenceDetails panel regardless of confidence level.
+    </div>
+    <div class="node-tag">React · answer.tsx</div>
+  </div>
+
+</div>
+
+<div class="footnote">
+  <p><strong>Key design decisions:</strong></p>
+  <ul style="margin: 8px 0 0 20px; line-height: 1.8;">
+    <li><strong>Provenance-bound rewriting</strong> — the rewrite LLM may only introduce terms that appear in the expanded query, recent history, or previous answer. Unsupported rewrites are rejected.</li>
+    <li><strong>Conditional dense leg</strong> — exact + sparse legs run first. If their reranker scores are high enough (fast-accept threshold), the dense embedding API call is skipped entirely.</li>
+    <li><strong>Graduated relaxation ladder</strong> — two levels of loosening thresholds before query rewrite. If rewrite changes the query, the 2-level ladder re-runs with the new query.</li>
+    <li><strong>Graph expansion is lazy</strong> — Neo4j expansion only runs when vector/sparse/exact legs are insufficient, not on every retrieval.</li>
+    <li><strong>Deterministic execution check</strong> — runs after every tool round and before every think call. Short-circuits the agent loop as soon as the plan is satisfied, without waiting for the LLM to notice.</li>
+    <li><strong>Deduplication by content_hash</strong> — prevents duplicate chunks across legs, synonym variants, and graph expansion from reaching the final generation call.</li>
+    <li><strong>Follow-up suggestions</strong> — generated by the LastAnswerObject extraction LLM call in finalize_node (1-3 questions), emitted as <code>la:</code> SSE event via streaming.py, parsed by page.tsx into <code>message.lastAnswerObject</code>, rendered as clickable <code>&lt;Suggestion&gt;</code> buttons in answer.tsx only when streaming is complete. Clicking a suggestion calls <code>handleFollowUp → handleSubmit</code>, starting a new graph turn with the suggestion as the next user query.</li>
+    <li><strong>GPU acceleration</strong> — SPLADE sparse embeddings and cross-encoder reranking use CUDAExecutionProvider when <code>FASTEMBED_USE_GPU=true</code> and GPU runtime is configured.</li>
+  </ul>
+</div>
+
+</body>
+</html>

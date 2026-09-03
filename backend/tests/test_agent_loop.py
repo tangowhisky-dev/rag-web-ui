@@ -42,6 +42,7 @@ class TestToolRegistry:
         names = {t.name for t in tools}
         expected = {
             "rag_retrieve",
+            "kb_search_documents",
             "file_read",
             "file_summarize",
             "file_extract_table",

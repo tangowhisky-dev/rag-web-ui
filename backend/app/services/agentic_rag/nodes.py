@@ -792,6 +792,70 @@ async def exact_retrieval_node(
 # Node: merge
 # ---------------------------------------------------------------------------
 
+def collapse_same_title_versions(docs: list[dict]) -> list[dict]:
+    """Collapse chunks from same-title documents, keeping only the latest version.
+
+    When multiple documents share the same title (e.g. "Weekly Update" uploaded
+    on different dates), keep only chunks from the document with the latest
+    created_at. This prevents older versions from polluting retrieval results
+    for "latest" / "most recent" queries.
+
+    Documents without a title or with unique titles are passed through unchanged.
+    """
+    if not docs:
+        return docs
+
+    # Group document_ids by title, tracking the latest created_at per title.
+    doc_meta: dict[int, dict] = {}  # document_id -> {title, created_at}
+    for d in docs:
+        meta = d.get("metadata", {})
+        doc_id = meta.get("document_id")
+        if doc_id is None:
+            continue
+        title = (meta.get("title") or meta.get("_title") or "").strip()
+        created = meta.get("_created_at") or meta.get("created_at") or ""
+        if doc_id not in doc_meta:
+            doc_meta[doc_id] = {"title": title, "created_at": created}
+        else:
+            # Keep the latest created_at if we see it on a later chunk.
+            if created > doc_meta[doc_id]["created_at"]:
+                doc_meta[doc_id]["created_at"] = created
+
+    # For each title, find the document_id with the latest created_at.
+    title_to_latest_doc: dict[str, int] = {}
+    for doc_id, info in doc_meta.items():
+        title = info["title"]
+        if not title:
+            continue
+        existing = title_to_latest_doc.get(title)
+        if existing is None:
+            title_to_latest_doc[title] = doc_id
+        else:
+            existing_created = doc_meta[existing]["created_at"]
+            if info["created_at"] > existing_created:
+                title_to_latest_doc[title] = doc_id
+
+    if not title_to_latest_doc:
+        return docs
+
+    # Build the set of document_ids to drop (older versions of same-title docs).
+    dropped_doc_ids: set[int] = set()
+    for title, latest_doc_id in title_to_latest_doc.items():
+        for doc_id, info in doc_meta.items():
+            if info["title"] == title and doc_id != latest_doc_id:
+                dropped_doc_ids.add(doc_id)
+
+    if not dropped_doc_ids:
+        return docs
+
+    result = [d for d in docs if d.get("metadata", {}).get("document_id") not in dropped_doc_ids]
+    logger.debug(
+        "[collapse_same_title] %d titles with multiple versions | dropped %d doc_ids | %d → %d chunks",
+        len(title_to_latest_doc), len(dropped_doc_ids), len(docs), len(result),
+    )
+    return result
+
+
 def merge_node(
     state: AgentState,
     file_markdown: str | None = None,
@@ -800,9 +864,10 @@ def merge_node(
 ) -> dict:
     """Merge per-leg retrieval results into a single deduplicated doc list.
 
-    Two-stage dedup:
+    Three-stage dedup:
       1. Exact content_hash dedup (recency-aware: latest modified_at wins).
       2. Semantic dedup (>threshold cosine similarity, keep latest).
+      3. Same-title version collapse (keep only latest created_at per title).
     """
     from app.services.settings_service import get_setting
 
@@ -820,6 +885,11 @@ def merge_node(
         threshold = get_setting(db, "DEDUP_SEMANTIC_THRESHOLD", org_id) if db else 0.95
         if threshold < 1.0 and len(merged) > 1:
             merged = semantic_dedup(merged, threshold)
+
+        # Stage 3: collapse same-title document versions (keep latest)
+        collapse_enabled = get_setting(db, "COLLAPSE_SAME_TITLE_VERSIONS", org_id) if db else True
+        if collapse_enabled:
+            merged = collapse_same_title_versions(merged)
 
         # Stream the merged candidate docs as they become available.
         if merged:
@@ -886,7 +956,7 @@ async def answer_evaluation_node(
         # Evaluate against the user's exact request, not the retrieval rewrite:
         # completeness is a property of what was asked, not what was searched.
         query = state.get("original_query", "") or state.get("rewritten_query", "")
-        docs = state.get("retrieved_docs", [])
+        all_docs = state.get("retrieved_docs", [])
         retrieval_conf = state.get("retrieval_confidence", 0.0)
 
         if not answer:
@@ -898,6 +968,16 @@ async def answer_evaluation_node(
                 "completeness": 0,
                 "retrieval_score": 0,
             }
+
+        # Use only cited docs for evaluation, not the full retrieved set.
+        # The evaluator checks faithfulness against the evidence the answer
+        # actually cites — feeding 50 uncited chunks just inflates the prompt
+        # and slows the LLM call without improving the assessment.
+        cited_indices = state.get("cited_doc_indices", [])
+        if cited_indices:
+            docs = [all_docs[i - 1] for i in cited_indices if 0 < i <= len(all_docs)]
+        else:
+            docs = all_docs
 
         _db = ctx.db if ctx is not None else None
         _org_id = ctx.org_id if ctx is not None else None

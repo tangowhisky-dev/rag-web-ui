@@ -270,6 +270,19 @@ def _merge_observation_docs(all_observations, seen_hashes, merged_docs):
                 conf = obs.result.get("confidence", 0.0)
                 if conf > best_confidence:
                     best_confidence = conf
+        elif obs.tool == "kb_search_documents" and not obs.error:
+            docs = obs.result.get("docs")
+            if isinstance(docs, list):
+                for doc in docs:
+                    if not isinstance(doc, dict):
+                        continue
+                    h = doc.get("metadata", {}).get("content_hash") or _ch(doc.get("page_content", ""))
+                    if h not in seen_hashes:
+                        seen_hashes.add(h)
+                        merged_docs.append(doc)
+                # Document-level matches are high-confidence by definition.
+                if best_confidence < 0.9:
+                    best_confidence = 0.9
     return best_confidence
 
 

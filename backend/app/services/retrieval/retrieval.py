@@ -475,9 +475,16 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
 
     # Build optional doc_id filter clause for MySQL queries.
     doc_id_clause = " AND d.id IN :doc_ids" if doc_ids else ""
-    doc_id_params = {"doc_ids": tuple(doc_ids)} if doc_ids else {}
+    doc_id_params = {"doc_ids": list(doc_ids)} if doc_ids else {}
     if doc_ids:
         logger.debug("[EXACT] filtering to %d document_ids", len(doc_ids))
+
+    # bindparam for doc_ids is only declared when the placeholder is in the SQL text.
+    kb_binds = [bindparam("kb_ids", expanding=True)]
+    ds_binds = [bindparam("ds_ids", expanding=True)]
+    if doc_ids:
+        kb_binds.append(bindparam("doc_ids", expanding=True))
+        ds_binds.append(bindparam("doc_ids", expanding=True))
 
     # Query KB documents — JOIN documents for modified_at and title.
     # Title matches get 2x weight: a chunk from a document whose title
@@ -500,7 +507,7 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
         ORDER  BY fts_score DESC
         LIMIT  :candidates
         """
-    ).bindparams(bindparam("kb_ids", expanding=True))
+    ).bindparams(*kb_binds)
 
     # Query DataStore documents — same title-weighted scoring
     ds_sql = text(
@@ -520,7 +527,7 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
         ORDER  BY fts_score DESC
         LIMIT  :candidates
         """
-    ).bindparams(bindparam("ds_ids", expanding=True))
+    ).bindparams(*ds_binds)
 
     logger.debug("[EXACT] MySQL FTS query | query=%r | kb_ids=%s | ds_ids=%s | candidates=%d", 
                 query[:120], kb_ids, datastore_ids, candidates)

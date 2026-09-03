@@ -489,7 +489,7 @@ class TestQueryResolution:
         from app.services.agentic_rag.utils import resolve_retrieval_query
 
         query = "What is a mutex?"
-        resolved, provenance = asyncio.run(resolve_retrieval_query(
+        resolved, provenance, query_intent = asyncio.run(resolve_retrieval_query(
             query=query,
             original_query=query,
             recent_history=[HumanMessage(content="tell me about Linux")],
@@ -502,7 +502,7 @@ class TestQueryResolution:
     def test_no_history_means_no_resolver_call(self):
         from app.services.agentic_rag.utils import resolve_retrieval_query
 
-        resolved, provenance = asyncio.run(resolve_retrieval_query(
+        resolved, provenance, query_intent = asyncio.run(resolve_retrieval_query(
             query="what are its limitations?",
             original_query="what are its limitations?",
             recent_history=[],
@@ -539,7 +539,7 @@ class TestQueryResolution:
             raise RuntimeError("provider down")
 
         monkeypatch.setattr(utils, "_call_rewriter", _boom)
-        resolved, provenance = asyncio.run(utils.resolve_retrieval_query(
+        resolved, provenance, query_intent = asyncio.run(utils.resolve_retrieval_query(
             query="what about its limitations?",
             original_query="what about its limitations?",
             recent_history=[HumanMessage(content="tell me about StreamVC")],

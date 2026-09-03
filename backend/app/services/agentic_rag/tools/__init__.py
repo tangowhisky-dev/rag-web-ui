@@ -17,12 +17,14 @@ from .kb_grep import KbGrepTool
 from .kb_metadata import KbMetadataTool
 from .kb_outline import KbOutlineTool
 from .kb_read import KbReadTool
+from .kb_search_documents import KbSearchDocumentsTool
 from .rag_retrieve import RagRetrieveTool
 from .summarize_answer import SummarizeAnswerTool
 
 
 _TOOL_CLASSES = [
     RagRetrieveTool,
+    KbSearchDocumentsTool,
     FileReadTool,
     FileSummarizeTool,
     FileExtractTableTool,

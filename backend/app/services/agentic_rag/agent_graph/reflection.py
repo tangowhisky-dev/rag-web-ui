@@ -132,7 +132,12 @@ def _build_subtask_status(plan, successful_by_tool, any_successful):
                 consumed_any += 1
         else:
             used = consumed.get(hint, 0)
-            completed = used < successful_by_tool.get(hint, 0)
+            # kb_search_documents satisfies rag_retrieve hints — it's a
+            # document-level retrieval that covers the same intent.
+            available = successful_by_tool.get(hint, 0)
+            if hint == "rag_retrieve" and not available:
+                available = successful_by_tool.get("kb_search_documents", 0)
+            completed = used < available
             if completed:
                 consumed[hint] = used + 1
         subtask_status.append({
@@ -147,7 +152,7 @@ def _build_subtask_status(plan, successful_by_tool, any_successful):
 def _retrieval_doc_count(coerced):
     total_docs = 0
     for o in coerced:
-        if o.tool == "rag_retrieve" and not o.error:
+        if o.tool in ("rag_retrieve", "kb_search_documents") and not o.error:
             total_docs += len(o.result.get("docs", []))
     return total_docs
 

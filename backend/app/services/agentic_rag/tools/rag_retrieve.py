@@ -717,6 +717,17 @@ async def _run_relaxation_ladder(
         if sufficient:
             break
 
+        # Detect "many docs, all low relevance" — loosening thresholds won't
+        # help here; the query is too broad, not too strict. Skip remaining
+        # relaxation levels and go straight to query rewrite.
+        if len(docs) >= 10 and confidence < min_confidence:
+            logger.debug(
+                "[rag_retrieve] level %d: %d docs but confidence %.2f < %.2f — "
+                "broad query, skipping remaining levels and going to rewrite",
+                i, len(docs), confidence, min_confidence,
+            )
+            break
+
         logger.debug(
             "[rag_retrieve] level %d insufficient (docs=%d confidence=%.2f missing=%s) — %s",
             i, len(docs), confidence, missing[:80] if missing else "(none)",

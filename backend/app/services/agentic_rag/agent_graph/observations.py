@@ -183,6 +183,10 @@ def _observations_text(observations: list[Observation], full: bool = False) -> s
             parts.append(f"  error: {obs.error}")
             continue
         result = obs.result if isinstance(obs.result, dict) else {}
+        # kb_search_documents returns {"ok":..., "result":{"docs":[...]}}
+        # — unwrap the nested result to access docs/confidence.
+        if "docs" not in result and isinstance(result.get("result"), dict):
+            result = result["result"]
         if "docs" not in result:
             # Non-retrieval tools (code_execute, chart_generate, extract_data,
             # file_read, etc.) don't use the docs/confidence shape — render
@@ -218,8 +222,12 @@ def _non_retrieval_observations_text(observations: list[Observation]) -> str:
     for i, raw_obs in enumerate(observations, 1):
         obs = _coerce_observation(raw_obs)
         result = obs.result if isinstance(obs.result, dict) else {}
-        if "docs" in result:
-            continue  # retrieval — already in retrieved_docs
+        # Skip retrieval tools whose docs are already in retrieved_docs.
+        # Check both the top-level result and the nested "result" key
+        # (kb_search_documents returns {"ok":..., "result":{"docs":[...]}}).
+        nested = result.get("result", {}) if isinstance(result.get("result"), dict) else {}
+        if "docs" in result or "docs" in nested or obs.tool in ("rag_retrieve", "kb_search_documents"):
+            continue
         parts.append(f"Observation {i}: tool={obs.tool} args={obs.arguments}")
         if obs.error:
             parts.append(f"  error: {obs.error}")
