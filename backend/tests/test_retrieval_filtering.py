@@ -91,7 +91,7 @@ class _StubQuery:
         if self._query_type == "column":
             return [(getattr(r, "title", None),) for r in rows]
         if self._query_type == "multi":
-            return [_Row(r, ["id", "title", "file_name", "content_type", "created_at", "file_modified_at"]) for r in rows]
+            return [_Row(r, ["id", "title", "file_name", "content_type", "file_created_at", "file_modified_at"]) for r in rows]
         return rows
 
     def first(self):
@@ -225,7 +225,7 @@ class TestKbMetadataListDocuments:
         assert len(docs_result) == 2
         assert "title" in docs_result[0]
         assert "file_name" in docs_result[0]
-        assert "created_at" in docs_result[0]
+        assert "file_created_at" in docs_result[0]
 
 
 class TestKbMetadataRbac:
@@ -272,40 +272,40 @@ class TestResolveFilterToDocIds:
 class TestSortMergedDocs:
     def test_no_sort_returns_original(self):
         from app.services.agentic_rag.tools.rag_retrieve import _sort_merged_docs
-        docs = [{"metadata": {"_created_at": "2026-06-07"}}, {"metadata": {"_created_at": "2026-06-01"}}]
+        docs = [{"metadata": {"_file_created_at": "2026-06-07"}}, {"metadata": {"_file_created_at": "2026-06-01"}}]
         result = _sort_merged_docs(docs, None)
         assert result == docs
 
     def test_sort_desc_by_created_at(self):
         from app.services.agentic_rag.tools.rag_retrieve import _sort_merged_docs
         docs = [
-            {"metadata": {"_created_at": "2026-06-01"}},
-            {"metadata": {"_created_at": "2026-06-07"}},
-            {"metadata": {"_created_at": "2026-06-03"}},
+            {"metadata": {"_file_created_at": "2026-06-01"}},
+            {"metadata": {"_file_created_at": "2026-06-07"}},
+            {"metadata": {"_file_created_at": "2026-06-03"}},
         ]
-        result = _sort_merged_docs(docs, {"field": "created_at", "direction": "desc"})
-        assert result[0]["metadata"]["_created_at"] == "2026-06-07"
-        assert result[1]["metadata"]["_created_at"] == "2026-06-03"
-        assert result[2]["metadata"]["_created_at"] == "2026-06-01"
+        result = _sort_merged_docs(docs, {"field": "file_created_at", "direction": "desc"})
+        assert result[0]["metadata"]["_file_created_at"] == "2026-06-07"
+        assert result[1]["metadata"]["_file_created_at"] == "2026-06-03"
+        assert result[2]["metadata"]["_file_created_at"] == "2026-06-01"
 
     def test_sort_asc_by_created_at(self):
         from app.services.agentic_rag.tools.rag_retrieve import _sort_merged_docs
         docs = [
-            {"metadata": {"_created_at": "2026-06-07"}},
-            {"metadata": {"_created_at": "2026-06-01"}},
+            {"metadata": {"_file_created_at": "2026-06-07"}},
+            {"metadata": {"_file_created_at": "2026-06-01"}},
         ]
-        result = _sort_merged_docs(docs, {"field": "created_at", "direction": "asc"})
-        assert result[0]["metadata"]["_created_at"] == "2026-06-01"
-        assert result[1]["metadata"]["_created_at"] == "2026-06-07"
+        result = _sort_merged_docs(docs, {"field": "file_created_at", "direction": "asc"})
+        assert result[0]["metadata"]["_file_created_at"] == "2026-06-01"
+        assert result[1]["metadata"]["_file_created_at"] == "2026-06-07"
 
     def test_sort_empty_docs_returns_empty(self):
         from app.services.agentic_rag.tools.rag_retrieve import _sort_merged_docs
-        result = _sort_merged_docs([], {"field": "created_at", "direction": "desc"})
+        result = _sort_merged_docs([], {"field": "file_created_at", "direction": "desc"})
         assert result == []
 
     def test_sort_missing_field_in_sort_returns_original(self):
         from app.services.agentic_rag.tools.rag_retrieve import _sort_merged_docs
-        docs = [{"metadata": {"_created_at": "2026-06-01"}}]
+        docs = [{"metadata": {"_file_created_at": "2026-06-01"}}]
         result = _sort_merged_docs(docs, {"direction": "desc"})
         assert result == docs
 
@@ -414,11 +414,11 @@ class TestContextNoDuplicates:
         """Sort should not create duplicates — each doc appears once."""
         from app.services.agentic_rag.tools.rag_retrieve import _sort_merged_docs
         docs = [
-            {"page_content": "doc1", "metadata": {"_created_at": "2026-06-01", "content_hash": "h1"}},
-            {"page_content": "doc2", "metadata": {"_created_at": "2026-06-07", "content_hash": "h2"}},
-            {"page_content": "doc3", "metadata": {"_created_at": "2026-06-03", "content_hash": "h3"}},
+            {"page_content": "doc1", "metadata": {"_file_created_at": "2026-06-01", "content_hash": "h1"}},
+            {"page_content": "doc2", "metadata": {"_file_created_at": "2026-06-07", "content_hash": "h2"}},
+            {"page_content": "doc3", "metadata": {"_file_created_at": "2026-06-03", "content_hash": "h3"}},
         ]
-        sorted_docs = _sort_merged_docs(docs, {"field": "created_at", "direction": "desc"})
+        sorted_docs = _sort_merged_docs(docs, {"field": "file_created_at", "direction": "desc"})
         hashes = [d["metadata"]["content_hash"] for d in sorted_docs]
         assert len(hashes) == len(set(hashes)), "Sort produced duplicate content hashes"
 

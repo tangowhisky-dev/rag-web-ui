@@ -384,9 +384,9 @@ def _enrich_meta_from_row(meta: dict, row) -> None:
     # Store file_modified_at from the JOIN for recency-aware dedup.
     if hasattr(row, "file_modified_at") and row.file_modified_at:
         meta["_file_modified_at"] = row.file_modified_at.isoformat() if hasattr(row.file_modified_at, "isoformat") else str(row.file_modified_at)
-    # Store created_at for sort-by-recency in rag_retrieve filters.
-    if hasattr(row, "created_at") and row.created_at:
-        meta["_created_at"] = row.created_at.isoformat() if hasattr(row.created_at, "isoformat") else str(row.created_at)
+    # Store file_created_at from the JOIN for sort-by-recency in rag_retrieve.
+    if hasattr(row, "file_created_at") and row.file_created_at:
+        meta["_file_created_at"] = row.file_created_at.isoformat() if hasattr(row.file_created_at, "isoformat") else str(row.file_created_at)
 
 
 def _normalize_metadata(raw_meta, row) -> dict:
@@ -494,7 +494,7 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
         SELECT dc.chunk_text, dc.chunk_metadata, dc.kb_id, dc.document_id, dc.chunk_index,
                dc.file_name, d.title,
                COALESCE(d.file_modified_at, d.file_created_at, d.created_at) AS file_modified_at,
-               d.created_at AS created_at,
+               COALESCE(d.file_created_at, d.created_at) AS file_created_at,
                (MATCH(dc.chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE)
                 + COALESCE(MATCH(d.title) AGAINST(:query IN NATURAL LANGUAGE MODE), 0) * 2.0
                ) AS fts_score
@@ -515,7 +515,7 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
         SELECT dc.chunk_text, dc.chunk_metadata, dc.kb_id, dc.document_id, dc.chunk_index,
                dc.file_name, d.title,
                COALESCE(d.file_modified_at, d.file_created_at, d.created_at) AS file_modified_at,
-               d.created_at AS created_at,
+               COALESCE(d.file_created_at, d.created_at) AS file_created_at,
                (MATCH(dc.chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE)
                 + COALESCE(MATCH(d.title) AGAINST(:query IN NATURAL LANGUAGE MODE), 0) * 2.0
                ) AS fts_score

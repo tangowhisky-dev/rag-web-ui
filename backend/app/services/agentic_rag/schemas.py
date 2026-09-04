@@ -91,7 +91,7 @@ class Subtask(BaseModel):
     )
     suggested_sort: Optional[dict] = Field(
         default=None,
-        description="Sort spec for this subtask: {field, direction}. Use {field: 'created_at', direction: 'desc'} for 'latest'/'most recent'.",
+        description="Sort spec for this subtask: {field, direction}. Use {field: 'file_modified_at', direction: 'desc'} for 'latest'/'most recent'.",
     )
     suggested_legs: Optional[List[str]] = Field(
         default=None,

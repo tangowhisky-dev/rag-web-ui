@@ -191,7 +191,7 @@ class RagRetrieveInput(BaseModel):
         default=None,
         description=(
             "Sort merged results by metadata field before reranking. "
-            'Example: {"field": "created_at", "direction": "desc"}. '
+            'Example: {"field": "file_modified_at", "direction": "desc"}. '
             "Use when the query implies recency or ordering ('latest', 'most recent')."
         ),
     )
@@ -206,7 +206,7 @@ class _RagRetrieveTool(BaseTool):
         "Search the attached knowledge bases. Returns ranked document chunks, "
         "confidence, and sufficiency. Use when the user needs facts from documents. "
         "Supports metadata filters (title_contains, content_type, created_after/before, "
-        "document_ids), sort (by created_at or other metadata fields), and leg selection "
+        "document_ids), sort (by file_modified_at or other metadata fields), and leg selection "
         "(dense/sparse/exact). For literal lookups (filenames, IDs), use legs=['exact','sparse']. "
         "For conceptual queries, use legs=['dense'] or omit (all legs run)."
     )

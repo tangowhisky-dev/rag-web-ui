@@ -43,6 +43,7 @@ class TestToolRegistry:
         expected = {
             "rag_retrieve",
             "kb_search_documents",
+            "current_datetime",
             "file_read",
             "file_summarize",
             "file_extract_table",

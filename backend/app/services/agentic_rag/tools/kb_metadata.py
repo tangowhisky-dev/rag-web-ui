@@ -160,9 +160,9 @@ def _date_range(db, kb_ids: list[int], input_obj: KbMetadataInput) -> dict:
 def _list_documents(db, kb_ids: list[int], input_obj: KbMetadataInput) -> dict:
     """Return recent documents with metadata."""
     rows = (
-        db.query(Document.id, Document.title, Document.file_name, Document.content_type, Document.created_at, Document.file_modified_at)
+        db.query(Document.id, Document.title, Document.file_name, Document.content_type, Document.file_created_at, Document.file_modified_at)
         .filter(Document.knowledge_base_id.in_(kb_ids))
-        .order_by(Document.created_at.desc())
+        .order_by(Document.file_modified_at.desc())
         .limit(input_obj.limit)
         .all()
     )
@@ -176,7 +176,7 @@ def _list_documents(db, kb_ids: list[int], input_obj: KbMetadataInput) -> dict:
             "title": r.title or r.file_name,
             "file_name": r.file_name,
             "content_type": r.content_type,
-            "created_at": _iso(r.created_at),
+            "file_created_at": _iso(r.file_created_at),
             "file_modified_at": _iso(r.file_modified_at),
         }
         for r in rows

@@ -9,6 +9,7 @@ if TYPE_CHECKING:
 
 from .chart_generate import ChartGenerateTool
 from .code_execute import CodeExecuteTool
+from .current_datetime import CurrentDatetimeTool
 from .extract_data import ExtractDataTool
 from .file_extract_table import FileExtractTableTool
 from .file_read import FileReadTool
@@ -25,6 +26,7 @@ from .summarize_answer import SummarizeAnswerTool
 _TOOL_CLASSES = [
     RagRetrieveTool,
     KbSearchDocumentsTool,
+    CurrentDatetimeTool,
     FileReadTool,
     FileSummarizeTool,
     FileExtractTableTool,

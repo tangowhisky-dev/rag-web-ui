@@ -53,7 +53,7 @@ REWRITE_INTENT_SUFFIX: str = """\
 
 If a [KB Profile] section is provided, also extract search intent:
 1. Suggest filters ONLY when the query clearly implies a metadata constraint:
-   - "latest weekly update" → filters={{"title_contains":"Weekly Update"}}, sort={{"field":"created_at","direction":"desc"}}
+   - "latest weekly update" → filters={{"title_contains":"Weekly Update"}}, sort={{"field":"file_modified_at","direction":"desc"}}
    - "PDF documents about networking" → filters={{"content_type":"application/pdf"}}
    - "documents from June" → filters={{"created_after":"2026-06-01","created_before":"2026-06-30"}}
 2. Suggest sort ONLY when the query implies ordering (latest, newest, oldest, most recent).
@@ -330,8 +330,9 @@ You are the planning module for an autonomous knowledge assistant. Given the use
 If a [Abbreviation Glossary] section is provided in the context, use it to interpret abbreviations in the user query. Do not echo the glossary in your output.
 
 Available tools:
-- rag_retrieve: chunk-level search the knowledge base. Supports filters (title_contains, content_type, created_after/before, document_ids), sort (by created_at or other metadata fields), and leg selection (dense/sparse/exact). Use filters to narrow to specific documents, sort for recency queries, and legs=['exact','sparse'] for literal title/filename lookups. Returns ranked chunks — best for conceptual queries and finding specific facts.
-- kb_search_documents: document-level retrieval by title. Queries the documents table directly, deduplicates same-title versions (keeps latest by created_at), and returns the FULL converted markdown of each matching document. No chunks, no reranker. Use when the query names a specific document (e.g. "weekly update", "Q3 report") or asks for the latest/most recent version of a document. Set top_n=1 for latest only, top_n=3 to synthesize across multiple versions.
+- current_datetime: returns the current UTC date and time. Call this FIRST when the query involves "latest", "most recent", "newest", "this week", "last month", or any temporal reasoning. You need to know what "now" is to compare dates in document titles and content.
+- rag_retrieve: chunk-level search the knowledge base. Supports filters (title_contains, content_type, created_after/before, document_ids), sort (by file_modified_at or other metadata fields), and leg selection (dense/sparse/exact). Use filters to narrow to specific documents, sort for recency queries, and legs=['exact','sparse'] for literal title/filename lookups. Returns ranked chunks — best for conceptual queries and finding specific facts.
+- kb_search_documents: document-level retrieval by title. Queries the documents table directly, deduplicates same-title versions (keeps latest by file_modified_at), and returns the FULL converted markdown of each matching document. No chunks, no reranker. Use when the query names a specific document (e.g. "weekly update", "Q3 report") or asks for the latest/most recent version of a document. Always use top_n=3 (minimum) so you see the most recent versions and can pick the right one. Use top_n=5 or more if you need to synthesize across multiple versions.
 - kb_outline: get the heading structure (table of contents) of a KB document. Use when the query is about a specific document and rag_retrieve chunks don't cover the full answer.
 - kb_read: read a specific section (by heading name) or character range of a KB document. Use after kb_outline to read the relevant section in full.
 - kb_grep: search for exact terms or regex patterns across all KB documents. Use when looking for specific keywords, names, or codes.
@@ -366,13 +367,13 @@ Output a JSON object with this structure:
 Per-subtask retrieval parameters:
 - For each subtask with tool_hint "rag_retrieve" or "kb_search_documents" or "any", you SHOULD populate suggested_filters, suggested_sort, and suggested_legs when the subtask has a clear retrieval strategy.
 - suggested_filters: Use {{"title_contains": "..."}} when the subtask targets a named document. Use {{"content_type": "application/pdf"}} when the subtask targets a file type. Use {{"created_after": "...", "created_before": "..."}} for date ranges.
-- suggested_sort: Use {{"field": "created_at", "direction": "desc"}} when the subtask needs the latest/most recent version.
+- suggested_sort: Use {{"field": "file_modified_at", "direction": "desc"}} when the subtask needs the latest/most recent version.
 - suggested_legs: Use ["exact","sparse"] for literal title/filename lookups. Use ["dense"] for conceptual queries. Use null to let the agent decide.
 - For subtasks that use kb_search_documents, set suggested_filters to {{"title_contains": "..."}} — the tool reads full documents by title, not chunks.
 - Independent subtasks (no depends_on) will be dispatched in parallel. Dependent subtasks wait for their dependencies to complete.
 - Example: "Compare the latest weekly update with the previous one" → two subtasks:
-  - Subtask a: tool_hint="kb_search_documents", suggested_filters={{"title_contains":"Weekly Update"}}, suggested_sort={{"field":"created_at","direction":"desc"}}, depends_on=[]
-  - Subtask b: tool_hint="kb_search_documents", suggested_filters={{"title_contains":"Weekly Update"}}, suggested_sort={{"field":"created_at","direction":"desc"}}, depends_on=["a"] (needs subtask a's document to know which is "previous")
+  - Subtask a: tool_hint="kb_search_documents", suggested_filters={{"title_contains":"Weekly Update"}}, suggested_sort={{"field":"file_modified_at","direction":"desc"}}, depends_on=[]
+  - Subtask b: tool_hint="kb_search_documents", suggested_filters={{"title_contains":"Weekly Update"}}, suggested_sort={{"field":"file_modified_at","direction":"desc"}}, depends_on=["a"] (needs subtask a's document to know which is "previous")
 
 Rules for needs_clarification:
 - Set it to true ONLY if the user's query is genuinely ambiguous or under-specified in isolation (e.g. missing a required parameter, multiple unrelated interpretations).
@@ -400,16 +401,27 @@ Do NOT write the answer text. Emit the next tool call needed to advance the plan
 rag_retrieve query rules:
 - Reuse the rewritten query verbatim as the "query" argument. Do NOT add synonyms, related terms, or extra keywords beyond what the user or the rewriter already provided.
 - If a [Query Intent] section is present with suggested_filters, suggested_sort, or suggested_legs, you MUST pass them as the corresponding "filters", "sort", and "legs" arguments to rag_retrieve. These are extracted by the query rewriter based on KB metadata and are critical for needle-in-haystack queries. Do NOT ignore them.
-- When the query implies recency ("latest", "most recent", "newest", "last"), always pass sort={{"field":"created_at","direction":"desc"}} so the reranker sees the newest chunks first.
+- When the query implies recency ("latest", "most recent", "newest", "last"), always pass sort={{"field":"file_modified_at","direction":"desc"}} so the reranker sees the newest chunks first.
 - rag_retrieve now evaluates whether retrieved docs actually contain the answer (not just topic similarity). If the observation shows sufficient=false with a "missing" field, the tool already tried rewriting the query internally. Only re-call rag_retrieve with a DIFFERENT query if the missing field suggests a fundamentally different search angle (e.g. a different entity, time period, or concept). Do NOT re-call just because confidence is not perfect.
 - Never repeat a rag_retrieve call with the same "query" argument as a previous observation — it will return identical results.
 
 Document-specific queries (when the user asks about a named document like "weekly update", "Q3 report", etc.):
-- FIRST CHOICE: use kb_search_documents with title_contains="..." to get the full document content directly. This reads the complete file, not chunks — no reranker, no fragmentation. Set top_n=1 for the latest version, top_n=3 if you need to synthesize across multiple versions.
+- FIRST CHOICE: use kb_search_documents with title_contains="..." to get the full document content directly. This reads the complete file, not chunks — no reranker, no fragmentation. Always use top_n=3 (minimum) so you see the most recent versions and can pick the right one. Use top_n=5+ if you need to synthesize across multiple versions.
 - If kb_search_documents returns the document but the content is too large or you need a specific section: use kb_outline to see the heading structure, then kb_read to read the relevant section.
-- If kb_search_documents finds no matching documents: fall back to rag_retrieve with filters={{"title_contains":"..."}} and sort={{"field":"created_at","direction":"desc"}} and legs=["exact","sparse"].
+- If kb_search_documents finds no matching documents: fall back to rag_retrieve with filters={{"title_contains":"..."}} and sort={{"field":"file_modified_at","direction":"desc"}} and legs=["exact","sparse"].
 - Do NOT use rag_retrieve as the first call for document-specific queries — it returns chunks, not the full document, and the reranker may rank fragments from an older version higher than the actual latest version.
 - kb_search_documents is the primary strategy for named-document queries. rag_retrieve is for conceptual queries and finding facts across many documents.
+
+Temporal reasoning — deciding which document is "latest" or "most recent":
+- Call current_datetime FIRST to learn what today's date is. You cannot judge "latest" without knowing "now".
+- kb_search_documents sorts by file_modified_at (filesystem mtime), but a user may accidentally modify an old file, making its mtime recent while the content is actually old. Do NOT blindly trust file_modified_at alone.
+- After receiving documents from kb_search_documents, compare dates in TITLES and CONTENT to determine which is truly the latest. For example:
+  - "Weekly Update 21-28 Aug 2026" is newer than "Weekly Update 1-7 Aug 2026" regardless of file_modified_at.
+  - A document titled "Q3 2025 Report" is older than "Q4 2025 Report" even if the Q3 file was touched more recently.
+  - Look for date patterns in titles: "DD-DD Mon YYYY", "Mon YYYY", "Qn YYYY", "YYYY-MM-DD", "Week of DD Mon YYYY".
+  - If the title has no date, check the first few lines of content for a date header or "Period: ..." line.
+- Only when title and content dates are ambiguous or absent should you fall back to file_modified_at as the tiebreaker.
+- When the user asks for "the latest weekly update", they mean the one whose coverage period is most recent, not the one whose file was last touched on disk.
 
 Chart requests: if the plan includes a chart, call extract_data first to turn retrieved docs / the previous answer into structured {{label, value}} rows, then call chart_generate with that structured data. Do NOT hand-roll the ECharts option yourself via code_execute — chart_generate is the only tool that produces a chart_option the UI can render.
 """

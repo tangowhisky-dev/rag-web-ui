@@ -374,7 +374,8 @@ def _build_single_chunk(
         source_metadata["original_text"] = original_text
     # Store document-level metadata in the Qdrant payload so retrieval
     # can filter/sort on these fields without a MySQL round-trip.
-    source_metadata["_created_at"] = document.created_at.isoformat() if document.created_at else None
+    # Use file-level timestamps (from filesystem), not DB row timestamps.
+    source_metadata["_file_created_at"] = (document.file_created_at or document.created_at).isoformat() if (document.file_created_at or document.created_at) else None
     source_metadata["_file_modified_at"] = (document.file_modified_at or document.file_created_at or document.created_at).isoformat() if (document.file_modified_at or document.file_created_at or document.created_at) else None
     source_metadata["_content_type"] = document.content_type
     source_metadata["_file_size"] = document.file_size

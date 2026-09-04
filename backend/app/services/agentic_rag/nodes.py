@@ -665,9 +665,10 @@ def filter_node(state: AgentState, threshold: Optional[float] = None, db: Any = 
 # ---------------------------------------------------------------------------
 
 def _enrich_with_modified_at(docs: list[dict], db: Any) -> None:
-    """Fetch COALESCE(file_modified_at, file_created_at, created_at) for unique
-    document_ids and store as ``_file_modified_at`` (ISO string) in each doc's
-    metadata.
+    """Fetch COALESCE(file_modified_at, file_created_at, created_at) and
+    COALESCE(file_created_at, created_at) for unique document_ids and store
+    as ``_file_modified_at`` and ``_file_created_at`` (ISO strings) in each
+    doc's metadata.
 
     Skips docs that already have ``_file_modified_at`` (e.g. exact leg gets it
     from the SQL JOIN). Uses a single indexed query.
@@ -690,12 +691,16 @@ def _enrich_with_modified_at(docs: list[dict], db: Any) -> None:
     rows = db.query(
         Document.id,
         func.coalesce(Document.file_modified_at, Document.file_created_at, Document.created_at),
+        func.coalesce(Document.file_created_at, Document.created_at),
     ).filter(Document.id.in_(needed)).all()
 
     mtime_map: dict[int, str] = {}
+    ctime_map: dict[int, str] = {}
     for row in rows:
         if row[1] is not None:
             mtime_map[row[0]] = row[1].isoformat() if hasattr(row[1], "isoformat") else str(row[1])
+        if row[2] is not None:
+            ctime_map[row[0]] = row[2].isoformat() if hasattr(row[2], "isoformat") else str(row[2])
 
     for doc in docs:
         meta = doc.get("metadata", {})
@@ -704,6 +709,8 @@ def _enrich_with_modified_at(docs: list[dict], db: Any) -> None:
         did = meta.get("document_id")
         if did is not None and int(did) in mtime_map:
             meta["_file_modified_at"] = mtime_map[int(did)]
+            if int(did) in ctime_map:
+                meta["_file_created_at"] = ctime_map[int(did)]
 
 
 
@@ -866,23 +873,23 @@ def collapse_same_title_versions(docs: list[dict]) -> list[dict]:
     if not docs:
         return docs
 
-    # Group document_ids by title, tracking the latest created_at per title.
-    doc_meta: dict[int, dict] = {}  # document_id -> {title, created_at}
+    # Group document_ids by title, tracking the latest file_modified_at per title.
+    doc_meta: dict[int, dict] = {}  # document_id -> {title, file_modified_at}
     for d in docs:
         meta = d.get("metadata", {})
         doc_id = meta.get("document_id")
         if doc_id is None:
             continue
         title = (meta.get("title") or meta.get("_title") or "").strip()
-        created = meta.get("_created_at") or meta.get("created_at") or ""
+        modified = meta.get("_file_modified_at") or meta.get("_file_created_at") or ""
         if doc_id not in doc_meta:
-            doc_meta[doc_id] = {"title": title, "created_at": created}
+            doc_meta[doc_id] = {"title": title, "file_modified_at": modified}
         else:
-            # Keep the latest created_at if we see it on a later chunk.
-            if created > doc_meta[doc_id]["created_at"]:
-                doc_meta[doc_id]["created_at"] = created
+            # Keep the latest file_modified_at if we see it on a later chunk.
+            if modified > doc_meta[doc_id]["file_modified_at"]:
+                doc_meta[doc_id]["file_modified_at"] = modified
 
-    # For each title, find the document_id with the latest created_at.
+    # For each title, find the document_id with the latest file_modified_at.
     title_to_latest_doc: dict[str, int] = {}
     for doc_id, info in doc_meta.items():
         title = info["title"]
@@ -892,8 +899,8 @@ def collapse_same_title_versions(docs: list[dict]) -> list[dict]:
         if existing is None:
             title_to_latest_doc[title] = doc_id
         else:
-            existing_created = doc_meta[existing]["created_at"]
-            if info["created_at"] > existing_created:
+            existing_modified = doc_meta[existing]["file_modified_at"]
+            if info["file_modified_at"] > existing_modified:
                 title_to_latest_doc[title] = doc_id
 
     if not title_to_latest_doc:

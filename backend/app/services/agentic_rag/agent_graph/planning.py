@@ -99,10 +99,10 @@ async def plan_node(state, ctx) -> dict:
         title_contains = (qi.get("suggested_filters") or {}).get("title_contains")
         if title_contains and not state.get("clarification_response"):
             suggested_sort = qi.get("suggested_sort")
-            sort_field = "created_at"
+            sort_field = "file_modified_at"
             sort_direction = "desc"
             if suggested_sort and isinstance(suggested_sort, dict):
-                sort_field = suggested_sort.get("field", "created_at")
+                sort_field = suggested_sort.get("field", "file_modified_at")
                 sort_direction = suggested_sort.get("direction", "desc")
             fast_plan = Plan(
                 intent="rag",
@@ -120,8 +120,8 @@ async def plan_node(state, ctx) -> dict:
                     "title_contains": title_contains,
                     "sort_field": sort_field,
                     "sort_direction": sort_direction,
-                    "top_n": 1,
-                    "max_tokens_per_doc": 4000,
+                    "top_n": 3,
+                    "max_tokens_per_doc": 16000,
                 },
             }
             logger.debug("[plan_node] Tier-0 fast-track: title_contains=%r, skipping plan LLM", title_contains)
@@ -196,10 +196,10 @@ async def plan_node(state, ctx) -> dict:
                 if title_contains:
                     # Document-level retrieval: read the full file, skip
                     # chunks and reranker entirely.
-                    sort_field = "created_at"
+                    sort_field = "file_modified_at"
                     sort_direction = "desc"
                     if suggested_sort and isinstance(suggested_sort, dict):
-                        sort_field = suggested_sort.get("field", "created_at")
+                        sort_field = suggested_sort.get("field", "file_modified_at")
                         sort_direction = suggested_sort.get("direction", "desc")
                     call: dict = {
                         "tool": "kb_search_documents",
@@ -207,8 +207,8 @@ async def plan_node(state, ctx) -> dict:
                             "title_contains": title_contains,
                             "sort_field": sort_field,
                             "sort_direction": sort_direction,
-                            "top_n": 1,
-                            "max_tokens_per_doc": 4000,
+                            "top_n": 3,
+                            "max_tokens_per_doc": 16000,
                         },
                     }
                     precomputed_tool_calls.append(call)

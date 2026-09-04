@@ -35,10 +35,11 @@ class KbSearchDocumentsInput(BaseModel):
     sort_field: str = Field(default="file_modified_at", description="Metadata field to sort by.")
     sort_direction: str = Field(default="desc", description="Sort direction: 'desc' (newest first) or 'asc'.")
     top_n: int = Field(
-        default=3, ge=3, le=10,
-        description="Minimum 3 — always return at least the 3 most recent matching documents "
-        "so the agent can pick the right one. Same-title versions are deduplicated to the "
-        "latest before applying this cap.",
+        default=3, ge=1, le=10,
+        description="Number of documents to return. Use 3 (default) to see the most "
+        "recent matches and pick the right one. Use 5+ to synthesize across multiple "
+        "versions. Same-title versions are deduplicated to the latest before applying "
+        "this cap.",
     )
     max_tokens_per_doc: int = Field(
         default=16000, ge=500, le=32000,
@@ -156,7 +157,7 @@ class KbSearchDocumentsTool(BaseAgentTool):
                 tokens = count_tokens(markdown)
                 truncated = True
 
-            created_iso = doc.created_at.isoformat() if doc.created_at else ""
+            file_created_iso = (doc.file_created_at or doc.created_at).isoformat() if (doc.file_created_at or doc.created_at) else ""
             file_modified_iso = (doc.file_modified_at or doc.file_created_at or doc.created_at).isoformat() if (doc.file_modified_at or doc.file_created_at or doc.created_at) else ""
 
             doc_dict = {
@@ -166,8 +167,8 @@ class KbSearchDocumentsTool(BaseAgentTool):
                     "title": doc.title or doc.file_name,
                     "file_name": doc.file_name,
                     "content_type": doc.content_type,
-                    "created_at": created_iso,
-                    "_created_at": created_iso,
+                    "file_created_at": file_created_iso,
+                    "_file_created_at": file_created_iso,
                     "_file_modified_at": file_modified_iso,
                     "source": "kb_search_documents",
                     "_reranker_score": 1.0,  # Document-level match — full relevance
