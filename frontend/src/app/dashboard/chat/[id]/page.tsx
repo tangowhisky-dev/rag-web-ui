@@ -16,7 +16,7 @@ import { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback, use
 
 import { useRouter } from "next/navigation";
 import Image from "next/image";
-import { Copy, Trash2, ChevronDown, Info } from "lucide-react";
+import { Copy, Check, Trash2, ChevronDown, Info } from "lucide-react";
 import { useChatContext } from "@/contexts/chat-context";
 import { api, ApiError, handleAuthRedirect } from "@/lib/api";
 import { APP_LOGO_SRC } from "@/lib/app-config";
@@ -130,6 +130,15 @@ function ChatPageInner({ params }: { params: { id: string } }) {
 
   // ── Delete message confirmation ───────────────────────────────────────────
   const [confirmDeleteMsgId, setConfirmDeleteMsgId] = useState<string | null>(null);
+
+  // ── Copy feedback for user message bubble ─────────────────────────────────
+  const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
+  const handleCopyUserMessage = useCallback((id: string, content: string) => {
+    navigator.clipboard.writeText(content).then(() => {
+      setCopiedMsgId(id);
+      setTimeout(() => setCopiedMsgId(null), 1500);
+    });
+  }, []);
 
   // ── Clarification state ───────────────────────────────────────────────────
   const [clarificationState, setClarificationState] = useState<{
@@ -1363,12 +1372,12 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                           disabled={isLoading}
                         />
                         <button
-                          onClick={() => navigator.clipboard.writeText(message.content)}
-                          title="Copy"
+                          onClick={() => handleCopyUserMessage(message.id, message.content)}
+                          title={copiedMsgId === message.id ? "Copied!" : "Copy"}
                           className="flex items-center gap-1 px-2 py-0.5 rounded text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
                         >
-                          <Copy className="h-3 w-3" />
-                          Copy
+                          {copiedMsgId === message.id ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+                          {copiedMsgId === message.id ? "Copied" : "Copy"}
                         </button>
                         <button
                           onClick={() => setConfirmDeleteMsgId(message.id)}

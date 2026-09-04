@@ -75,6 +75,12 @@ class MessageCitation(Base):
 
 class Message(Base, TimestampMixin):
     __tablename__ = "messages"
+    # The self-referential parent_message_id FK has ondelete="CASCADE" at the
+    # DB level. When SQLAlchemy deletes a parent message via the ORM cascade,
+    # the DB also removes its children — so SQLAlchemy's row count check
+    # (expected vs actual deleted) mismatches. This is benign: the rows are
+    # gone either way. Suppress the warning so it doesn't clutter logs.
+    __mapper_args__ = {"confirm_deleted_rows": False}
 
     id = Column(Integer, primary_key=True, index=True)
     content = Column(LONGTEXT, nullable=False)
