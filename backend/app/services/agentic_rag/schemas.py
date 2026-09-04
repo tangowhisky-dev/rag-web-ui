@@ -87,7 +87,9 @@ class Subtask(BaseModel):
     # If null, the acting LLM decides based on the query and query_intent.
     suggested_filters: Optional[dict] = Field(
         default=None,
-        description="Metadata filters for this subtask's retrieval: {title_contains, content_type, created_after, created_before, document_ids}.",
+        description="Metadata filters for this subtask's retrieval: {title_contains, "
+        "content_type, created_after, created_before, file_modified_after, "
+        "file_modified_before, document_ids}.",
     )
     suggested_sort: Optional[dict] = Field(
         default=None,
@@ -96,6 +98,23 @@ class Subtask(BaseModel):
     suggested_legs: Optional[List[str]] = Field(
         default=None,
         description="Retrieval legs for this subtask: subset of ['dense', 'sparse', 'exact']. Use ['exact','sparse'] for literal title lookups.",
+    )
+    suggested_query: Optional[str] = Field(
+        default=None,
+        description="For rag_retrieve subtasks: the search query to use. If null, the "
+        "rewritten query is used. Set this when the subtask targets a specific "
+        "aspect of a multi-part query (e.g. 'encryption methods in satellite comms' "
+        "vs 'encryption methods in fiber optics').",
+    )
+    suggested_top_n: Optional[int] = Field(
+        default=None,
+        description="For kb_search_documents: max documents to return. Use 3 for "
+        "'latest' queries, 20-50+ for aggregate queries. If null, defaults to 3.",
+    )
+    suggested_metadata_only: Optional[bool] = Field(
+        default=None,
+        description="For kb_search_documents: return only metadata (title, date, type) "
+        "without markdown. Use for discovery subtasks in aggregate queries.",
     )
 
 

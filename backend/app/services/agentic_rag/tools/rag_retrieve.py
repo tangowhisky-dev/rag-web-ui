@@ -107,6 +107,18 @@ def _resolve_filter_to_doc_ids(
             q = q.filter(Document.created_at <= before)
         except (ValueError, TypeError):
             pass
+    if filters.get("file_modified_after"):
+        try:
+            after = _dt.fromisoformat(filters["file_modified_after"])
+            q = q.filter(Document.file_modified_at >= after)
+        except (ValueError, TypeError):
+            pass
+    if filters.get("file_modified_before"):
+        try:
+            before = _dt.fromisoformat(filters["file_modified_before"])
+            q = q.filter(Document.file_modified_at <= before)
+        except (ValueError, TypeError):
+            pass
     if filters.get("document_ids"):
         q = q.filter(Document.id.in_(filters["document_ids"]))
 
@@ -182,9 +194,10 @@ class RagRetrieveInput(BaseModel):
             "All conditions are AND-combined. Supported keys: "
             "title_contains (str), file_name_contains (str), "
             "content_type (str, e.g. 'application/pdf'), "
-            "created_after (ISO date string), created_before (ISO date string), "
+            "created_after (ISO date), created_before (ISO date), "
+            "file_modified_after (ISO date), file_modified_before (ISO date), "
             "document_ids (list[int]). "
-            'Example: {"title_contains": "Weekly Update", "created_after": "2026-06-01"}'
+            'Example: {"title_contains": "Weekly Update", "file_modified_after": "2026-01-01"}'
         ),
     )
     sort: Optional[dict] = Field(

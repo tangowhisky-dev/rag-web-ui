@@ -148,6 +148,13 @@ class AgentState(MessagesState):
     clarification_question: Annotated[Optional[str], _last_value] = None
     reflection_final: Annotated[Optional[dict], _last_value] = None  # {ready: bool, reasoning: str} from reflect_final_node
 
+    # ── Accumulated structured data (map-reduce for aggregate queries) ──
+    # extract_data appends {label, value, unit, context} rows here across
+    # multiple batches. chart_generate reads from this instead of
+    # retrieved_docs. Not subject to compaction — it's small structured
+    # data, not raw document content.
+    accumulated_data: Annotated[List[dict], _last_value] = []
+
     # Wall-clock start of the current turn (time.monotonic()). Must be
     # declared: LangGraph silently drops updates for undeclared keys, which
     # previously made AGENT_MAX_WALL_SECONDS a no-op.

@@ -79,7 +79,7 @@ class TestKbMetadataE2E:
             assert "id" in d
             assert "title" in d
             assert "file_name" in d
-            assert "created_at" in d
+            assert "file_created_at" in d or "file_modified_at" in d
 
     def test_unique_values_for_title(self, live_ctx):
         from app.services.agentic_rag.tools.kb_metadata import KbMetadataTool, KbMetadataInput
@@ -209,8 +209,8 @@ class TestQdrantFilterE2E:
 # ── Sort E2E tests ─────────────────────────────────────────────────────────────
 
 class TestSortE2E:
-    def test_sort_by_created_at_desc(self, live_ctx):
-        """Sort by created_at desc should put newest docs first."""
+    def test_sort_by_file_modified_at_desc(self, live_ctx):
+        """Sort by file_modified_at desc should put newest docs first."""
         from app.services.agentic_rag.tools.rag_retrieve import _sort_merged_docs
         from app.services.retrieval.retrieval import exact_search_docs
         # Use exact search (MySQL FTS) which doesn't need the embedding model
@@ -225,9 +225,9 @@ class TestSortE2E:
             pytest.skip("No docs returned from exact search")
         # Convert to serialized format
         serialised = [{"page_content": d.page_content, "metadata": d.metadata} for d in docs]
-        sorted_docs = _sort_merged_docs(serialised, {"field": "created_at", "direction": "desc"})
+        sorted_docs = _sort_merged_docs(serialised, {"field": "file_modified_at", "direction": "desc"})
         # Verify sort order
-        dates = [d["metadata"].get("_created_at", "") for d in sorted_docs]
+        dates = [d["metadata"].get("_file_modified_at", "") for d in sorted_docs]
         assert dates == sorted(dates, reverse=True), f"Dates not in desc order: {dates}"
 
 

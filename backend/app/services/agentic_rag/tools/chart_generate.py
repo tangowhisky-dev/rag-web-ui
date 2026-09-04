@@ -127,7 +127,11 @@ _CHART_BUILDERS = {
 
 class ChartGenerateInput(BaseModel):
     chart_type: str = Field(default="bar", description="pie, bar, line, scatter, area, effectScatter, radar, gauge, funnel")
-    data: list[dict] = Field(default_factory=list, description="List of {label, value} or {name, value}.")
+    data: list[dict] = Field(
+        default_factory=list,
+        description="List of {label, value} or {name, value}. If empty, reads from "
+        "accumulated_data in state (populated by prior extract_data calls).",
+    )
     title: Optional[str] = Field(default=None)
     x_label: Optional[str] = Field(default=None)
     y_label: Optional[str] = Field(default=None)
@@ -138,7 +142,9 @@ class ChartGenerateTool(BaseAgentTool):
     ui_label: str = "Generating chart"
     description: str = (
         "Generate an ECharts option JSON from structured data. "
-        "Use after extract_data to create pie/bar/line/scatter/radar/gauge/funnel charts."
+        "Use after extract_data to create pie/bar/line/scatter/radar/gauge/funnel charts. "
+        "If data is empty, automatically reads from accumulated_data (populated by "
+        "prior extract_data calls with source='retrieved_docs')."
     )
     args_schema: type[BaseModel] = ChartGenerateInput
 
@@ -149,10 +155,15 @@ class ChartGenerateTool(BaseAgentTool):
         t0 = time.monotonic()
         ctx: ToolContext = self.ctx
 
-        if not input_obj.data:
-            return {"ok": False, "result": {}, "error": "No data provided.", "tokens": 0}
+        data = input_obj.data
+        if not data and ctx.state:
+            # Fall back to accumulated_data from prior extract_data calls.
+            data = ctx.state.get("accumulated_data", []) or []
 
-        normalized = _normalize_data(input_obj.data)
+        if not data:
+            return {"ok": False, "result": {}, "error": "No data provided and no accumulated_data in state. Call extract_data first.", "tokens": 0}
+
+        normalized = _normalize_data(data)
 
         if not normalized:
             return {"ok": False, "result": {}, "error": "No numeric values found.", "tokens": 0}

@@ -83,6 +83,30 @@ def _check_clarification_budget(plan, state, ctx):
     return needs_clarification
 
 
+_AGGREGATE_KEYWORDS = frozenset({
+    "how many", "count", "summarize all", "compare", "table", "chart",
+    "list all", "aggregate", "breakdown", "statistics", "all of", "every ",
+    "each ", "trend", "distribution", "summary of all", "overview of all",
+})
+
+
+def _is_simple_lookup(original: str) -> bool:
+    """Heuristic: is this a single-document lookup that can skip the plan LLM?
+
+    Fast-track is appropriate for queries like "what is in the latest weekly
+    update" or "show me the Q3 report". It is NOT appropriate for aggregate
+    queries ("how many weekly updates this year"), comparison queries, or
+    queries that need chart/table generation — those need the plan LLM to
+    decompose into multiple subtasks.
+    """
+    if len(original.split()) > 12:
+        return False
+    lower = original.lower()
+    if any(kw in lower for kw in _AGGREGATE_KEYWORDS):
+        return False
+    return True
+
+
 async def plan_node(state, ctx) -> dict:
     """Produce a structured plan for the current turn."""
     with _agent_step("plan"):
@@ -91,13 +115,15 @@ async def plan_node(state, ctx) -> dict:
         rewritten = state.get("rewritten_query", "") or original
 
         # ── Tier-0 fast-track ────────────────────────────────────────────
-        # When query_intent already has title_contains, the rewrite LLM
-        # identified a named-document lookup. Skip the plan LLM entirely —
+        # When query_intent already has title_contains AND the query is a
+        # simple single-document lookup, skip the plan LLM entirely —
         # create a minimal plan and pre-populate a kb_search_documents call.
         # This saves ~2-5s of plan LLM latency for title-specific queries.
+        # Aggregate/analysis queries fall through to the plan LLM so it can
+        # decompose them into discovery → retrieval → extraction → chart.
         qi = state.get("query_intent") or {}
         title_contains = (qi.get("suggested_filters") or {}).get("title_contains")
-        if title_contains and not state.get("clarification_response"):
+        if title_contains and not state.get("clarification_response") and _is_simple_lookup(original):
             suggested_sort = qi.get("suggested_sort")
             sort_field = "file_modified_at"
             sort_direction = "desc"
@@ -151,6 +177,13 @@ async def plan_node(state, ctx) -> dict:
 
         system = AGENT_SYSTEM_PROMPT + "\n\n" + PLAN_SYSTEM_PROMPT
 
+        # Inject current date so the plan LLM can produce correct date filters
+        # (e.g. file_modified_after for "this year" queries) without needing
+        # a current_datetime tool call first.
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        system += f"\n\n[Current Date: {now.strftime('%Y-%m-%d')} UTC — use this when producing date filters in suggested_filters]"
+
         # Glossary was built once by expand_query_node — reuse it.
         glossary = state.get("abbreviation_glossary", "")
 
@@ -183,6 +216,24 @@ async def plan_node(state, ctx) -> dict:
             for st in plan.subtasks:
                 if st.depends_on:
                     continue  # dependent subtasks wait for their deps
+
+                # current_datetime: no args needed.
+                if st.tool_hint == "current_datetime":
+                    call = {"tool": "current_datetime", "arguments": {}}
+                    precomputed_tool_calls.append(call)
+                    logger.debug("[plan_node] pre-populated current_datetime for subtask %s", st.id)
+                    continue
+
+                # kb_metadata: pre-populate based on action hints.
+                if st.tool_hint == "kb_metadata":
+                    call = {"tool": "kb_metadata", "arguments": {"action": "list_documents", "limit": 50}}
+                    suggested_filters = st.suggested_filters or {}
+                    if suggested_filters.get("title_contains"):
+                        call["arguments"]["value_contains"] = suggested_filters["title_contains"]
+                    precomputed_tool_calls.append(call)
+                    logger.debug("[plan_node] pre-populated kb_metadata for subtask %s: %s", st.id, call["arguments"])
+                    continue
+
                 if st.tool_hint not in ("rag_retrieve", "kb_search_documents", "any"):
                     continue
 
@@ -193,7 +244,7 @@ async def plan_node(state, ctx) -> dict:
                 suggested_legs = st.suggested_legs or qi.get("suggested_legs")
                 title_contains = suggested_filters.get("title_contains") if suggested_filters else None
 
-                if title_contains:
+                if title_contains or st.tool_hint == "kb_search_documents":
                     # Document-level retrieval: read the full file, skip
                     # chunks and reranker entirely.
                     sort_field = "file_modified_at"
@@ -204,25 +255,31 @@ async def plan_node(state, ctx) -> dict:
                     call: dict = {
                         "tool": "kb_search_documents",
                         "arguments": {
-                            "title_contains": title_contains,
                             "sort_field": sort_field,
                             "sort_direction": sort_direction,
-                            "top_n": 3,
+                            "top_n": st.suggested_top_n or 3,
                             "max_tokens_per_doc": 16000,
                         },
                     }
+                    if title_contains:
+                        call["arguments"]["title_contains"] = title_contains
+                    if st.suggested_metadata_only:
+                        call["arguments"]["metadata_only"] = True
+                    # Pass date filters from suggested_filters
+                    if suggested_filters.get("file_modified_after"):
+                        call["arguments"]["modified_after"] = suggested_filters["file_modified_after"]
+                    if suggested_filters.get("file_modified_before"):
+                        call["arguments"]["modified_before"] = suggested_filters["file_modified_before"]
+                    if suggested_filters.get("content_type"):
+                        call["arguments"]["content_type"] = suggested_filters["content_type"]
                     precomputed_tool_calls.append(call)
                     logger.debug(
                         "[plan_node] pre-populated kb_search_documents for subtask %s: %s",
                         st.id, call["arguments"],
                     )
-                elif st.tool_hint == "kb_search_documents":
-                    # kb_search_documents without title_contains — skip
-                    # precomputation, let the think LLM decide.
-                    continue
-                elif suggested_filters or suggested_sort or suggested_legs:
+                elif suggested_filters or suggested_sort or suggested_legs or st.suggested_query:
                     # Chunk-level retrieval with filters/sort/legs.
-                    call = {"tool": "rag_retrieve", "arguments": {"query": rewritten}}
+                    call = {"tool": "rag_retrieve", "arguments": {"query": st.suggested_query or rewritten}}
                     if suggested_filters:
                         call["arguments"]["filters"] = suggested_filters
                     if suggested_sort:

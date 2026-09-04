@@ -18,6 +18,7 @@ import time
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
+from sqlalchemy import or_
 
 from app.models.knowledge import Document
 from app.services.agentic_rag.tool_context import ToolContext, enforce_rbac, write_audit
@@ -46,11 +47,13 @@ _DATE_FIELDS = {"created_at", "file_modified_at"}
 class KbMetadataInput(BaseModel):
     action: str = Field(
         description=(
-            "One of: list_fields, unique_values, date_range, list_documents. "
+            "One of: list_fields, unique_values, date_range, list_documents, count_only. "
             "list_fields: returns available filter fields (no field needed). "
             "unique_values: returns distinct values for a field. "
             "date_range: returns min/max dates for a field. "
-            "list_documents: returns recent documents."
+            "list_documents: returns recent documents (use value_contains to filter by title). "
+            "count_only: returns total count of documents matching value_contains. "
+            "Use count_only for aggregate queries ('how many weekly updates exist')."
         )
     )
     field: Optional[str] = Field(
@@ -59,7 +62,8 @@ class KbMetadataInput(BaseModel):
     )
     value_contains: Optional[str] = Field(
         default=None,
-        description="Filter unique_values results to those containing this substring.",
+        description="Filter results to those containing this substring (applies to title "
+        "for list_documents and count_only, to the field value for unique_values).",
     )
     limit: int = Field(default=50, ge=1, le=200, description="Max results for unique_values or list_documents.")
     kb_ids: Optional[list[int]] = Field(default=None, description="Specific KBs; default all authorized KBs for this chat.")
@@ -101,6 +105,8 @@ class KbMetadataTool(BaseAgentTool):
             result = _date_range(ctx.db, kb_ids, input_obj)
         elif action == "list_documents":
             result = _list_documents(ctx.db, kb_ids, input_obj)
+        elif action == "count_only":
+            result = _count_only(ctx.db, kb_ids, input_obj)
         else:
             return _empty_metadata_result(input_obj, t0, f"Unknown action: {action}")
 
@@ -158,14 +164,17 @@ def _date_range(db, kb_ids: list[int], input_obj: KbMetadataInput) -> dict:
 
 
 def _list_documents(db, kb_ids: list[int], input_obj: KbMetadataInput) -> dict:
-    """Return recent documents with metadata."""
-    rows = (
+    """Return recent documents with metadata, optionally filtered by title."""
+    q = (
         db.query(Document.id, Document.title, Document.file_name, Document.content_type, Document.file_created_at, Document.file_modified_at)
         .filter(Document.knowledge_base_id.in_(kb_ids))
-        .order_by(Document.file_modified_at.desc())
-        .limit(input_obj.limit)
-        .all()
     )
+    if input_obj.value_contains:
+        q = q.filter(or_(
+            Document.title.ilike(f"%{input_obj.value_contains}%"),
+            Document.file_name.ilike(f"%{input_obj.value_contains}%"),
+        ))
+    rows = q.order_by(Document.file_modified_at.desc()).limit(input_obj.limit).all()
 
     def _iso(v):
         return v.isoformat() if hasattr(v, "isoformat") else str(v) if v else None
@@ -182,3 +191,15 @@ def _list_documents(db, kb_ids: list[int], input_obj: KbMetadataInput) -> dict:
         for r in rows
     ]
     return {"documents": docs, "count": len(docs)}
+
+
+def _count_only(db, kb_ids: list[int], input_obj: KbMetadataInput) -> dict:
+    """Return total count of documents, optionally filtered by title/file_name."""
+    q = db.query(Document.id).filter(Document.knowledge_base_id.in_(kb_ids))
+    if input_obj.value_contains:
+        q = q.filter(or_(
+            Document.title.ilike(f"%{input_obj.value_contains}%"),
+            Document.file_name.ilike(f"%{input_obj.value_contains}%"),
+        ))
+    count = q.count()
+    return {"count": count, "value_contains": input_obj.value_contains}

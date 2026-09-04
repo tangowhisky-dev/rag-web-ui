@@ -55,7 +55,8 @@ If a [KB Profile] section is provided, also extract search intent:
 1. Suggest filters ONLY when the query clearly implies a metadata constraint:
    - "latest weekly update" → filters={{"title_contains":"Weekly Update"}}, sort={{"field":"file_modified_at","direction":"desc"}}
    - "PDF documents about networking" → filters={{"content_type":"application/pdf"}}
-   - "documents from June" → filters={{"created_after":"2026-06-01","created_before":"2026-06-30"}}
+   - "documents from June" → filters={{"file_modified_after":"2026-06-01","file_modified_before":"2026-06-30"}}
+   - "this year" → filters={{"file_modified_after":"2026-01-01"}}
 2. Suggest sort ONLY when the query implies ordering (latest, newest, oldest, most recent).
 3. Suggest legs=["exact","sparse"] for literal lookups (filenames, IDs, exact titles). Use null for conceptual queries.
 4. Suggest semantic_ratio:
@@ -65,6 +66,7 @@ If a [KB Profile] section is provided, also extract search intent:
    - null when unclear
 5. If no filters/sort/legs/semantic_ratio are implied, return null for all.
 6. Do NOT invent field names — use only the fields listed in [KB Profile].
+7. For aggregate queries ("how many", "count", "all", "list every"), set suggested_filters with title_contains and file_modified_after/before as appropriate. The plan LLM will decompose these into multi-step retrieval.
 
 Output the rewritten query on the first line, then a JSON object on the second line:
 {query}
@@ -331,19 +333,19 @@ If a [Abbreviation Glossary] section is provided in the context, use it to inter
 
 Available tools:
 - current_datetime: returns the current UTC date and time. Call this FIRST when the query involves "latest", "most recent", "newest", "this week", "last month", or any temporal reasoning. You need to know what "now" is to compare dates in document titles and content.
-- rag_retrieve: chunk-level search the knowledge base. Supports filters (title_contains, content_type, created_after/before, document_ids), sort (by file_modified_at or other metadata fields), and leg selection (dense/sparse/exact). Use filters to narrow to specific documents, sort for recency queries, and legs=['exact','sparse'] for literal title/filename lookups. Returns ranked chunks — best for conceptual queries and finding specific facts.
-- kb_search_documents: document-level retrieval by title. Queries the documents table directly, deduplicates same-title versions (keeps latest by file_modified_at), and returns the FULL converted markdown of each matching document. No chunks, no reranker. Use when the query names a specific document (e.g. "weekly update", "Q3 report") or asks for the latest/most recent version of a document. Always use top_n=3 (minimum) so you see the most recent versions and can pick the right one. Use top_n=5 or more if you need to synthesize across multiple versions.
+- rag_retrieve: chunk-level search the knowledge base. Supports filters (title_contains, file_name_contains, content_type, created_after/before, file_modified_after/before, document_ids), sort (by file_modified_at or other metadata fields), and leg selection (dense/sparse/exact). Use filters to narrow to specific documents, sort for recency queries, and legs=['exact','sparse'] for literal title/filename lookups. Returns ranked chunks — best for conceptual queries and finding specific facts.
+- kb_search_documents: document-level retrieval by title, filename, content type, or date range. Queries the documents table directly, deduplicates same-title versions (keeps latest by file_modified_at), and returns the FULL converted markdown of each matching document. No chunks, no reranker. Use when the query names a specific document (e.g. "weekly update", "Q3 report") or asks for the latest/most recent version. For aggregate queries ("how many weekly updates this year"), use metadata_only=true with date filters to discover all matching documents first, then follow up to read specific ones. Set top_n based on the query: 3 for "latest", 20-50+ for aggregate queries. Supports modified_after/modified_before for date filtering.
 - kb_outline: get the heading structure (table of contents) of a KB document. Use when the query is about a specific document and rag_retrieve chunks don't cover the full answer.
 - kb_read: read a specific section (by heading name) or character range of a KB document. Use after kb_outline to read the relevant section in full.
 - kb_grep: search for exact terms or regex patterns across all KB documents. Use when looking for specific keywords, names, or codes.
-- kb_metadata: inspect KB document metadata (titles, dates, content types). Use to discover what documents exist before retrieving.
+- kb_metadata: inspect KB document metadata (titles, dates, content types). Use to discover what documents exist before retrieving. Actions: list_fields, unique_values, date_range, list_documents (with value_contains to filter by title), count_only (total count of documents matching value_contains — use for "how many" queries).
 - file_read: read a section of an attached file.
 - file_summarize: map-reduce summarization of a large attached file.
 - file_extract_table: extract a table from CSV/Excel/HTML in a file.
 - code_execute: run Python for computation or data transformation.
-- chart_generate: build an ECharts option from structured data.
+- chart_generate: build an ECharts option from structured data. If no data argument is passed, reads from accumulated_data (populated by prior extract_data calls).
 - summarize_answer: summarize the previous answer.
-- extract_data: pull numbers/stats from a previous answer, retrieved docs, or file.
+- extract_data: pull structured data from a previous answer, retrieved docs (with optional document_ids for batch processing), accumulated data, or a file. Results from source="retrieved_docs" accumulate in state — use source="accumulated" to retrieve all accumulated data before chart_generate.
 
 Output a JSON object with this structure:
 {{
@@ -352,12 +354,15 @@ Output a JSON object with this structure:
     {{
       "id": "a",
       "description": "...",
-      "tool_hint": "rag_retrieve|kb_search_documents|file_read|...|any",
+      "tool_hint": "rag_retrieve|kb_search_documents|kb_metadata|current_datetime|file_read|...|any",
       "depends_on": [],
       "expected_output": "...",
       "suggested_filters": null,
       "suggested_sort": null,
-      "suggested_legs": null
+      "suggested_legs": null,
+      "suggested_query": null,
+      "suggested_top_n": null,
+      "suggested_metadata_only": null
     }}
   ],
   "needs_clarification": false,
@@ -366,14 +371,38 @@ Output a JSON object with this structure:
 
 Per-subtask retrieval parameters:
 - For each subtask with tool_hint "rag_retrieve" or "kb_search_documents" or "any", you SHOULD populate suggested_filters, suggested_sort, and suggested_legs when the subtask has a clear retrieval strategy.
-- suggested_filters: Use {{"title_contains": "..."}} when the subtask targets a named document. Use {{"content_type": "application/pdf"}} when the subtask targets a file type. Use {{"created_after": "...", "created_before": "..."}} for date ranges.
+- suggested_filters: Use {{"title_contains": "..."}} when the subtask targets a named document. Use {{"content_type": "application/pdf"}} when the subtask targets a file type. Use {{"file_modified_after": "2026-01-01", "file_modified_before": "2026-12-31"}} for date ranges (prefer file-level dates over created_after/created_before).
 - suggested_sort: Use {{"field": "file_modified_at", "direction": "desc"}} when the subtask needs the latest/most recent version.
 - suggested_legs: Use ["exact","sparse"] for literal title/filename lookups. Use ["dense"] for conceptual queries. Use null to let the agent decide.
+- suggested_query: Set this when the subtask targets a specific aspect of a multi-part query. Example: for "compare encryption in satellite vs fiber optic", subtask a gets suggested_query="encryption methods in satellite communications", subtask b gets suggested_query="encryption methods in fiber optic networks".
+- suggested_top_n: For kb_search_documents. Use 3 for "latest" queries, 20-50+ for aggregate queries that need all matching documents. If null, defaults to 3.
+- suggested_metadata_only: Set to true for discovery subtasks that only need to know what documents exist (title, date, type) without loading full content. Follow up with a dependent subtask that reads specific documents.
 - For subtasks that use kb_search_documents, set suggested_filters to {{"title_contains": "..."}} — the tool reads full documents by title, not chunks.
 - Independent subtasks (no depends_on) will be dispatched in parallel. Dependent subtasks wait for their dependencies to complete.
-- Example: "Compare the latest weekly update with the previous one" → two subtasks:
-  - Subtask a: tool_hint="kb_search_documents", suggested_filters={{"title_contains":"Weekly Update"}}, suggested_sort={{"field":"file_modified_at","direction":"desc"}}, depends_on=[]
-  - Subtask b: tool_hint="kb_search_documents", suggested_filters={{"title_contains":"Weekly Update"}}, suggested_sort={{"field":"file_modified_at","direction":"desc"}}, depends_on=["a"] (needs subtask a's document to know which is "previous")
+
+Simple document lookup (one subtask):
+- "What is in the latest weekly update?" → one subtask:
+  - Subtask a: tool_hint="kb_search_documents", suggested_filters={{"title_contains":"Weekly Update"}}, suggested_sort={{"field":"file_modified_at","direction":"desc"}}, suggested_top_n=3, depends_on=[]
+
+Comparison of two versions (two subtasks, one dependent):
+- "Compare the latest weekly update with the previous one" → two subtasks:
+  - Subtask a: tool_hint="kb_search_documents", suggested_filters={{"title_contains":"Weekly Update"}}, suggested_sort={{"field":"file_modified_at","direction":"desc"}}, suggested_top_n=3, depends_on=[]
+  - Subtask b: tool_hint="kb_search_documents", suggested_filters={{"title_contains":"Weekly Update"}}, depends_on=["a"] (needs subtask a's documents to know which is "previous")
+
+Aggregate/analysis queries (counting, summarizing across many documents, trends, tables, charts):
+- Decompose into: discovery → retrieval → extraction → chart
+- The current date is provided in the system prompt — use it directly in date filters. No need for a current_datetime subtask.
+- Subtask a: tool_hint="kb_metadata", suggested_filters={{"title_contains":"Weekly Update"}}, depends_on=[] — discover how many matching documents exist.
+- Subtask b: tool_hint="kb_search_documents", suggested_filters={{"title_contains":"Weekly Update","file_modified_after":"2026-01-01"}}, suggested_top_n=50, suggested_metadata_only=true, depends_on=[] — get metadata for all matching documents this year.
+- Subtask c: tool_hint="kb_search_documents", depends_on=["b"] — read full content of documents identified in b (the acting LLM will use document_ids from b's observation). If there are many documents, the acting LLM may read them in batches.
+- Subtask d: tool_hint="extract_data", depends_on=["c"] — turn retrieved content into structured {{label, value}} rows.
+- Subtask e: tool_hint="chart_generate", depends_on=["d"] — build the chart.
+- Example: "How many weekly updates were prepared this year? Table with month, count, topics. Then chart it." → five subtasks (a-e above).
+
+Parallel multi-aspect queries (different search terms for different aspects):
+- "Compare encryption methods in satellite communications and fiber optic networks" → two independent subtasks:
+  - Subtask a: tool_hint="rag_retrieve", suggested_query="encryption methods in satellite communications", depends_on=[]
+  - Subtask b: tool_hint="rag_retrieve", suggested_query="encryption methods in fiber optic networks", depends_on=[]
 
 Rules for needs_clarification:
 - Set it to true ONLY if the user's query is genuinely ambiguous or under-specified in isolation (e.g. missing a required parameter, multiple unrelated interpretations).
@@ -406,11 +435,18 @@ rag_retrieve query rules:
 - Never repeat a rag_retrieve call with the same "query" argument as a previous observation — it will return identical results.
 
 Document-specific queries (when the user asks about a named document like "weekly update", "Q3 report", etc.):
-- FIRST CHOICE: use kb_search_documents with title_contains="..." to get the full document content directly. This reads the complete file, not chunks — no reranker, no fragmentation. Always use top_n=3 (minimum) so you see the most recent versions and can pick the right one. Use top_n=5+ if you need to synthesize across multiple versions.
+- FIRST CHOICE: use kb_search_documents with title_contains="..." to get the full document content directly. This reads the complete file, not chunks — no reranker, no fragmentation. Use top_n=3 for "latest" queries, top_n=5+ to synthesize across multiple versions.
 - If kb_search_documents returns the document but the content is too large or you need a specific section: use kb_outline to see the heading structure, then kb_read to read the relevant section.
 - If kb_search_documents finds no matching documents: fall back to rag_retrieve with filters={{"title_contains":"..."}} and sort={{"field":"file_modified_at","direction":"desc"}} and legs=["exact","sparse"].
 - Do NOT use rag_retrieve as the first call for document-specific queries — it returns chunks, not the full document, and the reranker may rank fragments from an older version higher than the actual latest version.
 - kb_search_documents is the primary strategy for named-document queries. rag_retrieve is for conceptual queries and finding facts across many documents.
+
+Aggregate/analysis queries (counting, summarizing across many documents, trends, tables, charts):
+- Use kb_search_documents with metadata_only=true first to discover all matching documents (title, date, type) without loading content. Then read specific documents in a second call.
+- When reading many documents (10+), read them in batches: call kb_search_documents with document_ids for 5-10 documents at a time, using a lower max_tokens_per_doc (e.g. 4000-8000) to fit within the context window.
+- After reading each batch, call extract_data with source="retrieved_docs" and document_ids=[...] to extract structured data from that batch. Results accumulate automatically — each extract_data call appends to a persistent accumulated_data store that is NOT subject to context compaction.
+- For chart/table queries: after all batches are processed, call chart_generate with no data argument — it automatically reads from accumulated_data. Or call extract_data with source="accumulated" to inspect the accumulated data first.
+- Pattern: discover (metadata_only) → read batch 1 → extract_data(batch 1) → read batch 2 → extract_data(batch 2) → ... → chart_generate() → final_answer.
 
 Temporal reasoning — deciding which document is "latest" or "most recent":
 - Call current_datetime FIRST to learn what today's date is. You cannot judge "latest" without knowing "now".

@@ -362,6 +362,13 @@ async def tool_node(state, ctx) -> dict:
             state_update["retrieved_docs"] = merged_docs
             state_update["retrieval_confidence"] = best_confidence
 
+        # Propagate accumulated_data changes from extract_data back into
+        # graph state. extract_data writes to ctx.state["accumulated_data"]
+        # directly (append semantics); tool_node must surface it so the
+        # _last_value reducer picks it up.
+        if "accumulated_data" in ctx.state:
+            state_update["accumulated_data"] = ctx.state["accumulated_data"]
+
         # Root cause: the acting LLM alone decides when to stop calling tools,
         # and small/local models don\u2019t reliably follow "stop once sufficient"
         # / "don\u2019t repeat calls" prompt rules \u2014 they keep re-emitting tool_calls

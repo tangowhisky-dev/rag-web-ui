@@ -592,10 +592,13 @@ async def _call_rewriter(
 ) -> str:
     """Single rewriter LLM call. Raises on provider failure."""
     from app.services.agentic_rag.prompts import REWRITE_INTENT_SUFFIX
+    from datetime import datetime, timezone
 
     system_msg = REWRITE_SYSTEM_PROMPT
     if kb_profile_text:
+        now = datetime.now(timezone.utc)
         system_msg += "\n" + REWRITE_INTENT_SUFFIX
+        system_msg += f"\n\n[Current Date: {now.strftime('%Y-%m-%d')} UTC — use this when producing date filters]"
 
     messages: list[dict] = [{"role": "system", "content": system_msg}]
     from langchain_core.messages import HumanMessage, AIMessage
