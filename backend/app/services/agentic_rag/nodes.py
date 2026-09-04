@@ -661,14 +661,15 @@ def filter_node(state: AgentState, threshold: Optional[float] = None, db: Any = 
 
 
 # ---------------------------------------------------------------------------
-# Helper: fetch modified_at for documents and attach to serialized docs
+# Helper: fetch file_modified_at for documents and attach to serialized docs
 # ---------------------------------------------------------------------------
 
 def _enrich_with_modified_at(docs: list[dict], db: Any) -> None:
-    """Fetch COALESCE(modified_at, created_at) for unique document_ids and
-    store as ``_modified_at`` (ISO string) in each doc's metadata.
+    """Fetch COALESCE(file_modified_at, file_created_at, created_at) for unique
+    document_ids and store as ``_file_modified_at`` (ISO string) in each doc's
+    metadata.
 
-    Skips docs that already have ``_modified_at`` (e.g. exact leg gets it
+    Skips docs that already have ``_file_modified_at`` (e.g. exact leg gets it
     from the SQL JOIN). Uses a single indexed query.
     """
     from app.models.knowledge import Document
@@ -677,7 +678,7 @@ def _enrich_with_modified_at(docs: list[dict], db: Any) -> None:
     needed: set[int] = set()
     for doc in docs:
         meta = doc.get("metadata", {})
-        if meta.get("_modified_at"):
+        if meta.get("_file_modified_at"):
             continue
         did = meta.get("document_id")
         if did is not None:
@@ -688,7 +689,7 @@ def _enrich_with_modified_at(docs: list[dict], db: Any) -> None:
 
     rows = db.query(
         Document.id,
-        func.coalesce(Document.modified_at, Document.created_at),
+        func.coalesce(Document.file_modified_at, Document.file_created_at, Document.created_at),
     ).filter(Document.id.in_(needed)).all()
 
     mtime_map: dict[int, str] = {}
@@ -698,11 +699,11 @@ def _enrich_with_modified_at(docs: list[dict], db: Any) -> None:
 
     for doc in docs:
         meta = doc.get("metadata", {})
-        if meta.get("_modified_at"):
+        if meta.get("_file_modified_at"):
             continue
         did = meta.get("document_id")
         if did is not None and int(did) in mtime_map:
-            meta["_modified_at"] = mtime_map[int(did)]
+            meta["_file_modified_at"] = mtime_map[int(did)]
 
 
 
@@ -837,7 +838,7 @@ async def exact_retrieval_node(
             failed = True
 
         serialised = [_serialise_doc(d) for d in docs]
-        # Exact leg already has _modified_at from the SQL JOIN — no fetch needed.
+        # Exact leg already has _file_modified_at from the SQL JOIN — no fetch needed.
         serialised = dedup_by_content_hash(serialised)
 
         return {
@@ -1038,7 +1039,7 @@ def merge_node(
     """Merge per-leg retrieval results into a single deduplicated doc list.
 
     Four-stage processing:
-      1. Exact content_hash dedup (recency-aware: latest modified_at wins).
+      1. Exact content_hash dedup (recency-aware: latest file_modified_at wins).
       2. RRF fusion across legs (boosts docs found by multiple legs).
       3. Semantic dedup (>threshold cosine similarity, keep latest).
       4. Same-title version collapse (keep only latest created_at per title).

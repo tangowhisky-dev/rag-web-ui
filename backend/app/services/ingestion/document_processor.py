@@ -375,7 +375,7 @@ def _build_single_chunk(
     # Store document-level metadata in the Qdrant payload so retrieval
     # can filter/sort on these fields without a MySQL round-trip.
     source_metadata["_created_at"] = document.created_at.isoformat() if document.created_at else None
-    source_metadata["_modified_at"] = (document.modified_at or document.created_at).isoformat() if (document.modified_at or document.created_at) else None
+    source_metadata["_file_modified_at"] = (document.file_modified_at or document.file_created_at or document.created_at).isoformat() if (document.file_modified_at or document.file_created_at or document.created_at) else None
     source_metadata["_content_type"] = document.content_type
     source_metadata["_file_size"] = document.file_size
     db_chunk = DocumentChunk(
@@ -631,6 +631,22 @@ def _get_file_mtime(doc_file_path: str) -> datetime:
         return datetime.now(timezone.utc)
 
 
+def _get_file_ctime(doc_file_path: str) -> datetime:
+    """Get filesystem creation/birth time (st_ctime).
+
+    On Linux, st_ctime is the last metadata change time (not creation),
+    but it's the closest available. On macOS/Windows, st_birthtime may
+    be available. Falls back to st_ctime, then to now().
+    """
+    try:
+        st = os.stat(doc_file_path)
+        # Prefer birthtime if available (macOS, some Windows)
+        ctime = getattr(st, "st_birthtime", None) or st.st_ctime
+        return datetime.fromtimestamp(ctime, tz=timezone.utc)
+    except (OSError, TypeError, AttributeError):
+        return datetime.now(timezone.utc)
+
+
 def _get_or_create_document(
     file_path: Optional[str],
     permanent_path: str,
@@ -660,7 +676,8 @@ def _get_or_create_document(
             document.content_type = doc_content_type
             document.data_store_id = data_store_id
             document.knowledge_base_id = kb_id if kb_id else None
-            document.modified_at = _get_file_mtime(doc_file_path)
+            document.file_modified_at = _get_file_mtime(doc_file_path)
+            document.file_created_at = _get_file_ctime(doc_file_path)
             db.commit()
             logger.debug(f"Task {task_id}: Updated document ID {document.id}")
         else:
@@ -675,7 +692,8 @@ def _get_or_create_document(
             content_type=doc_content_type,
             knowledge_base_id=kb_id if kb_id else None,
             data_store_id=data_store_id,
-            modified_at=_get_file_mtime(doc_file_path),
+            file_modified_at=_get_file_mtime(doc_file_path),
+            file_created_at=_get_file_ctime(doc_file_path),
         )
         db.add(document)
         db.commit()

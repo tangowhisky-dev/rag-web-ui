@@ -21,6 +21,7 @@ import { useChatContext } from "@/contexts/chat-context";
 import { api, ApiError, handleAuthRedirect } from "@/lib/api";
 import { APP_LOGO_SRC } from "@/lib/app-config";
 import { cancelStream } from "@/lib/cancel-stream";
+import { copyToClipboard } from "@/lib/utils";
 import { useToast } from "@/components/ui/use-toast";
 import { Answer } from "@/components/chat/answer";
 import { InputBar } from "@/components/chat/chat-input";
@@ -134,7 +135,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
   // ── Copy feedback for user message bubble ─────────────────────────────────
   const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
   const handleCopyUserMessage = useCallback((id: string, content: string) => {
-    navigator.clipboard.writeText(content).then(() => {
+    copyToClipboard(content).then(() => {
       setCopiedMsgId(id);
       setTimeout(() => setCopiedMsgId(null), 1500);
     });

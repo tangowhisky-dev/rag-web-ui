@@ -59,7 +59,16 @@ class Document(Base, TimestampMixin):
     data_store_id = Column(Integer, ForeignKey("data_stores.id", ondelete="CASCADE"), nullable=True, index=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
-    modified_at = Column(DateTime, nullable=True, index=True)  # Source file mtime; COALESCE(modified_at, created_at) in queries
+    # File-level timestamps from the source filesystem (captured at ingestion).
+    # file_created_at: filesystem ctime (file creation/birth time).
+    # file_modified_at: filesystem mtime (last content modification).
+    # These reflect the actual temporal versioning of the document content,
+    # not DB row lifecycle. Retrieval sorts by COALESCE(file_modified_at, file_created_at).
+    file_created_at = Column(DateTime, nullable=True, index=True)
+    file_modified_at = Column(DateTime, nullable=True, index=True)
+    # Set when an admin edits converted_markdown (OCR/extraction correction).
+    # NOT a temporal versioning signal — only a content-correction tracking field.
+    file_edited_at = Column(DateTime, nullable=True)
     is_selected = Column(Boolean, nullable=False, default=False, server_default=sa.text('0'))  # Controls ingestion participation; unselect = delete ingested data
     needs_reprocess = Column(Boolean, nullable=False, default=False, server_default=sa.text('0'))  # Set when markdown is edited; cleared after successful re-ingest
 

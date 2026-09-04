@@ -2,11 +2,11 @@
 
 Queries the documents table directly (no chunks, no Qdrant, no reranker).
 Finds documents by title, deduplicates same-title versions (keeps latest
-by created_at), and returns the full converted_markdown of each matching
-document. This is the primary retrieval strategy for document-specific
-queries like "what is in the latest weekly update" — the reranker scores
-chunks against the query, but for named documents the user wants the
-full file, not the top-scoring fragments.
+by file_modified_at → file_created_at), and returns the full converted_markdown
+of each matching document. This is the primary retrieval strategy for
+document-specific queries like "what is in the latest weekly update" — the
+reranker scores chunks against the query, but for named documents the user
+wants the full file, not the top-scoring fragments.
 """
 
 from __future__ import annotations
@@ -32,19 +32,19 @@ class KbSearchDocumentsInput(BaseModel):
         "Example: 'Weekly Update' matches 'Weekly Update Aug 21-28'."
     )
     kb_ids: Optional[list[int]] = Field(default=None, description="Optional KB id override.")
-    sort_field: str = Field(default="created_at", description="Metadata field to sort by.")
+    sort_field: str = Field(default="file_modified_at", description="Metadata field to sort by.")
     sort_direction: str = Field(default="desc", description="Sort direction: 'desc' (newest first) or 'asc'.")
     top_n: int = Field(
-        default=3, ge=1, le=10,
-        description="Maximum number of documents to return overall (after same-title "
-        "deduplication and recency sorting). 3 = the 3 most recent matching documents. "
-        "Same-title versions are deduplicated to the latest before applying this cap.",
+        default=3, ge=3, le=10,
+        description="Minimum 3 — always return at least the 3 most recent matching documents "
+        "so the agent can pick the right one. Same-title versions are deduplicated to the "
+        "latest before applying this cap.",
     )
     max_tokens_per_doc: int = Field(
-        default=4000, ge=500, le=32000,
+        default=16000, ge=500, le=32000,
         description="Token budget per document. The full markdown is truncated if it exceeds this. "
         "Note: some tokenizers (e.g. Gemma) count tokens at ~3x the rate of the estimator, "
-        "so 4000 estimated tokens may be ~12000 actual tokens for the provider.",
+        "so 16000 estimated tokens may be ~48000 actual tokens for the provider.",
     )
 
 
@@ -55,7 +55,7 @@ class KbSearchDocumentsTool(BaseAgentTool):
         "Find and read full documents by title from the knowledge base. "
         "Queries the document table directly — no chunk retrieval, no reranking. "
         "Returns the complete converted markdown of matching documents, deduplicated "
-        "to the latest version by created_at. Use when the query names a specific "
+        "to the latest version by file_modified_at. Use when the query names a specific "
         "document (e.g. 'weekly update', 'Q3 report', 'onboarding guide') or asks "
         "for the latest/most recent version of a document. For conceptual queries "
         "that don't name a specific document, use rag_retrieve instead."
@@ -101,7 +101,7 @@ class KbSearchDocumentsTool(BaseAgentTool):
 
         # Sort
         sort_field = input_obj.sort_field
-        sort_col = getattr(Document, sort_field, Document.created_at)
+        sort_col = getattr(Document, sort_field, Document.file_modified_at)
         if input_obj.sort_direction == "asc":
             q = q.order_by(sort_col.asc())
         else:
@@ -127,15 +127,15 @@ class KbSearchDocumentsTool(BaseAgentTool):
             title_key = (doc.title or doc.file_name or "").strip().lower()
             if not title_key:
                 title_key = f"__untitled_{doc.id}"
-            # rows are already sorted by created_at desc, so the first
+            # rows are already sorted by the sort_field desc, so the first
             # occurrence per title is the latest version.
             if title_key not in latest_per_title:
                 latest_per_title[title_key] = doc
 
-        # Sort deduplicated docs by created_at desc and cap at top_n overall.
+        # Sort deduplicated docs by file_modified_at → file_created_at desc and cap at top_n overall.
         selected = sorted(
             latest_per_title.values(),
-            key=lambda d: d.created_at or d.updated_at,
+            key=lambda d: d.file_modified_at or d.file_created_at or d.created_at,
             reverse=True,
         )[:input_obj.top_n]
 
@@ -157,7 +157,7 @@ class KbSearchDocumentsTool(BaseAgentTool):
                 truncated = True
 
             created_iso = doc.created_at.isoformat() if doc.created_at else ""
-            modified_iso = (doc.modified_at or doc.created_at).isoformat() if (doc.modified_at or doc.created_at) else ""
+            file_modified_iso = (doc.file_modified_at or doc.file_created_at or doc.created_at).isoformat() if (doc.file_modified_at or doc.file_created_at or doc.created_at) else ""
 
             doc_dict = {
                 "page_content": markdown,
@@ -168,7 +168,7 @@ class KbSearchDocumentsTool(BaseAgentTool):
                     "content_type": doc.content_type,
                     "created_at": created_iso,
                     "_created_at": created_iso,
-                    "_modified_at": modified_iso,
+                    "_file_modified_at": file_modified_iso,
                     "source": "kb_search_documents",
                     "_reranker_score": 1.0,  # Document-level match — full relevance
                     "truncated": truncated,

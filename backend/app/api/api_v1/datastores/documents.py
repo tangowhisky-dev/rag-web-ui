@@ -10,6 +10,7 @@ All endpoints are admin-only and enforce organisation scope.
 
 import logging
 import os
+from datetime import datetime, timezone
 
 from fastapi import Depends, HTTPException
 from fastapi.responses import JSONResponse
@@ -124,6 +125,7 @@ def update_document_markdown(
     doc.conversion_status = "completed"
     doc.lock_version = doc.lock_version + 1
     doc.needs_reprocess = True
+    doc.file_edited_at = datetime.now(timezone.utc)
     db.commit()
 
     logger.debug(

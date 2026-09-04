@@ -381,9 +381,9 @@ def _enrich_meta_from_row(meta: dict, row) -> None:
     # title comes from the documents JOIN, not chunk_metadata.
     if "title" not in meta and hasattr(row, "title") and row.title:
         meta["title"] = row.title
-    # Store modified_at from the JOIN for recency-aware dedup.
-    if hasattr(row, "modified_at") and row.modified_at:
-        meta["_modified_at"] = row.modified_at.isoformat() if hasattr(row.modified_at, "isoformat") else str(row.modified_at)
+    # Store file_modified_at from the JOIN for recency-aware dedup.
+    if hasattr(row, "file_modified_at") and row.file_modified_at:
+        meta["_file_modified_at"] = row.file_modified_at.isoformat() if hasattr(row.file_modified_at, "isoformat") else str(row.file_modified_at)
     # Store created_at for sort-by-recency in rag_retrieve filters.
     if hasattr(row, "created_at") and row.created_at:
         meta["_created_at"] = row.created_at.isoformat() if hasattr(row.created_at, "isoformat") else str(row.created_at)
@@ -486,14 +486,14 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
         kb_binds.append(bindparam("doc_ids", expanding=True))
         ds_binds.append(bindparam("doc_ids", expanding=True))
 
-    # Query KB documents — JOIN documents for modified_at and title.
+    # Query KB documents — JOIN documents for file_modified_at and title.
     # Title matches get 2x weight: a chunk from a document whose title
     # matches the query is more relevant than one matching only in body.
     kb_sql = text(
         f"""
         SELECT dc.chunk_text, dc.chunk_metadata, dc.kb_id, dc.document_id, dc.chunk_index,
                dc.file_name, d.title,
-               COALESCE(d.modified_at, d.created_at) AS modified_at,
+               COALESCE(d.file_modified_at, d.file_created_at, d.created_at) AS file_modified_at,
                d.created_at AS created_at,
                (MATCH(dc.chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE)
                 + COALESCE(MATCH(d.title) AGAINST(:query IN NATURAL LANGUAGE MODE), 0) * 2.0
@@ -514,7 +514,7 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
         f"""
         SELECT dc.chunk_text, dc.chunk_metadata, dc.kb_id, dc.document_id, dc.chunk_index,
                dc.file_name, d.title,
-               COALESCE(d.modified_at, d.created_at) AS modified_at,
+               COALESCE(d.file_modified_at, d.file_created_at, d.created_at) AS file_modified_at,
                d.created_at AS created_at,
                (MATCH(dc.chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE)
                 + COALESCE(MATCH(d.title) AGAINST(:query IN NATURAL LANGUAGE MODE), 0) * 2.0
@@ -554,18 +554,18 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
 # ── Recency-aware dedup helpers (shared by leg nodes and merge_node) ──────────
 
 def _get_modified_at(doc: dict) -> str:
-    """Extract _modified_at from a serialized doc's metadata as a sortable string.
+    """Extract _file_modified_at from a serialized doc's metadata as a sortable string.
 
     Falls back to empty string (sorts oldest) if missing.
     """
-    return doc.get("metadata", {}).get("_modified_at", "")
+    return doc.get("metadata", {}).get("_file_modified_at", "")
 
 
 def dedup_by_content_hash(docs: list[dict]) -> list[dict]:
     """Recency-aware exact dedup by content_hash.
 
     When two docs share the same content_hash, keeps the one from the document
-    with the latest _modified_at. Used by both retrieval leg nodes (per-leg
+    with the latest _file_modified_at. Used by both retrieval leg nodes (per-leg
     dedup) and merge_node (cross-leg dedup).
     """
     by_hash: dict[str, dict] = {}
@@ -575,7 +575,7 @@ def dedup_by_content_hash(docs: list[dict]) -> list[dict]:
         if h not in by_hash:
             by_hash[h] = doc
         else:
-            # Keep the one with the latest _modified_at
+            # Keep the one with the latest _file_modified_at
             if _get_modified_at(doc) > _get_modified_at(by_hash[h]):
                 by_hash[h] = doc
     return list(by_hash.values())
@@ -596,7 +596,7 @@ def semantic_dedup(docs: list[dict], threshold: float) -> list[dict]:
 
     import numpy as np
 
-    # Sort newest-first by _modified_at
+    # Sort newest-first by _file_modified_at
     sorted_docs = sorted(docs, key=_get_modified_at, reverse=True)
 
     kept: list[dict] = []

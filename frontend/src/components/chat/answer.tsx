@@ -52,7 +52,7 @@ const EChartsDiagramDynamic = dynamic(
 );
 import { api, handleAuthRedirect } from "@/lib/api";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { cleanChunkText } from "@/lib/utils";
+import { cleanChunkText, copyToClipboard } from "@/lib/utils";
 import { FileIcon } from "react-file-icon";
 
 // Debounce hook to prevent rapid state updates during streaming
@@ -717,7 +717,7 @@ export const Answer: FC<{
     const text = parsedContent.answerText
       .replace(/```echarts\s*\n[\s\S]*?\n```/g, "")
       .trim();
-    navigator.clipboard.writeText(text).then(() => {
+    copyToClipboard(text).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     });

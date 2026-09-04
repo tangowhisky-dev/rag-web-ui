@@ -205,7 +205,7 @@ _ORG_OVERRIDABLE = [
                "float", 0.95, scope="org", reload="next_request", min_value=0.0, max_value=1.0,
                description="Cosine similarity above which chunks from different documents "
                            "are considered near-duplicates; the one from the latest "
-                           "modified_at document is kept. 1.0 = disabled."),
+                           "file_modified_at document is kept. 1.0 = disabled."),
     SettingDef("COLLAPSE_SAME_TITLE_VERSIONS", "Retrieval", "Collapse same-title versions",
                "bool", True, scope="org", reload="next_request",
                description="When multiple documents share the same title (e.g. repeated uploads "

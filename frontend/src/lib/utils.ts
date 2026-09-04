@@ -6,6 +6,31 @@ export function cn(...inputs: ClassValue[]) {
 }
 
 /**
+ * Copy text to clipboard with fallback for insecure contexts.
+ *
+ * navigator.clipboard is undefined when the page is served over HTTP
+ * (not HTTPS/localhost). Fall back to the deprecated execCommand approach
+ * so copy buttons work on non-TLS deployments.
+ */
+export async function copyToClipboard(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    document.execCommand("copy");
+  } finally {
+    document.body.removeChild(textarea);
+  }
+}
+
+/**
  * Clean raw chunk text for display in citation popups.
  *
  * PDF/OCR extraction produces heavily wrapped text: lines break every ~40 chars

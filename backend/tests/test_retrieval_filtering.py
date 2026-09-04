@@ -29,7 +29,8 @@ class _StubDoc:
                  file_name="weekly_update_jun.pdf",
                  content_type="application/pdf",
                  created_at=datetime(2026, 6, 7, 12, 0, tzinfo=timezone.utc),
-                 modified_at=datetime(2026, 6, 7, 14, 0, tzinfo=timezone.utc),
+                 file_modified_at=datetime(2026, 6, 7, 14, 0, tzinfo=timezone.utc),
+                 file_created_at=None,
                  knowledge_base_id=1, data_store_id=None,
                  converted_markdown="# Weekly Update\n\nContent here.\n"):
         self.id = id
@@ -37,7 +38,8 @@ class _StubDoc:
         self.file_name = file_name
         self.content_type = content_type
         self.created_at = created_at
-        self.modified_at = modified_at
+        self.file_modified_at = file_modified_at
+        self.file_created_at = file_created_at
         self.knowledge_base_id = knowledge_base_id
         self.data_store_id = data_store_id
         self.converted_markdown = converted_markdown
@@ -89,7 +91,7 @@ class _StubQuery:
         if self._query_type == "column":
             return [(getattr(r, "title", None),) for r in rows]
         if self._query_type == "multi":
-            return [_Row(r, ["id", "title", "file_name", "content_type", "created_at", "modified_at"]) for r in rows]
+            return [_Row(r, ["id", "title", "file_name", "content_type", "created_at", "file_modified_at"]) for r in rows]
         return rows
 
     def first(self):
