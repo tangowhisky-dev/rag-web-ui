@@ -58,12 +58,17 @@ If a [KB Profile] section is provided, also extract search intent:
    - "documents from June" → filters={{"created_after":"2026-06-01","created_before":"2026-06-30"}}
 2. Suggest sort ONLY when the query implies ordering (latest, newest, oldest, most recent).
 3. Suggest legs=["exact","sparse"] for literal lookups (filenames, IDs, exact titles). Use null for conceptual queries.
-4. If no filters/sort/legs are implied, return null for all.
-5. Do NOT invent field names — use only the fields listed in [KB Profile].
+4. Suggest semantic_ratio:
+   - 0.0 for literal lookups (filenames, IDs, exact titles) — keyword search only
+   - 0.3-0.5 for hybrid queries that name a specific entity but need some semantic matching
+   - 0.7-1.0 for conceptual/semantic questions with no specific entity ("what are the main security risks?")
+   - null when unclear
+5. If no filters/sort/legs/semantic_ratio are implied, return null for all.
+6. Do NOT invent field names — use only the fields listed in [KB Profile].
 
 Output the rewritten query on the first line, then a JSON object on the second line:
 {query}
-{{"suggested_filters": {{...}}|null, "suggested_sort": {{...}}|null, "suggested_legs": [...]|null, "reasoning": "..."}}
+{{"suggested_filters": {{...}}|null, "suggested_sort": {{...}}|null, "suggested_legs": [...]|null, "semantic_ratio": 0.0|null, "reasoning": "..."}}
 """
 
 # ── Synonym expansion (Phase 2) ──────────────────────────────────────────────

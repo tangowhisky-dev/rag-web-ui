@@ -511,6 +511,7 @@ async def _run_retrieval_pass(
     level: dict[str, Any],
     doc_ids: Optional[list[int]] = None,
     sort: Optional[dict] = None,
+    filters: Optional[dict] = None,
 ) -> dict:
     """Run one dense+sparse+exact+rerank+filter pass at a given relaxation level.
 
@@ -563,7 +564,14 @@ async def _run_retrieval_pass(
         # Merge + rerank the exact+sparse results to get a quality score
         state.update(merge_node(state, file_markdown, ctx.db, ctx.org_id))
         pre_docs = state.get("retrieved_docs", [])
-        if pre_docs:
+
+        # Pre-fusion quality gate: if exact+sparse returned very few docs,
+        # skip the reranker check and go straight to dense (the reranker
+        # call is wasted latency when there aren't enough candidates to
+        # judge quality). Only run the reranker when we have enough docs
+        # for the fast-accept score to be meaningful.
+        pre_fusion_min_docs = get_setting(ctx.db, "PRE_FUSION_MIN_DOCS", ctx.org_id)
+        if pre_docs and len(pre_docs) >= pre_fusion_min_docs:
             state.update(reranking_node(state))
             scored_docs = state.get("all_scored_docs", [])
             best_score = max(
@@ -584,6 +592,11 @@ async def _run_retrieval_pass(
                 # Actually, simpler: just run dense separately and merge.
                 state["retrieved_docs"] = []
                 state["all_scored_docs"] = []
+        elif pre_docs:
+            logger.debug("[rag_retrieve] pre-fusion: only %d docs from exact+sparse (< %d), running dense without reranker check",
+                         len(pre_docs), pre_fusion_min_docs)
+            state["retrieved_docs"] = []
+            state["all_scored_docs"] = []
 
         if run_dense:
             # Run dense leg separately and merge with existing exact/sparse docs
@@ -612,6 +625,27 @@ async def _run_retrieval_pass(
 
         state.update(merge_node(state, file_markdown, ctx.db, ctx.org_id))
 
+    # Fallback: if vector legs (dense/sparse) failed or returned nothing
+    # and exact wasn't in the original legs, run exact as a fallback.
+    # Handles Qdrant outages, missing collections, and dense-only queries
+    # that have no semantic matches but do have keyword matches.
+    if "exact" not in legs:
+        dense_docs = state.get("dense_docs", [])
+        sparse_docs = state.get("sparse_docs", [])
+        if not dense_docs and not sparse_docs:
+            logger.info("[rag_retrieve] vector legs returned nothing, falling back to exact leg")
+            _emit_progress("retrieval", "Falling back to keyword search...")
+            try:
+                exact_result = await exact_retrieval_node(
+                    state, ctx.db, kb_ids, org_id, file_markdown,
+                    min_score=level["exact_min_score"], doc_ids=doc_ids,
+                    extra_queries=extra_queries,
+                )
+                state.update(exact_result)
+                state.update(merge_node(state, file_markdown, ctx.db, ctx.org_id))
+            except Exception as exc:
+                logger.warning("[rag_retrieve] exact fallback failed: %s", exc)
+
     # Fast path: exact-only search with explicit sort skips the reranker
     # quality gate. Exact FTS matches are already high-precision and the
     # user explicitly wants sorted order, not relevance order.
@@ -627,6 +661,13 @@ async def _run_retrieval_pass(
     state.update(reranking_node(state))
     state.update(filter_node(state, threshold=level["rerank_threshold"]))
 
+    # Filter pin boost: promote exact filter matches to top positions.
+    # When the user specified a filter (title_contains, content_type, etc.),
+    # docs whose metadata exactly matches the filter value should rank
+    # above higher-scored but less-relevant results.
+    if filters:
+        _pin_filter_matches(state, filters)
+
     # Apply metadata sort AFTER filtering so user's explicit sort order
     # is preserved instead of being overridden by reranker relevance score.
     if sort:
@@ -636,6 +677,48 @@ async def _run_retrieval_pass(
     # Drop docs containing negated terms extracted by rewrite_query_node.
     _apply_excluded_terms_filter(state, ctx)
     return state
+
+
+def _pin_filter_matches(state: dict, filters: dict) -> None:
+    """Promote docs whose metadata exactly matches filter values to top positions.
+
+    After reranking, a doc that exactly matches the user's title_contains
+    filter may be ranked below a higher-scored but less-relevant doc.
+    This function moves exact filter matches to the front, preserving
+    reranker order within the matched and unmatched groups.
+    """
+    docs = state.get("retrieved_docs", [])
+    if not docs or not filters:
+        return
+
+    pinned: list[dict] = []
+    rest: list[dict] = []
+
+    title_filter = (filters.get("title_contains") or "").lower()
+    content_type_filter = filters.get("content_type")
+
+    for doc in docs:
+        meta = doc.get("metadata", {})
+        is_pinned = False
+
+        if title_filter:
+            title = (meta.get("title") or meta.get("_title") or "").lower()
+            if title_filter in title:
+                is_pinned = True
+
+        if content_type_filter and not is_pinned:
+            ct = meta.get("content_type", "")
+            if ct == content_type_filter:
+                is_pinned = True
+
+        if is_pinned:
+            pinned.append(doc)
+        else:
+            rest.append(doc)
+
+    if pinned and len(pinned) < len(docs):
+        logger.debug("[pin_filter] pinned %d/%d docs to top (filter=%s)", len(pinned), len(docs), filters)
+        state["retrieved_docs"] = pinned + rest
 
 
 def _apply_excluded_terms_filter(state: dict, ctx: ToolContext) -> None:
@@ -677,6 +760,7 @@ async def _run_relaxation_ladder(
     graph_expand: bool,
     doc_ids: Optional[list[int]] = None,
     sort: Optional[dict] = None,
+    filters: Optional[dict] = None,
 ) -> tuple[dict[str, Any], list, float, int, bool, str]:
     """Run the relaxation ladder for a single query string.
 
@@ -691,7 +775,7 @@ async def _run_relaxation_ladder(
 
     for i, level in enumerate(levels):
         levels_tried = i + 1
-        state = await _run_retrieval_pass(ctx, query, kb_ids, org_id, file_markdown, legs, level, doc_ids=doc_ids, sort=sort)
+        state = await _run_retrieval_pass(ctx, query, kb_ids, org_id, file_markdown, legs, level, doc_ids=doc_ids, sort=sort, filters=filters)
         docs = state.get("retrieved_docs", [])
         confidence = float(state.get("retrieval_confidence", 0.0))
 
@@ -781,7 +865,7 @@ async def _try_rewrite_retry(
     )
     state, docs, confidence, levels_tried, sufficient, missing = await _run_relaxation_ladder(
         ctx, rewritten, kb_ids, org_id, file_markdown, legs, levels,
-        min_confidence, input_obj.graph_expand, doc_ids=doc_ids, sort=input_obj.sort,
+        min_confidence, input_obj.graph_expand, doc_ids=doc_ids, sort=input_obj.sort, filters=merged_filters,
     )
     return rewritten, state, docs, confidence, levels_tried, sufficient, missing, doc_ids
 
@@ -796,6 +880,24 @@ async def _rag_retrieve(ctx: ToolContext, input_obj: RagRetrieveInput) -> dict:
     file_markdown = ctx.state.get("file_markdown") if ctx.state else None
 
     legs = input_obj.legs or ["dense", "sparse", "exact"]
+
+    # Adaptive semantic_ratio: when the rewrite LLM produced a semantic_ratio,
+    # use it to select legs. This overrides the default all-legs behavior.
+    # 0.0 = keyword-only (exact+sparse), 1.0 = vector-only (dense),
+    # 0.5 = hybrid (all legs). Values in between bias toward one side.
+    if input_obj.legs is None and ctx.state is not None:
+        qi = ctx.state.get("query_intent") or {}
+        sr = qi.get("semantic_ratio")
+        if sr is not None:
+            sr = max(0.0, min(1.0, float(sr)))
+            if sr <= 0.2:
+                legs = ["exact", "sparse"]
+                logger.debug("[rag_retrieve] semantic_ratio=%.1f → keyword-only legs=%s", sr, legs)
+            elif sr >= 0.8:
+                legs = ["dense"]
+                logger.debug("[rag_retrieve] semantic_ratio=%.1f → vector-only legs=%s", sr, legs)
+            # 0.2 < sr < 0.8: keep all legs (hybrid)
+
     from app.services.settings_service import get_setting
     min_confidence = (
         input_obj.min_confidence
@@ -818,7 +920,7 @@ async def _rag_retrieve(ctx: ToolContext, input_obj: RagRetrieveInput) -> dict:
     # ── Pass 1: relaxation ladder with the original query ──────────────
     state, docs, confidence, levels_tried, sufficient, missing = await _run_relaxation_ladder(
         ctx, input_obj.query, kb_ids, org_id, file_markdown, legs, levels,
-        min_confidence, input_obj.graph_expand, doc_ids=doc_ids, sort=input_obj.sort,
+        min_confidence, input_obj.graph_expand, doc_ids=doc_ids, sort=input_obj.sort, filters=input_obj.filters,
     )
 
     # ── Pass 2: if still insufficient, rewrite the query and re-run ────

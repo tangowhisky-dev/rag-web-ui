@@ -566,34 +566,94 @@ def reranking_node(
 # Node: filter (applies RERANKER_SCORE_THRESHOLD)
 # ---------------------------------------------------------------------------
 
-def filter_node(state: AgentState, threshold: Optional[float] = None, db: Any = None, org_id: Any = None) -> dict:
-    """Filter scored docs by RERANKER_SCORE_THRESHOLD (or an override).
+def _elbow_cut(sorted_docs: list[dict]) -> list[dict]:
+    """Elbow cutoff: find the largest consecutive score drop and cut there.
 
-    Keeps only docs whose _reranker_score >= threshold.
-    Unscored docs (graph expansion without score) are excluded.
+    After sorting docs by reranker score (descending), find the position
+    where the score drops most sharply between consecutive docs. Cut there
+    to keep only the high-scoring cluster, adapting to the score
+    distribution per query rather than using a fixed threshold.
+
+    Also applies an absolute floor (RERANKER_SCORE_THRESHOLD) — no doc
+    below the floor survives even if there's no sharp elbow.
+    """
+    if not sorted_docs:
+        return []
+
+    scores = [d.get("metadata", {}).get("_reranker_score", -float("inf")) for d in sorted_docs]
+
+    # Need at least 3 docs to detect an elbow meaningfully
+    if len(scores) < 3:
+        # Just apply the floor
+        floor = get_def("RERANKER_SCORE_THRESHOLD").default
+        return [d for d in sorted_docs if d.get("metadata", {}).get("_reranker_score", -float("inf")) >= floor]
+
+    # Find the largest consecutive score drop
+    max_drop = -float("inf")
+    elbow_idx = len(scores)  # default: keep all
+    for i in range(1, len(scores)):
+        drop = scores[i - 1] - scores[i]
+        if drop > max_drop:
+            max_drop = drop
+            elbow_idx = i  # keep docs[0..i-1], cut from i onward
+
+    # Apply the absolute floor as well — no doc below floor survives
+    floor = get_def("RERANKER_SCORE_THRESHOLD").default
+    result = []
+    for i, d in enumerate(sorted_docs):
+        if i >= elbow_idx:
+            break
+        score = d.get("metadata", {}).get("_reranker_score", -float("inf"))
+        if score >= floor:
+            result.append(d)
+
+    logger.debug("[elbow_cut] %d docs → elbow at idx %d (drop=%.2f) → %d passed (floor=%.2f)",
+                 len(sorted_docs), elbow_idx, max_drop, len(result), floor)
+    return result
+
+
+def filter_node(state: AgentState, threshold: Optional[float] = None, db: Any = None, org_id: Any = None) -> dict:
+    """Filter scored docs by RERANKER_SCORE_THRESHOLD or adaptive elbow cutoff.
+
+    When ELBOW_CUT_ENABLED is True, uses adaptive elbow cutoff: finds the
+    largest consecutive score drop and cuts there, while still applying an
+    absolute floor. This adapts to the score distribution per query.
+    Otherwise, uses the traditional flat threshold.
     """
     with _agent_step("filter"):
         docs = state.get("all_scored_docs", [])
         if not docs:
             return {"retrieved_docs": []}
 
-        if threshold is None:
-            if db is not None:
-                from app.services.settings_service import get_setting
-                threshold = get_setting(db, "RERANKER_SCORE_THRESHOLD", org_id)
-            else:
-                threshold = get_def("RERANKER_SCORE_THRESHOLD").default
-
-        filtered = [
-            d for d in docs
-            if d.get("metadata", {}).get("_reranker_score", -float("inf")) >= threshold
-        ]
-        filtered.sort(
+        # Sort by reranker score descending
+        sorted_docs = sorted(
+            docs,
             key=lambda d: d.get("metadata", {}).get("_reranker_score", -float("inf")),
             reverse=True,
         )
 
-        logger.debug("[FILTER] threshold=%.2f | input=%d | passed=%d", threshold, len(docs), len(filtered))
+        if db is not None:
+            from app.services.settings_service import get_setting
+            elbow_enabled = get_setting(db, "ELBOW_CUT_ENABLED", org_id)
+        else:
+            elbow_enabled = get_def("ELBOW_CUT_ENABLED").default
+
+        if elbow_enabled:
+            filtered = _elbow_cut(sorted_docs)
+        else:
+            # Traditional flat threshold
+            if threshold is None:
+                if db is not None:
+                    from app.services.settings_service import get_setting
+                    threshold = get_setting(db, "RERANKER_SCORE_THRESHOLD", org_id)
+                else:
+                    threshold = get_def("RERANKER_SCORE_THRESHOLD").default
+            filtered = [
+                d for d in sorted_docs
+                if d.get("metadata", {}).get("_reranker_score", -float("inf")) >= threshold
+            ]
+
+        logger.debug("[FILTER] elbow=%s | input=%d | passed=%d", elbow_enabled, len(docs), len(filtered))
 
         return {
             "retrieved_docs": filtered,
@@ -856,6 +916,119 @@ def collapse_same_title_versions(docs: list[dict]) -> list[dict]:
     return result
 
 
+def _rrf_fuse_legs(all_docs: list[dict], k: int = 60) -> list[dict]:
+    """Reciprocal Rank Fusion across retrieval legs.
+
+    Each doc's metadata contains ``_legs`` (list of legs that found it) and
+    ``_leg_rank`` (rank within the first leg that found it). We use the
+    per-leg rank to compute RRF scores across legs, then sort by fused score.
+
+    Docs from a single leg get a score from that leg's rank only.
+    Docs found by multiple legs get the sum of reciprocal ranks — naturally
+    boosting consensus hits.
+
+    Returns the docs sorted by fused RRF score (descending).
+    """
+    if not all_docs:
+        return all_docs
+
+    from app.services.infrastructure import content_hash as _ch
+
+    # Build per-leg ranked lists from _legs metadata
+    leg_docs: dict[str, list[dict]] = {}
+    for doc in all_docs:
+        meta = doc.get("metadata", {})
+        legs = meta.get("_legs", [])
+        for leg in legs:
+            leg_docs.setdefault(leg, []).append(doc)
+
+    # Sort each leg's docs by _leg_rank
+    for leg in leg_docs:
+        leg_docs[leg].sort(key=lambda d: d.get("metadata", {}).get("_leg_rank", 9999))
+
+    # Compute RRF scores
+    scores: dict[str, float] = {}
+    for leg, docs in leg_docs.items():
+        for rank, doc in enumerate(docs):
+            meta = doc.get("metadata", {})
+            h = meta.get("content_hash") or _ch(doc.get("page_content", ""))
+            scores[h] = scores.get(h, 0.0) + 1.0 / (k + rank)
+
+    # Sort all_docs by their fused score
+    def _score(doc: dict) -> float:
+        meta = doc.get("metadata", {})
+        h = meta.get("content_hash") or _ch(doc.get("page_content", ""))
+        return scores.get(h, 0.0)
+
+    return sorted(all_docs, key=_score, reverse=True)
+
+
+def _bow_jaccard(text_a: str, text_b: str) -> float:
+    """Bag-of-words Jaccard similarity between two text snippets.
+
+    Tokenizes on whitespace, lowercases. Fast and embedding-free.
+    """
+    set_a = set(text_a.lower().split())
+    set_b = set(text_b.lower().split())
+    if not set_a or not set_b:
+        return 0.0
+    intersection = set_a & set_b
+    union = set_a | set_b
+    return len(intersection) / len(union)
+
+
+def _mmr_diverse(docs: list[dict], lam: float, max_results: int | None = None) -> list[dict]:
+    """Maximal Marginal Relevance diversification.
+
+    Greedily selects docs that are both relevant (high RRF/reranker score)
+    and diverse (low lexical overlap with already-selected docs).
+
+    score = lam * relevance - (1 - lam) * max_sim_to_selected
+
+    ``lam`` controls the relevance/diversity tradeoff:
+      1.0 = pure relevance (no diversification)
+      0.7 = balanced (default from retrievalagent)
+      0.0 = pure diversity
+
+    Uses bag-of-words Jaccard for similarity (no embeddings needed).
+    """
+    if not docs or lam >= 1.0:
+        return docs
+
+    n = max_results or len(docs)
+    selected: list[dict] = []
+    selected_texts: list[str] = []
+    remaining = list(docs)
+
+    # Use RRF rank as relevance proxy (position in the input list,
+    # which is already sorted by RRF score from _rrf_fuse_legs).
+    max_idx = len(remaining) - 1
+
+    while remaining and len(selected) < n:
+        best_score = -float("inf")
+        best_idx = 0
+        for i, doc in enumerate(remaining):
+            # Relevance: normalized inverse rank
+            relevance = 1.0 - (len(selected) + i) / (max_idx + 1) if max_idx > 0 else 1.0
+            # Diversity penalty: max similarity to any selected doc
+            text = doc.get("page_content", "")[:500]
+            max_sim = 0.0
+            for sel_text in selected_texts:
+                sim = _bow_jaccard(text, sel_text)
+                if sim > max_sim:
+                    max_sim = sim
+            mmr_score = lam * relevance - (1.0 - lam) * max_sim
+            if mmr_score > best_score:
+                best_score = mmr_score
+                best_idx = i
+
+        chosen = remaining.pop(best_idx)
+        selected.append(chosen)
+        selected_texts.append(chosen.get("page_content", "")[:500])
+
+    return selected
+
+
 def merge_node(
     state: AgentState,
     file_markdown: str | None = None,
@@ -864,10 +1037,11 @@ def merge_node(
 ) -> dict:
     """Merge per-leg retrieval results into a single deduplicated doc list.
 
-    Three-stage dedup:
+    Four-stage processing:
       1. Exact content_hash dedup (recency-aware: latest modified_at wins).
-      2. Semantic dedup (>threshold cosine similarity, keep latest).
-      3. Same-title version collapse (keep only latest created_at per title).
+      2. RRF fusion across legs (boosts docs found by multiple legs).
+      3. Semantic dedup (>threshold cosine similarity, keep latest).
+      4. Same-title version collapse (keep only latest created_at per title).
     """
     from app.services.settings_service import get_setting
 
@@ -881,15 +1055,28 @@ def merge_node(
         # Stage 1: exact content_hash dedup (recency-aware)
         merged = dedup_by_content_hash(all_docs)
 
-        # Stage 2: semantic dedup (cosine > threshold, keep latest)
+        # Stage 2: RRF fusion across legs (before semantic dedup so
+        # consensus-ranked docs survive even if semantically similar)
+        rrf_enabled = get_setting(db, "RRF_FUSION_ENABLED", org_id) if db else True
+        if rrf_enabled and len(merged) > 1:
+            merged = _rrf_fuse_legs(merged)
+
+        # Stage 3: semantic dedup (cosine > threshold, keep latest)
         threshold = get_setting(db, "DEDUP_SEMANTIC_THRESHOLD", org_id) if db else 0.95
         if threshold < 1.0 and len(merged) > 1:
             merged = semantic_dedup(merged, threshold)
 
-        # Stage 3: collapse same-title document versions (keep latest)
+        # Stage 4: collapse same-title document versions (keep latest)
         collapse_enabled = get_setting(db, "COLLAPSE_SAME_TITLE_VERSIONS", org_id) if db else True
         if collapse_enabled:
             merged = collapse_same_title_versions(merged)
+
+        # Stage 5: MMR diversity — reduce redundant context by penalizing
+        # lexical similarity. Uses bag-of-words Jaccard (no embeddings needed).
+        # lambda=1.0 = pure relevance, 0.0 = pure diversity.
+        mmr_lambda = get_setting(db, "MERGE_MMR_LAMBDA", org_id) if db else 1.0
+        if mmr_lambda < 1.0 and len(merged) > 2:
+            merged = _mmr_diverse(merged, mmr_lambda)
 
         # Stream the merged candidate docs as they become available.
         if merged:

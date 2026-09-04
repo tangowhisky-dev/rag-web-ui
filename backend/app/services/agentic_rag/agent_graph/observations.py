@@ -226,7 +226,7 @@ def _non_retrieval_observations_text(observations: list[Observation]) -> str:
         # Check both the top-level result and the nested "result" key
         # (kb_search_documents returns {"ok":..., "result":{"docs":[...]}}).
         nested = result.get("result", {}) if isinstance(result.get("result"), dict) else {}
-        if "docs" in result or "docs" in nested or obs.tool in ("rag_retrieve", "kb_search_documents"):
+        if "docs" in result or "docs" in nested or obs.tool in ("rag_retrieve", "kb_search_documents", "kb_read"):
             continue
         parts.append(f"Observation {i}: tool={obs.tool} args={obs.arguments}")
         if obs.error:

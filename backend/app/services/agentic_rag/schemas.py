@@ -129,6 +129,11 @@ class QueryIntent(BaseModel):
         default=None,
         description="Retrieval legs to run: subset of ['dense', 'sparse', 'exact']. null = let the agent decide.",
     )
+    semantic_ratio: Optional[float] = Field(
+        default=None,
+        description="0.0 = keyword-only (exact+sparse), 1.0 = vector-only (dense), 0.5 = hybrid. "
+                    "null = let the agent decide. Used by rag_retrieve to select legs adaptively.",
+    )
     reasoning: str = Field(default="", description="Why these filters/sort/legs were suggested.")
 
 

@@ -283,6 +283,30 @@ def _merge_observation_docs(all_observations, seen_hashes, merged_docs):
                 # Document-level matches are high-confidence by definition.
                 if best_confidence < 0.9:
                     best_confidence = 0.9
+        elif obs.tool == "kb_read" and not obs.error:
+            # kb_read returns a single document's content, not a docs list.
+            # Convert to the standard doc dict shape so it gets a [KB-N]
+            # label in the finalize prompt and becomes citable evidence.
+            content = obs.result.get("content", "")
+            if content:
+                doc_dict = {
+                    "page_content": content,
+                    "metadata": {
+                        "document_id": obs.result.get("document_id"),
+                        "title": obs.result.get("title") or obs.result.get("file_name"),
+                        "file_name": obs.result.get("file_name"),
+                        "section": obs.result.get("section"),
+                        "source": "kb_read",
+                        "_reranker_score": 1.0,
+                        "truncated": obs.result.get("truncated", False),
+                    },
+                }
+                h = _ch(content)
+                if h not in seen_hashes:
+                    seen_hashes.add(h)
+                    merged_docs.append(doc_dict)
+                if best_confidence < 0.9:
+                    best_confidence = 0.9
     return best_confidence
 
 
@@ -350,10 +374,54 @@ async def tool_node(state, ctx) -> dict:
         probe_state = {**state, **state_update, "observations": all_observations}
         ready, reasoning = _verify_execution(_build_execution_summary(probe_state))
         if ready:
-            logger.debug("[tool_node] plan deterministically satisfied after this tool round \u2014 forcing finalize: %s", reasoning[:200])
+            logger.debug("[tool_node] plan deterministically satisfied after this tool round, forcing finalize: %s", reasoning[:200])
             state_update["force_finalize"] = True
+        else:
+            # Confidence short-circuit: if the reranker is highly confident
+            # (top-1 score >= threshold AND gap to tail >= gap_threshold),
+            # skip reflection and go straight to finalize. Saves ~2-5s of
+            # reflect+think LLM latency for confident retrievals.
+            if _reranker_confident(merged_docs, ctx):
+                logger.debug("[tool_node] reranker confidence short-circuit, forcing finalize")
+                state_update["force_finalize"] = True
 
         return state_update
+
+def _reranker_confident(merged_docs: list[dict], ctx) -> bool:
+    """Check if the reranker is confident enough to skip reflection.
+
+    Returns True when:
+    - There are at least 2 docs with reranker scores
+    - Top-1 score >= RERANKER_CONFIDENCE_THRESHOLD (default 0.8)
+    - Gap between top-1 and the tail (last doc) >= RERANKER_CONFIDENCE_GAP (default 0.3)
+
+    This mirrors the Cohere confidence short-circuit from retrievalagent.
+    """
+    if not merged_docs or len(merged_docs) < 2:
+        return False
+
+    scores = [
+        d.get("metadata", {}).get("_reranker_score", -float("inf"))
+        for d in merged_docs
+        if d.get("metadata", {}).get("_reranker_score") is not None
+    ]
+    if len(scores) < 2:
+        return False
+
+    scores.sort(reverse=True)
+    top1 = scores[0]
+    tail = scores[-1]
+    gap = top1 - tail
+
+    top_threshold = get_setting(ctx.db, "RERANKER_CONFIDENCE_THRESHOLD", ctx.org_id)
+    gap_threshold = get_setting(ctx.db, "RERANKER_CONFIDENCE_GAP", ctx.org_id)
+
+    confident = top1 >= top_threshold and gap >= gap_threshold
+    if confident:
+        logger.debug("[reranker_confident] top1=%.3f >= %.2f, gap=%.3f >= %.2f — confident",
+                     top1, top_threshold, gap, gap_threshold)
+    return confident
+
 
 async def _run_tool(tool, name: str, args: dict) -> dict:
     try:

@@ -8,6 +8,10 @@ import re
 from typing import Any, List, Optional
 
 from app.services.agentic_rag.prompts import REWRITE_SYSTEM_PROMPT
+from app.services.infrastructure.reasoning_tags import (
+    build_strip_patterns as _build_reasoning_patterns,
+    strip_reasoning_tags,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,9 +33,6 @@ def estimate_messages_tokens(messages: list) -> int:
     return total
 
 
-def strip_reasoning_tags(text: str) -> str:
-    """Strip <think>...</think> tags from text."""
-    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
 
 def _format_doc_parts(pruned_docs: list[dict], file_markdown: str | None) -> list[str]:
@@ -182,6 +183,9 @@ def normalize_citations(answer: str, docs: list) -> tuple[str, list[int]]:
     - Normalizes [citation](N) and [citation](N)(N) variants to [N](N).
     - Removes any citation whose index is outside the provided docs range.
     - Renumbers remaining citations 1..M by first appearance in the answer.
+    - Skips reasoning/thinking sections when collecting cited indices so
+      that citations in the reasoning (which often reference every chunk)
+      don't dilute the answer's renumbering.
     - Returns the rewritten answer and the list of original 1-based doc indices
       in display order.
     """
@@ -246,11 +250,24 @@ def normalize_citations(answer: str, docs: list) -> tuple[str, list[int]]:
             answer,
         )
 
+    # Split out reasoning sections so citations inside them don't affect
+    # the answer's renumbering.  Uses the shared pattern definitions from
+    # reasoning_tags.py — the single source of truth for tag formats.
+    # Preserves original tags (think, reasoning, channel) in the output.
+    _reasoning_segments: list[str] = []
+    def _extract_reasoning_block(m: re.Match) -> str:
+        _reasoning_segments.append(m.group(0))
+        return f"\x00REASONING{len(_reasoning_segments) - 1}\x00"
+    _full_patterns, _ = _build_reasoning_patterns()
+    for pat in _full_patterns:
+        answer = pat.sub(_extract_reasoning_block, answer)
+
     max_index = len(docs)
     valid_cited: list[int] = []
     seen: set[int] = set()
 
-    # Collect unique valid original indices in first-appearance order.
+    # Collect unique valid original indices in first-appearance order
+    # from the answer section only (reasoning sections are extracted).
     for match in re.finditer(r"\[(\d+)\]\((\d+)\)", answer):
         n = int(match.group(1))
         # Guard against mismatched brackets like [1](2) — require both numbers equal.
@@ -271,7 +288,24 @@ def normalize_citations(answer: str, docs: list) -> tuple[str, list[int]]:
             return f"[{new_idx}]({new_idx})"
         return ""
 
+    # Renumber citations in the answer section.
     normalized = re.sub(r"\[(\d+)\]\((\d+)\)", _replace_marker, answer)
+
+    # Strip citations from reasoning sections — they are internal reasoning
+    # displayed in a collapsible UI section, not clickable citations.
+    def _strip_reasoning_citations(text: str) -> str:
+        text = re.sub(r"\[(?:KB-)?\d+\]\((?:KB-)?\d+\)", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\[citation\]\(\d+\)\(\d+\)", "", text)
+        text = re.sub(r"\[citation\]\(\d+\)", "", text)
+        return text
+
+    # Restore reasoning sections with citations stripped, preserving
+    # the original tag format.
+    normalized = re.sub(
+        r"\x00REASONING(\d+)\x00",
+        lambda m: _strip_reasoning_citations(_reasoning_segments[int(m.group(1))]),
+        normalized,
+    )
     return normalized, valid_cited
 
 
@@ -383,7 +417,11 @@ async def resolve_retrieval_query(
     provenance_sources = provenance_sources or []
     has_history = bool(recent_history)
 
-    if not needs_reference_resolution(query, has_history):
+    # Self-contained queries don't need reference resolution, but when
+    # kb_profile_text is provided we still call the LLM to extract query
+    # intent (semantic_ratio, suggested_filters, suggested_legs). The
+    # query itself won't change — only the intent metadata is produced.
+    if not needs_reference_resolution(query, has_history) and not kb_profile_text:
         return query, {"resolved": False, "reason": "self_contained"}, None
 
     try:
@@ -491,9 +529,17 @@ def _validate_query_intent(intent_raw: str) -> Optional[dict]:
         if not isinstance(obj, dict):
             return None
         # Validate keys — only accept known fields
-        valid_keys = {"suggested_filters", "suggested_sort", "suggested_legs", "reasoning"}
+        valid_keys = {"suggested_filters", "suggested_sort", "suggested_legs", "semantic_ratio", "reasoning"}
         if not all(k in valid_keys for k in obj.keys()):
             return None
+        # Clamp semantic_ratio to [0.0, 1.0] if present
+        sr = obj.get("semantic_ratio")
+        if sr is not None:
+            try:
+                sr = float(sr)
+                obj["semantic_ratio"] = max(0.0, min(1.0, sr))
+            except (TypeError, ValueError):
+                obj.pop("semantic_ratio", None)
         return obj
     except (json.JSONDecodeError, TypeError):
         return None

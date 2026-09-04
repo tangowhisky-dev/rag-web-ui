@@ -127,6 +127,36 @@ def _classify_abbrs(forward: Dict[str, List[str]]) -> tuple[List[str], List[str]
     return exact_abbrs, prose_abbrs
 
 
+# Context-sensitive abbreviations: these are common English words that
+# are also valid abbreviations, but only in specific contexts. The
+# keyword processor matches them everywhere (producing false positives
+# like "used in" → "in = Inch"); the context validator below filters
+# out matches that don't appear in the right context.
+#
+# Rules:
+# - "in" (Inch/Inches): only valid when preceded by a number (e.g. "20 in", "20in")
+# - "no" (Number): only valid when followed by "of" (e.g. "no of carts")
+# - "nos" (Numbers): only valid when followed by "of" (e.g. "nos of carts")
+_CONTEXT_RULES: Dict[str, "re.Pattern[str]"] = {
+    "in": re.compile(r"(?<![a-zA-Z])\d+\s*in\b", re.IGNORECASE),
+    "no": re.compile(r"\bno\s+of\b", re.IGNORECASE),
+    "nos": re.compile(r"\bnos\s+of\b", re.IGNORECASE),
+}
+
+
+def _context_valid(abbr: str, text: str) -> bool:
+    """Check if an abbreviation match is valid in its surrounding context.
+
+    For context-sensitive abbreviations (in, no, nos), the raw keyword
+    match is only kept when the surrounding text matches the expected
+    pattern. All other abbreviations are always valid.
+    """
+    rule = _CONTEXT_RULES.get(abbr.lower())
+    if rule is None:
+        return True
+    return bool(rule.search(text))
+
+
 def _build_keyword_processors(
     exact_abbrs: List[str], prose_abbrs: List[str]
 ) -> tuple[KeywordProcessor, KeywordProcessor]:
@@ -224,6 +254,21 @@ def find_abbrs_in_text(text: str, lookup: AbbreviationLookup) -> Dict[str, List[
         for abbr in lookup.kp_prose.extract_keywords(match_text):
             if abbr in lookup.forward and abbr not in found:
                 found[abbr] = lookup.forward[abbr]
+    # Context filter: drop context-sensitive abbrs (in, no, nos) that
+    # matched as common English words without the right surrounding context.
+    if found:
+        for abbr in list(found.keys()):
+            if not _context_valid(abbr, text):
+                del found[abbr]
+    # Supplementary scan: context-sensitive abbrs like "in" (Inch) may
+    # not be found by flashtext2 when fused with a number ("20in") because
+    # the word segmenter treats "20in" as one token. Check the raw text
+    # with the context regex and add the abbr if it matches but wasn't found.
+    for abbr, pattern in _CONTEXT_RULES.items():
+        if abbr in found:
+            continue
+        if abbr in lookup.forward and pattern.search(text):
+            found[abbr] = lookup.forward[abbr]
     return found
 
 
@@ -250,11 +295,31 @@ def find_forms_in_text(text: str, lookup: AbbreviationLookup) -> Dict[str, List[
     return {abbr: lookup.forward[abbr] for abbr in found_abbrs}
 
 
+_GLOSSARY_BLOCK_RE = re.compile(
+    r"\n*\[Abbreviation Glossary\]\n.*?(?=\n\[Abbreviation Glossary\]\n|$)",
+    re.DOTALL,
+)
+
+
+def _strip_glossary_blocks(text: str) -> str:
+    """Remove all existing [Abbreviation Glossary] blocks from text.
+
+    Makes expansion idempotent: calling expand_* twice on the same text
+    produces the same result as calling it once. Without this, the second
+    call matches abbreviation words inside the glossary block itself
+    (e.g. "Abbreviation" → abvn) and appends a duplicate block.
+    """
+    return _GLOSSARY_BLOCK_RE.sub("", text).rstrip()
+
+
 def expand_suffix(text: str, lookup: AbbreviationLookup) -> str:
     """Append an [Abbreviation Glossary] block to text.
 
     Preserves the original text and adds all expanded forms as a suffix block.
     Forward-only (used during ingestion).
+
+    Idempotent: strips any existing glossary block before matching so
+    re-expansion never produces duplicate blocks.
 
     Format:
         {original text}
@@ -265,14 +330,15 @@ def expand_suffix(text: str, lookup: AbbreviationLookup) -> str:
     """
     if lookup.is_empty:
         return text
-    found = find_abbrs_in_text(text, lookup)
+    clean = _strip_glossary_blocks(text)
+    found = find_abbrs_in_text(clean, lookup)
     if not found:
-        return text
+        return clean
     lines = []
     for abbr in sorted(found.keys(), key=lambda x: x.lower()):
         forms = ", ".join(found[abbr])
         lines.append(f"{abbr} = {forms}")
-    return f"{text}\n\n[Abbreviation Glossary]\n" + "\n".join(lines)
+    return f"{clean}\n\n[Abbreviation Glossary]\n" + "\n".join(lines)
 
 
 def expand_query_suffix(query: str, lookup: AbbreviationLookup) -> str:
@@ -281,29 +347,36 @@ def expand_query_suffix(query: str, lookup: AbbreviationLookup) -> str:
     Finds abbreviations in the query (forward) AND full forms (reverse),
     then appends an [Abbreviation Glossary] block.
 
+    Idempotent: strips any existing glossary block before matching so
+    re-expansion never produces duplicate blocks.
+
     "bns wdr"             → "bns wdr\n\n[Abbreviation Glossary]\nbns = Battalions\nwdr = Withdraw, ..."
     "battalions withdrew" → "battalions withdrew\n\n[Abbreviation Glossary]\nbns = Battalions\nwdr = Withdraw, ..."
     "commanding officer"  → "commanding officer\n\n[Abbreviation Glossary]\nCO = Commanding Officer"
     """
     if lookup.is_empty:
         return query
-    found_abbrs = find_abbrs_in_text(query, lookup)
-    found_forms = find_forms_in_text(query, lookup)
+    clean = _strip_glossary_blocks(query)
+    found_abbrs = find_abbrs_in_text(clean, lookup)
+    found_forms = find_forms_in_text(clean, lookup)
     merged = dict(found_abbrs)
     for abbr, forms in found_forms.items():
         if abbr not in merged:
             merged[abbr] = forms
     if not merged:
-        return query
+        return clean
     lines = []
     for abbr in sorted(merged.keys(), key=lambda x: x.lower()):
         forms = ", ".join(merged[abbr])
         lines.append(f"{abbr} = {forms}")
-    return f"{query}\n\n[Abbreviation Glossary]\n" + "\n".join(lines)
+    return f"{clean}\n\n[Abbreviation Glossary]\n" + "\n".join(lines)
 
 
 def build_glossary(text: str, lookup: AbbreviationLookup) -> str:
     """Build a glossary block from abbreviations found in text.
+
+    Idempotent: strips any existing glossary block before matching so
+    the glossary never includes entries derived from a previous glossary.
 
     Format:
         CO = Commanding Officer
@@ -312,7 +385,8 @@ def build_glossary(text: str, lookup: AbbreviationLookup) -> str:
     """
     if lookup.is_empty:
         return ""
-    found = find_abbrs_in_text(text, lookup)
+    clean = _strip_glossary_blocks(text)
+    found = find_abbrs_in_text(clean, lookup)
     if not found:
         return ""
     lines = []

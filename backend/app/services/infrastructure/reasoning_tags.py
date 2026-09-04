@@ -1,9 +1,14 @@
 """
-Reasoning tag detection and stripping.
+Reasoning tag detection, stripping, and extraction.
 
 Two formats supported (hardcoded):
-  1. OpenAI/DeepSeek/Qwen HTML-style: <think>...</think>  <reasoning>...</reasoning>
+  1. OpenAI/DeepSeek/Qwen HTML-style: <think>...</think>
+     <reasoning>...</reasoning>
   2. Gemma channel-style:              <|channel>thought ... <channel|>
+
+This module is the single source of truth for reasoning tag handling in the
+backend.  All callers (chat_service, document_converter, export_service,
+agentic_rag/utils) import from here rather than implementing their own regex.
 """
 
 import re
@@ -51,7 +56,7 @@ def build_strip_patterns() -> tuple[list[re.Pattern], list[re.Pattern]]:
                 full.append(_CHANNEL_PATTERN)
                 prefix.append(_CHANNEL_PREFIX)
             else:
-                # HTML-style: <think>content</think>
+                # HTML-style: <tag>content</tag>
                 esc_tag = re.escape(tag)
                 full.append(
                     re.compile(
@@ -89,3 +94,39 @@ def strip_reasoning_tags(text: str) -> str:
         cleaned = pat.sub("", cleaned).strip()
 
     return cleaned
+
+
+def extract_reasoning(text: str) -> tuple[str | None, str, bool]:
+    """
+    Split model output into (reasoning_content, answer_text, is_complete).
+
+    Tries each supported format in order.  The first match wins.
+
+    Args:
+        text: Raw model output that may contain reasoning tags.
+
+    Returns:
+        reasoning_content: The text inside the reasoning tags, or None if
+            no reasoning tags were found.
+        answer_text: The text outside reasoning tags (preamble + postamble).
+        is_complete: True if the reasoning block has a closing tag.
+            False if the block is unclosed (streaming/truncation).
+    """
+    full_patterns, prefix_patterns = build_strip_patterns()
+
+    for pat in full_patterns:
+        m = pat.search(text)
+        if m:
+            reasoning = m.group(1).strip() if m.lastindex else ""
+            # Reconstruct answer: text before match + text after match
+            answer = (text[:m.start()] + text[m.end():]).strip()
+            return reasoning, answer, True
+
+    for pat in prefix_patterns:
+        m = pat.search(text)
+        if m:
+            reasoning = m.group(1).strip() if m.lastindex else ""
+            answer = text[:m.start()].strip()
+            return reasoning, answer, False
+
+    return None, text, True

@@ -211,6 +211,20 @@ _ORG_OVERRIDABLE = [
                description="When multiple documents share the same title (e.g. repeated uploads "
                            "of 'Weekly Update'), keep only chunks from the latest created_at "
                            "version. Prevents older versions from polluting 'latest' queries."),
+    SettingDef("RRF_FUSION_ENABLED", "Retrieval", "RRF fusion across legs",
+               "bool", True, scope="org", reload="next_request",
+               description="Reciprocal Rank Fusion: merge per-leg results by 1/(k+rank) instead of "
+                           "simple concatenation. Boosts docs found by multiple legs (consensus)."),
+    SettingDef("MERGE_MMR_LAMBDA", "Retrieval", "Merge MMR lambda",
+               "float", 1.0, scope="org", reload="next_request", min_value=0.0, max_value=1.0,
+               description="Maximal Marginal Relevance lambda for merge_node. "
+                           "1.0 = pure relevance (disabled), 0.7 = balanced, 0.0 = pure diversity. "
+                           "Uses bag-of-words Jaccard similarity (no embeddings needed)."),
+    SettingDef("PRE_FUSION_MIN_DOCS", "Retrieval", "Pre-fusion min docs",
+               "int", 3, scope="org", reload="next_request", min_value=1,
+               description="Minimum docs from exact+sparse legs before running the reranker for "
+                           "the fast-accept check. Below this, dense runs without the check "
+                           "(saves reranker latency when there aren't enough candidates)."),
     SettingDef("RETRIEVAL_DENSE_ENABLED", "Retrieval", "Enable dense leg",
                "bool", True, scope="org", reload="next_request",
                description="Ingestion always indexes all legs."),
@@ -251,6 +265,21 @@ _ORG_OVERRIDABLE = [
     SettingDef("RERANKER_SCORE_THRESHOLD", "Reranker", "Reranker score threshold",
                "float", -2.0, scope="org", reload="next_request",
                description="Minimum cross-encoder logit to pass reranking. Lower = more results pass; adaptive retrieval uses progressively lower thresholds on retries."),
+    SettingDef("ELBOW_CUT_ENABLED", "Reranker", "Elbow cutoff enabled",
+               "bool", False, scope="org", reload="next_request",
+               description="When True, replaces the flat RERANKER_SCORE_THRESHOLD with adaptive elbow "
+                           "cutoff: finds the largest consecutive score drop and cuts there, while "
+                           "still applying the threshold as an absolute floor. Adapts to per-query "
+                           "score distributions."),
+    SettingDef("RERANKER_CONFIDENCE_THRESHOLD", "Reranker", "Confidence short-circuit threshold",
+               "float", 0.8, scope="org", reload="next_request",
+               description="Reranker top-1 score above which the confidence short-circuit fires. "
+                           "When top-1 >= this AND gap to tail >= RERANKER_CONFIDENCE_GAP, "
+                           "reflection is skipped and the agent goes straight to finalize."),
+    SettingDef("RERANKER_CONFIDENCE_GAP", "Reranker", "Confidence short-circuit gap",
+               "float", 0.3, scope="org", reload="next_request", min_value=0.0,
+               description="Minimum gap between top-1 and tail reranker scores for the confidence "
+                           "short-circuit. A wide gap means the top result is clearly best."),
 
     # GraphRAG query-time
     SettingDef("GRAPHRAG_RETRIEVAL_HOPS", "GraphRAG", "Graph query hops",

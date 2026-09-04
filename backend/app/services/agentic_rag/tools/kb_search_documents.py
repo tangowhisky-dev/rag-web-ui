@@ -35,9 +35,10 @@ class KbSearchDocumentsInput(BaseModel):
     sort_field: str = Field(default="created_at", description="Metadata field to sort by.")
     sort_direction: str = Field(default="desc", description="Sort direction: 'desc' (newest first) or 'asc'.")
     top_n: int = Field(
-        default=1, ge=1, le=10,
-        description="Number of documents to return after same-title deduplication. "
-        "1 = only the latest version. 3 = latest 3 versions (for synthesizing across versions).",
+        default=3, ge=1, le=10,
+        description="Maximum number of documents to return overall (after same-title "
+        "deduplication and recency sorting). 3 = the 3 most recent matching documents. "
+        "Same-title versions are deduplicated to the latest before applying this cap.",
     )
     max_tokens_per_doc: int = Field(
         default=4000, ge=500, le=32000,
@@ -121,21 +122,22 @@ class KbSearchDocumentsTool(BaseAgentTool):
             }
 
         # Deduplicate same-title versions: keep only the latest per title.
-        # If top_n > 1, keep the top N latest versions per title.
-        latest_per_title: dict[str, list[Document]] = {}
+        latest_per_title: dict[str, Document] = {}
         for doc in rows:
             title_key = (doc.title or doc.file_name or "").strip().lower()
             if not title_key:
                 title_key = f"__untitled_{doc.id}"
-            latest_per_title.setdefault(title_key, []).append(doc)
+            # rows are already sorted by created_at desc, so the first
+            # occurrence per title is the latest version.
+            if title_key not in latest_per_title:
+                latest_per_title[title_key] = doc
 
-        selected: list[Document] = []
-        for title_key, docs in latest_per_title.items():
-            # docs are already sorted by created_at desc from the query
-            selected.extend(docs[:input_obj.top_n])
-
-        # Re-sort selected by created_at desc (interleaved across titles)
-        selected.sort(key=lambda d: d.created_at or d.updated_at, reverse=True)
+        # Sort deduplicated docs by created_at desc and cap at top_n overall.
+        selected = sorted(
+            latest_per_title.values(),
+            key=lambda d: d.created_at or d.updated_at,
+            reverse=True,
+        )[:input_obj.top_n]
 
         # Build doc dicts with full markdown content.
         docs_result: list[dict] = []

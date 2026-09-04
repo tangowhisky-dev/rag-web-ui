@@ -90,6 +90,49 @@ async def plan_node(state, ctx) -> dict:
         original = state.get("original_query", "")
         rewritten = state.get("rewritten_query", "") or original
 
+        # ── Tier-0 fast-track ────────────────────────────────────────────
+        # When query_intent already has title_contains, the rewrite LLM
+        # identified a named-document lookup. Skip the plan LLM entirely —
+        # create a minimal plan and pre-populate a kb_search_documents call.
+        # This saves ~2-5s of plan LLM latency for title-specific queries.
+        qi = state.get("query_intent") or {}
+        title_contains = (qi.get("suggested_filters") or {}).get("title_contains")
+        if title_contains and not state.get("clarification_response"):
+            suggested_sort = qi.get("suggested_sort")
+            sort_field = "created_at"
+            sort_direction = "desc"
+            if suggested_sort and isinstance(suggested_sort, dict):
+                sort_field = suggested_sort.get("field", "created_at")
+                sort_direction = suggested_sort.get("direction", "desc")
+            fast_plan = Plan(
+                intent="rag",
+                subtasks=[Subtask(
+                    id="a",
+                    description=f"Read document matching title '{title_contains}'",
+                    tool_hint="kb_search_documents",
+                    suggested_filters=qi.get("suggested_filters"),
+                    suggested_sort=suggested_sort,
+                )],
+            )
+            call: dict = {
+                "tool": "kb_search_documents",
+                "arguments": {
+                    "title_contains": title_contains,
+                    "sort_field": sort_field,
+                    "sort_direction": sort_direction,
+                    "top_n": 1,
+                    "max_tokens_per_doc": 4000,
+                },
+            }
+            logger.debug("[plan_node] Tier-0 fast-track: title_contains=%r, skipping plan LLM", title_contains)
+            writer({"event": "plan", "plan": fast_plan.model_dump(), "fast_track": True})
+            return {
+                "plan": fast_plan,
+                "needs_clarification": False,
+                "clarification_question": None,
+                "precomputed_tool_calls": [call],
+            }
+
         file_meta = []
         if ctx.chat_id:
             files = ctx.db.query(ChatFile).filter(ChatFile.chat_id == ctx.chat_id).all()
