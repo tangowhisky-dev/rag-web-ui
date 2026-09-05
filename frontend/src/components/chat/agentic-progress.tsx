@@ -184,24 +184,24 @@ export const AgenticProgress = ({
     );
   }, [toolCalls, toolObservations]);
 
-  // Unified timeline: phases with tool cards inserted right after
-  // "Gathering sources" (where retrieval tools belong chronologically).
-  // If there's no "Gathering sources" phase, tools fall through to the end.
+  // Unified timeline: phases with tool cards inserted after "Thinking"
+  // (in the atomic-tools pipeline, tools run after think and before
+  // sufficiency_check/verifying).
   const timeline = useMemo(() => {
     type Entry =
       | { kind: "phase"; phase: string; phaseIdx: number }
       | { kind: "tool"; pair: ToolCallPair; toolIdx: number };
     const entries: Entry[] = [];
-    const gatheringIdx = phases.indexOf("Gathering sources");
+    const toolAnchorIdx = phases.indexOf("Thinking");
     phases.forEach((phase, i) => {
       entries.push({ kind: "phase", phase, phaseIdx: i });
-      if (i === gatheringIdx) {
+      if (i === toolAnchorIdx) {
         toolPairs.forEach((pair, ti) => {
           entries.push({ kind: "tool", pair, toolIdx: ti });
         });
       }
     });
-    if (gatheringIdx === -1) {
+    if (toolAnchorIdx === -1) {
       toolPairs.forEach((pair, ti) => {
         entries.push({ kind: "tool", pair, toolIdx: ti });
       });
