@@ -1,7 +1,7 @@
 """kb_metadata tool — introspect KB document metadata for filtering.
 
 Lets the agent discover what documents exist and what fields it can filter
-on before calling rag_retrieve. This makes the agent autonomous — it doesn't
+on before calling search tools. This makes the agent autonomous — it doesn't
 need the user to pre-filter.
 
 Actions:
@@ -74,7 +74,7 @@ class KbMetadataTool(BaseAgentTool):
     ui_label: str = "Inspecting KB metadata"
     description: str = (
         "Inspect knowledge base metadata to discover what documents exist and "
-        "what fields you can filter on. Call BEFORE rag_retrieve when the query "
+        "what fields you can filter on. Call BEFORE search tools when the query "
         "implies filtering by title, date, file type, or filename. "
         "Actions: list_fields (available filter fields), "
         "unique_values (distinct values for a field), "

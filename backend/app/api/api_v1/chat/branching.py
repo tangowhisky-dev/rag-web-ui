@@ -267,8 +267,6 @@ async def submit_clarification(
             name = event.get("event", "")
             mapping = {
                 "token": "0",
-                "rewritten_query": "1",
-                "expanded_query": "eq",
                 "context": "2",
                 "error": "3",
                 "agent_step": "4",
@@ -281,6 +279,7 @@ async def submit_clarification(
                 "tool_observation": "to",
                 "last_answer": "la",
                 "interrupt": "c",
+                "done": "d",
             }
             return mapping.get(name) or name
 
@@ -350,7 +349,7 @@ async def submit_clarification(
             },
             "full_response": final_answer,
         }
-        yield f"done:{json.dumps(done_payload)}\n"
+        yield f"d:{json.dumps(done_payload)}\n"
 
     return StreamingResponse(
         response_stream(),

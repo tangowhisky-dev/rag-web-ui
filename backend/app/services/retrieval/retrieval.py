@@ -137,7 +137,7 @@ def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
     Uses native Qdrant MMR when QDRANT_MMR_DIVERSITY > 0 to diversify results.
     Returns dense vectors in metadata for downstream semantic dedup.
     ``min_score`` overrides settings.DENSE_MIN_SCORE for this call (used by the
-    graduated relaxation ladder in rag_retrieve).
+    graduated relaxation ladder in atomic search tools).
     """
     from app.services.settings_service import get_setting
     embed_model = get_setting(db, "DENSE_EMBEDDINGS_MODEL", None)
@@ -182,6 +182,10 @@ def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
             if pid in result:
                 continue
             doc = _qdrant_payload_to_doc(hit.payload or {})
+            # Store the Qdrant similarity score in metadata so downstream
+            # tools (search_dense, rerank_results) can access it for
+            # confidence scoring.
+            doc.metadata["score"] = float(score)
             # Store dense vector for downstream semantic dedup.
             vec = hit.vector
             if isinstance(vec, dict):
@@ -249,7 +253,7 @@ def _sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: 
     Uses native Qdrant MMR when QDRANT_MMR_DIVERSITY > 0 to diversify results.
     Returns dense vectors in metadata for downstream semantic dedup.
     ``min_score`` overrides settings.SPARSE_MIN_SCORE for this call (used by the
-    graduated relaxation ladder in rag_retrieve).
+    graduated relaxation ladder in atomic search tools).
     """
     logger.debug("[SPARSE] SPLADE embed | model=%s | query=%r", settings.SPLADE_MODEL, query[:120])
     sparse_emb = next(iter(get_sparse_embedder().embed([query])))
@@ -294,6 +298,7 @@ def _sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: 
             if pid in result:
                 continue
             doc = _qdrant_payload_to_doc(hit.payload or {})
+            doc.metadata["score"] = float(score)
             # Store dense vector for downstream semantic dedup.
             # Qdrant returns all named vectors when with_vectors=True.
             vec = hit.vector
@@ -384,7 +389,7 @@ def _enrich_meta_from_row(meta: dict, row) -> None:
     # Store file_modified_at from the JOIN for recency-aware dedup.
     if hasattr(row, "file_modified_at") and row.file_modified_at:
         meta["_file_modified_at"] = row.file_modified_at.isoformat() if hasattr(row.file_modified_at, "isoformat") else str(row.file_modified_at)
-    # Store file_created_at from the JOIN for sort-by-recency in rag_retrieve.
+    # Store file_created_at from the JOIN for sort-by-recency in atomic search tools.
     if hasattr(row, "file_created_at") and row.file_created_at:
         meta["_file_created_at"] = row.file_created_at.isoformat() if hasattr(row.file_created_at, "isoformat") else str(row.file_created_at)
 
@@ -392,6 +397,9 @@ def _enrich_meta_from_row(meta: dict, row) -> None:
 def _normalize_metadata(raw_meta, row) -> dict:
     meta = _parse_raw_meta(raw_meta)
     _enrich_meta_from_row(meta, row)
+    # Store the FTS score so downstream tools can access it for confidence.
+    if hasattr(row, 'fts_score') and row.fts_score is not None:
+        meta["score"] = float(row.fts_score)
     return meta
 
 
@@ -461,7 +469,7 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
     
     Searches both KB documents and DataStore documents.
     ``min_score`` overrides settings.EXACT_MIN_SCORE for this call (used by the
-    graduated relaxation ladder in rag_retrieve).
+    graduated relaxation ladder in atomic search tools).
 
     IMPORTANT: This function creates its own fresh SessionLocal() session for
     each retry attempt instead of using the passed ``db`` session. The passed

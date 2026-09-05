@@ -430,16 +430,28 @@ def test_tools_registered():
 
 
 def test_applicable_tools_filters_without_kb():
-    """KB tools should be filtered out when state has no kb_ids."""
+    """KB tools are always available — they handle empty kb_ids gracefully via enforce_rbac.
+    File tools should be filtered out when no file is attached."""
     from app.services.agentic_rag.tools import applicable_tools
     from app.services.agentic_rag.tool_context import ToolContext
 
     ctx = ToolContext(db=None, user_id=1, org_id=1, chat_id=1, state={"kb_ids": [], "file_markdown": None})
     tools = applicable_tools(ctx)
     names = {t.name for t in tools}
-    assert "kb_grep" not in names
-    assert "kb_read" not in names
-    assert "kb_outline" not in names
+    # KB tools are always available (enforce_rbac handles empty kb_ids)
+    assert "kb_grep" in names
+    assert "kb_read" in names
+    assert "kb_outline" in names
+    # File tools should be filtered out without a file
+    assert "file_read" not in names
+    assert "file_summarize" not in names
+    # Search tools should be available
+    assert "search_exact" in names
+    assert "search_sparse" in names
+    assert "search_dense" in names
+    # Deferred tools should be filtered out before any search
+    assert "rerank_results" not in names
+    assert "graph_expand" not in names
 
 
 def test_applicable_tools_includes_with_kb():

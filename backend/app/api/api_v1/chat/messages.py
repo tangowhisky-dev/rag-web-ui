@@ -139,6 +139,16 @@ def _serialize_messages_with_citations(
                 if chunk:
                     entry = {**(cit.citation_metadata or {})}  # type: ignore[misc]
                     entry["text"] = chunk.chunk_text
+                    # Include new CitationRef fields for the frontend
+                    entry["citation_kind"] = cit.citation_kind or "chunk"
+                    entry["section"] = cit.section
+                    entry["start_char"] = cit.start_char
+                    entry["end_char"] = cit.end_char
+                    entry["start_line"] = cit.start_line
+                    entry["end_line"] = cit.end_line
+                    entry["page"] = cit.page
+                    entry["match_line"] = cit.match_line
+                    entry["source_tool"] = cit.source_tool
                     msg_dict["citations"].append(entry)
         else:
             msg_dict["citations"] = []
@@ -563,10 +573,14 @@ def get_message_siblings(
             .order_by(Message.id.desc())
             .first()
         )
-        from app.schemas.chat import MessageResponse
+        # Use the same citation-aware serialization as the main message list
+        pair = [m for m in [user_msg, assistant_msg] if m is not None]
+        serialized = _serialize_messages_with_citations(pair, db, {})
+        user_dict = next((m for m in serialized if m["id"] == str(user_msg.id)), serialized[0] if serialized else {})
+        assistant_dict = next((m for m in serialized if m["id"] == str(assistant_msg.id)), None) if assistant_msg else None
         result.append({
-            "user": MessageResponse.model_validate(user_msg).model_dump(),
-            "assistant": MessageResponse.model_validate(assistant_msg).model_dump() if assistant_msg else None,
+            "user": user_dict,
+            "assistant": assistant_dict,
         })
 
     return result

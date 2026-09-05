@@ -154,9 +154,10 @@ class TestDeclaredStateKeys:
 
         monkeypatch.setattr("app.services.agentic_rag.agent_graph.helpers.get_setting", _mock_get_setting)
         monkeypatch.setattr("app.services.agentic_rag.agent_graph.thinking.get_setting", _mock_get_setting)
-        state = {"started_at": 0.0, "iteration": 1, "tool_calls": [{"tool": "rag_retrieve"}]}
+        state = {"started_at": 0.0, "iteration": 1, "tool_calls": [{"tool": "search_dense"}]}
         assert _wall_clock_exceeded(state) is True
-        assert route_think(state) == "reflect_final"
+        # In the new topology, route_think returns "finalize" when wall clock is exceeded
+        assert route_think(state) == "finalize"
 
     def test_clarification_question_declared_once(self):
         with open("/app/app/services/agentic_rag/graph_state.py") as f:
@@ -173,7 +174,7 @@ class TestObservationAccumulation:
 
     def _obs(self, n: int) -> Observation:
         return Observation(
-            tool="rag_retrieve",
+            tool="search_dense",
             arguments={"query": f"q{n}"},
             result={"docs": [{"page_content": f"doc{n}"}]},
             error=None,
@@ -184,7 +185,7 @@ class TestObservationAccumulation:
         from app.services.agentic_rag.agent_graph import tool_node
 
         ctx = _ctx()
-        state = {"observations": [], "tool_call_count": {}, "retrieved_docs": [], "plan": Plan()}
+        state = {"observations": [], "tool_call_counts": {}, "retrieved_docs": [], "plan": Plan()}
         for n in range(1, 4):
             update = asyncio.run(tool_node(
                 {**state, "tool_calls": [{"tool": "nonexistent_tool", "arguments": {"n": n}}]},
@@ -194,7 +195,7 @@ class TestObservationAccumulation:
             # accumulated list.
             assert len(update["observations"]) == 1
             state["observations"] = accumulate(state["observations"], update["observations"])
-            state["tool_call_count"] = update["tool_call_count"]
+            state["tool_call_counts"] = update["tool_call_counts"]
 
         assert len(state["observations"]) == 3
 
@@ -233,7 +234,7 @@ class TestRecalledMemoryIsNotEvidence:
         update = asyncio.run(tool_node(
             {
                 "observations": [],
-                "tool_call_count": {},
+                "tool_call_counts": {},
                 "retrieved_docs": [],
                 "recalled_memories": recalled,
                 "plan": Plan(),
@@ -251,15 +252,15 @@ class TestSubtaskVerification:
         return Plan(
             intent="rag",
             subtasks=[
-                Subtask(id=chr(97 + i), description=f"part {i}", tool_hint="rag_retrieve")
+                Subtask(id=chr(97 + i), description=f"part {i}", tool_hint="search_dense")
                 for i in range(n)
             ],
         )
 
     def _obs(self, n: int) -> Observation:
         return Observation(
-            tool="rag_retrieve", arguments={"query": f"q{n}"},
-            result={"docs": [{"page_content": f"doc{n}"}]}, error=None, tokens=1,
+            tool="search_dense", arguments={"query": f"q{n}"},
+            result={"hits": [{"content": f"doc{n}"}]}, error=None, tokens=1,
         )
 
     def test_one_retrieval_does_not_complete_three_subtasks(self):
@@ -268,7 +269,7 @@ class TestSubtaskVerification:
         summary = _build_execution_summary({
             "plan": self._plan(3),
             "observations": [self._obs(1)],
-            "tool_call_count": {"rag_retrieve": 1},
+            "tool_call_counts": {"search_dense": 1},
             "iteration": 1,
         })
         assert [s["completed"] for s in summary["subtasks"]] == [True, False, False]
@@ -280,7 +281,7 @@ class TestSubtaskVerification:
         summary = _build_execution_summary({
             "plan": self._plan(3),
             "observations": [self._obs(1), self._obs(2), self._obs(3)],
-            "tool_call_count": {"rag_retrieve": 3},
+            "tool_call_counts": {"search_dense": 3},
             "iteration": 3,
         })
         assert all(s["completed"] for s in summary["subtasks"])
@@ -480,73 +481,6 @@ class TestEvidenceTrimming:
 
         docs = [{"page_content": "x " * 500, "_reranker_score": 0.1}]
         assert len(_trim_docs_to_budget(docs, overflow_tokens=10_000)) == 1
-
-
-class TestQueryResolution:
-    """Resolution must be conditional and provenance-bound."""
-
-    def test_self_contained_query_passes_through_byte_for_byte(self):
-        from app.services.agentic_rag.utils import resolve_retrieval_query
-
-        query = "What is a mutex?"
-        resolved, provenance, query_intent = asyncio.run(resolve_retrieval_query(
-            query=query,
-            original_query=query,
-            recent_history=[HumanMessage(content="tell me about Linux")],
-            provenance_sources=["tell me about Linux"],
-        ))
-        assert resolved == query
-        assert provenance["resolved"] is False
-        assert provenance["reason"] == "self_contained"
-
-    def test_no_history_means_no_resolver_call(self):
-        from app.services.agentic_rag.utils import resolve_retrieval_query
-
-        resolved, provenance, query_intent = asyncio.run(resolve_retrieval_query(
-            query="what are its limitations?",
-            original_query="what are its limitations?",
-            recent_history=[],
-        ))
-        assert resolved == "what are its limitations?"
-        assert provenance["resolved"] is False
-
-    def test_untraceable_terms_are_rejected(self):
-        from app.services.agentic_rag.utils import validate_resolution_provenance
-
-        ok, unsupported = validate_resolution_provenance(
-            original_query="what about its limitations?",
-            rewritten="limitations of Kubernetes autoscaling",
-            provenance_sources=["User: tell me about the StreamVC paper"],
-        )
-        assert ok is False
-        assert "kubernetes" in unsupported
-
-    def test_terms_traceable_to_history_are_accepted(self):
-        from app.services.agentic_rag.utils import validate_resolution_provenance
-
-        ok, unsupported = validate_resolution_provenance(
-            original_query="what about its limitations?",
-            rewritten="limitations of the StreamVC model",
-            provenance_sources=["User: tell me about the StreamVC model"],
-        )
-        assert ok is True
-        assert unsupported == []
-
-    def test_resolver_failure_falls_back_to_the_original_query(self, monkeypatch):
-        from app.services.agentic_rag import utils
-
-        async def _boom(**_kwargs):
-            raise RuntimeError("provider down")
-
-        monkeypatch.setattr(utils, "_call_rewriter", _boom)
-        resolved, provenance, query_intent = asyncio.run(utils.resolve_retrieval_query(
-            query="what about its limitations?",
-            original_query="what about its limitations?",
-            recent_history=[HumanMessage(content="tell me about StreamVC")],
-            provenance_sources=["tell me about StreamVC"],
-        ))
-        assert resolved == "what about its limitations?"
-        assert provenance["reason"].startswith("resolver_failed")
 
 
 class TestContiguousOverlapPruning:

@@ -2,7 +2,7 @@
 
 Profiles are computed once per KB and cached in Redis. They provide
 field availability, content types, date range, doc count, and avg
-chunk length so that rewrite_query_node can suggest filters/sort
+chunk length so that the plan LLM can suggest filters/sort
 and plan/think prompts can include KB context without calling
 kb_metadata as a tool.
 """
@@ -90,7 +90,7 @@ def _compute_profile(org_id: int, kb_id: int, db: Any) -> dict:
             if lengths:
                 avg_chunk_len = sum(lengths) // len(lengths)
 
-        # Field availability: which rag_retrieve filter fields are usable
+        # Field availability: which search tool filter fields are usable
         has_titles = any(d.title for d in docs)
         has_file_names = any(d.file_name for d in docs)
         has_content_types = len(content_types) > 1  # only useful if there's variety

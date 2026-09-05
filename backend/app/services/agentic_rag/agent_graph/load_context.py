@@ -2,7 +2,7 @@
 
 Loads the previous-answer object, recalled conversational memory, and file
 metadata into graph state. Resets all per-turn loop state (observations,
-iteration, tool_call_count, force_finalize, etc.) so the checkpointer
+iteration, tool_call_counts, force_finalize, etc.) so the checkpointer
 doesn't carry over stale values from the previous turn.
 """
 
@@ -78,26 +78,22 @@ async def load_context_node(state, ctx) -> dict:
             # doc chunks into this turn's think_node prompt).
             "observations": [{"__reset__": True}],
             "iteration": 0,
-            "tool_call_count": {},
+            "tool_call_counts": {},
             "force_finalize": False,
-            "precomputed_tool_calls": [],
-            "reflection_final": None,
             "precomputed_answer": "",
             "tool_calls": [],
             "retrieved_docs": [],
-            "all_scored_docs": [],
             "cited_doc_indices": [],
-            "retrieval_confidence": 0.0,
             "compaction_triggered": False,
             "answer_evaluation_attempts": 0,
             "evaluation_flags": [],
-            "adaptive_reran": False,
             "answer_usage": None,
             "final_answer": "",
             "answer": "",
             "clarification_count": 0,
             "clarification_response": "",
             "needs_clarification": False,
-            "resolution_provenance": None,
             "kb_profile": kb_profile,
+            # New atomic-tools state
+            "sufficient": False,
         }

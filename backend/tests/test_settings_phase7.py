@@ -109,19 +109,7 @@ def test_agent_history_pairs_is_org_overridable():
     assert is_org_overridable("AGENT_HISTORY_PAIRS")
 
 
-def test_adaptive_retrieval_enabled_is_org_overridable():
-    from app.core.settings_registry import is_org_overridable
-    assert is_org_overridable("ADAPTIVE_RETRIEVAL_ENABLED")
-
-
-def test_adaptive_retrieval_threshold_is_org_overridable():
-    from app.core.settings_registry import is_org_overridable
-    assert is_org_overridable("ADAPTIVE_RETRIEVAL_THRESHOLD")
-
-
-def test_adaptive_retrieval_reranker_threshold_is_org_overridable():
-    from app.core.settings_registry import is_org_overridable
-    assert is_org_overridable("ADAPTIVE_RETRIEVAL_RERANKER_THRESHOLD")
+# ADAPTIVE_RETRIEVAL_* settings were removed in the atomic-tools redesign.
 
 
 def test_openai_api_key_is_org_overridable():
@@ -158,11 +146,4 @@ def test_agent_history_pairs_org_override(db_session):
     assert val == 15
 
 
-def test_adaptive_retrieval_enabled_org_override(db_session):
-    """ADAPTIVE_RETRIEVAL_ENABLED can be overridden per-org."""
-    org = _create_org(db_session)
-    upsert_org_setting(db_session, org.id, "ADAPTIVE_RETRIEVAL_ENABLED", False)
-    clear_cache()
-
-    val = get_setting(db_session, "ADAPTIVE_RETRIEVAL_ENABLED", org.id)
-    assert val is False
+# ADAPTIVE_RETRIEVAL_ENABLED org override test removed — setting was deleted.

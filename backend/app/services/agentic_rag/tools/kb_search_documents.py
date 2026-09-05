@@ -99,7 +99,7 @@ class KbSearchDocumentsTool(BaseAgentTool):
         "(e.g. 'weekly update', 'Q3 report') or asks for the latest/most recent version. "
         "For aggregate queries ('how many weekly updates this year'), use metadata_only=true "
         "with date filters to discover all matching documents first. For conceptual queries "
-        "that don't name a specific document, use rag_retrieve instead."
+        "that don't name a specific document, use search_dense or search_sparse instead."
     )
     args_schema: type[BaseModel] = KbSearchDocumentsInput
 
@@ -234,6 +234,13 @@ class KbSearchDocumentsTool(BaseAgentTool):
                     "_reranker_score": 1.0,
                     "truncated": truncated,
                     "total_tokens": tokens,
+                    "citation_ref": {
+                        "document_id": doc.id,
+                        "citation_kind": "file",
+                        "quoted_text": (markdown or "")[:200],
+                        "source_tool": "kb_search_documents",
+                        "citation_id": "",
+                    },
                 },
             }
             docs_result.append(doc_dict)

@@ -110,7 +110,7 @@ def _dispatch_parsed_json(parsed: Any) -> Optional[ParsedThinkResponse]:
         return ParsedThinkResponse(final_answer=parsed["final_answer"])
     elif isinstance(parsed, dict) and len(parsed) == 1:
         # Malformed shorthand some local models emit, e.g.
-        # {"rag_retrieve": {"query": "..."}} instead of the
+        # {"search_dense": {"query": "..."}} instead of the
         # documented {"tool": ..., "arguments": ...} shape.
         # Treat the single key as the tool name.
         (name, args), = parsed.items()

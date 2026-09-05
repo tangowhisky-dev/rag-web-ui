@@ -3,7 +3,7 @@
 Reads converted_markdown (the mirrored markdown stored in the database),
 never the original file on disk. This is the "read" in the search/browse/
 read triad — the agent uses it after kb_grep and kb_outline to read
-specific sections that rag_retrieve missed.
+specific sections that search tools missed.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 class KbReadInput(BaseModel):
-    document_id: int = Field(description="Document ID from rag_retrieve results, kb_grep matches, or kb_outline.")
+    document_id: int = Field(description="Document ID from search results, kb_grep matches, or kb_outline.")
     section: Optional[str] = Field(default=None, description="Heading text to read (e.g. 'Integrity'). Reads from this heading until the next heading of same or higher level.")
     start_char: Optional[int] = Field(default=None, description="Start character offset (from kb_outline or kb_grep). If omitted with end_char, reads from beginning.")
     end_char: Optional[int] = Field(default=None, description="End character offset. If omitted, reads to end of section or document.")
@@ -37,8 +37,8 @@ class KbReadTool(BaseAgentTool):
     description: str = (
         "Read a specific section or character range of a KB document's markdown. "
         "Use after kb_outline to read the relevant section, or after kb_grep to "
-        "read context around a matching line. Slower than rag_retrieve — use "
-        "only when rag_retrieve returns insufficient=false."
+        "read context around a matching line. Use when search tools return "
+        "insufficient evidence for a specific document."
     )
     args_schema: type[BaseModel] = KbReadInput
 
@@ -91,6 +91,20 @@ class KbReadTool(BaseAgentTool):
                       "char_range": [char_start, char_end]},
                      latency_ms=latency_ms, status="ok")
 
+        # Determine citation_kind based on read mode
+        if section_name:
+            citation_kind = "section"
+        elif input_obj.start_char is not None or input_obj.end_char is not None:
+            citation_kind = "range"
+        else:
+            citation_kind = "file"
+
+        # Compute line numbers for range reads
+        start_line = end_line = None
+        if citation_kind == "range":
+            start_line = markdown[:char_start].count("\n") + 1
+            end_line = markdown[:char_end].count("\n") + 1
+
         return {
             "ok": True,
             "result": {
@@ -102,6 +116,21 @@ class KbReadTool(BaseAgentTool):
                 "total_tokens": tokens,
                 "truncated": truncated,
                 "char_range": [char_start, char_end],
+                "start_line": start_line,
+                "end_line": end_line,
+                "citation_ref": {
+                    "document_id": doc.id,
+                    "citation_kind": citation_kind,
+                    "chunk_index": None,
+                    "section": section_name,
+                    "start_char": char_start if citation_kind in ("section", "range") else None,
+                    "end_char": char_end if citation_kind in ("section", "range") else None,
+                    "start_line": start_line,
+                    "end_line": end_line,
+                    "quoted_text": content[:200],
+                    "source_tool": "kb_read",
+                    "citation_id": "",
+                },
             },
             "error": None,
             "tokens": tokens,

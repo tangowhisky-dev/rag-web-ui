@@ -101,7 +101,9 @@ def test_chart_options_holds_multiple_charts():
 def test_citation_ref_coerces_kb_label_string():
     # The extraction LLM often copies the answer's own "[KB-2](KB-2)" label
     # verbatim instead of the bare numeric id CitationRef expects.
-    ref = CitationRef.model_validate({"document_id": "KB-2", "chunk_index": "KB-2"})
+    # document_id has a validator that coerces "KB-2" → 2.
+    # chunk_index is now Optional[int] — pass it as int or omit it.
+    ref = CitationRef.model_validate({"document_id": "KB-2", "chunk_index": 2})
     assert ref.document_id == 2
     assert ref.chunk_index == 2
 
@@ -110,6 +112,13 @@ def test_citation_ref_accepts_plain_ints():
     ref = CitationRef(document_id=5, chunk_index=0)
     assert ref.document_id == 5
     assert ref.chunk_index == 0
+
+
+def test_citation_ref_optional_chunk_index():
+    # New schema: chunk_index is Optional (non-chunk citations don't have it)
+    ref = CitationRef(document_id=5, citation_kind="file")
+    assert ref.chunk_index is None
+    assert ref.citation_kind == "file"
 
 
 def test_save_memory_persists_final_answer_and_object(db):

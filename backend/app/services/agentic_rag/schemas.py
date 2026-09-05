@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List, Optional, Union
+from typing import List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -41,12 +41,23 @@ class DataPoint(BaseModel):
 
 
 class CitationRef(BaseModel):
-    """Reference to a document chunk."""
+    """Reference to a piece of evidence cited in the answer."""
 
     document_id: int
-    chunk_index: int
+    citation_kind: Literal["chunk", "file", "section", "range", "grep", "table", "outline"] = "chunk"
+    chunk_index: Optional[int] = None
+    section: Optional[str] = None
+    start_char: Optional[int] = None
+    end_char: Optional[int] = None
+    start_line: Optional[int] = None
+    end_line: Optional[int] = None
+    page: Optional[int] = None
+    match_line: Optional[int] = None
+    quoted_text: Optional[str] = None
+    source_tool: Optional[str] = None
+    citation_id: str = ""
 
-    @field_validator("document_id", "chunk_index", mode="before")
+    @field_validator("document_id", mode="before")
     @classmethod
     def _coerce_kb_label(cls, v):
         # The extraction LLM often copies the answer's own citation label
@@ -80,11 +91,9 @@ class Subtask(BaseModel):
     tool_hint: str = Field(default="any", description="Preferred tool name or 'any'.")
     depends_on: List[str] = Field(default_factory=list, description="Subtask ids that must complete first.")
     expected_output: str = Field(default="", description="What the agent expects to observe.")
-    # Per-subtask retrieval parameters. When the subtask uses rag_retrieve
-    # or kb_search_documents, these let the planner express a specific
-    # retrieval strategy per sub-query (e.g. subtask A searches for the
-    # latest weekly update, subtask B searches for the Q3 report).
-    # If null, the acting LLM decides based on the query and query_intent.
+    # Per-subtask retrieval parameters. When the subtask uses an atomic
+    # search tool or kb_search_documents, these let the planner express a
+    # specific strategy per sub-query.
     suggested_filters: Optional[dict] = Field(
         default=None,
         description="Metadata filters for this subtask's retrieval: {title_contains, "
@@ -95,16 +104,10 @@ class Subtask(BaseModel):
         default=None,
         description="Sort spec for this subtask: {field, direction}. Use {field: 'file_modified_at', direction: 'desc'} for 'latest'/'most recent'.",
     )
-    suggested_legs: Optional[List[str]] = Field(
-        default=None,
-        description="Retrieval legs for this subtask: subset of ['dense', 'sparse', 'exact']. Use ['exact','sparse'] for literal title lookups.",
-    )
     suggested_query: Optional[str] = Field(
         default=None,
-        description="For rag_retrieve subtasks: the search query to use. If null, the "
-        "rewritten query is used. Set this when the subtask targets a specific "
-        "aspect of a multi-part query (e.g. 'encryption methods in satellite comms' "
-        "vs 'encryption methods in fiber optics').",
+        description="Search query for this subtask. If null, the original query is used. "
+        "Set this when the subtask targets a specific aspect of a multi-part query.",
     )
     suggested_top_n: Optional[int] = Field(
         default=None,
@@ -128,32 +131,6 @@ class Plan(BaseModel):
     subtasks: List[Subtask] = Field(default_factory=list, description="Subtasks to execute.")
     needs_clarification: bool = Field(default=False, description="True if the user must clarify.")
     clarification_question: Optional[str] = Field(default=None, description="Question to ask the user.")
-
-
-class QueryIntent(BaseModel):
-    """Suggested filters/sort extracted from the query by rewrite_query_node.
-
-    Folded into the existing rewrite LLM call — no separate node or extra latency.
-    Only populated when a KB profile is available and the LLM produces valid JSON.
-    """
-    suggested_filters: Optional[dict] = Field(
-        default=None,
-        description="Metadata filters for rag_retrieve (title_contains, file_name_contains, content_type, created_after, created_before, document_ids).",
-    )
-    suggested_sort: Optional[dict] = Field(
-        default=None,
-        description="Sort spec for rag_retrieve: {field, direction}.",
-    )
-    suggested_legs: Optional[List[str]] = Field(
-        default=None,
-        description="Retrieval legs to run: subset of ['dense', 'sparse', 'exact']. null = let the agent decide.",
-    )
-    semantic_ratio: Optional[float] = Field(
-        default=None,
-        description="0.0 = keyword-only (exact+sparse), 1.0 = vector-only (dense), 0.5 = hybrid. "
-                    "null = let the agent decide. Used by rag_retrieve to select legs adaptively.",
-    )
-    reasoning: str = Field(default="", description="Why these filters/sort/legs were suggested.")
 
 
 class Observation(BaseModel):

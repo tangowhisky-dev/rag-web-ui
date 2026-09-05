@@ -1,7 +1,7 @@
 """Agent loop graph for the enterprise agent.
 
-Replaces the rigid RAG pipeline with a tool-calling loop:
-  load_context → rewrite_query → plan → think → [tool → think ...] → finalize → save_memory
+Atomic tools topology:
+  load_context → plan → think → [tool → sufficiency_check → think ...] → finalize → save_memory
 
 This package splits the original monolithic agent_graph.py into focused
 sub-modules. All public names are re-exported here so existing imports
@@ -17,12 +17,12 @@ from .build import build_agent_graph
 # Helpers
 from .helpers import (
     _coerce_observation,
-    _correction_hints,
     _extract_balanced,
     _extract_json_block,
     _is_transient_error,
     _substitute_chart_markers,
     _tool_call_budget,
+    _total_tool_budget,
     _wall_clock_exceeded,
     _writer,
 )
@@ -38,7 +38,7 @@ from .observations import (
     _prune_contiguous_overlaps,
     _strip_overlap,
     _tool_descriptions_text,
-    _tried_rag_retrieve_queries,
+    _tried_search_queries,
 )
 
 # Compaction
@@ -77,16 +77,29 @@ from .thinking import (
 
 # Tooling
 from .tooling import (
-    _correct_tool_args,
     _dispatch_tool_calls,
     _merge_observation_docs,
     _merge_retrieved_docs,
     _retry_failed_calls,
     _run_tool,
     _seed_existing_docs,
-    route_reflect_final,
-    route_tool,
     tool_node,
+)
+
+# Execution check (moved from reflection.py)
+from .execution_check import (
+    _build_execution_summary,
+    _build_subtask_status,
+    _collect_tool_failures,
+    _count_successful_by_tool,
+    _retrieval_hit_count,
+    _verify_execution,
+)
+
+# Sufficiency check (replaces reflect_final)
+from .sufficiency import (
+    route_sufficiency,
+    sufficiency_check_node,
 )
 
 # Finalization
@@ -98,18 +111,10 @@ from .finalization import (
     save_memory_node,
 )
 
-# Reflection
+# Reflection (active nodes only; reflect_node/reflect_final_node removed)
 from .reflection import (
-    _build_execution_summary,
-    _build_subtask_status,
-    _collect_tool_failures,
-    _count_successful_by_tool,
-    _retrieval_doc_count,
-    _verify_execution,
     answer_scoring_node,
     clarify_interrupt_node,
-    reflect_final_node,
-    reflect_node,
 )
 
 # Re-export external names that tests and app code patch on this module.
@@ -121,9 +126,7 @@ from app.services.agentic_rag.llm_factory import build_chat_llm
 from app.services.agentic_rag.nodes import (
     _agent_step,
     answer_evaluation_node,
-    expand_query_node,
     history_to_text,
-    rewrite_query_node,
     select_recent_history,
 )
 from app.services.agentic_rag.prompts import (
@@ -168,12 +171,12 @@ __all__ = [
     "build_agent_graph",
     # Helpers
     "_coerce_observation",
-    "_correction_hints",
     "_extract_balanced",
     "_extract_json_block",
     "_is_transient_error",
     "_substitute_chart_markers",
     "_tool_call_budget",
+    "_total_tool_budget",
     "_wall_clock_exceeded",
     "_writer",
     # Observations
@@ -186,7 +189,7 @@ __all__ = [
     "_prune_contiguous_overlaps",
     "_strip_overlap",
     "_tool_descriptions_text",
-    "_tried_rag_retrieve_queries",
+    "_tried_search_queries",
     # Compaction
     "_build_compaction_llm",
     "_compact_if_needed",
@@ -212,33 +215,32 @@ __all__ = [
     "route_think",
     "think_node",
     # Tooling
-    "_correct_tool_args",
     "_dispatch_tool_calls",
     "_merge_observation_docs",
     "_merge_retrieved_docs",
     "_retry_failed_calls",
     "_run_tool",
     "_seed_existing_docs",
-    "route_reflect_final",
-    "route_tool",
     "tool_node",
+    # Execution check
+    "_build_execution_summary",
+    "_build_subtask_status",
+    "_collect_tool_failures",
+    "_count_successful_by_tool",
+    "_retrieval_hit_count",
+    "_verify_execution",
+    # Sufficiency check
+    "route_sufficiency",
+    "sufficiency_check_node",
     # Finalization
     "_build_finalize_prompt",
     "_build_last_answer_object",
     "_stream_final_answer",
     "finalize_node",
     "save_memory_node",
-    # Reflection
-    "_build_execution_summary",
-    "_build_subtask_status",
-    "_collect_tool_failures",
-    "_count_successful_by_tool",
-    "_retrieval_doc_count",
-    "_verify_execution",
+    # Reflection (active)
     "answer_scoring_node",
     "clarify_interrupt_node",
-    "reflect_final_node",
-    "reflect_node",
     # External names
     "settings",
     "get_def",
@@ -263,9 +265,7 @@ __all__ = [
     "StateGraph",
     "interrupt",
     "answer_evaluation_node",
-    "expand_query_node",
     "history_to_text",
-    "rewrite_query_node",
     "select_recent_history",
     "_agent_step",
     "AGENT_SYSTEM_PROMPT",

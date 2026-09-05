@@ -24,7 +24,7 @@ _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
 
 
 class KbOutlineInput(BaseModel):
-    document_id: int = Field(description="Document ID from rag_retrieve results, kb_grep matches, or kb_outline.")
+    document_id: int = Field(description="Document ID from search results, kb_grep matches, or kb_outline.")
 
 
 class KbOutlineTool(BaseAgentTool):
@@ -67,6 +67,12 @@ class KbOutlineTool(BaseAgentTool):
                 "file_name": doc.file_name,
                 "headings": headings,
                 "total_chars": len(markdown),
+                "citation_ref": {
+                    "document_id": doc.id,
+                    "citation_kind": "outline",
+                    "source_tool": "kb_outline",
+                    "citation_id": "",
+                },
             },
             "error": None,
             "tokens": count_tokens(str(headings)),

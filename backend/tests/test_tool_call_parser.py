@@ -13,12 +13,12 @@ class TestParseThinkResponse:
     def test_native_tool_call(self):
         resp = _msg(
             "",
-            tool_calls=[{"id": "tc_1", "name": "rag_retrieve", "args": {"query": "revenue"}}],
+            tool_calls=[{"id": "tc_1", "name": "search_dense", "args": {"query": "revenue"}}],
         )
         parsed = parse_think_response(resp, mode="native")
         assert parsed.final_answer is None
         assert len(parsed.tool_calls) == 1
-        assert parsed.tool_calls[0]["tool"] == "rag_retrieve"
+        assert parsed.tool_calls[0]["tool"] == "search_dense"
         assert parsed.tool_calls[0]["arguments"]["query"] == "revenue"
 
     def test_json_text_tool_calls(self):
@@ -28,7 +28,7 @@ class TestParseThinkResponse:
         assert parsed.tool_calls[0]["tool"] == "chart_generate"
 
     def test_json_text_single_tool(self):
-        resp = _msg('{"tool": "rag_retrieve", "arguments": {"query": "q"}}')
+        resp = _msg('{"tool": "search_dense", "arguments": {"query": "q"}}')
         parsed = parse_think_response(resp, mode="json_text")
         assert len(parsed.tool_calls) == 1
 
@@ -52,12 +52,12 @@ class TestParseThinkResponse:
     def test_json_text_extra_closing_brace_is_repaired(self):
         # Some local models emit one stray '}' before the array close.
         resp = _msg(
-            '{ "tool_calls": [ { "tool": "rag_retrieve", "arguments": '
+            '{ "tool_calls": [ { "tool": "search_dense", "arguments": '
             '{ "query": "CPU scheduling" } } } ] }'
         )
         parsed = parse_think_response(resp, mode="json_text")
         assert len(parsed.tool_calls) == 1
-        assert parsed.tool_calls[0]["tool"] == "rag_retrieve"
+        assert parsed.tool_calls[0]["tool"] == "search_dense"
         assert parsed.tool_calls[0]["arguments"]["query"] == "CPU scheduling"
 
     def test_json_text_missing_closing_brace_is_repaired(self):
@@ -74,11 +74,11 @@ class TestParseThinkResponse:
     def test_shorthand_single_key_tool_call(self):
         # Malformed shape some local models emit instead of the documented
         # {"tool": ..., "arguments": ...} — must not be swallowed as a literal answer.
-        resp = _msg('{"rag_retrieve": {"query": "race condition definition"}}')
+        resp = _msg('{"search_dense": {"query": "race condition definition"}}')
         parsed = parse_think_response(resp, mode="json_text")
         assert parsed.final_answer is None
         assert len(parsed.tool_calls) == 1
-        assert parsed.tool_calls[0]["tool"] == "rag_retrieve"
+        assert parsed.tool_calls[0]["tool"] == "search_dense"
         assert parsed.tool_calls[0]["arguments"]["query"] == "race condition definition"
 
     def test_chart_generate_args_written_as_prose_answer(self):

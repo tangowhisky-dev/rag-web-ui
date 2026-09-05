@@ -26,8 +26,8 @@ from app.services.settings_service import get_setting
 
 from .compaction import _compact_if_needed
 from .helpers import _wall_clock_exceeded, _writer
-from .observations import _observations_metadata_text, _tool_descriptions_text, _tried_rag_retrieve_queries
-from .reflection import _build_execution_summary, _verify_execution
+from .observations import _observations_metadata_text, _tool_descriptions_text, _tried_search_queries
+from .execution_check import _build_execution_summary, _verify_execution
 
 logger = logging.getLogger(__name__)
 
@@ -37,16 +37,13 @@ def _build_think_prompt(
     max_iter: int,
     original: str,
     query: str,
-    glossary: str,
     summary_text: str,
     history_text: str,
     lao,
-    reflection,
     observations: list,
     plan,
     tools_text: str,
     kb_profile_text: str = "",
-    query_intent: dict | None = None,
 ) -> str:
     # Include last_answer_object summary so "summarize it" / "chart it" work.
     lao_text = ""
@@ -55,35 +52,21 @@ def _build_think_prompt(
         if lao.key_points:
             lao_text += f"  Key points: {'; '.join(lao.key_points[:5])}\n"
 
-    # If reflect_final sent us back, include its reasoning so the agent
-    # knows exactly what was missing and can act on it.
-    reflection_text = ""
-    if reflection and isinstance(reflection, dict) and not reflection.get("ready", True):
-        reflection_text = (
-            f"  NOTE \u2014 the verification module rejected your previous final_answer because:\n"
-            f"  {reflection.get('reasoning', '')}\n"
-            "  Do NOT reference this feedback in your answer. Use it only as guidance to\n"
-            "  decide which tool to call next, then emit a clean final_answer.\n"
-        )
-
-    tried_queries = _tried_rag_retrieve_queries(observations)
+    tried_queries = _tried_search_queries(observations)
     tried_queries_text = (
-        f"  Already tried (do NOT resubmit these exact strings to rag_retrieve): {tried_queries}\n"
+        f"  Already tried (do NOT resubmit these exact strings): {tried_queries}\n"
         if tried_queries else ""
     )
 
     return (
         f"User message: {original}\n"
         f"Retrieval query: {query}\n"
-        + (f"[Abbreviation Glossary]\n{glossary}\n\n" if glossary else "")
         + (f"{kb_profile_text}\n\n" if kb_profile_text else "")
-        + (f"[Query Intent] {json.dumps(query_intent)}\n\n" if query_intent else "")
         + (f"Earlier conversation summary:\n{summary_text}\n" if summary_text else "")
         + f"Conversation history (recent turns):\n{history_text or '  (none)'}\n"
         f"Previous answer context:\n{lao_text or '  (none)'}\n"
         f"Plan: {json.dumps(plan.model_dump() if isinstance(plan, Plan) else plan, default=str)}\n"
         f"Available tools:\n{tools_text}\n\n"
-        f"Verification feedback:\n{reflection_text or '  (none)'}\n"
         f"{tried_queries_text}"
         f"Observations so far:\n{_observations_metadata_text(observations)}\n\n"
         f"Iteration: {iteration}/{max_iter}\n"
@@ -122,19 +105,18 @@ async def _invoke_think_llm(ctx, system, user, tools, mode):
     return await llm.bind_tools(tools).ainvoke([{"role": "system", "content": system}, {"role": "user", "content": user}])
 
 
-def _rebuild_think_after_compaction(state, compaction_local, ctx, iteration, max_iter, original, query, glossary, plan, tools_text):
+def _rebuild_think_after_compaction(state, compaction_local, ctx, iteration, max_iter, original, query, plan, tools_text):
     state = {**state, **compaction_local}
     observations = state.get("observations", [])
     recent = select_recent_history(state.get("messages", []), max_pairs=get_setting(ctx.db, "AGENT_HISTORY_PAIRS", ctx.org_id))
     history_text = history_to_text(recent)
     summary_text = state.get("compaction_summary") or ""
     kb_profile_text = format_profile_summary(state.get("kb_profile", {}))
-    query_intent = state.get("query_intent")
     user = _build_think_prompt(
-        iteration, max_iter, original, query, glossary, summary_text,
+        iteration, max_iter, original, query, summary_text,
         history_text, state.get("last_answer_object"),
-        state.get("reflection_final"), observations, plan, tools_text,
-        kb_profile_text, query_intent,
+        observations, plan, tools_text,
+        kb_profile_text,
     )
     return state, observations, user
 
@@ -150,8 +132,8 @@ async def think_node(state, ctx) -> dict:
         if early is not None:
             return early
 
-        query = state.get("rewritten_query", "") or state.get("original_query", "")
-        original = state.get("original_query", "") or query
+        query = state.get("original_query", "")
+        original = query
         plan = state.get("plan") or Plan()
         observations = state.get("observations", [])
         # Expose current state to tools so applicable_tools() and tool reads
@@ -161,23 +143,19 @@ async def think_node(state, ctx) -> dict:
         tools_text = _tool_descriptions_text(tools)
 
         # Build conversation context from the same shared projection every
-        # other node uses (select_recent_history), so rewrite/think/finalize
+        # other node uses (select_recent_history), so think/finalize
         # can't disagree about what "recent history" means.
         recent = select_recent_history(state.get("messages", []), max_pairs=get_setting(ctx.db, "AGENT_HISTORY_PAIRS", ctx.org_id))
         history_text = history_to_text(recent)
         summary_text = state.get("compaction_summary") or ""
 
-        # Glossary was built once by expand_query_node — reuse it.
-        glossary = state.get("abbreviation_glossary", "")
-
         system = AGENT_SYSTEM_PROMPT + "\n\n" + THINK_SYSTEM_PROMPT
         kb_profile_text = format_profile_summary(state.get("kb_profile", {}))
-        query_intent = state.get("query_intent")
         user = _build_think_prompt(
-            iteration, max_iter, original, query, glossary, summary_text,
+            iteration, max_iter, original, query, summary_text,
             history_text, state.get("last_answer_object"),
-            state.get("reflection_final"), observations, plan, tools_text,
-            kb_profile_text, query_intent,
+            observations, plan, tools_text,
+            kb_profile_text,
         )
 
         # Runtime compaction: check if the prompt exceeds the context budget.
@@ -188,7 +166,7 @@ async def think_node(state, ctx) -> dict:
         )
         if compaction_local:
             state, observations, user = _rebuild_think_after_compaction(
-                state, compaction_local, ctx, iteration, max_iter, original, query, glossary, plan, tools_text,
+                state, compaction_local, ctx, iteration, max_iter, original, query, plan, tools_text,
             )
 
         mode = get_setting(ctx.db, "TOOL_CALL_MODE", None)
@@ -196,7 +174,11 @@ async def think_node(state, ctx) -> dict:
             resp = await _invoke_think_llm(ctx, system, user, tools, mode)
         except Exception as exc:
             logger.warning("[think_node] LLM call failed: %s", exc)
-            return {"iteration": iteration, "tool_calls": [], "precomputed_answer": f"LLM error: {exc}"}
+            # Don't set precomputed_answer to the error — that bypasses
+            # finalization and produces an error message as the answer.
+            # Instead, force finalize so the finalization node generates
+            # an answer from whatever evidence is in retrieved_docs.
+            return {"iteration": iteration, "tool_calls": [], "force_finalize": True}
 
         allowed, final_answer = _parse_tool_calls(resp, mode, iteration, max_iter)
 
@@ -223,7 +205,12 @@ def route_think(state) -> str:
     finally:
         _db.close()
     if iteration >= max_iter or _wall_clock_exceeded(state):
-        return "reflect_final"
+        return "finalize"
     if state.get("tool_calls"):
         return "tool"
-    return "reflect_final"
+    # If the LLM emitted a final_answer string (Tier 3 fallback), go straight
+    # to finalize — the answer is already generated, no need to check sufficiency.
+    if state.get("precomputed_answer"):
+        return "finalize"
+    # No tool calls and budget remains → check sufficiency.
+    return "sufficiency_check"

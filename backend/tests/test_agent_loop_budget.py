@@ -7,21 +7,23 @@ from app.services.agentic_rag.token_budget import count_tokens
 
 
 def test_route_think_routes_to_tool_when_calls_present():
-    state = {"iteration": 1, "tool_calls": [{"tool": "rag_retrieve"}]}
+    state = {"iteration": 1, "tool_calls": [{"tool": "search_dense"}]}
     with patch("app.services.agentic_rag.agent_graph.thinking.get_setting", return_value=8):
         assert route_think(state) == "tool"
 
 
-def test_route_think_routes_to_reflect_final_at_max_iterations():
+def test_route_think_routes_to_finalize_at_max_iterations():
     state = {"iteration": 3, "tool_calls": []}
     with patch("app.services.agentic_rag.agent_graph.thinking.get_setting", return_value=3):
-        assert route_think(state) == "reflect_final"
+        # In the new topology, route_think returns "finalize" at max iterations
+        assert route_think(state) == "finalize"
 
 
-def test_route_think_routes_to_reflect_final_when_no_calls():
+def test_route_think_routes_to_sufficiency_check_when_no_calls():
     state = {"iteration": 2, "tool_calls": []}
     with patch("app.services.agentic_rag.agent_graph.thinking.get_setting", return_value=5):
-        assert route_think(state) == "reflect_final"
+        # In the new topology, no tool calls → check sufficiency (not reflect_final)
+        assert route_think(state) == "sufficiency_check"
 
 
 def test_count_tokens_handles_strings_and_lists():

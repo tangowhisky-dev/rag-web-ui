@@ -19,7 +19,7 @@ class AgenticRAGTransformer(StreamTransformer):
 
     Requires updates (state deltas), messages (tokens + usage), and custom
     (explicit node-emitted events including agent_step, task_list, progress,
-    context, rewritten_query).
+    context).
 
     Produces three side-channel projections:
       - events: StreamChannel[dict]  -> internal SSE event payloads
@@ -43,8 +43,6 @@ class AgenticRAGTransformer(StreamTransformer):
         self._custom_handlers = {
             "agent_step": self._passthrough,
             "task_list": self._handle_task_list,
-            "rewritten_query": self._passthrough,
-            "expanded_query": self._passthrough,
             "progress": self._passthrough,
             "thinking": self._passthrough,
             "context": self._handle_context,
@@ -229,12 +227,29 @@ class AgenticRAGTransformer(StreamTransformer):
                 if h is not None:
                     seen.add(h)
 
+        # Compute confidence from best reranker score in retrieved docs.
+        best_score = 0.0
+        for d in self._all_docs:
+            score = d.get("metadata", {}).get("_reranker_score", 0.0) or 0.0
+            if score > best_score:
+                best_score = score
+        if best_score > 0.8:
+            conf_level, conf_score = "very_high", int(best_score * 100)
+        elif best_score > 0.6:
+            conf_level, conf_score = "high", int(best_score * 100)
+        elif best_score > 0.3:
+            conf_level, conf_score = "medium", int(best_score * 100)
+        elif best_score > 0:
+            conf_level, conf_score = "low", int(best_score * 100)
+        else:
+            conf_level, conf_score = "none", 0
+
         self.events.push(
             {
                 "event": "context",
                 "docs": list(self._all_docs),
-                "confidence": "medium",
-                "score": 50,
+                "confidence": conf_level,
+                "score": conf_score,
             }
         )
 

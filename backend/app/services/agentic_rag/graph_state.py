@@ -41,51 +41,15 @@ class AgentState(MessagesState):
     """State for the agent graph. Extends MessagesState with agentic fields."""
 
     # ── Query state ─────────────────────────────────────────────────────
-    # ``original_query`` is the user's exact wording and is authoritative for
-    # planning, finalization and evaluation. ``rewritten_query`` is the
-    # standalone retrieval string and is used only by retrieval/reranking.
     original_query: Annotated[str, _last_value] = ""
-    rewritten_query: Annotated[str, _last_value] = ""
-    expanded_query: Annotated[str, _last_value] = ""
-    # Abbreviation glossary built once by expand_query_node, reused by all
-    # downstream LLM calls (rewrite, plan, think, finalize, evaluation).
-    abbreviation_glossary: Annotated[str, _last_value] = ""
-    # Where each reference in rewritten_query was resolved from, or the
-    # reason resolution was skipped/rejected.
-    resolution_provenance: Annotated[Optional[dict], _last_value] = None
-    # Negated terms extracted by rewrite_query_node via regex (e.g. "but not Linux" → ["Linux"]).
-    # Used by rag_retrieve for post-filtering and by finalize_node as a generation guardrail.
-    excluded_terms: Annotated[List[str], _last_value] = []
     # KB profile loaded by load_context_node (doc count, fields, content types, date range).
-    # Injected into plan/think/rewrite prompts so the agent has KB context without calling kb_metadata.
+    # Injected into plan/think prompts so the agent has KB context without calling kb_metadata.
     kb_profile: Annotated[dict, _last_value] = {}
-    # Query intent (suggested filters/sort/legs) extracted by rewrite_query_node.
-    # Folded into the existing rewrite LLM call — no separate node. null when no KB profile
-    # or when the LLM output is malformed (after one retry).
-    query_intent: Annotated[Optional[dict], _last_value] = None
 
-    # ── Per-leg retrieval state (separated for observability) ───────────
-    dense_docs: Annotated[List[dict], accumulate] = []
-    sparse_docs: Annotated[List[dict], accumulate] = []
-    exact_docs: Annotated[List[dict], accumulate] = []
-    graph_docs: Annotated[List[dict], accumulate] = []  # Graph expansion docs
-    
-    # Per-leg status tracking
-    # Annotated with a merge reducer so parallel Send() branches (multiple subtasks)
-    # can each write their own leg results without LangGraph throwing
-    # "Can receive only one value per step".
-    leg_results: Annotated[dict, lambda a, b: {**a, **b}] = {}
-    failed_legs: Annotated[List[str], accumulate] = []  # Legs that failed (for confidence messages)
-    leg_doc_counts: Annotated[dict, lambda a, b: {**a, **b}] = {}  # {leg_name: count} for sufficiency check
-    
     # ── Merged retrieval state ──────────────────────────────────────────
-    # All scored docs (with _reranker_score) — used by adaptive reranking.
-    all_scored_docs: Annotated[List[dict], _last_value] = []
-    # Filtered docs after applying threshold — used for generation.
     # Citable evidence ONLY: never seed this with recalled conversational
     # memory (see recalled_memories).
     retrieved_docs: Annotated[List[dict], _last_value] = []
-    retrieval_confidence: Annotated[float, _last_value] = 0.0
 
     # ── Conversational memory (NOT citable evidence) ────────────────────
     # Hits from the long-term semantic store. May inform reference
@@ -105,11 +69,7 @@ class AgentState(MessagesState):
     cited_doc_indices: List[int] = []  # 1-based doc indices cited by the final answer, in display order
 
     # ── Retry budget state ──────────────────────────────────────────────
-    # Annotated with last-value reducer so parallel subgraphs can each write
-    # without LangGraph throwing "Can receive only one value per step".
-    adaptive_reran: Annotated[bool, _last_value] = False
     answer_evaluation_attempts: Annotated[int, _last_value] = 0
-    graph_expansion_done: Annotated[bool, _last_value] = False
 
     # ── Synthesis state ─────────────────────────────────────────────────
     final_answer: str = ""
@@ -122,6 +82,10 @@ class AgentState(MessagesState):
     completeness: int = 0
     retrieval_score: int = 0
     confidence_match: bool = True
+    # Best retrieval confidence from merged docs (max reranker score or
+    # kb_read/kb_search_documents confidence). Written by tool_node, read
+    # by answer_evaluation_node for the final confidence formula.
+    best_retrieval_confidence: Annotated[float, _last_value] = 0.0
     evaluation_flags: Annotated[List[str], _last_value] = []
 
     # ── Configuration ───────────────────────────────────────────────────
@@ -142,11 +106,12 @@ class AgentState(MessagesState):
     iteration: Annotated[int, _last_value] = 0
     tool_calls: Annotated[List[dict], _last_value] = []
     precomputed_answer: Annotated[str, _last_value] = ""
-    tool_call_count: Annotated[dict, _last_value] = {}
+    tool_call_counts: Annotated[dict, _last_value] = {}
     last_answer_object: Annotated[Optional[LastAnswerObject], _last_value] = None
     needs_clarification: Annotated[bool, _last_value] = False
     clarification_question: Annotated[Optional[str], _last_value] = None
-    reflection_final: Annotated[Optional[dict], _last_value] = None  # {ready: bool, reasoning: str} from reflect_final_node
+    # Sufficiency check result
+    sufficient: Annotated[bool, _last_value] = False
 
     # ── Accumulated structured data (map-reduce for aggregate queries) ──
     # extract_data appends {label, value, unit, context} rows here across
@@ -160,9 +125,9 @@ class AgentState(MessagesState):
     # previously made AGENT_MAX_WALL_SECONDS a no-op.
     started_at: Annotated[Optional[float], _last_value] = None
     # Set by tool_node when _verify_execution is already satisfied so
-    # route_tool can short-circuit straight to reflect_final.
+    # route_think can short-circuit straight to finalize.
     force_finalize: Annotated[bool, _last_value] = False
-    # Recovery tool calls injected by reflect_node for the next think round.
+    # Pre-populated tool calls from plan_node for the first think round.
     precomputed_tool_calls: Annotated[List[dict], _last_value] = []
 
     # ── Clarification state ─────────────────────────────────────────────

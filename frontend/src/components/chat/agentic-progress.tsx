@@ -35,43 +35,27 @@ import type { LucideIcon } from "lucide-react";
 
 const NODE_PHASE: Record<string, string> = {
   // Phase 1: Analyzing query
-  rewrite_query: "Analyzing query",
-  classify_query: "Analyzing query",
   load_context: "Analyzing query",
   plan: "Analyzing query",
   clarify_interrupt: "Analyzing query",
 
-  // Phase 2: Gathering sources
-  exact_retrieval: "Gathering sources",
-  sparse_retrieval: "Gathering sources",
-  dense_retrieval: "Gathering sources",
-  neo4j_expansion: "Gathering sources",
-
-  // Phase 3: Removing clutter & synthesizing
-  merge: "Synthesizing",
-  reranking: "Synthesizing",
-  filter: "Synthesizing",
-  collect_context: "Synthesizing",
-  prepare_final_context: "Synthesizing",
-
-  // Phase 4: Thinking & tools
-  think: "Thinking",
+  // Phase 2: Gathering sources (atomic search tools run inside the tool node)
   // "tool" node is not mapped — tool calls are shown as Tool cards.
 
-  // Phase 5: Reflecting
-  reflect: "Reflecting",
-  reflect_final: "Verifying",
+  // Phase 3: Thinking & sufficiency
+  think: "Thinking",
+  sufficiency_check: "Verifying",
 
-  // Phase 6: Generating answer
+  // Phase 4: Generating answer
   generating: "Generating answer",
   generate_answer: "Generating answer",
 
-  // Phase 7: Finalizing answer
+  // Phase 5: Finalizing answer
   finalize: "Finalizing answer",
   answer_scoring: "Finalizing answer",
   finalize_answer: "Finalizing answer",
 
-  // Phase 8: Calculating confidence
+  // Phase 6: Calculating confidence
   answer_evaluation: "Calculating confidence",
 };
 
@@ -90,7 +74,11 @@ const PHASE_ICONS: Record<string, LucideIcon> = {
 
 // Map tool names to icons
 const TOOL_ICONS: Record<string, LucideIcon> = {
-  rag_retrieve: ScanSearchIcon,
+  search_exact: ScanSearchIcon,
+  search_sparse: ScanSearchIcon,
+  search_dense: ScanSearchIcon,
+  rerank_results: ScanSearchIcon,
+  graph_expand: ScanSearchIcon,
   kb_metadata: DatabaseIcon,
   kb_grep: ScanTextIcon,
   kb_outline: BookOpenIcon,

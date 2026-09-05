@@ -392,35 +392,6 @@ class TestContextStringGlossary:
 
 
 # ---------------------------------------------------------------------------
-# 7. expand_query_node state output
-# ---------------------------------------------------------------------------
-
-class TestExpandQueryNode:
-    def test_node_returns_glossary(self, db_session):
-        from app.services.agentic_rag.nodes import expand_query_node
-        state = {"original_query": "CO ordered bns to wdr"}
-        result = expand_query_node(state, db=db_session, org_id=None)
-        assert "expanded_query" in result
-        assert "abbreviation_glossary" in result
-        assert result["abbreviation_glossary"] != ""
-        assert "CO" in result["abbreviation_glossary"]
-        assert "bns" in result["abbreviation_glossary"]
-
-    def test_node_empty_glossary_for_plain_english(self, db_session):
-        from app.services.agentic_rag.nodes import expand_query_node
-        state = {"original_query": "what is the weather today"}
-        result = expand_query_node(state, db=db_session, org_id=None)
-        assert result["abbreviation_glossary"] == ""
-        assert result["expanded_query"] == "what is the weather today"
-
-    def test_node_expanded_query_preserves_original(self, db_session):
-        from app.services.agentic_rag.nodes import expand_query_node
-        original = "CO ordered bns to wdr"
-        result = expand_query_node({"original_query": original}, db=db_session, org_id=None)
-        assert result["expanded_query"].startswith(original)
-
-
-# ---------------------------------------------------------------------------
 # 8. System prompt glossary instructions
 # ---------------------------------------------------------------------------
 
@@ -574,10 +545,7 @@ class TestQualificationAbbrs:
 # ---------------------------------------------------------------------------
 
 class TestGraphState:
-    def test_state_has_abbreviation_glossary_field(self):
-        from app.services.agentic_rag.graph_state import AgentState
-        assert "abbreviation_glossary" in AgentState.__annotations__
-
-    def test_state_has_expanded_query_field(self):
-        from app.services.agentic_rag.graph_state import AgentState
-        assert "expanded_query" in AgentState.__annotations__
+    # abbreviation_glossary and expanded_query were removed from AgentState
+    # in the atomic-tools redesign. The glossary is now built inline by
+    # format_context_string, not stored in state.
+    pass

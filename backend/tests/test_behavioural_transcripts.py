@@ -5,7 +5,7 @@ individual graph mechanics), these tests run the **full agent graph** with
 mocked LLMs that return scripted responses per node.  The graph mechanics
 (routing, state propagation, reference resolution, tool dispatch, citation
 normalisation, conversation history) are real; only the LLM outputs and the
-rag_retrieve tool's vector search are mocked.
+search_dense tool's vector search are mocked.
 
 Each transcript is a sequence of turns.  After each turn we assert on the
 final graph state — the answer text, retrieved docs, observations, citations,
@@ -48,7 +48,7 @@ def _mock_docs(*pairs: tuple[str, str]) -> list[dict]:
     """Build mock retrieved docs from (content, source) pairs.
 
     Each doc gets a unique content_hash derived from the content itself,
-    so docs from different rag_retrieve calls are not deduplicated by the
+    so docs from different search_dense calls are not deduplicated by the
     tool_node's content_hash-based merge.
     """
     import hashlib
@@ -99,6 +99,9 @@ class _ScriptedLLM:
             # so any stray think call finalizes instead of looping.
             if role == "think":
                 return json.dumps({"final_answer": True})
+            # Default sufficiency response: evidence is sufficient.
+            if role == "sufficiency":
+                return json.dumps({"sufficient": True})
             return "{}"
         return queue.pop(0)
 
@@ -118,6 +121,8 @@ class _ScriptedLLM:
             role = "think"
         elif "Extract a structured summary" in sys_content:
             role = "extract"
+        elif "sufficient evidence" in sys_content.lower() or "sufficiency" in sys_content.lower():
+            role = "sufficiency"
         else:
             role = "finalize"
 
@@ -132,6 +137,9 @@ class _ScriptedLLM:
             return SimpleNamespace(content=content, tool_calls=None)
         # For extract: return content as-is.
         if role == "extract":
+            return SimpleNamespace(content=content)
+        # For sufficiency: return JSON with sufficient=true (default when no script).
+        if role == "sufficiency":
             return SimpleNamespace(content=content)
         # For finalize: ainvoke is not used (astream is), but provide a fallback.
         return SimpleNamespace(content=content)
@@ -176,9 +184,9 @@ class _ScriptedLLM:
 
 def _setup_graph(monkeypatch, scripted_llm: _ScriptedLLM, ctx: ToolContext,
                  rag_results: dict[str, list[dict]] | None = None):
-    """Wire up a full agent graph with mocked LLMs and rag_retrieve.
+    """Wire up a full agent graph with mocked LLMs and search_dense.
 
-    ``rag_results`` maps a query string to the docs that rag_retrieve should
+    ``rag_results`` maps a query string to the docs that search_dense should
     return for that query.  Queries not in the map return empty docs.
     If ``ctx.redis_memory`` already has a checkpointer (from a prior call),
     it is reused so the graph state persists across calls.
@@ -187,64 +195,62 @@ def _setup_graph(monkeypatch, scripted_llm: _ScriptedLLM, ctx: ToolContext,
 
     # Mock build_chat_llm to return our scripted LLM everywhere.
     # After the agent_graph split, build_chat_llm is imported individually
-    # by each sub-module, so we must patch it on every one.
+    # by each sub-module. tooling no longer imports it (correction LLM removed),
+    # but we patch the modules that still do.
     from app.services.agentic_rag.agent_graph import (
         planning as _planning_mod,
         thinking as _thinking_mod,
-        tooling as _tooling_mod,
         finalization as _finalization_mod,
         compaction as _compaction_mod,
     )
-    for _mod in (_planning_mod, _thinking_mod, _tooling_mod, _finalization_mod, _compaction_mod):
-        monkeypatch.setattr(_mod, "build_chat_llm", lambda *a, **kw: scripted_llm)
+    # Also patch sufficiency module which uses build_chat_llm
+    from app.services.agentic_rag.agent_graph import sufficiency as _sufficiency_mod
+    for _mod in (_planning_mod, _thinking_mod, _finalization_mod, _compaction_mod, _sufficiency_mod):
+        if hasattr(_mod, "build_chat_llm"):
+            monkeypatch.setattr(_mod, "build_chat_llm", lambda *a, **kw: scripted_llm)
 
-    # Mock resolve_retrieval_query — the rewriter uses AsyncOpenAI directly
-    # (not LangChain), so build_chat_llm mock doesn't cover it. The test
-    # exercises agent loop logic, not LLM rewriting ability.
-    from app.services.agentic_rag import nodes as _nodes
-
-    async def _mock_resolve(query, original_query, recent_history, provenance_sources, **kw):
-        # "its" → resolve to the entity from the previous turn.
-        # Simple heuristic: find the first capitalized word in the AI message.
-        if "its" in query.lower() or "it" in query.lower().split():
-            for m in reversed(recent_history):
-                from langchain_core.messages import AIMessage
-                if isinstance(m, AIMessage):
-                    import re
-                    # Match capitalized words including camelCase (e.g. "StreamVC").
-                    words = re.findall(r'\b([A-Z][A-Za-z]+)\b', m.content)
-                    if words:
-                        return f"What are the limitations of {words[0]}?", {
-                            "resolved": True,
-                            "reason": "reference_resolved",
-                            "original_query": original_query,
-                        }, None
-        return query, {"resolved": False, "reason": "self_contained"}, None
-
-    monkeypatch.setattr(
-        "app.services.agentic_rag.utils.resolve_retrieval_query",
-        _mock_resolve,
-    )
-
-    # Mock the rag_retrieve tool to return scripted docs.
-    async def _mock_rag_retrieve(ctx, input_obj):
+    # Mock the atomic search tools to return scripted hits.
+    # All search tools (search_exact, search_sparse, search_dense) share the
+    # same mock — they return hits based on the query string.
+    async def _mock_search_execute(self, input_obj):
         query = input_obj.query
         docs = rag_results.get(query, [])
+        # Convert docs to hits format (flat dict with content, document_id, etc.)
+        hits = []
+        for doc in docs:
+            meta = doc.get("metadata", {})
+            hits.append({
+                "document_id": meta.get("document_id", 1),
+                "chunk_index": meta.get("chunk_index", 0),
+                "content": doc.get("page_content", ""),
+                "title": meta.get("title", ""),
+                "file_name": meta.get("source", ""),
+                "score": 0.85,
+                "_reranker_score": 0.85,
+                "citation_ref": {
+                    "document_id": meta.get("document_id", 1),
+                    "citation_kind": "chunk",
+                    "chunk_index": meta.get("chunk_index", 0),
+                    "source_tool": "search_dense",
+                    "citation_id": "",
+                },
+            })
         return {
             "ok": True,
             "result": {
-                "docs": docs,
-                "confidence": 0.85 if docs else 0.0,
-                "sufficient": bool(docs),
+                "hits": hits,
+                "search_type": "mock",
             },
             "error": None,
             "tokens": 50,
         }
 
-    monkeypatch.setattr(
-        "app.services.agentic_rag.tools.rag_retrieve._rag_retrieve",
-        _mock_rag_retrieve,
-    )
+    # Patch all three search tools' _execute methods
+    from app.services.agentic_rag.tools.search_exact import SearchExactTool
+    from app.services.agentic_rag.tools.search_sparse import SearchSparseTool
+    from app.services.agentic_rag.tools.search_dense import SearchDenseTool
+    for _tool_cls in (SearchExactTool, SearchSparseTool, SearchDenseTool):
+        monkeypatch.setattr(_tool_cls, "_execute", _mock_search_execute)
 
     # Mock answer_evaluation_node to skip the LLM eval call.
     async def _mock_eval_node(state, ctx=None):
@@ -316,15 +322,15 @@ class TestMultiTurnReferenceResolution:
         llm = _ScriptedLLM()
         ctx = _make_ctx(chat_id=1, message_id=101)
 
-        # Turn 1 plan: single rag_retrieve for StreamVC.
+        # Turn 1 plan: single search_dense for StreamVC.
         llm.script("plan", json.dumps({
             "intent": "rag",
-            "subtasks": [{"id": "a", "description": "Retrieve StreamVC overview", "tool_hint": "rag_retrieve"}],
+            "subtasks": [{"id": "a", "description": "Retrieve StreamVC overview", "tool_hint": "search_dense", "suggested_query": "StreamVC model overview"}],
             "needs_clarification": False,
         }))
-        # Turn 1 think: call rag_retrieve.
+        # Turn 1 think: call search_dense.
         llm.script("think", json.dumps({
-            "tool_calls": [{"tool": "rag_retrieve", "arguments": {"query": "StreamVC model overview"}}],
+            "tool_calls": [{"tool": "search_dense", "arguments": {"query": "StreamVC model overview"}}],
         }))
         # Turn 1 finalize: answer about StreamVC.
         llm.script("finalize", "StreamVC is a voice conversion model based on streaming architecture [1](1).")
@@ -359,11 +365,11 @@ class TestMultiTurnReferenceResolution:
         ctx.message_id = 102
         llm.script("plan", json.dumps({
             "intent": "rag",
-            "subtasks": [{"id": "a", "description": "Retrieve StreamVC limitations", "tool_hint": "rag_retrieve"}],
+            "subtasks": [{"id": "a", "description": "Retrieve StreamVC limitations", "tool_hint": "search_dense", "suggested_query": "StreamVC limitations"}],
             "needs_clarification": False,
         }))
         llm.script("think", json.dumps({
-            "tool_calls": [{"tool": "rag_retrieve", "arguments": {"query": "StreamVC limitations"}}],
+            "tool_calls": [{"tool": "search_dense", "arguments": {"query": "StreamVC limitations"}}],
         }))
         llm.script("finalize", "StreamVC has limitations in real-time latency and speaker adaptation [1](1).")
         llm.script("extract", json.dumps({
@@ -378,10 +384,17 @@ class TestMultiTurnReferenceResolution:
         _run_turn(graph, config, "What are its limitations?", message_id=102)
         state2 = _get_state(graph, config)
 
-        # Verify Turn 2: rewritten query should contain "StreamVC".
-        rewritten = state2.get("rewritten_query", "")
-        assert "StreamVC" in rewritten or "streamvc" in rewritten.lower(), \
-            f"Turn 2: rewritten query should resolve 'its' to 'StreamVC', got: {rewritten!r}"
+        # Verify Turn 2: the search query used by the think loop should contain "StreamVC".
+        # In the new topology (no rewrite node), the LLM in think resolves "its" itself.
+        observations = state2.get("observations", [])
+        from app.services.agentic_rag.agent_graph import _coerce_observation
+        search_queries = [
+            _coerce_observation(o).arguments.get("query", "")
+            for o in observations
+            if _coerce_observation(o).tool in ("search_exact", "search_sparse", "search_dense")
+        ]
+        assert any("StreamVC" in q or "streamvc" in q.lower() for q in search_queries), \
+            f"Turn 2: search query should resolve 'its' to 'StreamVC', got: {search_queries}"
 
         # Verify conversation history grew.
         msgs2 = state2.get("messages", [])
@@ -414,11 +427,11 @@ class TestTopicCarryover:
         # Turn 1: Kubernetes autoscaling.
         llm.script("plan", json.dumps({
             "intent": "rag",
-            "subtasks": [{"id": "a", "description": "Retrieve K8s autoscaling", "tool_hint": "rag_retrieve"}],
+            "subtasks": [{"id": "a", "description": "Retrieve K8s autoscaling", "tool_hint": "search_dense", "suggested_query": "Kubernetes autoscaling overview"}],
             "needs_clarification": False,
         }))
         llm.script("think", json.dumps({
-            "tool_calls": [{"tool": "rag_retrieve", "arguments": {"query": "Kubernetes autoscaling overview"}}],
+            "tool_calls": [{"tool": "search_dense", "arguments": {"query": "Kubernetes autoscaling overview"}}],
         }))
         llm.script("finalize", "Kubernetes autoscaling adjusts pod count based on load [1](1).")
         llm.script("extract", json.dumps({"summary": "K8s autoscaling adjusts pods based on load."}))
@@ -438,11 +451,11 @@ class TestTopicCarryover:
         ctx.message_id = 202
         llm.script("plan", json.dumps({
             "intent": "rag",
-            "subtasks": [{"id": "a", "description": "Retrieve Redis caching", "tool_hint": "rag_retrieve"}],
+            "subtasks": [{"id": "a", "description": "Retrieve Redis caching", "tool_hint": "search_dense", "suggested_query": "Redis caching strategies"}],
             "needs_clarification": False,
         }))
         llm.script("think", json.dumps({
-            "tool_calls": [{"tool": "rag_retrieve", "arguments": {"query": "Redis caching strategies"}}],
+            "tool_calls": [{"tool": "search_dense", "arguments": {"query": "Redis caching strategies"}}],
         }))
         llm.script("finalize", "Redis caching uses TTL and LRU eviction [1](1).")
         llm.script("extract", json.dumps({"summary": "Redis caching uses TTL and LRU."}))
@@ -454,10 +467,16 @@ class TestTopicCarryover:
         _run_turn(graph, config, "What about Redis caching strategies?", message_id=202)
         state2 = _get_state(graph, config)
 
-        # Turn 2's rewritten query should NOT contain "Kubernetes".
-        rewritten2 = state2.get("rewritten_query", "")
-        assert "kubernetes" not in rewritten2.lower(), \
-            f"Turn 2: rewrite should not leak topic A (Kubernetes) into topic B, got: {rewritten2!r}"
+        # Turn 2's search query should NOT contain "Kubernetes".
+        from app.services.agentic_rag.agent_graph import _coerce_observation
+        observations2 = state2.get("observations", [])
+        search_queries2 = [
+            _coerce_observation(o).arguments.get("query", "")
+            for o in observations2
+            if _coerce_observation(o).tool in ("search_exact", "search_sparse", "search_dense")
+        ]
+        assert not any("kubernetes" in q.lower() for q in search_queries2), \
+            f"Turn 2: search should not leak topic A (Kubernetes) into topic B, got: {search_queries2}"
 
         # Turn 3: "Can you compare that with the first thing?"
         # "that" = Redis caching (Turn 2), "the first thing" = Kubernetes autoscaling (Turn 1)
@@ -465,16 +484,17 @@ class TestTopicCarryover:
         llm.script("plan", json.dumps({
             "intent": "rag",
             "subtasks": [
-                {"id": "a", "description": "Retrieve K8s autoscaling", "tool_hint": "rag_retrieve"},
-                {"id": "b", "description": "Retrieve Redis caching", "tool_hint": "rag_retrieve", "depends_on": ["a"]},
+                {"id": "a", "description": "Retrieve K8s autoscaling", "tool_hint": "search_dense", "suggested_query": "Kubernetes autoscaling comparison"},
+                {"id": "b", "description": "Retrieve Redis caching", "tool_hint": "search_dense", "depends_on": ["a"], "suggested_query": "Redis caching comparison"},
             ],
             "needs_clarification": False,
         }))
         llm.script("think", json.dumps({
-            "tool_calls": [{"tool": "rag_retrieve", "arguments": {"query": "Kubernetes autoscaling comparison"}}],
+            "tool_calls": [{"tool": "search_dense", "arguments": {"query": "Kubernetes autoscaling comparison"}}],
         }))
+        llm.script("sufficiency", json.dumps({"sufficient": False}))
         llm.script("think", json.dumps({
-            "tool_calls": [{"tool": "rag_retrieve", "arguments": {"query": "Redis caching comparison"}}],
+            "tool_calls": [{"tool": "search_dense", "arguments": {"query": "Redis caching comparison"}}],
         }))
         llm.script("finalize", "K8s autoscaling and Redis caching serve different purposes [1](1) [2](2).")
         llm.script("extract", json.dumps({"summary": "Comparison of K8s autoscaling and Redis caching."}))
@@ -547,11 +567,11 @@ class TestClarificationInterruptResume:
         # After clarification, plan again with the answer, then proceed.
         llm.script("plan", json.dumps({
             "intent": "rag",
-            "subtasks": [{"id": "a", "description": "Retrieve PostgreSQL replication", "tool_hint": "rag_retrieve"}],
+            "subtasks": [{"id": "a", "description": "Retrieve PostgreSQL replication", "tool_hint": "search_dense", "suggested_query": "PostgreSQL replication configuration"}],
             "needs_clarification": False,
         }))
         llm.script("think", json.dumps({
-            "tool_calls": [{"tool": "rag_retrieve", "arguments": {"query": "PostgreSQL replication configuration"}}],
+            "tool_calls": [{"tool": "search_dense", "arguments": {"query": "PostgreSQL replication configuration"}}],
         }))
         llm.script("finalize", "PostgreSQL replication is configured via streaming replication [1](1).")
         llm.script("extract", json.dumps({"summary": "PostgreSQL replication via streaming."}))
@@ -589,14 +609,14 @@ class TestClarificationInterruptResume:
         assert len(msgs) >= 2, f"Should have multiple messages after clarification, got {len(msgs)}"
 
 
-# ─── Transcript 4: Multi-tool plan (2+ rag_retrieve subtasks) ──────────────
+# ─── Transcript 4: Multi-tool plan (2+ search_dense subtasks) ──────────────
 
 
 class TestMultiToolPlan:
-    """A single turn with a plan requiring 2 rag_retrieve subtasks.
+    """A single turn with a plan requiring 2 search_dense subtasks.
 
     Verifies that:
-    - Both subtasks execute (2 rag_retrieve calls).
+    - Both subtasks execute (2 search_dense calls).
     - Observations accumulate correctly (no duplication).
     - Retrieved docs from both calls are merged into retrieved_docs.
     - The plan is marked complete only after both subtasks have results.
@@ -609,19 +629,20 @@ class TestMultiToolPlan:
         llm.script("plan", json.dumps({
             "intent": "rag",
             "subtasks": [
-                {"id": "a", "description": "Retrieve revenue data", "tool_hint": "rag_retrieve"},
-                {"id": "b", "description": "Retrieve cost data", "tool_hint": "rag_retrieve", "depends_on": ["a"]},
+                {"id": "a", "description": "Retrieve revenue data", "tool_hint": "search_dense", "suggested_query": "Q3 revenue data"},
+                {"id": "b", "description": "Retrieve cost data", "tool_hint": "search_dense", "depends_on": ["a"], "suggested_query": "Q3 cost data"},
             ],
             "needs_clarification": False,
         }))
-        # First think: call rag_retrieve for revenue.
+        # First think is skipped — precomputed_tool_calls from plan handles subtask a.
+        # First sufficiency check: not sufficient (still need costs).
+        llm.script("sufficiency", json.dumps({"sufficient": False}))
+        # Second think: call search_dense for costs.
         llm.script("think", json.dumps({
-            "tool_calls": [{"tool": "rag_retrieve", "arguments": {"query": "Q3 revenue data"}}],
+            "tool_calls": [{"tool": "search_dense", "arguments": {"query": "Q3 cost data"}}],
         }))
-        # Second think: call rag_retrieve for costs.
-        llm.script("think", json.dumps({
-            "tool_calls": [{"tool": "rag_retrieve", "arguments": {"query": "Q3 cost data"}}],
-        }))
+        # Second sufficiency check: sufficient (both queries done).
+        llm.script("sufficiency", json.dumps({"sufficient": True}))
         llm.script("finalize", "Revenue was $10M [1](1) and costs were $6M [2](2), yielding $4M profit.")
         llm.script("extract", json.dumps({"summary": "Q3 revenue $10M, costs $6M, profit $4M."}))
 
@@ -640,16 +661,13 @@ class TestMultiToolPlan:
         _run_turn(graph, config, "What were Q3 revenue and costs?", message_id=401)
         state = _get_state(graph, config)
 
-        # Verify 2 rag_retrieve observations.
+        # Verify 2 search_dense observations.
         observations = state.get("observations", [])
-        rag_obs = [o for o in observations if isinstance(o, dict) and o.get("tool") == "rag_retrieve"
-                   or (hasattr(o, "tool") and o.tool == "rag_retrieve")]
-        # Observations might be Observation objects or dicts; coerce.
         from app.services.agentic_rag.agent_graph import _coerce_observation
         rag_obs = [_coerce_observation(o) for o in observations
-                   if _coerce_observation(o).tool == "rag_retrieve"]
+                   if _coerce_observation(o).tool == "search_dense"]
         assert len(rag_obs) == 2, \
-            f"Should have 2 rag_retrieve observations, got {len(rag_obs)}: {[_coerce_observation(o).tool for o in observations]}"
+            f"Should have 2 search_dense observations, got {len(rag_obs)}: {[_coerce_observation(o).tool for o in observations]}"
 
         # Verify both docs are in retrieved_docs.
         docs = state.get("retrieved_docs", [])
@@ -692,6 +710,7 @@ class TestCodeExecuteChartGenerate:
         llm.script("think", json.dumps({
             "tool_calls": [{"tool": "code_execute", "arguments": {"code": "result = [10, 20, 30, 40]; print(result)"}}],
         }))
+        llm.script("sufficiency", json.dumps({"sufficient": False}))
         # Second think: call chart_generate.
         llm.script("think", json.dumps({
             "tool_calls": [{"tool": "chart_generate", "arguments": {
@@ -772,11 +791,11 @@ class TestEntityAdditionRate:
 
             llm.script("plan", json.dumps({
                 "intent": "rag",
-                "subtasks": [{"id": "a", "description": f"Retrieve {entity} overview", "tool_hint": "rag_retrieve"}],
+                "subtasks": [{"id": "a", "description": f"Retrieve {entity} overview", "tool_hint": "search_dense", "suggested_query": f"{entity} overview"}],
                 "needs_clarification": False,
             }))
             llm.script("think", json.dumps({
-                "tool_calls": [{"tool": "rag_retrieve", "arguments": {"query": f"{entity} overview"}}],
+                "tool_calls": [{"tool": "search_dense", "arguments": {"query": f"{entity} overview"}}],
             }))
             llm.script("finalize", f"{entity} is a programming language with unique features [1](1).")
             llm.script("extract", json.dumps({"summary": f"{entity} is a programming language."}))
@@ -856,11 +875,11 @@ class TestUnsupportedCitationRejection:
 
         llm.script("plan", json.dumps({
             "intent": "rag",
-            "subtasks": [{"id": "a", "description": "Retrieve data", "tool_hint": "rag_retrieve"}],
+            "subtasks": [{"id": "a", "description": "Retrieve data", "tool_hint": "search_dense", "suggested_query": "important data"}],
             "needs_clarification": False,
         }))
         llm.script("think", json.dumps({
-            "tool_calls": [{"tool": "rag_retrieve", "arguments": {"query": "important data"}}],
+            "tool_calls": [{"tool": "search_dense", "arguments": {"query": "important data"}}],
         }))
         # Finalize cites [1] (valid) and [3] (out of range — only 1 doc).
         llm.script("finalize", "The key finding is in [1](1), also referenced in [3](3).")
@@ -883,16 +902,20 @@ class TestUnsupportedCitationRejection:
         assert "[1]" in answer, f"Valid citation [1] should be in answer, got: {answer!r}"
         assert "[3]" not in answer, f"Invalid citation [3] should be stripped, got: {answer!r}"
 
-        # cited_doc_indices should only contain 1.
-        cited = state.get("cited_doc_indices", [])
-        assert cited == [1], f"Should cite only doc 1, got: {cited}"
+        # In the evidence-based citation pipeline, cited_doc_indices is not set.
+        # The answer text itself is the source of truth for which citations survived.
+        # Verify [1] is the only citation in the answer.
+        import re
+        citations_in_answer = re.findall(r"\[(\d+)\]\(\d+\)", answer)
+        assert citations_in_answer == ["1"], \
+            f"Should only cite [1], got citations: {citations_in_answer}"
 
 
 # ─── Transcript 8: Observation non-duplication across turns ────────────────
 
 
 class TestObservationNonDuplicationAcrossTurns:
-    """Two turns, each calling rag_retrieve. Observations from Turn 1 should
+    """Two turns, each calling search_dense. Observations from Turn 1 should
     not leak into Turn 2.
 
     Verifies that:
@@ -907,11 +930,11 @@ class TestObservationNonDuplicationAcrossTurns:
         # Turn 1.
         llm.script("plan", json.dumps({
             "intent": "rag",
-            "subtasks": [{"id": "a", "description": "Retrieve topic A", "tool_hint": "rag_retrieve"}],
+            "subtasks": [{"id": "a", "description": "Retrieve topic A", "tool_hint": "search_dense", "suggested_query": "topic A details"}],
             "needs_clarification": False,
         }))
         llm.script("think", json.dumps({
-            "tool_calls": [{"tool": "rag_retrieve", "arguments": {"query": "topic A details"}}],
+            "tool_calls": [{"tool": "search_dense", "arguments": {"query": "topic A details"}}],
         }))
         llm.script("finalize", "Topic A is about algorithms [1](1).")
         llm.script("extract", json.dumps({"summary": "Topic A is about algorithms."}))
@@ -933,11 +956,11 @@ class TestObservationNonDuplicationAcrossTurns:
         ctx.message_id = 802
         llm.script("plan", json.dumps({
             "intent": "rag",
-            "subtasks": [{"id": "a", "description": "Retrieve topic B", "tool_hint": "rag_retrieve"}],
+            "subtasks": [{"id": "a", "description": "Retrieve topic B", "tool_hint": "search_dense", "suggested_query": "topic B details"}],
             "needs_clarification": False,
         }))
         llm.script("think", json.dumps({
-            "tool_calls": [{"tool": "rag_retrieve", "arguments": {"query": "topic B details"}}],
+            "tool_calls": [{"tool": "search_dense", "arguments": {"query": "topic B details"}}],
         }))
         llm.script("finalize", "Topic B is about data structures [1](1).")
         llm.script("extract", json.dumps({"summary": "Topic B is about data structures."}))
@@ -951,8 +974,8 @@ class TestObservationNonDuplicationAcrossTurns:
         coerced2 = [_coerce_observation(o) for o in obs2]
         assert len(coerced2) == 1, \
             f"Turn 2: should have 1 observation (reset), got {len(coerced2)}"
-        assert coerced2[0].tool == "rag_retrieve", \
-            f"Turn 2: observation should be rag_retrieve, got {coerced2[0].tool}"
+        assert coerced2[0].tool == "search_dense", \
+            f"Turn 2: observation should be search_dense, got {coerced2[0].tool}"
 
         # The query should be "topic B details", not "topic A details".
         assert "topic B" in coerced2[0].arguments.get("query", ""), \
@@ -978,11 +1001,11 @@ class TestPreviousAnswerAction:
         # Turn 1: normal RAG turn.
         llm.script("plan", json.dumps({
             "intent": "rag",
-            "subtasks": [{"id": "a", "description": "Retrieve data", "tool_hint": "rag_retrieve"}],
+            "subtasks": [{"id": "a", "description": "Retrieve data", "tool_hint": "search_dense", "suggested_query": "machine learning basics"}],
             "needs_clarification": False,
         }))
         llm.script("think", json.dumps({
-            "tool_calls": [{"tool": "rag_retrieve", "arguments": {"query": "machine learning basics"}}],
+            "tool_calls": [{"tool": "search_dense", "arguments": {"query": "machine learning basics"}}],
         }))
         llm.script("finalize", "Machine learning is a subset of AI that learns from data [1](1).")
         llm.script("extract", json.dumps({

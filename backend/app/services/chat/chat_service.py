@@ -109,7 +109,7 @@ class _StreamContext:
         self.user_message_id = user_message_id
         self.full_response = ""
         self.rewritten_q = None
-        self.buffered_citations: list[tuple[int, int, int, int, dict]] = []
+        self.buffered_citations: list[tuple] = []
         self.confidence_level: str | None = None
         self.confidence_score: int | None = None
         self.confidence_breakdown: dict | None = None
@@ -128,21 +128,6 @@ class _StreamContext:
 async def _handle_agent_step(event, ctx):
     yield f'4:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
     await stream_flush()
-
-
-async def _handle_rewritten_query(event, ctx):
-    ctx.rewritten_q = event.get("query", ctx.query)
-    ctx.bot_message.rewritten_query = ctx.rewritten_q
-    yield f'1:{json.dumps({"rewritten_query": ctx.rewritten_q})}\n'
-    await asyncio.sleep(0)
-
-
-async def _handle_expanded_query(event, ctx):
-    expanded_q = event.get("query", "")
-    ctx.user_message.expanded_query = expanded_q
-    ctx.db.commit()
-    yield f'eq:{json.dumps({"expanded_query": expanded_q})}\n'
-    await asyncio.sleep(0)
 
 
 async def _handle_context(event, ctx):
@@ -176,17 +161,33 @@ async def _handle_answer_rewrite(event, ctx):
     ctx.buffered_citations = []
     citation_idx = 0
     for doc in event.get("citations", []):
-        document_id = doc.get("metadata", {}).get("document_id")
-        chunk_index = doc.get("metadata", {}).get("chunk_index")
-        if document_id is not None and chunk_index is not None:
+        # Support both legacy format (doc["metadata"]["document_id"]) and
+        # new evidence format (doc["citation_ref"]["document_id"]).
+        metadata = doc.get("metadata", {}) or {}
+        citation_ref = metadata.get("citation_ref") or doc.get("citation_ref") or {}
+        document_id = citation_ref.get("document_id") or metadata.get("document_id")
+        chunk_index = citation_ref.get("chunk_index") if citation_ref.get("chunk_index") is not None else metadata.get("chunk_index")
+        if document_id is not None:
             citation_idx += 1
-            meta = {**(doc.get("metadata", {}) or {})}
+            meta = {**metadata}
             for rk in ("score", "dense_rank", "sparse_rank", "exact_rank", "retrieval_leg"):
                 v = doc.get(rk)
                 if v is not None:
                     meta[rk] = v
+            # Extract new CitationRef fields for persistence
+            citation_kind = citation_ref.get("citation_kind", "chunk")
+            section = citation_ref.get("section")
+            start_char = citation_ref.get("start_char")
+            end_char = citation_ref.get("end_char")
+            start_line = citation_ref.get("start_line")
+            end_line = citation_ref.get("end_line")
+            page = citation_ref.get("page") or metadata.get("page")
+            match_line = citation_ref.get("match_line")
+            source_tool = citation_ref.get("source_tool")
             ctx.buffered_citations.append((
-                ctx.bot_message.id, document_id, chunk_index, citation_idx, meta,
+                ctx.bot_message.id, document_id, chunk_index or 0, citation_idx, meta,
+                citation_kind, section, start_char, end_char, start_line, end_line,
+                page, match_line, source_tool,
             ))
     rewrite_payload = {
         "content": ctx.full_response,
@@ -279,8 +280,6 @@ async def _handle_interrupt(event, ctx):
 
 EVENT_HANDLERS = {
     "agent_step": _handle_agent_step,
-    "rewritten_query": _handle_rewritten_query,
-    "expanded_query": _handle_expanded_query,
     "context": _handle_context,
     "token": _handle_token,
     "answer_rewrite": _handle_answer_rewrite,
@@ -382,7 +381,17 @@ def _persist_citations(db: Session, chat_id: int, buffered_citations: list) -> N
     if not buffered_citations:
         return
     try:
-        for msg_id, document_id, chunk_index, citation_index, metadata in buffered_citations:
+        for entry in buffered_citations:
+            # Unpack with new fields (14-element tuple) or legacy (5-element tuple)
+            if len(entry) == 14:
+                (msg_id, document_id, chunk_index, citation_index, metadata,
+                 citation_kind, section, start_char, end_char, start_line, end_line,
+                 page, match_line, source_tool) = entry
+            else:
+                msg_id, document_id, chunk_index, citation_index, metadata = entry[:5]
+                citation_kind = "chunk"
+                section = start_char = end_char = start_line = end_line = None
+                page = match_line = source_tool = None
             db.add(
                 MessageCitation(
                     message_id=msg_id,
@@ -390,6 +399,15 @@ def _persist_citations(db: Session, chat_id: int, buffered_citations: list) -> N
                     chunk_index=chunk_index,
                     citation_index=citation_index,
                     citation_metadata=metadata,
+                    citation_kind=citation_kind,
+                    section=section,
+                    start_char=start_char,
+                    end_char=end_char,
+                    start_line=start_line,
+                    end_line=end_line,
+                    page=page,
+                    match_line=match_line,
+                    source_tool=source_tool,
                 )
             )
         db.commit()
@@ -474,12 +492,11 @@ async def generate_response(
     """
     Stream a chat response for the given query.
 
-    Delegates the full RAG pipeline (query rewrite -> routing -> retrieval ->
-    grading -> generation) to run_agentic_rag(), which emits typed events
-    that are forwarded as Vercel AI SDK SSE frames:
+    Delegates the full RAG pipeline (planning -> atomic search tools ->
+    sufficiency check -> generation) to run_agentic_rag(), which emits
+    typed events that are forwarded as Vercel AI SDK SSE frames:
 
       0:  token             (streaming answer text)
-      1:  rewritten_query   (standalone question after rewrite node)
       2:  context           (retrieved docs + confidence metadata)
       3:  error             (exception message)
       4:  agent_step        (LangGraph node start / finish event)
@@ -520,7 +537,7 @@ async def generate_response(
         # all (code_execute, chart_generate on inline data, plain conversation,
         # identity questions with unusual phrasing, etc.) — short-circuiting to
         # an error before planning even starts would block all of those. If the
-        # query genuinely needs retrieval, rag_retrieve returns zero docs when
+        # query genuinely needs retrieval, search tools return zero docs when
         # knowledge_base_ids is empty and the agent explains it found nothing,
         # which is the correct behavior for a non-RAG-only agentic pipeline.
 

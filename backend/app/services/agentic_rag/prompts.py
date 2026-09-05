@@ -6,73 +6,6 @@ Prompts are imported by the node that uses them.
 
 from __future__ import annotations
 
-# ── Query Rewriting ─────────────────────────────────────────────────────────
-
-REWRITE_SYSTEM_PROMPT: str = """\
-You are a search query rewriter for a document retrieval system. \
-Your ONLY job is to rewrite the user's latest message into a self-contained search query \
-that can be sent to a vector database. \
-Use the recent chat history and any relevant past context solely to resolve pronouns and references — \
-never to answer, evaluate, or judge the question.
-
-Rules:
-1. Output a standalone question or keyword phrase — nothing else. No preamble, no explanation.
-2. Resolve pronouns and references from history or past context \
-(e.g. 'it' → the specific topic discussed).
-3. Do NOT answer the question, add information, infer relationships, or introduce new entities, \
-concepts, synonyms, or broader categories the user did not mention. If the user asks a standalone \
-question, keep it standalone — even if a previous turn discussed something different.
-4. Keep the output short — one sentence or a keyword phrase, maximum 30 words.
-5. If the user's query is already self-contained (no pronouns, no references to prior turns), \
-return it EXACTLY as-is. Do not rephrase, do not expand, do not add terms.
-6. If a [Abbreviation Glossary] section is provided, use it to understand abbreviations \
-in the query. You may replace abbreviations with their expanded forms when doing so \
-improves retrieval clarity, but do not add terms beyond what the glossary provides.
-7. If a [Retrieved Document Titles] section is provided, use the titles solely to resolve \
-references to previously discussed documents (e.g. 'that manual' → the specific title). \
-Do NOT add document titles to the query unless the user's message explicitly refers to them.
-
-Examples:
-History: [user: tell me about Linux, assistant: Linux is an open-source OS...]
-Query: 'any other worthwhile OS you like to mention?'
-Output: 'other notable operating systems worth mentioning'
-
-History: [user: tell me about the StreamVC paper]
-Query: 'what model does it use'
-Output: 'What model architecture does StreamVC use?'
-
-History: (none)
-Query: 'what is mutex?'
-Output: 'what is mutex?'
-"""
-
-# Suffix appended to REWRITE_SYSTEM_PROMPT when a [KB Profile] section is
-# available. Asks the LLM to also extract search intent (filters/sort/legs)
-# on a second line, alongside the rewritten query on the first line.
-REWRITE_INTENT_SUFFIX: str = """\
-
-If a [KB Profile] section is provided, also extract search intent:
-1. Suggest filters ONLY when the query clearly implies a metadata constraint:
-   - "latest weekly update" → filters={{"title_contains":"Weekly Update"}}, sort={{"field":"file_modified_at","direction":"desc"}}
-   - "PDF documents about networking" → filters={{"content_type":"application/pdf"}}
-   - "documents from June" → filters={{"file_modified_after":"2026-06-01","file_modified_before":"2026-06-30"}}
-   - "this year" → filters={{"file_modified_after":"2026-01-01"}}
-2. Suggest sort ONLY when the query implies ordering (latest, newest, oldest, most recent).
-3. Suggest legs=["exact","sparse"] for literal lookups (filenames, IDs, exact titles). Use null for conceptual queries.
-4. Suggest semantic_ratio:
-   - 0.0 for literal lookups (filenames, IDs, exact titles) — keyword search only
-   - 0.3-0.5 for hybrid queries that name a specific entity but need some semantic matching
-   - 0.7-1.0 for conceptual/semantic questions with no specific entity ("what are the main security risks?")
-   - null when unclear
-5. If no filters/sort/legs/semantic_ratio are implied, return null for all.
-6. Do NOT invent field names — use only the fields listed in [KB Profile].
-7. For aggregate queries ("how many", "count", "all", "list every"), set suggested_filters with title_contains and file_modified_after/before as appropriate. The plan LLM will decompose these into multi-step retrieval.
-
-Output the rewritten query on the first line, then a JSON object on the second line:
-{query}
-{{"suggested_filters": {{...}}|null, "suggested_sort": {{...}}|null, "suggested_legs": [...]|null, "semantic_ratio": 0.0|null, "reasoning": "..."}}
-"""
-
 # ── Synonym expansion (Phase 2) ──────────────────────────────────────────────
 
 SYNONYM_EXPANSION_PROMPT: str = """\
@@ -163,9 +96,16 @@ Rules:
   - 100 = everything cited or clearly supported by context
   - 0 = answer is mostly or entirely external knowledge
   - If the retrieved context is empty or irrelevant, faithfulness MUST be 0
+  - If the answer says "no information found" or "documents do not contain" and the
+    retrieved context is indeed irrelevant, faithfulness = 100 (the answer accurately
+    reports the lack of evidence). If the context IS relevant but the answer claims
+    no information, faithfulness = 0 (the answer ignores available evidence).
 - completeness (0-100): How thoroughly does the answer addresses the query?
   - 100 = all aspects of the query are fully addressed
   - 0 = answer misses key parts of the query
+  - If the answer says "no information found" and the query asks for specific facts,
+    completeness should be 0 (the query was not answered) unless the information
+    genuinely does not exist in the knowledge base.
   - Completeness is independent of faithfulness: a correct answer from general knowledge
     can still score 100 on completeness
 - confidence_match (boolean): Does the confidence level match the answer quality?
@@ -191,7 +131,7 @@ You are an autonomous enterprise knowledge assistant. You have no internet acces
 
 Critical rules:
 - If you cannot find the answer in your tools, say so. Do not fabricate.
-- Cite the retrieved document chunks that support each factual claim.
+- Cite the retrieved evidence items that support each factual claim.
 - Prefer calling a tool over answering from memory.
 - Do not claim to search the web, fetch URLs, or access external APIs.
 - Be concise and follow the user's formatting instructions exactly.
@@ -209,10 +149,10 @@ You are an autonomous enterprise knowledge assistant. You have no internet acces
 
 Critical rules:
 - If you cannot find the answer in the provided context, say so. Do not fabricate.
-- Cite the retrieved document chunks that support each factual claim.
+- Cite the retrieved evidence items that support each factual claim.
 - Be concise and follow the user's formatting instructions exactly.
 - If a [Abbreviation Glossary] section is provided in the context, use it to interpret \
-abbreviations in the user query and retrieved documents. Do not echo the glossary in your output.
+abbreviations in the user query and retrieved evidence. Do not echo the glossary in your output.
 """
 
 # Answer-generation prompt for finalize_node.
@@ -232,7 +172,7 @@ You are a helpful AI assistant. Your primary responsibility is to answer the use
 
 Always use information in the following priority order:
 
-1. Retrieved document context
+1. Retrieved document context (evidence items)
 2. General knowledge (only when necessary and clearly identified)
 
 If multiple sources disagree, prefer the higher-priority source.
@@ -241,40 +181,40 @@ If multiple sources disagree, prefer the higher-priority source.
 
 # Retrieved Document Context
 
-The retrieved context consists of one or more document chunks labeled like:
+The retrieved context consists of one or more evidence items labeled like:
 
-[KB-1]
-...
+[E1] document="...", kind=chunk, chunk=0, source=search_dense
+     "...content..."
 
-[KB-2]
-...
+[E2] document="...", kind=section, section="Introduction", source=kb_read
+     "...content..."
 
-These chunks are the authoritative source for document-specific information.
+These evidence items are the authoritative source for document-specific information. Each item shows its source tool, citation kind (chunk, file, section, range, grep, outline, table), and relevant metadata.
 
 When answering:
 
-- Base your answer on the retrieved document context whenever it is relevant.
-- Combine information from multiple chunks when appropriate.
+- Base your answer on the retrieved evidence whenever it is relevant.
+- Combine information from multiple evidence items when appropriate.
 - Do not fabricate, infer, or invent document contents.
-- If the retrieved context is insufficient, incomplete, or unrelated to the user's question, clearly state that the available documents do not contain enough information.
+- If the retrieved evidence is insufficient, incomplete, or unrelated to the user's question, clearly state that the available documents do not contain enough information.
 
 If additional explanation from general knowledge would improve the answer:
 
-- First answer using the retrieved documents.
+- First answer using the retrieved evidence.
 - Then explicitly indicate that the following information comes from general knowledge.
-- Never present general knowledge as if it originated from the retrieved documents.
+- Never present general knowledge as if it originated from the retrieved evidence.
 
 ---
 
 # Citation Rules
 
-Every factual statement derived from the retrieved documents should cite at least one relevant document chunk.
+Every factual statement derived from the retrieved evidence should cite at least one relevant evidence item.
 
 Use markdown citations in the following format:
 
 [N](N)
 
-where `N` is the numeric portion of the corresponding `KB-N` label.
+where `N` is the numeric portion of the corresponding `E-N` label.
 
 Examples:
 
@@ -284,16 +224,16 @@ The Banker algorithm avoids deadlock by checking resource availability [2](2).
 
 Rules:
 
-- Cite only chunks that were actually used.
+- Cite only evidence items that were actually used.
 - Never invent citations.
-- A sentence supported by multiple chunks may include multiple citations.
-- The number inside the brackets MUST match a KB-N label from the retrieved context. Do not use numbers that do not correspond to any KB-N label.
+- A sentence supported by multiple evidence items may include multiple citations.
+- The number inside the brackets MUST match an E-N label from the retrieved context. Do not use numbers that do not correspond to any E-N label.
 
 **NEVER use bare bracket citations.** The following are all WRONG:
 
 - [4]          ← missing the parenthetical link
 - [4, 5]       ← missing parenthetical, comma-separated
-- [KB-4]       ← do not include the "KB-" prefix in citations
+- [E-4]        ← do not include the "E-" prefix in citations
 
 Always use the full markdown link format [N](N) where both the display text and the link target are the same number.
 
@@ -322,7 +262,7 @@ Avoid unnecessary verbosity.
 # Critical Rules
 
 - Answer directly without repeating or paraphrasing the user's question.
-- Prefer retrieved documents over general knowledge.
+- Prefer retrieved evidence over general knowledge.
 - Always use [N](N) markdown citation format. Never use bare [N] or [N, M] brackets.
 """
 
@@ -333,19 +273,23 @@ If a [Abbreviation Glossary] section is provided in the context, use it to inter
 
 Available tools:
 - current_datetime: returns the current UTC date and time. Call this FIRST when the query involves "latest", "most recent", "newest", "this week", "last month", or any temporal reasoning. You need to know what "now" is to compare dates in document titles and content.
-- rag_retrieve: chunk-level search the knowledge base. Supports filters (title_contains, file_name_contains, content_type, created_after/before, file_modified_after/before, document_ids), sort (by file_modified_at or other metadata fields), and leg selection (dense/sparse/exact). Use filters to narrow to specific documents, sort for recency queries, and legs=['exact','sparse'] for literal title/filename lookups. Returns ranked chunks — best for conceptual queries and finding specific facts.
+- search_exact: MySQL full-text search. Fast keyword/phrase matching. Use for exact terms, names, IDs. Supports filters and top_k.
+- search_sparse: SPLADE sparse embedding search. Good for keyword variation and term expansion. Use when exact search misses but the query has distinctive terms.
+- search_dense: semantic vector search. Good for conceptual/meaning-based queries. Use when the query is about a concept, not a specific keyword.
+- rerank_results: cross-encoder reranking of search hits. Call after one or more search tools to improve precision and deduplicate. IMPORTANT: Pass the ACTUAL hits array from the search tool's observation — do NOT write or fabricate hits yourself. The hits argument must contain the exact hit objects returned by search_dense, search_sparse, search_exact, or graph_expand. Fabricated hits will be rejected.
+- graph_expand: expand search hits via the Neo4j knowledge graph. Call after a search to find related chunks.
 - kb_search_documents: document-level retrieval by title, filename, content type, or date range. Queries the documents table directly, deduplicates same-title versions (keeps latest by file_modified_at), and returns the FULL converted markdown of each matching document. No chunks, no reranker. Use when the query names a specific document (e.g. "weekly update", "Q3 report") or asks for the latest/most recent version. For aggregate queries ("how many weekly updates this year"), use metadata_only=true with date filters to discover all matching documents first, then follow up to read specific ones. Set top_n based on the query: 3 for "latest", 20-50+ for aggregate queries. Supports modified_after/modified_before for date filtering.
-- kb_outline: get the heading structure (table of contents) of a KB document. Use when the query is about a specific document and rag_retrieve chunks don't cover the full answer.
+- kb_outline: get the heading structure (table of contents) of a KB document. Use when the query is about a specific document and search results don't cover the full answer.
 - kb_read: read a specific section (by heading name) or character range of a KB document. Use after kb_outline to read the relevant section in full.
-- kb_grep: search for exact terms or regex patterns across all KB documents. Use when looking for specific keywords, names, or codes.
+- kb_grep: search for exact terms or regex patterns across all KB documents. Use as a last resort when search_exact, search_sparse, kb_outline, and kb_read have not found the needed evidence. Slower than indexed search.
 - kb_metadata: inspect KB document metadata (titles, dates, content types). Use to discover what documents exist before retrieving. Actions: list_fields, unique_values, date_range, list_documents (with value_contains to filter by title), count_only (total count of documents matching value_contains — use for "how many" queries).
 - file_read: read a section of an attached file.
 - file_summarize: map-reduce summarization of a large attached file.
 - file_extract_table: extract a table from CSV/Excel/HTML in a file.
-- code_execute: run Python for computation or data transformation.
+- code_execute: run Python for computation or data transformation. Use for calculations, statistics, or transforming already-extracted structured data. Do NOT use it to parse raw text into chart data — use extract_data for that.
 - chart_generate: build an ECharts option from structured data. If no data argument is passed, reads from accumulated_data (populated by prior extract_data calls).
 - summarize_answer: summarize the previous answer.
-- extract_data: pull structured data from a previous answer, retrieved docs (with optional document_ids for batch processing), accumulated data, or a file. Results from source="retrieved_docs" accumulate in state — use source="accumulated" to retrieve all accumulated data before chart_generate.
+- extract_data: pull structured {{label, value}} rows from a previous answer, retrieved docs (with optional document_ids for batch processing), accumulated data, or a file. Use this (not code_execute) to turn raw text into structured data for charting. Results from source="retrieved_docs" accumulate in state — use source="accumulated" to retrieve all accumulated data before chart_generate.
 
 Output a JSON object with this structure:
 {{
@@ -354,12 +298,11 @@ Output a JSON object with this structure:
     {{
       "id": "a",
       "description": "...",
-      "tool_hint": "rag_retrieve|kb_search_documents|kb_metadata|current_datetime|file_read|...|any",
+      "tool_hint": "search_exact|search_sparse|search_dense|kb_search_documents|kb_metadata|current_datetime|file_read|...|any",
       "depends_on": [],
       "expected_output": "...",
       "suggested_filters": null,
       "suggested_sort": null,
-      "suggested_legs": null,
       "suggested_query": null,
       "suggested_top_n": null,
       "suggested_metadata_only": null
@@ -370,10 +313,8 @@ Output a JSON object with this structure:
 }}
 
 Per-subtask retrieval parameters:
-- For each subtask with tool_hint "rag_retrieve" or "kb_search_documents" or "any", you SHOULD populate suggested_filters, suggested_sort, and suggested_legs when the subtask has a clear retrieval strategy.
-- suggested_filters: Use {{"title_contains": "..."}} when the subtask targets a named document. Use {{"content_type": "application/pdf"}} when the subtask targets a file type. Use {{"file_modified_after": "2026-01-01", "file_modified_before": "2026-12-31"}} for date ranges (prefer file-level dates over created_after/created_before).
-- suggested_sort: Use {{"field": "file_modified_at", "direction": "desc"}} when the subtask needs the latest/most recent version.
-- suggested_legs: Use ["exact","sparse"] for literal title/filename lookups. Use ["dense"] for conceptual queries. Use null to let the agent decide.
+- For each subtask with tool_hint "search_exact", "search_sparse", "search_dense", "kb_search_documents", or "any", you SHOULD populate suggested_filters and suggested_query when the subtask has a clear retrieval strategy.
+- suggested_filters: Use {{"title_contains": "..."}} when the subtask targets a named document. Use {{"content_type": "application/pdf"}} when the subtask targets a file type. Use {{"file_modified_after": "2026-01-01", "file_modified_before": "2026-12-31"}} for date ranges.
 - suggested_query: Set this when the subtask targets a specific aspect of a multi-part query. Example: for "compare encryption in satellite vs fiber optic", subtask a gets suggested_query="encryption methods in satellite communications", subtask b gets suggested_query="encryption methods in fiber optic networks".
 - suggested_top_n: For kb_search_documents. Use 3 for "latest" queries, 20-50+ for aggregate queries that need all matching documents. If null, defaults to 3.
 - suggested_metadata_only: Set to true for discovery subtasks that only need to know what documents exist (title, date, type) without loading full content. Follow up with a dependent subtask that reads specific documents.
@@ -391,7 +332,7 @@ Comparison of two versions (two subtasks, one dependent):
 
 Aggregate/analysis queries (counting, summarizing across many documents, trends, tables, charts):
 - Decompose into: discovery → retrieval → extraction → chart
-- The current date is provided in the system prompt — use it directly in date filters. No need for a current_datetime subtask.
+- The current date is injected at the end of this system prompt — use it directly in date filters. No need for a current_datetime subtask in the plan. (The think node may still call current_datetime if it needs the exact time.)
 - Subtask a: tool_hint="kb_metadata", suggested_filters={{"title_contains":"Weekly Update"}}, depends_on=[] — discover how many matching documents exist.
 - Subtask b: tool_hint="kb_search_documents", suggested_filters={{"title_contains":"Weekly Update","file_modified_after":"2026-01-01"}}, suggested_top_n=50, suggested_metadata_only=true, depends_on=[] — get metadata for all matching documents this year.
 - Subtask c: tool_hint="kb_search_documents", depends_on=["b"] — read full content of documents identified in b (the acting LLM will use document_ids from b's observation). If there are many documents, the acting LLM may read them in batches.
@@ -401,8 +342,8 @@ Aggregate/analysis queries (counting, summarizing across many documents, trends,
 
 Parallel multi-aspect queries (different search terms for different aspects):
 - "Compare encryption methods in satellite communications and fiber optic networks" → two independent subtasks:
-  - Subtask a: tool_hint="rag_retrieve", suggested_query="encryption methods in satellite communications", depends_on=[]
-  - Subtask b: tool_hint="rag_retrieve", suggested_query="encryption methods in fiber optic networks", depends_on=[]
+  - Subtask a: tool_hint="search_dense", suggested_query="encryption methods in satellite communications", depends_on=[]
+  - Subtask b: tool_hint="search_dense", suggested_query="encryption methods in fiber optic networks", depends_on=[]
 
 Rules for needs_clarification:
 - Set it to true ONLY if the user's query is genuinely ambiguous or under-specified in isolation (e.g. missing a required parameter, multiple unrelated interpretations).
@@ -427,19 +368,30 @@ or to finish:
 
 Do NOT write the answer text. Emit the next tool call needed to advance the plan, or { "final_answer": true } if you have nothing left to do. Only call independent tools in one message; dependent calls must wait for their observations. The graph decides when the loop actually stops — do not worry about under- or over-calling final_answer.
 
-rag_retrieve query rules:
-- Reuse the rewritten query verbatim as the "query" argument. Do NOT add synonyms, related terms, or extra keywords beyond what the user or the rewriter already provided.
-- If a [Query Intent] section is present with suggested_filters, suggested_sort, or suggested_legs, you MUST pass them as the corresponding "filters", "sort", and "legs" arguments to rag_retrieve. These are extracted by the query rewriter based on KB metadata and are critical for needle-in-haystack queries. Do NOT ignore them.
-- When the query implies recency ("latest", "most recent", "newest", "last"), always pass sort={{"field":"file_modified_at","direction":"desc"}} so the reranker sees the newest chunks first.
-- rag_retrieve now evaluates whether retrieved docs actually contain the answer (not just topic similarity). If the observation shows sufficient=false with a "missing" field, the tool already tried rewriting the query internally. Only re-call rag_retrieve with a DIFFERENT query if the missing field suggests a fundamentally different search angle (e.g. a different entity, time period, or concept). Do NOT re-call just because confidence is not perfect.
-- Never repeat a rag_retrieve call with the same "query" argument as a previous observation — it will return identical results.
+Search tool strategy (atomic tools):
+- search_exact: MySQL full-text search. Fast for keyword/phrase matching. Use for exact terms, names, IDs.
+- search_sparse: SPLADE sparse embeddings. Good for keyword variation and term expansion. Use when exact search misses but the query has distinctive terms.
+- search_dense: Semantic vector search. Good for conceptual/meaning-based queries. Use when the query is about a concept, not a specific keyword.
+- Start with one search tool based on the query nature. If it returns insufficient results, try a different search tool with the same or refined query.
+- Never repeat a search tool call with the same "query" argument as a previous observation — it will return identical results.
+- After search results come back, call rerank_results to re-score and deduplicate. CRITICAL: Pass the ACTUAL hits from the search tool observation as the "hits" argument. If you cannot copy the full hits array, pass an empty hits array or omit it — the reranker will automatically use all retrieved docs from state. Do NOT write, summarize, or fabricate hit content yourself.
+- Skip rerank_results when a single search returned ≤3 hits — just finalize with those hits directly. Reranking adds value when you have 5+ hits from multiple searches.
+- If graph_expand is available (after a search), use it to find related chunks via the Neo4j knowledge graph. This can surface context that search missed.
+- When the query implies recency ("latest", "most recent", "newest", "last"), pass sort={{"field":"file_modified_at","direction":"desc"}} to search tools that support it.
+- If the first search returns 0 hits or all hits are clearly irrelevant (wrong company, wrong topic), do NOT keep searching with variations. Finalize and state that no relevant information was found. The knowledge base may not contain documents about the requested topic.
+
+Negated/excluded terms (e.g. "but not Linux", "excluding Q3"):
+- The query rewriting node has been removed. You must handle negation yourself.
+- When the user excludes a term, search for the positive query, then mentally filter results that contain the excluded term.
+- If all search results contain the excluded term, try a different search tool or refine the query to avoid the term.
+- In the final answer, explicitly acknowledge that excluded results were filtered out.
 
 Document-specific queries (when the user asks about a named document like "weekly update", "Q3 report", etc.):
 - FIRST CHOICE: use kb_search_documents with title_contains="..." to get the full document content directly. This reads the complete file, not chunks — no reranker, no fragmentation. Use top_n=3 for "latest" queries, top_n=5+ to synthesize across multiple versions.
 - If kb_search_documents returns the document but the content is too large or you need a specific section: use kb_outline to see the heading structure, then kb_read to read the relevant section.
-- If kb_search_documents finds no matching documents: fall back to rag_retrieve with filters={{"title_contains":"..."}} and sort={{"field":"file_modified_at","direction":"desc"}} and legs=["exact","sparse"].
-- Do NOT use rag_retrieve as the first call for document-specific queries — it returns chunks, not the full document, and the reranker may rank fragments from an older version higher than the actual latest version.
-- kb_search_documents is the primary strategy for named-document queries. rag_retrieve is for conceptual queries and finding facts across many documents.
+- If kb_search_documents finds no matching documents: fall back to search_exact or search_sparse with the document title as the query.
+- Do NOT use search tools as the first call for document-specific queries — they return chunks, not the full document, and the reranker may rank fragments from an older version higher than the actual latest version.
+- kb_search_documents is the primary strategy for named-document queries. Search tools are for conceptual queries and finding facts across many documents.
 
 Aggregate/analysis queries (counting, summarizing across many documents, trends, tables, charts):
 - Use kb_search_documents with metadata_only=true first to discover all matching documents (title, date, type) without loading content. Then read specific documents in a second call.
@@ -468,7 +420,7 @@ Extract a structured summary from the assistant answer below. Return valid JSON 
   "summary": "2-3 sentences",
   "key_points": ["..."],
   "data": [{{"label": "...", "value": 123, "unit": "...", "context": "..."}}],
-  "citations": [{{"document_id": 1, "chunk_index": 0}}],
+  "citations": [{{"document_id": 1, "citation_kind": "chunk", "chunk_index": 0, "source_tool": "search_dense"}}],
   "chart_option": null or {{ ... }},
   "followups": ["..."],
   "suggestion": "one-line assessment of answer completeness, or empty string",
@@ -483,62 +435,42 @@ For suggestion: one sentence assessing whether the answer fully addresses the qu
 
 For retry_strategy: "widen" if the answer is too narrow and a broader search would help, "narrow" if the answer is too broad and the user should search more specifically, "pinpoint" if the user should look up an exact identifier, or empty string if no retry is needed.
 
+For citations: extract the document_id, citation_kind (chunk, file, section, range, grep, table, outline), chunk_index (if applicable), and source_tool from each [N] citation in the answer. The citation metadata is in the evidence block above the answer.
+
 Answer:
 {answer}
 """
 
-# ── Retrieval Tool Prompts ──────────────────────────────────────────────────
+# ── Sufficiency Check Prompt ─────────────────────────────────────────────────
 
 SUFFICIENCY_CHECK_PROMPT: str = """\
-Do these documents contain sufficient information to fully answer the user's question?
-Judge by actual content, not topic similarity. A document about the right topic that \
-does not contain the specific answer is NOT sufficient.
+You are evaluating whether the agent has gathered sufficient evidence to answer the user's query.
 
-Return ONLY a JSON object:
-{{"sufficient": true/false, "missing": "what's missing if not sufficient, or empty string"}}
+User query: {query}
 
-If the documents are sufficient, set "missing" to an empty string.
-"""
+Retrieved evidence (content previews):
+{evidence}
 
-SUFFICIENCY_CHECK_USER_PROMPT: str = """\
-User question: {query}
+Tool observations (metadata):
+{observations}
 
-Retrieved document excerpts:
-{previews}
-"""
+Summary: {search_calls} search calls returned {hit_count} hits. {remaining_budget} tool calls remaining in budget.
 
-RETRIEVAL_REWRITE_PROMPT: str = """\
-The query "{query}" did not retrieve sufficient documents from the knowledge base.
-Missing information: {missing}
+Question: Is the current evidence sufficient to write a complete, accurate answer to the user's query?
 
-Top results that were found but insufficient:
-{top_snippets}
+Respond with a JSON object: {{"sufficient": true}} or {{"sufficient": false}}
 
-Analyze why these results don't answer the question. Consider:
-- Is the query too vague? What specific terms would match better?
-- Is the user asking for a specific document by title, date, or file type?
-  If so, suggest a filter.
-- Should the query be split into a search term + a metadata filter?
+Guidelines:
+- "sufficient": true if the evidence directly answers the query or all key aspects are covered.
+- "sufficient": true if the evidence shows the query is about a topic NOT in the knowledge base
+  (e.g. all search results are clearly irrelevant to the query). In this case, the answer should
+  state that no relevant information was found. Do NOT keep searching for something that doesn't exist.
+- "sufficient": false ONLY if important aspects are missing AND another search/read could plausibly help.
+  If you've already tried 2+ different search strategies and none found relevant results, return true.
+- If no more budget remains, return true (finalize with what we have).
 
-Return ONLY a JSON object:
-{{"rewritten_query": "new search terms", "filter_suggestion": {{"title_contains": "...", "created_after": "YYYY-MM-DD"}} | null, "reasoning": "why"}}
-
-If no filter is needed, set "filter_suggestion" to null.
-"""
-
-# ── Tool Correction Prompt ──────────────────────────────────────────────────
-
-TOOL_CORRECTION_PROMPT: str = """\
-The {tool_name} tool failed with this error:
-{error}
-
-Original arguments: {original_args}
-
-Tool schema: {schema}
-
-Generate corrected arguments as a JSON object matching the schema.
-{hints}
-Return ONLY the JSON object, no explanation.
+Be conservative about wasting search rounds: if the first search returned relevant results that
+answer the query, finalize immediately. Do NOT request more searches just to "be thorough".
 """
 
 # ── Tool Action Prompts ─────────────────────────────────────────────────────

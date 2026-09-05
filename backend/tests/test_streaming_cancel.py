@@ -561,7 +561,7 @@ async def test_cancel_then_chat_reusable():
     bot_msg2.content = ""
     bot_msg2.role = "assistant"
     bot_msg2.chat_id = chat_id
-    bot_msg2.rewritten_query = None
+    bot_msg2.rewritten_query = None  # legacy field, no longer set by the stream handler
     bot_msg2.id = 3  # must be serializable for json.dumps in chat_service
 
     with patch("app.services.chat.chat_service.Message") as MockMsg:
@@ -623,9 +623,8 @@ async def test_cancel_preserves_agent_steps_in_db():
 
         async def mock_stream_iter():
             # Emit an agent_step and a context event before cancellation
-            yield {"event": "agent_step", "node": "rewrite_query", "status": "done", "latency_ms": 45}
-            yield {"event": "rewritten_query", "query": "rewritten question"}
-            yield {"event": "context", "docs": [], "rewritten_query": "rewritten question"}
+            yield {"event": "agent_step", "node": "plan", "status": "done", "latency_ms": 45}
+            yield {"event": "context", "docs": []}
             yield {"event": "token", "content": "Answer "}
             set_cancel_token(chat_id)
             yield {"event": "token", "content": "should not appear"}
@@ -646,15 +645,13 @@ async def test_cancel_preserves_agent_steps_in_db():
     assert "Answer " in bot_msg.content
     db.commit.assert_called()
 
-    # Verify that the rewritten_query was captured
-    assert bot_msg.rewritten_query == "rewritten question"
-
-    # Agent step frames should include rewrite_query
+    # rewritten_query event handler was removed in the atomic-tools redesign.
+    # Agent step frames should include plan
     import json
     agent_step_frames = [f for f in frames if f.startswith("4:")]
     assert len(agent_step_frames) >= 1
     node = json.loads(agent_step_frames[0][2:])  # "4:{json}" → f[2:] gives {json}\n
-    assert node["node"] == "rewrite_query"
+    assert node["node"] == "plan"
     assert node["status"] == "done"
 
     # Token cleanup

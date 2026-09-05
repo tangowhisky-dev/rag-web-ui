@@ -14,6 +14,7 @@ import { Copy, Trash2, FileText, FileImage, FileType } from "lucide-react";
 import { AgenticProgress, AgentStepEvent } from "./agentic-progress";
 import { AgentLoopPanel } from "./agent-loop-panel";
 import { SelectionActions } from "./selection-actions";
+import { preprocessCitations } from "./citation-utils";
 import {
   Reasoning,
   ReasoningTrigger,
@@ -72,10 +73,20 @@ const useDebouncedValue = <T,>(value: T, delay: number): T => {
   return debouncedValue;
 };
 
+interface CitationRef {
+  document_id?: number;
+  citation_kind?: string;  // chunk, file, section, range, grep, outline, table
+  chunk_index?: number;
+  section?: string;
+  source_tool?: string;  // search_exact, search_sparse, search_dense, kb_read, etc.
+  citation_id?: string;  // E1, E2, etc.
+}
+
 interface CitationMetadata {
   kb_id?: number;
   document_id?: number;
   source?: string;
+  citation_ref?: CitationRef;
   [key: string]: unknown;
 }
 
@@ -96,6 +107,7 @@ interface Citation {
   _legs?: string[];
   _reranker_score?: number;
   qdrant_point_id?: string;
+  citation_ref?: CitationRef;
 }
 
 interface KnowledgeBaseInfo {
@@ -295,7 +307,7 @@ const CodeBlock: FC<React.HTMLAttributes<HTMLElement> & { inline?: boolean }> = 
   );
 };
 
-const DEBUG_KEYS: string[] = ['kb_id', 'data_store_id', 'document_id', 'chunk_index', '_legs', '_reranker_score', 'qdrant_point_id'];
+const DEBUG_KEYS: string[] = ['kb_id', 'data_store_id', 'document_id', 'chunk_index', '_legs', '_reranker_score', 'qdrant_point_id', 'citation_ref'];
 
 const DebugDetails: FC<{ citation: Citation }> = ({ citation }) => {
   const hasDebug = DEBUG_KEYS.some(
@@ -516,11 +528,33 @@ const CitationLink: FC<CitationLinkProps> = (props) => {
   const citationInfo = citationInfoMap[`${effectiveKbId}-${effectiveDocId}`];
   const genericInfo = effectiveDocId ? genericDocMap[`doc-${effectiveDocId}`] : null;
 
+  // Extract citation_ref for kind-specific rendering
+  const citationRef = top.citation_ref ?? meta.citation_ref ?? {};
+  const citationKind: string = citationRef.citation_kind ?? meta.citation_kind ?? "chunk";
+  const sourceTool: string | undefined = citationRef.source_tool ?? meta.source_tool;
+  const section: string | undefined = citationRef.section ?? meta.section;
+  const matchLine: number | undefined = citationRef.match_line ?? meta.match_line;
+  const startLine: number | undefined = citationRef.start_line ?? meta.start_line;
+  const endLine: number | undefined = citationRef.end_line ?? meta.end_line;
+
+  // Build kind-specific tooltip label
+  const kindLabel: Record<string, string> = {
+    chunk: "Chunk",
+    file: "Full document",
+    section: section ? `Section: ${section}` : "Section",
+    range: startLine != null && endLine != null ? `Lines ${startLine}-${endLine}` : "Range",
+    grep: matchLine != null ? `Line ${matchLine}` : "Grep match",
+    table: "Extracted table",
+    outline: "Document outline",
+  };
+  const kindTooltip = kindLabel[citationKind] ?? "Citation";
+
   return (
     <Popover>
       <PopoverTrigger asChild>
         <button
           type="button"
+          title={kindTooltip}
           className="inline-flex items-center px-1 py-0.5 text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/50 rounded hover:bg-blue-100 dark:hover:bg-blue-900/60 transition-colors"
         >
           [{props.href}]
@@ -540,12 +574,33 @@ const CitationLink: FC<CitationLinkProps> = (props) => {
             effectiveKbId={effectiveKbId}
             effectiveDocId={effectiveDocId}
           />
+          {/* Citation kind badge + kind-specific metadata */}
+          <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+            <span className="inline-flex items-center px-1.5 py-0.5 rounded font-medium bg-muted">
+              {kindTooltip}
+            </span>
+            {sourceTool && (
+              <span className="text-muted-foreground/70">via {sourceTool}</span>
+            )}
+            {citationRef.page != null && (
+              <span>page {citationRef.page}</span>
+            )}
+            {section && citationKind !== "section" && (
+              <span>§ {section}</span>
+            )}
+            {citationKind === "range" && startLine != null && endLine != null && (
+              <span>lines {startLine}-{endLine}</span>
+            )}
+            {citationKind === "grep" && matchLine != null && (
+              <span>line {matchLine}</span>
+            )}
+          </div>
           <CitationScoreAndLeg citation={citation} />
           <CitationRankBreakdown citation={citation} />
           <Divider />
           <div className="text-foreground leading-relaxed prose prose-sm dark:prose-invert max-w-none">
             <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeHighlight, [rehypeKatex, { throwOnError: false }]]}>
-              {cleanChunkText(citation.text)}
+              {cleanChunkText(citationRef.quoted_text || citation.text)}
             </Markdown>
           </div>
           <Divider />
@@ -587,7 +642,6 @@ export const Answer: FC<{
   chatId?: string;
   markdown: string;
   citations?: Citation[];
-  rewrittenQuery?: string;
   confidence?: "very_high" | "high" | "medium" | "low" | "none";
   confidenceScore?: number;
   confidenceBreakdown?: Record<string, unknown>;
@@ -602,7 +656,7 @@ export const Answer: FC<{
   }>;
   agentSteps?: AgentStepEvent[];
   taskList?: Array<{ id: number; text: string; status: string }>;
-  progressMessages?: Array<{ phase: string; message: string; details?: Record<string, unknown>; rewritten_query?: string; original_query?: string }>;
+  progressMessages?: Array<{ phase: string; message: string; details?: Record<string, unknown> }>;
   synthesisMode?: boolean;
   isStreaming?: boolean;
   onDelete?: (id: string) => void;
@@ -625,7 +679,7 @@ export const Answer: FC<{
   chartOption?: Record<string, unknown>;
   chartOptions?: Array<Record<string, unknown>>;
   onFollowUp?: (query: string) => void;
-}> = React.memo(({ messageId, chatId, markdown, citations = [], rewrittenQuery, confidence, confidenceScore, suggestion, failedLegs, agentSteps, taskList, progressMessages, isStreaming = false, onDelete, finalConfidence, finalConfidenceLevel, faithfulness, completeness, retrievalScore, toolCalls, toolObservations, chartOption, chartOptions, lastAnswerObject, onFollowUp }) => {
+}> = React.memo(({ messageId, chatId, markdown, citations = [], confidence, confidenceScore, suggestion, failedLegs, agentSteps, taskList, progressMessages, isStreaming = false, onDelete, finalConfidence, finalConfidenceLevel, faithfulness, completeness, retrievalScore, toolCalls, toolObservations, chartOption, chartOptions, lastAnswerObject, onFollowUp }) => {
   const [citationInfoMap, setCitationInfoMap] = useState<
     Record<string, CitationInfo>
   >({});
@@ -779,7 +833,7 @@ export const Answer: FC<{
 
   const contentRef = useRef<HTMLDivElement>(null);
 
-  if (!markdown && !rewrittenQuery) {
+  if (!markdown) {
     return (
       <div className="flex flex-col gap-2">
         <Skeleton className="max-w-sm h-4 bg-zinc-200" />
@@ -859,7 +913,7 @@ export const Answer: FC<{
               rehypePlugins={[rehypeHighlight, [rehypeKatex, { throwOnError: false }]]}
               components={markdownComponents}
             >
-              {parsedContent.answerText}
+              {preprocessCitations(parsedContent.answerText)}
             </Markdown>
           </div>
         </CitationLinkContext.Provider>

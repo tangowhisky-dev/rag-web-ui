@@ -61,9 +61,19 @@ class MessageCitation(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     message_id = Column(Integer, ForeignKey("messages.id", ondelete="CASCADE"), nullable=False, index=True)
     document_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
-    chunk_index = Column(Integer, nullable=False)
+    chunk_index = Column(Integer, nullable=False, default=0)
     citation_index = Column(Integer, nullable=False)
     citation_metadata = Column(JSON, nullable=True)  # transient: score, dense_rank, sparse_rank, exact_rank, retrieval_leg
+    # New CitationRef fields (nullable for backward compat with old rows)
+    citation_kind = Column(String(20), nullable=True)
+    section = Column(String(255), nullable=True)
+    start_char = Column(Integer, nullable=True)
+    end_char = Column(Integer, nullable=True)
+    start_line = Column(Integer, nullable=True)
+    end_line = Column(Integer, nullable=True)
+    page = Column(Integer, nullable=True)
+    match_line = Column(Integer, nullable=True)
+    source_tool = Column(String(50), nullable=True)
 
     # Relationships
     document = relationship("Document")

@@ -25,7 +25,7 @@ from app.services.agentic_rag.prompts import (
 )
 from app.services.agentic_rag.schemas import LastAnswerObject, Plan
 from app.services.agentic_rag.token_budget import count_tokens
-from app.services.agentic_rag.utils import format_context_string, group_docs_by_document, normalize_citations
+from app.services.agentic_rag.utils import format_context_string, group_docs_by_document, normalize_citations, normalize_evidence_citations
 from app.services.infrastructure import is_cancelled
 from app.services.settings_service import get_setting
 
@@ -68,12 +68,10 @@ def _build_finalize_prompt(
     summary_text: str,
     history_text: str,
     observations: list,
-    glossary: str,
     ctx: "ToolContext",
-    excluded_terms: list[str] | None = None,
 ) -> tuple[str, str]:
     """Build the finalize system+user prompt. Returns (system, user)."""
-    context_text = format_context_string(docs, file_markdown, db=ctx.db, org_id=ctx.org_id, query_glossary=glossary)
+    context_text = format_context_string(docs, file_markdown, db=ctx.db, org_id=ctx.org_id)
     # Non-retrieval tool results (code_execute, chart_generate, etc.)
     # are not in retrieved_docs; surface them separately. Retrieval
     # results are already in context_text — don't duplicate.
@@ -108,8 +106,6 @@ def _build_finalize_prompt(
             "Conversation so far (intent only — cite nothing from here):\n"
             f"{history_text}\n\n"
         )
-    if excluded_terms:
-        parts.append(f"User excluded topics: {', '.join(excluded_terms)}. Do not discuss these.\n\n")
     if non_rag_text:
         parts.append(f"Tool results:\n{non_rag_text}\n\n")
     parts.append(f"Retrieved context (the only citable evidence):\n{context_text}\n\n")
@@ -162,6 +158,27 @@ async def _stream_final_answer(
             final = "I'm sorry, I couldn't generate a response at this time."
     except Exception as exc:
         logger.warning("[finalize_node] generation failed: %s", exc)
+        final = ""
+    # Fallback: if the LLM produced an empty answer but we have retrieved
+    # docs, synthesize a minimal answer from the evidence instead of
+    # returning a blank response. This happens when the wall-clock limit
+    # forces finalization after an unproductive think loop.
+    if not final and docs:
+        evidence_summaries = []
+        for i, doc in enumerate(docs[:5], 1):
+            if not isinstance(doc, dict):
+                continue
+            content = (doc.get("page_content") or "")[:200]
+            meta = doc.get("metadata", {}) or {}
+            title = meta.get("title", meta.get("file_name", "Unknown"))
+            evidence_summaries.append(f"[E{i}] {title}: {content}")
+        if evidence_summaries:
+            final = (
+                "Based on the retrieved evidence, here is what I found:\n\n"
+                + "\n\n".join(evidence_summaries)
+            )
+            logger.info("[finalize_node] synthesized fallback answer from %d retrieved docs", len(docs))
+    if not final:
         final = "I'm sorry, I couldn't generate a response at this time."
     return final, answer_usage
 
@@ -232,10 +249,8 @@ async def finalize_node(state, ctx) -> dict:
     with _agent_step("finalize"):
         writer = _writer()
         precomputed = state.get("precomputed_answer", "")
-        # The answer model always sees the user's exact wording; only
-        # retrieval sees the resolved standalone query.
-        query = state.get("original_query", "") or state.get("rewritten_query", "")
-        retrieval_query = state.get("rewritten_query", "") or query
+        query = state.get("original_query", "")
+        retrieval_query = query
         observations = state.get("observations", [])
         docs = state.get("retrieved_docs", [])
         # Log duplicate chunk detection before final generation.
@@ -265,8 +280,7 @@ async def finalize_node(state, ctx) -> dict:
             system, user = _build_finalize_prompt(
                 docs, state.get("file_markdown"), plan, chart_options,
                 query, retrieval_query, summary_text, history_text,
-                observations, state.get("abbreviation_glossary", ""), ctx,
-                excluded_terms=state.get("excluded_terms", []),
+                observations, ctx,
             )
 
             # Runtime compaction before the generation LLM call. trim_docs=True
@@ -285,8 +299,7 @@ async def finalize_node(state, ctx) -> dict:
                 system, user = _build_finalize_prompt(
                     docs, state.get("file_markdown"), plan, chart_options,
                     query, retrieval_query, summary_text, history_text,
-                    observations, state.get("abbreviation_glossary", ""), ctx,
-                    excluded_terms=state.get("excluded_terms", []),
+                    observations, ctx,
                 )
 
             final, answer_usage = await _stream_final_answer(ctx, system, user, writer)
@@ -296,8 +309,24 @@ async def finalize_node(state, ctx) -> dict:
         # Call 4 (last_answer_object extraction) or Call 5 (confidence score).
         raw_final = final
         final = _substitute_chart_markers(final, chart_options)
-        final, cited_doc_indices = normalize_citations(final, docs)
-        cited_docs = [docs[i - 1] for i in cited_doc_indices]
+        # Assign citation_id (E1, E2, ...) to each evidence item, then
+        # normalize citations. Use evidence-based normalization when docs
+        # carry citation_ref metadata; fall back to legacy [KB-N] otherwise.
+        has_evidence = any(
+            (d.get("metadata", {}) or {}).get("citation_ref")
+            for d in docs if isinstance(d, dict)
+        )
+        if has_evidence:
+            for i, doc in enumerate(docs, 1):
+                meta = doc.get("metadata", {}) if isinstance(doc, dict) else {}
+                cref = meta.get("citation_ref") or {}
+                if not cref.get("citation_id"):
+                    cref["citation_id"] = f"E{i}"
+            final, cited_evidence = normalize_evidence_citations(final, docs)
+            cited_docs = cited_evidence
+        else:
+            final, cited_doc_indices = normalize_citations(final, docs)
+            cited_docs = [docs[i - 1] for i in cited_doc_indices]
         writer({"event": "answer_rewrite", "content": final, "citations": cited_docs})
 
         lao = await _build_last_answer_object(raw_final, final, chart_options, ctx)
@@ -322,9 +351,12 @@ async def finalize_node(state, ctx) -> dict:
             "answer": final,
             "last_answer_object": lao,
             "retrieved_docs": docs,
-            "cited_doc_indices": cited_doc_indices,
             "messages": [*compaction_updates.get("messages", []), answer_message],
         }
+        # Include cited_doc_indices for legacy format (evidence format
+        # doesn't need this — cited evidence is in the answer_rewrite event).
+        if not has_evidence:
+            updates["cited_doc_indices"] = cited_doc_indices
         if answer_usage:
             updates["answer_usage"] = answer_usage
         return updates

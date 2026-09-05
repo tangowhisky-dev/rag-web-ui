@@ -176,28 +176,6 @@ def test_3_ingestion_expansion():
         db.close()
 
 
-def test_4_query_expansion_node():
-    """Test that expand_query_node produces expanded_query in state."""
-    from app.db.session import SessionLocal
-    from app.services.agentic_rag.nodes import expand_query_node
-
-    db = SessionLocal()
-    try:
-        state = {
-            "rewritten_query": "bns wdr from position",
-            "original_query": "bns wdr from position",
-            "org_id": None,
-        }
-        result = expand_query_node(state, db=db, org_id=None)
-
-        assert "expanded_query" in result, "Result should contain expanded_query"
-        eq = result["expanded_query"]
-        assert "Battalions" in eq or "bns" in eq, f"Expanded query should contain expansion: {eq}"
-        assert "bns wdr from position" in eq, "Original query should be preserved in expanded query"
-    finally:
-        db.close()
-
-
 def test_5_generation_glossary():
     """Test that format_context_string uses original_text and appends glossary."""
     from app.db.session import SessionLocal

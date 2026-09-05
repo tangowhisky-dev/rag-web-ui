@@ -1,6 +1,6 @@
 """kb_grep tool — keyword/regex search across KB document markdown.
 
-Last-resort exploration tool for the agent when rag_retrieve's sufficiency
+Last-resort exploration tool for the agent when search tools' sufficiency
 check fails. Searches raw converted markdown (not chunks, not embeddings)
 for exact terms or patterns that vector similarity may have missed.
 """
@@ -62,6 +62,14 @@ def _search_documents(documents: list, regex: re.Pattern, max_results: int) -> l
                     "file_name": doc.file_name,
                     "line_number": line_num,
                     "line_text": line.strip()[:200],
+                    "citation_ref": {
+                        "document_id": doc.id,
+                        "citation_kind": "grep",
+                        "match_line": line_num,
+                        "quoted_text": line.strip()[:200],
+                        "source_tool": "kb_grep",
+                        "citation_id": "",
+                    },
                 })
                 if len(matches) >= max_results:
                     break
@@ -76,7 +84,7 @@ class KbGrepTool(BaseAgentTool):
     description: str = (
         "Search for exact terms or regex patterns across all documents in authorized "
         "knowledge bases. Returns matching lines with document IDs and line numbers. "
-        "Use as a last resort when rag_retrieve returns insufficient=false and you "
+        "Use as a last resort when search tools return insufficient evidence and you "
         "need to find specific keywords that vector search may have missed."
     )
     args_schema: type[BaseModel] = KbGrepInput

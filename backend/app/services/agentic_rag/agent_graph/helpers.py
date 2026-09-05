@@ -46,12 +46,28 @@ def _writer():
 # Resolved per-request via the settings service (org-overridable).
 def _tool_call_budget(db, org_id) -> dict:
     return {
-        "rag_retrieve": get_setting(db, "AGENT_MAX_RETRIEVALS", org_id),
-        "code_execute": get_setting(db, "AGENT_MAX_CODE_EXEC", org_id),
+        # Atomic search tools
+        "search_exact": get_setting(db, "AGENT_MAX_SEARCH_EXACT", org_id),
+        "search_sparse": get_setting(db, "AGENT_MAX_SEARCH_SPARSE", org_id),
+        "search_dense": get_setting(db, "AGENT_MAX_SEARCH_DENSE", org_id),
+        "rerank_results": get_setting(db, "AGENT_MAX_RERANK", org_id),
+        "graph_expand": get_setting(db, "AGENT_MAX_GRAPH_EXPAND", org_id),
+        # Discovery
+        "kb_search_documents": get_setting(db, "AGENT_MAX_KB_SEARCH", org_id),
+        # Read
         "kb_grep": get_setting(db, "AGENT_MAX_KB_GREP", org_id),
         "kb_read": get_setting(db, "AGENT_MAX_KB_READ", org_id),
         "kb_outline": get_setting(db, "AGENT_MAX_KB_READ", org_id),
+        # Processing
+        "code_execute": get_setting(db, "AGENT_MAX_CODE_EXEC", org_id),
+        "extract_data": get_setting(db, "AGENT_MAX_EXTRACT_DATA", org_id),
+        "chart_generate": get_setting(db, "AGENT_MAX_CHART_GENERATE", org_id),
     }
+
+
+def _total_tool_budget(db, org_id) -> int:
+    """Total tool-call budget across all tools per turn."""
+    return get_setting(db, "AGENT_TOTAL_TOOL_BUDGET", org_id)
 
 # Error patterns that indicate a transient infrastructure failure rather
 # than a bad-argument error.  Transient failures retry with the same
@@ -60,39 +76,14 @@ _TRANSIENT_ERROR_PATTERNS = (
     "timeout", "timed out", "connection", "network", "unreachable",
     "temporarily", "broken pipe", "reset by peer", "i/o error",
     "errno 5", "errno 11", "errno 104", "errno 110",
+    "rate limit", "429", "too many requests", "quota", "throttle",
+    "503", "502", "service unavailable", "bad gateway",
 )
 
-# Tool-specific hints appended to the correction prompt so the LLM knows
-# how to fix common errors without guessing.
-_TOOL_ERROR_HINTS: dict[str, dict[str, str]] = {
-    "code_execute": {
-        "_iter_unpack_sequence_": "List comprehensions and tuple unpacking in for-loops are not supported. Rewrite as explicit for-loops with .append().",
-        "_unpack_sequence_": "Tuple unpacking (a, b = ...) is not supported. Use indexing: a = x[0]; b = x[1].",
-        "_inplacevar_": "Augmented assignment (+=, *=) is not supported. Use explicit assignment: x = x + 1.",
-    },
-    "chart_generate": {
-        "No numeric values": "Each data item must have a 'value' key with a numeric value. Check your data items.",
-        "No data provided": "The 'data' field must be a non-empty list of objects with 'label' and 'value' keys.",
-    },
-    "extract_data": {
-        "JSON": "Try a different source or simplify the focus parameter.",
-    },
-    "file_read": {
-        "not found": "Check the file_id and section parameter.",
-    },
-}
 
 
 def _is_transient_error(error: str) -> bool:
     return any(p in (error or "").lower() for p in _TRANSIENT_ERROR_PATTERNS)
-
-
-def _correction_hints(tool_name: str, error: str) -> str:
-    hints = _TOOL_ERROR_HINTS.get(tool_name, {})
-    matched = [h for pat, h in hints.items() if pat in (error or "")]
-    if matched:
-        return "\n".join(matched)
-    return "Fix the arguments based on the error message."
 
 
 def _extract_balanced(text: str, chars: tuple[str, str]) -> str | None:

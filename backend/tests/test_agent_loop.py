@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from app.services.agentic_rag.agent_graph import _observations_text, _tried_rag_retrieve_queries
+from app.services.agentic_rag.agent_graph import _observations_text, _tried_search_queries
 from app.services.agentic_rag.schemas import Observation
 from app.services.agentic_rag.token_budget import count_tokens
 from app.services.agentic_rag.tool_context import ToolContext
@@ -41,7 +41,11 @@ class TestToolRegistry:
         tools = build_tools(ctx)
         names = {t.name for t in tools}
         expected = {
-            "rag_retrieve",
+            "search_exact",
+            "search_sparse",
+            "search_dense",
+            "rerank_results",
+            "graph_expand",
             "kb_search_documents",
             "current_datetime",
             "file_read",
@@ -65,7 +69,7 @@ class TestToolRegistry:
         assert "file_read" not in names
         assert "file_summarize" not in names
         assert "file_extract_table" not in names
-        assert "rag_retrieve" in names
+        assert "search_dense" in names
 
     def test_applicable_tools_includes_chart_when_data_present(self):
         ctx = _make_ctx(has_file=True, has_data=True)
@@ -302,16 +306,16 @@ class TestTriedRagRetrieveQueries:
         # rag_retrieve query the ladder already exhausted, wasting an
         # iteration. This list is surfaced in the think prompt to discourage it.
         observations = [
-            Observation(tool="rag_retrieve", arguments={"query": "race condition"}, result={"docs": [], "sufficient": False}),
+            Observation(tool="search_dense", arguments={"query": "race condition"}, result={"docs": [], "sufficient": False}),
             Observation(tool="code_execute", arguments={"code": "1+1"}, result={"result": 2}),
-            Observation(tool="rag_retrieve", arguments={"query": "mutual exclusion condition"}, result={"docs": [], "sufficient": False}),
-            Observation(tool="rag_retrieve", arguments={"query": "race condition"}, result={"docs": [], "sufficient": False}),
+            Observation(tool="search_dense", arguments={"query": "mutual exclusion condition"}, result={"docs": [], "sufficient": False}),
+            Observation(tool="search_dense", arguments={"query": "race condition"}, result={"docs": [], "sufficient": False}),
         ]
-        assert _tried_rag_retrieve_queries(observations) == ["race condition", "mutual exclusion condition"]
+        assert _tried_search_queries(observations) == ["race condition", "mutual exclusion condition"]
 
-    def test_empty_when_no_rag_retrieve_calls(self):
+    def test_empty_when_no_search_calls(self):
         observations = [Observation(tool="code_execute", arguments={"code": "1+1"}, result={"result": 2})]
-        assert _tried_rag_retrieve_queries(observations) == []
+        assert _tried_search_queries(observations) == []
 
 
 class TestExtractDataTool:
@@ -422,24 +426,6 @@ class TestRetryHelpers:
         assert not _is_transient_error("No numeric values found")
         assert not _is_transient_error("Tool not available")
 
-    def test_correction_hints_for_code_execute(self):
-        from app.services.agentic_rag.agent_graph import _correction_hints
-
-        hints = _correction_hints("code_execute", "_iter_unpack_sequence_ is not defined")
-        assert "for-loops" in hints
-
-    def test_correction_hints_for_chart_generate(self):
-        from app.services.agentic_rag.agent_graph import _correction_hints
-
-        hints = _correction_hints("chart_generate", "No numeric values found")
-        assert "value" in hints
-
-    def test_correction_hints_default(self):
-        from app.services.agentic_rag.agent_graph import _correction_hints
-
-        hints = _correction_hints("unknown_tool", "some error")
-        assert "Fix the arguments" in hints
-
 
 class TestTokenBudget:
     def test_count_tokens_positive(self):
@@ -457,19 +443,19 @@ class TestConvergence:
 
         plan = Plan(
             intent="rag",
-            subtasks=[Subtask(id="a", description="find x", tool_hint="rag_retrieve", depends_on=[], expected_output="answer")],
+            subtasks=[Subtask(id="a", description="find x", tool_hint="search_dense", depends_on=[], expected_output="answer")],
         )
         obs = Observation(
-            tool="rag_retrieve",
+            tool="search_dense",
             arguments={"query": "what is mutex"},
-            result={"docs": [{"page_content": "a mutex is..."}]},
+            result={"hits": [{"content": "a mutex is..."}]},
             error=None,
             tokens=10,
         )
         return {
             "plan": plan,
             "observations": [obs],
-            "tool_call_count": {"rag_retrieve": 1},
+            "tool_call_counts": {"search_dense": 1},
             "iteration": 0,
             "original_query": "what is mutex",
             "messages": [],
@@ -482,11 +468,14 @@ class TestConvergence:
         ready, _reasoning = _verify_execution(summary)
         assert ready is True
 
-    def test_route_tool_skips_reflect_when_force_finalize(self):
-        from app.services.agentic_rag.agent_graph import route_tool
+    def test_route_sufficiency_finalizes_when_sufficient(self):
+        from app.services.agentic_rag.agent_graph import route_sufficiency
 
-        assert route_tool({"force_finalize": True}) == "reflect_final"
-        assert route_tool({"force_finalize": False}) == "reflect"
+        # In the new topology, tool → sufficiency_check → (finalize|think).
+        # route_sufficiency replaces the old route_tool + route_reflect_final.
+        assert route_sufficiency({"sufficient": True}) == "finalize"
+        assert route_sufficiency({"sufficient": False}) == "think"
+        assert route_sufficiency({"force_finalize": True}) == "finalize"
 
     def test_think_node_short_circuits_without_llm_call(self):
         # If this ever calls the LLM again despite an already-satisfied plan,
@@ -503,7 +492,7 @@ class TestConvergence:
 class TestLoadContextNodeResetsPerTurnState:
     """The checkpointer restores turn 1's full state at the start of turn 2.
     load_context_node must reset per-turn loop state (observations, iteration,
-    tool_call_count, force_finalize, ...) so turn 2 starts clean, while leaving
+    tool_call_counts, force_finalize, ...) so turn 2 starts clean, while leaving
     conversation-level state (messages, last_answer_object) untouched."""
 
     def _turn1_leftover_state(self) -> dict:
@@ -511,7 +500,7 @@ class TestLoadContextNodeResetsPerTurnState:
             "original_query": "what's next?",
             "observations": [
                 Observation(
-                    tool="rag_retrieve",
+                    tool="search_dense",
                     arguments={"query": "turn 1 query"},
                     result={"docs": [{"page_content": "turn 1 doc chunk"}]},
                     error=None,
@@ -519,17 +508,13 @@ class TestLoadContextNodeResetsPerTurnState:
                 )
             ],
             "iteration": 3,
-            "tool_call_count": {"rag_retrieve": 2},
+            "tool_call_counts": {"search_dense": 2},
             "force_finalize": True,
-            "reflection_final": {"ready": False, "reasoning": "turn 1 reasoning"},
             "precomputed_answer": "turn 1 answer",
             "tool_calls": [{"tool": "chart_generate", "arguments": {}}],
-            "all_scored_docs": [{"page_content": "turn 1 scored doc"}],
-            "retrieval_confidence": 0.9,
             "compaction_triggered": True,
             "answer_evaluation_attempts": 2,
             "evaluation_flags": ["low_confidence"],
-            "adaptive_reran": True,
         }
 
     def test_resets_loop_state_at_start_of_next_turn(self):
@@ -544,17 +529,14 @@ class TestLoadContextNodeResetsPerTurnState:
         update = asyncio.run(load_context_node(self._turn1_leftover_state(), ctx))
 
         assert update["iteration"] == 0
-        assert update["tool_call_count"] == {}
+        assert update["tool_call_counts"] == {}
         assert update["force_finalize"] is False
-        assert update["reflection_final"] is None
+        assert update["sufficient"] is False
         assert update["precomputed_answer"] == ""
         assert update["tool_calls"] == []
-        assert update["all_scored_docs"] == []
-        assert update["retrieval_confidence"] == 0.0
         assert update["compaction_triggered"] is False
         assert update["answer_evaluation_attempts"] == 0
         assert update["evaluation_flags"] == []
-        assert update["adaptive_reran"] is False
 
         # observations uses the accumulate reducer; applying the __reset__
         # marker on top of turn 1's list must clear it, not append to it.

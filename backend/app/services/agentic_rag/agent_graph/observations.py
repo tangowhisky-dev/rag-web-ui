@@ -3,7 +3,7 @@
 Formats tool observations for LLM context in three modes:
 - Full: complete page_content of all docs (deduplicated by content_hash).
 - Compact: doc count, confidence, top doc preview.
-- Metadata-only: rag_retrieve gets metadata only; non-retrieval tools get
+- Metadata-only: search tools get metadata only; non-retrieval tools get
   full results.
 
 Also contains overlap pruning for contiguous chunks from the same document,
@@ -22,7 +22,7 @@ from app.services.agentic_rag.schemas import Observation
 from .helpers import _coerce_observation
 
 
-# How many docs to keep per rag_retrieve observation when compacting.
+# How many docs to keep per search tool observation when compacting.
 _COMPACT_KEEP_DOCS = 5
 # How many stdout lines to keep for code_execute when compacting.
 _COMPACT_KEEP_STDOUT_LINES = 20
@@ -166,7 +166,7 @@ def _observations_text(observations: list[Observation], full: bool = False) -> s
     observation (deduplicated across observations by content_hash) so
     think_node can judge whether the retrieval actually answers the query.
     Chunks are 1500 chars (CHUNK_SIZE). With dedup, the worst case
-    (3 rag_retrieve calls returning the same 29 docs) is 29 unique docs
+    (3 search calls returning the same 29 docs) is 29 unique docs
     = ~43k chars = ~10.9k tokens — well within budget. The
     _compact_if_needed helper handles overflow if unique docs accumulate
     across many iterations with different queries.
@@ -213,11 +213,17 @@ def _non_retrieval_observations_text(observations: list[Observation]) -> str:
     """Format only non-retrieval tool results (code_execute, chart_generate,
     extract_data, file_read, etc.).
 
-    Retrieval (rag_retrieve) results are already in ``retrieved_docs`` via
-    ``format_context_string``; including them again here would duplicate the
-    same chunks in a different format. Non-retrieval tool outputs are NOT in
-    ``retrieved_docs`` and must be surfaced to the LLM for answer synthesis.
+    Retrieval (search tools) results are already in
+    ``retrieved_docs`` via ``format_context_string``; including them again
+    here would duplicate the same chunks in a different format. Non-retrieval
+    tool outputs are NOT in ``retrieved_docs`` and must be surfaced to the
+    LLM for answer synthesis.
     """
+    _retrieval_tools = frozenset({
+        "kb_search_documents", "kb_read",
+        "search_exact", "search_sparse", "search_dense",
+        "rerank_results", "graph_expand",
+    })
     parts = []
     for i, raw_obs in enumerate(observations, 1):
         obs = _coerce_observation(raw_obs)
@@ -226,7 +232,7 @@ def _non_retrieval_observations_text(observations: list[Observation]) -> str:
         # Check both the top-level result and the nested "result" key
         # (kb_search_documents returns {"ok":..., "result":{"docs":[...]}}).
         nested = result.get("result", {}) if isinstance(result.get("result"), dict) else {}
-        if "docs" in result or "docs" in nested or obs.tool in ("rag_retrieve", "kb_search_documents", "kb_read"):
+        if "docs" in result or "docs" in nested or "hits" in result or obs.tool in _retrieval_tools:
             continue
         parts.append(f"Observation {i}: tool={obs.tool} args={obs.arguments}")
         if obs.error:
@@ -238,16 +244,21 @@ def _non_retrieval_observations_text(observations: list[Observation]) -> str:
 
 
 def _observations_metadata_text(observations: list[Observation]) -> str:
-    """Format observations for think_node: metadata-only for rag_retrieve,
-    full result for non-retrieval tools.
+    """Format observations for think_node: metadata-only for search/retrieval
+    tools, full result for non-retrieval tools.
 
-    rag_retrieve: the reranker already determined relevance. think_node only
-    needs to know *what was found* (doc_count, confidence, sufficient) to
-    decide whether to call another tool or finalize — not the chunk content.
+    Search tools (search_exact, search_sparse, search_dense, rerank_results,
+    graph_expand): the reranker already determined relevance.
+    think_node only needs to know *what was found* (hit_count, best_score)
+    to decide whether to call another tool or finalize — not the chunk content.
 
     Non-retrieval tools (code_execute, chart_generate, extract_data, file_read):
     the LLM needs the full result to decide the next step.
     """
+    _search_tools = frozenset({
+        "search_exact", "search_sparse", "search_dense",
+        "rerank_results", "graph_expand",
+    })
     parts = []
     for i, raw_obs in enumerate(observations, 1):
         obs = _coerce_observation(raw_obs)
@@ -256,6 +267,15 @@ def _observations_metadata_text(observations: list[Observation]) -> str:
             parts.append(f"  error: {obs.error}")
             continue
         result = obs.result if isinstance(obs.result, dict) else {}
+        # Search tools return {"hits": [...]} — metadata only.
+        if obs.tool in _search_tools or "hits" in result:
+            hits = result.get("hits", [])
+            hit_count = len(hits)
+            best_score = max((h.get("_reranker_score", h.get("score", 0)) or 0) for h in hits) if hits else 0
+            search_type = result.get("search_type", "")
+            type_text = f" type={search_type}" if search_type else ""
+            parts.append(f"  hit_count={hit_count} best_score={best_score:.3f}{type_text}")
+            continue
         if "docs" not in result:
             # Non-retrieval tool — full result needed for next-step reasoning.
             # Truncate kb_read content to avoid bloating the think prompt.
@@ -274,7 +294,7 @@ def _observations_metadata_text(observations: list[Observation]) -> str:
             summary = json.dumps(result, default=str)
             parts.append(f"  result: {summary}")
             continue
-        # rag_retrieve — metadata only, no chunk content.
+        # kb_search_documents — metadata only, no chunk content.
         doc_count = len(result.get("docs", []))
         confidence = result.get("confidence", "N/A")
         sufficient = result.get("sufficient")
@@ -287,18 +307,18 @@ def _observations_metadata_text(observations: list[Observation]) -> str:
     return "\n".join(parts)
 
 
-def _tried_rag_retrieve_queries(observations: list[Observation]) -> list[str]:
-    """Exact query strings already sent to rag_retrieve, in order tried.
+def _tried_search_queries(observations: list[Observation]) -> list[str]:
+    """Exact query strings already sent to search tools, in order tried.
 
-    The ladder inside rag_retrieve already exhausts every relaxation level
-    for a given query string, so resubmitting the identical text can never
+    Re-submitting the identical query to the same search tool can never
     yield a better result — it only wastes an iteration (the dedup layer in
     tool_node reuses the prior observation instead of re-running it).
     """
     seen: list[str] = []
+    _search_tools = {"search_exact", "search_sparse", "search_dense", "rerank_results"}
     for raw_obs in observations:
         obs = _coerce_observation(raw_obs)
-        if obs.tool == "rag_retrieve":
+        if obs.tool in _search_tools:
             query = obs.arguments.get("query")
             if query and query not in seen:
                 seen.append(query)
@@ -309,23 +329,29 @@ def _compact_observations(observations: list[Observation]) -> list[Observation]:
     """Stage 1 (deterministic): shrink tool observations in-place.
 
     Per the design doc (05-context-memory.md §4.4):
-    - rag_retrieve: keep only top 5 chunks by score (already sorted by reranker).
+    - search tools: keep only top 5 hits/chunks by score.
     - code_execute: keep result + last 20 lines of stdout.
     - file_read: keep only a summary line.
 
     Returns a new list; original observations are not mutated.
     """
+    _search_tools = frozenset({
+        "search_exact", "search_sparse", "search_dense",
+        "rerank_results", "graph_expand",
+    })
     compacted = []
     for raw_obs in observations:
         obs = _coerce_observation(raw_obs)
         if obs.error:
             compacted.append(obs)
             continue
-        if obs.tool == "rag_retrieve":
-            docs = obs.result.get("docs", [])
-            if len(docs) > _COMPACT_KEEP_DOCS:
+        if obs.tool in _search_tools:
+            # Search tools return {"hits": [...]}
+            key = "hits" if "hits" in obs.result else "docs"
+            items = obs.result.get(key, [])
+            if len(items) > _COMPACT_KEEP_DOCS:
                 new_result = dict(obs.result)
-                new_result["docs"] = docs[:_COMPACT_KEEP_DOCS]
+                new_result[key] = items[:_COMPACT_KEEP_DOCS]
                 compacted.append(Observation(
                     tool=obs.tool, observation_id=obs.observation_id,
                     arguments=obs.arguments, result=new_result,

@@ -5,34 +5,14 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, List, Optional
+from typing import Any, List
 
-from app.services.agentic_rag.prompts import REWRITE_SYSTEM_PROMPT
 from app.services.infrastructure.reasoning_tags import (
     build_strip_patterns as _build_reasoning_patterns,
     strip_reasoning_tags,
 )
 
 logger = logging.getLogger(__name__)
-
-
-def estimate_context_tokens(text: str) -> int:
-    """Rough token estimation from character count.
-    
-    Uses ~1 token per 4 chars for English text.
-    """
-    return int(len(text) * 0.25)
-
-
-def estimate_messages_tokens(messages: list) -> int:
-    """Estimate total tokens for a list of messages."""
-    total = 0
-    for msg in messages:
-        content = getattr(msg, "content", str(msg)) if hasattr(msg, "content") else msg.get("content", "")
-        total += estimate_context_tokens(str(content))
-    return total
-
-
 
 
 def _format_doc_parts(pruned_docs: list[dict], file_markdown: str | None) -> list[str]:
@@ -43,13 +23,35 @@ def _format_doc_parts(pruned_docs: list[dict], file_markdown: str | None) -> lis
         content = metadata.get("original_text", doc.get("page_content", "")).strip()
         source = metadata.get("source", "")
         title = metadata.get("title", "")
-        # Header shows title as primary identifier, filename in parentheses.
-        # Falls back to filename only when no title is available.
-        if title and title != source:
-            header = f"[KB-{i}] {title} ({source})"
+        citation_ref = metadata.get("citation_ref") or {}
+        # When citation_ref is present, use evidence-based [E1] labeling.
+        # Otherwise fall back to legacy [KB-N] labeling for backward compat.
+        if citation_ref:
+            citation_id = citation_ref.get("citation_id") or f"E{i}"
+            kind = citation_ref.get("citation_kind", "chunk")
+            header_parts = [f'document="{title or metadata.get("file_name", "")}"',
+                            f"kind={kind}"]
+            if citation_ref.get("chunk_index") is not None:
+                header_parts.append(f"chunk={citation_ref['chunk_index']}")
+            if citation_ref.get("page") is not None:
+                header_parts.append(f"page={citation_ref['page']}")
+            if citation_ref.get("section"):
+                header_parts.append(f"section={citation_ref['section']}")
+            if citation_ref.get("start_line") is not None and citation_ref.get("end_line") is not None:
+                header_parts.append(f"lines={citation_ref['start_line']}-{citation_ref['end_line']}")
+            if citation_ref.get("match_line") is not None:
+                header_parts.append(f"line={citation_ref['match_line']}")
+            if citation_ref.get("source_tool"):
+                header_parts.append(f"source={citation_ref['source_tool']}")
+            header = f"[{citation_id}] " + ", ".join(header_parts)
+            parts.append(f'{header}\n     "{content}"')
         else:
-            header = f"[KB-{i}]" + (f" ({source})" if source else "")
-        parts.append(f"{header}\n{content}")
+            # Legacy [KB-N] labeling (no citation_ref metadata)
+            if title and title != source:
+                header = f"[KB-{i}] {title} ({source})"
+            else:
+                header = f"[KB-{i}]" + (f" ({source})" if source else "")
+            parts.append(f"{header}\n{content}")
     if file_markdown:
         parts.append(f"[File Content]\n{file_markdown}")
     return parts
@@ -112,7 +114,7 @@ def format_context_string(
     Uses ``original_text`` from doc metadata when available (for clean prose
     in generation). Appends a scoped abbreviation glossary when abbreviation
     expansion is enabled. The glossary merges *query_glossary* (pre-built by
-    expand_query_node) with any additional abbreviations found in the chunk
+    the abbreviation service) with any additional abbreviations found in the chunk
     texts.
 
     Contiguous chunks from the same document have their overlap pruned
@@ -174,6 +176,97 @@ def group_docs_by_document(docs: list[dict]) -> list[dict]:
         result.extend(group)
     result.extend(ungrouped)
     return result
+
+
+def normalize_evidence_citations(answer: str, evidence: list[dict]) -> tuple[str, list[dict]]:
+    """Validate, deduplicate, and renumber citations in an LLM answer.
+
+    Handles two citation formats:
+    - [E1], [E2] — evidence label format
+    - [N](N) — markdown link format where N is the numeric portion of E-N
+
+    Returns (rewritten_answer, cited_evidence_in_display_order).
+    Each item in cited_evidence is the evidence dict (with citation_ref in metadata).
+    """
+    if not answer:
+        return answer or "", []
+    if not evidence:
+        # Strip both [E1] and [N](N) citation formats
+        cleaned = re.sub(r"\[E\d+\]", "", answer, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\[\d+\]\(\d+\)", "", cleaned)
+        return cleaned.strip(), []
+
+    max_e = len(evidence)
+
+    # Split out code blocks
+    _code_segments: list[str] = []
+    def _extract_code(m: re.Match) -> str:
+        _code_segments.append(m.group(0))
+        return f"\x00CODE{len(_code_segments) - 1}\x00"
+    answer = re.sub(r"```[\s\S]*?```", _extract_code, answer)
+    answer = re.sub(r"`[^`]*`", _extract_code, answer)
+
+    # Split out reasoning sections
+    _reasoning_segments: list[str] = []
+    def _extract_reasoning(m: re.Match) -> str:
+        _reasoning_segments.append(m.group(0))
+        return f"\x00REASONING{len(_reasoning_segments) - 1}\x00"
+    _full_patterns, _ = _build_reasoning_patterns()
+    for pat in _full_patterns:
+        answer = pat.sub(_extract_reasoning, answer)
+
+    # Collect unique E-numbers in first-appearance order.
+    # Match both [E1] and [1](1) formats (N refers to the E-N label).
+    valid_cited: list[int] = []
+    seen: set[int] = set()
+    # First pass: [E1] format
+    for match in re.finditer(r"\[E(\d+)\]", answer, re.IGNORECASE):
+        n = int(match.group(1))
+        if 1 <= n <= max_e and n not in seen:
+            valid_cited.append(n)
+            seen.add(n)
+    # Second pass: [N](N) format (only if not already seen as [E1])
+    for match in re.finditer(r"\[(\d+)\]\(\d+\)", answer):
+        n = int(match.group(1))
+        if 1 <= n <= max_e and n not in seen:
+            valid_cited.append(n)
+            seen.add(n)
+
+    # Renumber: first cited → [1], second → [2], etc.
+    index_map = {orig: new for new, orig in enumerate(valid_cited, start=1)}
+
+    def _replace_marker(match: re.Match) -> str:
+        n = int(match.group(1))
+        if n in index_map:
+            return f"[{index_map[n]}]"
+        return ""
+    # Replace [E1] format
+    normalized = re.sub(r"\[E(\d+)\]", _replace_marker, answer, flags=re.IGNORECASE)
+    # Replace [N](N) format → [M](M) with renumbered M
+    def _replace_link(match: re.Match) -> str:
+        n = int(match.group(1))
+        if n in index_map:
+            new_n = index_map[n]
+            return f"[{new_n}]({new_n})"
+        return ""
+    normalized = re.sub(r"\[(\d+)\]\(\d+\)", _replace_link, normalized)
+
+    # Restore code blocks
+    normalized = re.sub(r"\x00CODE(\d+)\x00", lambda m: _code_segments[int(m.group(1))], normalized)
+
+    # Restore reasoning sections with citations stripped
+    def _strip_reasoning_citations(text: str) -> str:
+        text = re.sub(r"\[E\d+\]", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\[\d+\]\(\d+\)", "", text)
+        return text
+    normalized = re.sub(
+        r"\x00REASONING(\d+)\x00",
+        lambda m: _strip_reasoning_citations(_reasoning_segments[int(m.group(1))]),
+        normalized,
+    )
+
+    cited_evidence = [evidence[i - 1] for i in valid_cited]
+    return normalized, cited_evidence
 
 
 def normalize_citations(answer: str, docs: list) -> tuple[str, list[int]]:
@@ -307,331 +400,4 @@ def normalize_citations(answer: str, docs: list) -> tuple[str, list[int]]:
         normalized,
     )
     return normalized, valid_cited
-
-
-# Markers that indicate the message may depend on earlier turns. Only these
-# trigger the resolver LLM call; everything else passes through unchanged.
-_REFERENCE_MARKERS = re.compile(
-    r"\b("
-    r"it|its|it's|they|them|their|this|that|these|those|there|"
-    r"he|she|his|her|him|"
-    r"one|ones|former|latter|above|previous|prior|earlier|"
-    r"first|second|third|fourth|fifth|last|next|"
-    r"same|other|others|another|else|"
-    r"instead|also|too|again|more|further|"
-    r"yours?|you\s+said|you\s+mentioned|mentioned"
-    r")\b",
-    re.IGNORECASE,
-)
-
-# Elliptical fragments ("what about X?", "and Y?", "why?") are context-dependent
-# even without an explicit anaphor.
-_ELLIPSIS_MARKERS = re.compile(
-    r"^\s*(and|but|or|so|what about|how about|why|why not|what if|ok|okay|yes|no)\b",
-    re.IGNORECASE,
-)
-
-_STOPWORDS = {
-    "a", "an", "and", "are", "as", "at", "be", "by", "can", "did", "do", "does",
-    "for", "from", "had", "has", "have", "how", "in", "is", "it", "its", "of",
-    "on", "or", "that", "the", "their", "them", "there", "these", "they", "this",
-    "those", "to", "was", "were", "what", "when", "where", "which", "who", "why",
-    "will", "with", "you", "your", "about", "into", "than", "then", "explain",
-    "describe", "tell", "me", "give", "list", "show", "summarise", "summarize",
-}
-
-
-def _content_tokens(text: str) -> set[str]:
-    """Lowercase alphanumeric tokens with stopwords and short tokens removed."""
-    return {
-        t for t in re.findall(r"[a-z0-9]+", (text or "").lower())
-        if len(t) > 2 and t not in _STOPWORDS
-    }
-
-
-def needs_reference_resolution(query: str, has_history: bool) -> bool:
-    """True if *query* plausibly refers to something from an earlier turn."""
-    if not has_history:
-        return False
-    if not query or not query.strip():
-        return False
-    return bool(_REFERENCE_MARKERS.search(query) or _ELLIPSIS_MARKERS.match(query))
-
-
-def validate_resolution_provenance(
-    original_query: str,
-    rewritten: str,
-    provenance_sources: list[str],
-) -> tuple[bool, list[str]]:
-    """Check that every term introduced by the rewrite is traceable.
-
-    Resolving "it" legitimately *adds* an entity, so a "no new words" rule is
-    wrong. The correct invariant is provenance: any content token present in
-    the rewrite but absent from the original query must appear in one of the
-    supplied sources (recent turns, compaction summary, previous answer,
-    clarification text).
-
-    Returns (ok, unsupported_tokens).
-    """
-    added = _content_tokens(rewritten) - _content_tokens(original_query)
-    if not added:
-        return True, []
-    supported = set()
-    for source in provenance_sources:
-        supported |= _content_tokens(source)
-    unsupported = sorted(added - supported)
-    return not unsupported, unsupported
-
-
-async def resolve_retrieval_query(
-    query: str,
-    original_query: str,
-    recent_history: list,
-    provenance_sources: list[str] | None = None,
-    api_base: str | None = None,
-    query_model: str | None = None,
-    openai_api_key: str = "",
-    openai_api_base: str = "",
-    glossary: str = "",
-    retrieved_titles: list[str] | None = None,
-    kb_profile_text: str = "",
-) -> tuple[str, dict, Optional[dict]]:
-    """Resolve *query* into a standalone retrieval string.
-
-    Returns ``(retrieval_query, provenance, query_intent)``. ``provenance`` records whether
-    resolution ran and, when it did, which tokens it introduced — so a bad
-    rewrite is auditable rather than silently authoritative. ``query_intent``
-    is a dict with suggested_filters/suggested_sort/suggested_legs, or None
-    when no KB profile was provided or the LLM output was malformed.
-
-    Falls back to *query* on skip, timeout, LLM error, or failed provenance
-    validation. The retrieval query is never allowed to become free text the
-    pipeline cannot account for.
-
-    When kb_profile_text is provided, the LLM is asked to output the rewritten
-    query on the first line and a JSON intent object on the second line. If
-    the JSON is malformed, one retry is attempted with a corrective instruction.
-    If the retry also fails, query_intent is set to None and the pipeline
-    continues with just the rewritten query.
-    """
-    provenance_sources = provenance_sources or []
-    has_history = bool(recent_history)
-
-    # Self-contained queries don't need reference resolution, but when
-    # kb_profile_text is provided we still call the LLM to extract query
-    # intent (semantic_ratio, suggested_filters, suggested_legs). The
-    # query itself won't change — only the intent metadata is produced.
-    if not needs_reference_resolution(query, has_history) and not kb_profile_text:
-        return query, {"resolved": False, "reason": "self_contained"}, None
-
-    try:
-        raw_rewrite = await _call_rewriter(
-            query=query,
-            recent_history=recent_history,
-            api_base=api_base,
-            query_model=query_model,
-            openai_api_key=openai_api_key,
-            openai_api_base=openai_api_base,
-            glossary=glossary,
-            retrieved_titles=retrieved_titles,
-            kb_profile_text=kb_profile_text,
-        )
-    except Exception as exc:  # network, timeout, provider error
-        return query, {"resolved": False, "reason": f"resolver_failed: {exc}"}, None
-
-    # When intent extraction is enabled, parse the two-line output.
-    query_intent = None
-    if kb_profile_text:
-        standalone_raw, intent_raw = _parse_rewrite_with_intent(raw_rewrite)
-        if intent_raw is None:
-            # Malformed output — retry once with corrective instruction.
-            logger.warning("[rewrite_query] malformed intent output, retrying")
-            try:
-                raw_retry = await _call_rewriter(
-                    query=query,
-                    recent_history=recent_history,
-                    api_base=api_base,
-                    query_model=query_model,
-                    openai_api_key=openai_api_key,
-                    openai_api_base=openai_api_base,
-                    glossary=glossary,
-                    retrieved_titles=retrieved_titles,
-                    kb_profile_text=kb_profile_text,
-                    retry_reason="Your previous response did not match the required format. Output the rewritten query on the first line, then a valid JSON object on the second line. Do not wrap in markdown fences. Do not add any text after the JSON.",
-                )
-                standalone_raw, intent_raw = _parse_rewrite_with_intent(raw_retry)
-            except Exception as exc:
-                logger.warning("[rewrite_query] retry failed: %s", exc)
-                standalone_raw, intent_raw = raw_rewrite, None
-        if intent_raw is not None:
-            query_intent = _validate_query_intent(intent_raw)
-        standalone = _clean_rewrite(standalone_raw) or query
-    else:
-        standalone = _clean_rewrite(raw_rewrite) or query
-
-    if standalone == query:
-        return query, {"resolved": False, "reason": "unchanged"}, query_intent
-
-    ok, unsupported = validate_resolution_provenance(
-        original_query=query,
-        rewritten=standalone,
-        provenance_sources=provenance_sources,
-    )
-    if not ok:
-        return query, {
-            "resolved": False,
-            "reason": "provenance_rejected",
-            "unsupported_terms": unsupported,
-            "rejected_query": standalone,
-        }, query_intent
-
-    return standalone, {
-        "resolved": True,
-        "reason": "reference_resolved",
-        "original_query": original_query,
-    }, query_intent
-
-
-def _parse_rewrite_with_intent(raw: str) -> tuple[str, Optional[str]]:
-    """Parse two-line output: rewritten query on line 1, JSON on line 2.
-
-    Returns (query_line, intent_json_str_or_None).
-    Falls back to treating the entire output as the query if no JSON is found.
-    """
-    if not raw:
-        return raw, None
-    # Strip markdown fences if present
-    cleaned = raw.strip()
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```[a-z]*\n?", "", cleaned)
-        cleaned = re.sub(r"\n?```$", "", cleaned)
-    lines = cleaned.split("\n")
-    if len(lines) < 2:
-        return cleaned, None
-    # Find the first line that looks like JSON (starts with {)
-    query_line = lines[0].strip()
-    json_line = None
-    for line in lines[1:]:
-        stripped = line.strip()
-        if stripped.startswith("{"):
-            json_line = stripped
-            break
-    if json_line is None:
-        return cleaned, None
-    return query_line, json_line
-
-
-def _validate_query_intent(intent_raw: str) -> Optional[dict]:
-    """Parse and validate the intent JSON string. Returns dict or None."""
-    try:
-        import json
-        obj = json.loads(intent_raw)
-        if not isinstance(obj, dict):
-            return None
-        # Validate keys — only accept known fields
-        valid_keys = {"suggested_filters", "suggested_sort", "suggested_legs", "semantic_ratio", "reasoning"}
-        if not all(k in valid_keys for k in obj.keys()):
-            return None
-        # Clamp semantic_ratio to [0.0, 1.0] if present
-        sr = obj.get("semantic_ratio")
-        if sr is not None:
-            try:
-                sr = float(sr)
-                obj["semantic_ratio"] = max(0.0, min(1.0, sr))
-            except (TypeError, ValueError):
-                obj.pop("semantic_ratio", None)
-        return obj
-    except (json.JSONDecodeError, TypeError):
-        return None
-
-
-def _clean_rewrite(raw_rewrite: str) -> str:
-    """Strip reasoning tags, meta-commentary preambles, and answer echoes."""
-    standalone = strip_reasoning_tags(raw_rewrite).strip()
-    if not standalone:
-        return ""
-
-    # Strip a meta-commentary preamble ("Rewritten standalone query: ...").
-    # Only split on a colon that is part of such a preamble prefix, so a
-    # legitimate query containing a colon is left intact.
-    meta_prefix = re.match(
-        r"^[^:\n]{0,80}?\b(rewritten|standalone|search)\s+(query|question)?\s*:\s*",
-        standalone,
-        re.IGNORECASE,
-    )
-    if meta_prefix:
-        candidate = standalone[meta_prefix.end():].strip()
-        if len(candidate) > 5:
-            standalone = candidate
-
-    # Guard: the rewriter echoed an answer instead of rewriting.
-    answer_patterns = [
-        r"\bthere\s+is\s+no\s+information\b",
-        r"\bthe\s+context\s+does?\s+not\s+contain\b",
-        r"\bi\s+cannot\s+answer\b",
-        r"\bi\s+don't\s+have\s+enough\b",
-        r"\bno\s+information\s+found\b",
-    ]
-    if any(re.search(p, standalone, re.IGNORECASE) for p in answer_patterns):
-        return ""
-
-    return standalone.strip().strip('"')
-
-
-async def _call_rewriter(
-    query: str,
-    recent_history: list,
-    api_base: str | None,
-    query_model: str | None,
-    openai_api_key: str,
-    openai_api_base: str,
-    glossary: str = "",
-    retrieved_titles: list[str] | None = None,
-    kb_profile_text: str = "",
-    retry_reason: str = "",
-) -> str:
-    """Single rewriter LLM call. Raises on provider failure."""
-    from app.services.agentic_rag.prompts import REWRITE_INTENT_SUFFIX
-    from datetime import datetime, timezone
-
-    system_msg = REWRITE_SYSTEM_PROMPT
-    if kb_profile_text:
-        now = datetime.now(timezone.utc)
-        system_msg += "\n" + REWRITE_INTENT_SUFFIX
-        system_msg += f"\n\n[Current Date: {now.strftime('%Y-%m-%d')} UTC — use this when producing date filters]"
-
-    messages: list[dict] = [{"role": "system", "content": system_msg}]
-    from langchain_core.messages import HumanMessage, AIMessage
-
-    for m in recent_history:
-        if isinstance(m, HumanMessage):
-            messages.append({"role": "user", "content": m.content})
-        elif isinstance(m, AIMessage):
-            messages.append({"role": "assistant", "content": m.content})
-    user_content = query
-    if glossary:
-        user_content += f"\n\n[Abbreviation Glossary]\n{glossary}"
-    if retrieved_titles:
-        titles_text = "\n".join(f"- {t}" for t in retrieved_titles)
-        user_content += f"\n\n[Retrieved Document Titles]\n{titles_text}"
-    if kb_profile_text:
-        user_content += f"\n\n{kb_profile_text}"
-    if retry_reason:
-        user_content += f"\n\n[Retry] {retry_reason}"
-    messages.append({"role": "user", "content": user_content})
-
-    from openai import AsyncOpenAI as _AsyncOAI
-    client = _AsyncOAI(api_key=openai_api_key, base_url=api_base or openai_api_base)
-    resp = await client.chat.completions.create(
-        model=query_model or "default",
-        # 60 tokens truncated rewrites mid-phrase; the prompt caps output at
-        # 30 words, so 160 leaves headroom without inviting an essay.
-        # When intent extraction is enabled, we need more tokens for the JSON line.
-        max_tokens=320 if kb_profile_text else 160,
-        messages=messages,
-        temperature=0,
-        stream=False,
-        extra_body={"thinking": {"type": "disabled"}},
-    )
-    return (resp.choices[0].message.content or "").strip()
 

@@ -291,19 +291,7 @@ class TestSearchHistoryLogging:
 
 class TestAgenticPipelineUsesGlossary:
     """Confirm the agentic pipeline DOES use the glossary (contrast with search).
-    This ensures the glossary state is isolated to the agentic pipeline only."""
-
-    def test_graph_state_has_abbreviation_glossary(self):
-        from app.services.agentic_rag.graph_state import AgentState
-        assert "abbreviation_glossary" in AgentState.__annotations__
-
-    def test_expand_query_node_sets_glossary(self):
-        """expand_query_node must set abbreviation_glossary in its return dict."""
-        import app.services.agentic_rag.nodes as nodes_mod
-        src = inspect.getsource(nodes_mod)
-        assert "abbreviation_glossary" in src, (
-            "expand_query_node must reference abbreviation_glossary"
-        )
+    The glossary is now built inline by format_context_string, not stored in AgentState."""
 
     def test_format_context_string_accepts_query_glossary(self):
         """format_context_string must accept query_glossary parameter."""
