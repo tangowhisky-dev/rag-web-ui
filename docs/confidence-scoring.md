@@ -83,44 +83,34 @@ Evaluated by the LLM using `EVALUATION_SYSTEM_PROMPT`.
 | `backend/app/services/chat/chat_service.py` | Emits confidence in `d:` stream event |
 | `frontend/src/components/chat/answer.tsx` | `ConfidenceBar` component |
 
-### Stream event payload (`2:`)
+### Stream event payload (`d:` done event)
 
 ```json
 {
-  "context":     [...],
-  "confidence":  "high",
-  "score":       67,
-  "suggestion":  null,
-  "failed_legs": [],
-  "breakdown": {
-    "source_coverage":     20,
-    "cross_leg_agreement": 28,
-    "volume_fill":         25,
-    "source_diversity":    7,
-    "total":               67,
-    "enabled_legs":        ["dense", "qdrant_sparse", "exact"],
-    "producing_legs":      ["dense", "qdrant_sparse", "exact"],
-    "failed_legs":         [],
-    "docs_returned":       6,
-    "top_k":               6
-  }
+  "confidence":          "high",
+  "confidenceScore":     67,
+  "faithfulness":        85,
+  "completeness":        80,
+  "retrievalScore":      0.85,
+  "finalConfidence":     80,
+  "finalConfidenceLevel":"high",
+  "followups":           ["What are the safety requirements?", "How does it compare to slow charging?"],
+  "messageId":           12345,
+  "userMessageId":       12344
 }
 ```
 
-The `breakdown` field is available in the stream for debugging but is not
-currently displayed in the UI.
+The confidence scores are emitted in the `d:` (done) SSE event after the answer stream completes. The `la:` (last_answer) event carries the LastAnswerObject with citations and chart_options.
 
 ---
 
 ## UI
 
-`ConfidenceBar` renders immediately when the `2:` event arrives — before the LLM
-starts generating the answer. It shows:
+`ConfidenceBar` renders when the `d:` event arrives — after the answer stream completes. It shows:
 
 - Label: "Retrieval confidence · Very High · 92/100"
 - Four rectangular step segments, filled left-to-right based on level
 - Colour-coded per level (emerald / green / yellow / orange / red)
-- Suggestion text below the bar when present
 
 The bar is hidden for `confidence = "none"` — instead a distinct amber warning
 banner is shown, since there are no results to qualify.
@@ -129,17 +119,15 @@ banner is shown, since there are no results to qualify.
 
 ## Confidence in the Agentic Pipeline
 
-In the agentic pipeline the confidence score reported in the `context` event is derived from **sub-query coverage** rather than from the 4-signal formula above:
+In the atomic-tools pipeline, the confidence score is computed by `answer_scoring` (formerly `answer_evaluation_node`) using the 3-signal formula:
 
 ```
-confidence_score = covered_sub_queries / total_sub_queries
+final_confidence = 0.4 × retrieval_score + 0.3 × faithfulness + 0.3 × completeness
 ```
 
-| Score | Label |
-|---|---|
-| ≥ 0.8 | `"high"` |
-| ≥ 0.4 | `"medium"` |
-| < 0.4 | `"low"` |
+- **retrieval_score**: best search/rerank score from state.retrieved_docs (0–1)
+- **faithfulness**: LLM-graded — what percentage of the answer is supported by cited evidence (0–100)
+- **completeness**: LLM-graded — does the answer address the full query (0–100)
 
 This reflects whether the draft-grade loop succeeded in answering each part of the question, not just whether documents were retrieved. The `breakdown` field also includes `sub_queries` (list) and `retrieval_attempts` (1–3) for debugging.
 

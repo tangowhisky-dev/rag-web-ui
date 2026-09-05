@@ -71,41 +71,48 @@ Files attached to chat messages are processed ephemerally - they are NOT indexed
 - `GET /api/chat/{chat_id}/files/{file_id}/download` - Download file
 
 ### Agentic Pipeline
-**LangGraph agent loop with 11 tools**
+**LangGraph agent loop with 18 composable atomic tools**
 
-The system uses a LangGraph-based agent loop where the LLM autonomously decides which tools to call based on the current state. The loop: `load_context → expand_query → rewrite_query → plan → think ↔ tool ↔ reflect → reflect_final → finalize → answer_scoring → save_memory`.
+The system uses a LangGraph-based agent loop where the LLM autonomously selects and combines atomic tools based on the query type. The loop: `load_context → plan → clarify_interrupt → think → tool → sufficiency_check → think (loop) / finalize → answer_scoring → save_memory`. After save_memory, a background task extracts structured fields (summary, key_points, data) invisibly.
 
 **Tool registry:**
 
 | Tool | Purpose |
 |------|---------|
-| `rag_retrieve` | 3-leg hybrid retrieval (dense + sparse + exact) with reranking, LLM sufficiency check, query rewriting, and optional Neo4j graph expansion |
-| `kb_grep` | Regex/keyword search across all authorized KB documents — last resort for exact terms vector search missed |
+| `search_dense` | Vector search via Qdrant — semantic/conceptual matching |
+| `search_sparse` | SPLADE sparse embeddings — keyword matching with term expansion |
+| `search_exact` | MySQL fulltext search — exact terms, code, identifiers |
+| `rerank_results` | Cross-encoder reranker — deduplicates and re-scores hits from state |
+| `graph_expand` | Neo4j graph expansion — finds related chunks via entity relationships |
+| `kb_read` | Read a specific section or character range of a KB document |
+| `kb_search_documents` | Document-level retrieval by title, filename, content type, date range |
+| `kb_grep` | Regex/term search across KB document text — returns matching lines |
 | `kb_outline` | Heading structure (table of contents) of a KB document |
-| `kb_read` | Read a specific section or character range of a KB document's markdown |
+| `kb_metadata` | Inspect KB document metadata (fields, values, date ranges, counts) |
+| `extract_data` | Extract structured {label, value} data from docs/answer — accumulates in state |
+| `chart_generate` | Generate ECharts JSON from accumulated data in state |
+| `code_execute` | Execute Python code in a RestrictedPython sandbox |
 | `file_read` | Read content from an attached chat file |
 | `file_summarize` | Summarize an attached chat file |
 | `file_extract_table` | Extract tables from an attached chat file |
-| `code_execute` | Execute Python code in a RestrictedPython sandbox |
-| `chart_generate` | Generate an ECharts chart from structured data |
-| `summarize_answer` | Summarize the current answer |
-| `extract_data` | Extract structured data from retrieved docs or previous answers |
+| `summarize_answer` | Summarize the current answer or file |
+| `current_datetime` | Returns current UTC date/time — for "latest" / "most recent" queries |
 
 **Key features:**
-- **LLM sufficiency check**: evaluates whether retrieved chunks collectively answer the query; exposes `missing` field to guide the next tool call
-- **Query rewriting**: when retrieval is insufficient, the query is rewritten internally using the `missing` description before a second retrieval pass
+- **Composable atomic tools**: the LLM selects search_dense, search_sparse, search_exact, or kb_search_documents based on query type, then rerank_results to prioritize, then kb_read/grep/outline for deep reading
+- **State-based pass-through**: rerank_results, graph_expand, and chart_generate read inputs from graph state — the LLM never passes large data arrays as arguments
+- **LLM sufficiency check**: evaluates whether retrieved docs collectively answer the query after each tool round
+- **Citation provenance**: every hit carries a citation_ref with source_tool, citation_kind, and metadata; finalize normalizes [E1] labels to [N](N) links
 - **KB exploration tools**: `kb_grep`/`kb_outline`/`kb_read` give the agent fine-grained access to document content when chunk-level retrieval is insufficient
 - **Per-tool budgets**: configurable caps on retrieval, code execution, grep, and read calls per turn
 - **RBAC**: all tools enforce `enforce_rbac()` — KB access scoped to KBs linked to the current chat
 - **Tool call audit**: every tool call writes a `tool_call_audit` row with arguments, result summary, tokens, and latency
+- **Compact SSE**: tool observations stream only a one-line summary (~96 bytes) instead of the full result
 
 **Configuration:**
 - `AGENT_MAX_ITERATIONS` (default 8) — hard cap on think-act-observe cycles
-- `AGENT_MAX_RETRIEVALS` (default 3) — cap on `rag_retrieve` calls per turn
-- `AGENT_MAX_CODE_EXEC` (default 3) — cap on `code_execute` calls per turn
-- `AGENT_MAX_KB_GREP` (default 5) — cap on `kb_grep` calls per turn
-- `AGENT_MAX_KB_READ` (default 10) — combined cap on `kb_read` + `kb_outline` calls per turn
 - `AGENT_MAX_WALL_SECONDS` — wall-clock budget for the agent loop
+- Per-tool call budgets configurable via settings registry
 
 ### Conversation Compaction
 **Automatically summarize long conversations**

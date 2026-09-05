@@ -147,33 +147,44 @@ DENSE_EMBEDDING_DIM=1024
 
 ### Agentic Pipeline
 
-The LangGraph-based agent loop gives the LLM autonomous control over 11 tools:
+The LangGraph-based agent loop gives the LLM autonomous control over 18 composable atomic tools:
 
 ```
-load_context → expand_query → rewrite_query → plan
-  → think ↔ tool ↔ reflect (loop)
-  → reflect_final → finalize → answer_scoring → save_memory
+load_context → plan → clarify_interrupt → think → tool → sufficiency_check
+                                                         ↓
+                                               think (loop) / finalize
+                                                         ↓
+                                          answer_scoring → save_memory → END
+                                                         ↓
+                                          background: extract_structured
 ```
 
-The think node decides which tool to call based on the current state. The tool node executes it, emits `tc:`/`to:` SSE events, and returns an observation. The reflect node runs every N iterations for mid-loop replanning. The loop continues until the plan is satisfied, the iteration cap is reached, or the wall-clock budget expires.
+The think node decides which atomic tools to call based on the query type and current state. The tool node dispatches calls in parallel, emits `tc:`/`to:` SSE events (tool call + one-line summary), and returns observations. The sufficiency_check node evaluates whether retrieved docs are sufficient. The loop continues until the plan is satisfied, the iteration cap is reached, or the wall-clock budget expires. After finalize streams the answer, answer_scoring grades faithfulness/completeness and generates follow-ups, then save_memory persists and emits the `d:` event. A background task extracts structured fields (summary, key_points, data) invisibly.
 
-**Tool registry (11 tools):**
+**Tool registry (18 atomic tools):**
 
 | Tool | Purpose |
 |------|---------|
-| `rag_retrieve` | 3-leg hybrid retrieval (dense + sparse + exact) with reranking, LLM sufficiency check, query rewriting, and optional Neo4j graph expansion |
-| `kb_grep` | Regex/keyword search across all authorized KB documents — last resort for exact terms vector search missed |
+| `search_dense` | Vector search via Qdrant — semantic/conceptual matching |
+| `search_sparse` | SPLADE sparse embeddings — keyword matching with term expansion |
+| `search_exact` | MySQL fulltext search — exact terms, code, identifiers |
+| `rerank_results` | Cross-encoder reranker — deduplicates and re-scores hits from state |
+| `graph_expand` | Neo4j graph expansion — finds related chunks via entity relationships |
+| `kb_read` | Read a specific section or character range of a KB document |
+| `kb_search_documents` | Document-level retrieval by title, filename, content type, date range |
+| `kb_grep` | Regex/term search across KB document text — returns matching lines |
 | `kb_outline` | Heading structure (table of contents) of a KB document |
-| `kb_read` | Read a specific section or character range of a KB document's markdown |
+| `kb_metadata` | Inspect KB document metadata (fields, values, date ranges, counts) |
+| `extract_data` | Extract structured {label, value} data from docs/answer — accumulates in state |
+| `chart_generate` | Generate ECharts JSON from accumulated data in state |
+| `code_execute` | Execute Python code in a RestrictedPython sandbox |
 | `file_read` | Read content from an attached chat file |
 | `file_summarize` | Summarize an attached chat file |
 | `file_extract_table` | Extract tables from an attached chat file |
-| `code_execute` | Execute Python code in a RestrictedPython sandbox |
-| `chart_generate` | Generate an ECharts chart from structured data |
-| `summarize_answer` | Summarize the current answer |
-| `extract_data` | Extract structured data from retrieved docs or previous answers |
+| `summarize_answer` | Summarize the current answer or file |
+| `current_datetime` | Returns current UTC date/time — for "latest" / "most recent" queries |
 
-All steps are streamed to the UI as collapsible timeline entries in real time.
+All steps are streamed to the UI as a chain-of-thought timeline in real time. Tool calls show as steps with one-line summaries (e.g. "20 hits retrieved"), not expandable raw JSON.
 
 ### Pipeline Features
 

@@ -1,5 +1,7 @@
 # Search Implementation
 
+> **STATUS: SUPERSEDED.** This document describes the former monolithic `rag_retrieve` pipeline with the 3-leg relaxation ladder. The current pipeline uses composable atomic tools (`search_dense`, `search_sparse`, `search_exact`, `rerank_results`, `graph_expand`). See `docs/retrieval-pipeline.html` and `docs/atomic-tools-redesign.md` for the current architecture. This document is retained for historical reference.
+
 ## Overview
 
 Retrieval uses a **3-leg hybrid pipeline** with per-leg candidate APIs:

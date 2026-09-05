@@ -1,5 +1,7 @@
 # Retrievalagent Gap Analysis & Implementation Plan
 
+> **STATUS: SUPERSEDED by the atomic-tools redesign.** This gap analysis drove the transition from the monolithic `rag_retrieve` pipeline to the current composable atomic-tools architecture. The implementation is complete. See `docs/atomic-tools-redesign.md` for the redesign plan and `docs/retrieval-pipeline.html` for the current pipeline diagram. This document is retained for historical reference.
+
 ## Comparison: our pipeline vs retrievalagent
 
 ### Pipeline topology

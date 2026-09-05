@@ -1,6 +1,7 @@
 # Atomic Tools Redesign — Implementation Plan
 
 > **Status**: Implemented. All atomic tools, provenance validation, confidence scoring, and sufficiency checks are live.
+> **Note**: This is the historical design doc that drove the transition from the monolithic `rag_retrieve` pipeline to the current composable atomic-tools architecture. It references the old pipeline concepts (rag_retrieve, rewrite_query, expand_query, reflect, relaxation ladder) in the context of what was being replaced. The current pipeline is documented in `docs/retrieval-pipeline.html`.
 > **Branch**: `enterprise-agent`
 > **Date**: 2026-09-04
 > **Breaking change**: Yes. No compatibility layers, no legacy paths.
