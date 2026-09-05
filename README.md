@@ -18,14 +18,19 @@ RAG Web UI is a self-hosted knowledge base Q&A system with multi-tenant org mana
 
 **Agentic RAG pipeline:**
 
-The system uses a LangGraph-based agent loop with 11 tools that the LLM calls autonomously:
+The system uses a LangGraph-based agent graph with composable atomic tools that the LLM calls autonomously:
 
-- Query rewriting with chat history context and abbreviation expansion
-- Think → tool → observe → reflect loop with per-turn tool-call budgets
-- LLM-based retrieval sufficiency checking and internal query rewriting
-- Graduated relaxation ladder (dense → sparse → exact → graph expansion)
-- Last-resort KB exploration: `kb_grep`, `kb_outline`, `kb_read` for exact-term search and section-level reading when chunk retrieval is insufficient
-- Confidence scoring and partial-answer transparency
+- Pipeline stages: `load_context → plan → clarify_interrupt → think → tool → sufficiency_check → finalize → answer_scoring → save_memory`
+- Atomic search tools: `search_dense` (Qdrant vector), `search_sparse` (SPLADE), `search_exact` (MySQL FULLTEXT) — the LLM selects the right tool based on query nature
+- Cross-encoder `rerank_results` with provenance validation: rejects LLM-fabricated hits, auto-falls back to `state.retrieved_docs`
+- `graph_expand` for Neo4j knowledge graph traversal after search
+- Document-level tools: `kb_search_documents`, `kb_outline`, `kb_read`, `kb_grep`, `kb_metadata` for named-document queries and section-level reading
+- File tools: `file_read`, `file_summarize`, `file_extract_table` for uploaded files
+- Processing tools: `code_execute`, `chart_generate`, `extract_data` for computation and visualization
+- Deterministic sufficiency shortcuts: finalize early after 3+ searches with few results, or after rerank with 10+ docs
+- Confidence scoring: weighted formula (40% retrieval + 30% faithfulness + 30% completeness) with sigmoid-normalized cross-encoder scores and search-score propagation
+- Per-turn tool-call budgets and wall-clock timeout (600s default)
+- Citation provenance: every evidence item carries `citation_ref` metadata (source tool, document_id, chunk_index, content_hash)
 
 **Retrieval:** 3-leg hybrid search (dense vector via Qdrant, sparse via SPLADE, exact via MySQL FULLTEXT) with native Qdrant MMR diversity and recency-aware dedup (exact + semantic). Optional **GraphRAG** adds entity/relationship extraction into Neo4j for graph-traversal expansion.
 
@@ -37,7 +42,7 @@ The system uses a LangGraph-based agent loop with 11 tools that the LLM calls au
 
 | Layer | Technology |
 |---|---|
-| Frontend | Next.js 14, TypeScript, Tailwind CSS, shadcn/ui |
+| Frontend | Next.js 16, React 19, TypeScript, Tailwind CSS 4, shadcn/ui |
 | Backend | Python 3.11, FastAPI, LangGraph, LangChain, SQLAlchemy |
 | Vector DB | Qdrant v1.18 (dense + sparse vectors) |
 | Graph DB | Neo4j 2026.04.0 (entity/relationship graph for GraphRAG — optional) |

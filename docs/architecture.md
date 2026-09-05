@@ -5,7 +5,7 @@
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                              Browser / Client                                │
-│                         (Next.js 14 + TypeScript)                           │
+│                         (Next.js 16 + TypeScript)                           │
 └──────────────────────────────┬──────────────────────────────────────────────┘
                                │ HTTPS / SSE
                                ▼
@@ -117,25 +117,26 @@ graph TB
 ```mermaid
 graph LR
     A[User Query] --> B[load_context]
-    B --> C[expand_query + rewrite_query]
-    C --> D[plan]
-    D --> E[think]
-    E --> F{route_think}
-    F -->|tool_calls| G[tool_node]
-    G --> H{route_tool}
-    H -->|reflect| I[reflect]
-    I --> E
-    H -->|finalize| J[reflect_final]
-    F -->|finalize| J
-    J --> K[finalize]
+    B --> C[plan]
+    C --> D{route_plan}
+    D -->|needs_clarification| E[clarify_interrupt]
+    E --> C
+    D -->|proceed| F[think]
+    F --> G{route_think}
+    G -->|tool_calls| H[tool_node]
+    H --> I[sufficiency_check]
+    I --> J{route_sufficiency}
+    J -->|sufficient| K[finalize]
+    J -->|not_sufficient| F
+    G -->|finalize| K
     K --> L[answer_scoring]
     L --> M[save_memory]
     M --> N[Streaming Response]
 ```
 
-The think node decides which of 11 tools to call. The tool node executes it and returns an observation. The reflect node runs every N iterations for mid-loop replanning. The loop continues until the plan is satisfied, the iteration cap is reached, or the wall-clock budget expires.
+The plan node produces a structured plan with subtasks and pre-populates tool calls for independent subtasks. The think node decides which atomic tool to call next (or emits `final_answer`). The tool node executes it and returns an observation. The sufficiency check uses deterministic shortcuts (3+ searches with few docs, rerank with 10+ docs) plus LLM judgment. The loop continues until the plan is satisfied, the iteration cap is reached, or the wall-clock budget (600s) expires.
 
-**Tool registry:** `rag_retrieve`, `kb_grep`, `kb_outline`, `kb_read`, `file_read`, `file_summarize`, `file_extract_table`, `code_execute`, `chart_generate`, `summarize_answer`, `extract_data`. See `docs/enterprise-agent/03-tool-specifications.md` for contracts.
+**Atomic tool registry:** `search_dense`, `search_sparse`, `search_exact`, `rerank_results` (with provenance validation + auto-fallback), `graph_expand`, `kb_search_documents`, `kb_outline`, `kb_read`, `kb_grep`, `kb_metadata`, `current_datetime`, `file_read`, `file_summarize`, `file_extract_table`, `code_execute`, `chart_generate`, `summarize_answer`, `extract_data`. See `docs/atomic-tools-redesign.md` for the full design.
 
 ## Document Ingestion Pipeline
 
@@ -358,7 +359,7 @@ Cross-Encoder Reranking
 ## Key Architectural Patterns
 
 1. **Multi-Tenancy**: Hierarchical organization structure with path-based tree traversal
-2. **Agentic RAG**: LangGraph-based agent loop with 11 tools, LLM sufficiency checking, query rewriting, and KB exploration (grep/outline/read)
+2. **Agentic RAG**: LangGraph-based agent graph with 18 atomic tools, LLM-based sufficiency checking, rerank provenance validation, confidence scoring, and KB exploration (grep/outline/read)
 3. **Hybrid Retrieval**: 3-leg search (dense + sparse + exact) with native Qdrant MMR diversity and recency-aware dedup (exact + semantic)
 4. **GraphRAG**: Entity/relationship extraction with graph-enhanced retrieval
 5. **Streaming**: Server-Sent Events for real-time agent progress updates

@@ -1,6 +1,6 @@
 # Atomic Tools Redesign — Implementation Plan
 
-> **Status**: Planning document, not yet implemented.
+> **Status**: Implemented. All atomic tools, provenance validation, confidence scoring, and sufficiency checks are live.
 > **Branch**: `enterprise-agent`
 > **Date**: 2026-09-04
 > **Breaking change**: Yes. No compatibility layers, no legacy paths.

@@ -1,9 +1,9 @@
-# Retrieval Confidence Scoring
+# Confidence Scoring
 
-Every query response includes a confidence score that reflects how well the
-retrieval system found relevant content for the question. The score is computed
-from four independent signals and mapped to one of five levels displayed in the
-UI as a stepped progress bar.
+Every query response includes a confidence score (0.0–1.0) that reflects the
+quality of the retrieved evidence and the generated answer. The score is
+computed in `answer_evaluation_node` and mapped to one of five levels displayed
+in the UI as a stepped progress bar.
 
 ---
 
@@ -11,89 +11,63 @@ UI as a stepped progress bar.
 
 | Level     | Score range | Bar steps | Meaning |
 |-----------|-------------|-----------|---------|
-| Very High | 80 – 100    | ████      | All retrieval sources fired, strong cross-leg agreement, full result set |
-| High      | 55 – 79     | ███░      | Most sources found results, good agreement |
-| Medium    | 30 – 54     | ██░░      | Partial results, some sources missed or disagreed |
-| Low       | 1 – 29      | █░░░      | Very few results, most sources found nothing |
-| None      | 0           | ░░░░      | Zero documents retrieved |
+| Very High | >0.8        | ████      | Strong retrieved evidence with high faithfulness and completeness |
+| High      | 0.6–0.8     | ███░      | Good evidence, answer well-supported |
+| Medium    | 0.3–0.6     | ██░░      | Partial evidence or "no information found" with irrelevant context |
+| Low       | 0–0.3       | █░░░      | Weak evidence, answer mostly from general knowledge |
+| None      | 0           | ░░░░      | No answer generated or evaluation failed |
 
 ---
 
 ## Scoring model
 
-The score is a weighted sum of four signals, each normalised to [0, 1]:
+The final confidence is a weighted sum of three signals, each scored 0–100:
 
 ```
-score = 30·A  +  35·B  +  25·C  +  10·D
+final_confidence = (0.4 · retrieval_score + 0.3 · faithfulness + 0.3 · completeness) / 100
 ```
 
-### A — Source coverage  (30 pts)
+Clamped to [0, 1].
 
-Fraction of enabled retrieval legs that returned at least one result.
+### Retrieval score (40%)
 
-```
-A = producing_legs / enabled_legs
-```
+Reflects the quality of retrieved evidence. Computed from the best search/rerank
+score in `state.retrieved_docs`:
 
-An enabled leg that returns zero results contributes 0. A disabled leg (turned
-off via `.env`) is excluded from the denominator entirely — disabling a leg does
-not penalise the score.
+- **Cross-encoder reranker score** (`_reranker_score`): sigmoid-normalized to 0–1
+  (cross-encoder scores can be negative; sigmoid maps them to 0–1)
+- **Dense cosine similarity** (`score` from `search_dense`): already 0–1, used directly
+- **SPLADE sparse score** (`score` from `search_sparse`): clamped to 0–1 (can be 0–10+)
+- **MySQL FTS score** (`score` from `search_exact`): clamped to 0–1 (can be 0–10+)
+- **Document-level match** (`kb_search_documents`, `kb_read`): set to 0.9 (high confidence by definition)
 
-Example: dense=ok, sparse=ok, exact=0 results, graph=disabled → A = 2/3 = 0.67 → 20 pts
+The best score across all observations is stored in `state.best_retrieval_confidence`
+and read by `answer_evaluation_node`.
 
-### B — Cross-leg agreement  (35 pts, highest weight)
+**Special case:** If the answer says "no information found" (contains phrases like
+"no mention", "do not contain", "no relevant"), `retrieval_score` is set to 0
+regardless of search scores — the retrieved evidence was not used to answer the query.
 
-Fraction of the top-k chunks that were independently found by two or more
-retrieval legs before merge.
+### Faithfulness (30%)
 
-```
-B = chunks_found_by_≥2_legs / total_chunks_returned
-```
+What percentage of the answer is actually supported by the retrieved context?
+- 100 = everything cited or clearly supported by context
+- 0 = answer is mostly or entirely external knowledge
+- If the retrieved context is empty or irrelevant, faithfulness = 0
+- If the answer accurately reports "no information found" and the context IS
+  irrelevant, faithfulness = 100 (the answer accurately reports the lack of evidence)
 
-This is the strongest signal. A chunk that dense vector search AND keyword search
-both rank highly is very unlikely to be a false positive. A chunk surfaced by only
-one leg may be a weak match.
+Evaluated by the LLM using `EVALUATION_SYSTEM_PROMPT`.
 
-The implementation tracks which legs contributed to each chunk via
-`metadata["_legs"]`, written by the single-leg APIs (`dense_search_docs`, etc.) before the docs are
-returned.
+### Completeness (30%)
 
-### C — Volume fill rate  (25 pts)
+How thoroughly does the answer address the query?
+- 100 = all aspects of the query are fully addressed
+- 0 = answer misses key parts of the query
+- If the answer says "no information found" and the query asks for specific facts,
+  completeness = 0 unless the information genuinely does not exist in the KB
 
-How many of the requested top-k slots were actually filled.
-
-```
-C = min(docs_returned / RETRIEVAL_TOP_K, 1.0)
-```
-
-Getting a full result set (e.g. 6/6) is a positive signal. Getting 2/6 suggests
-the KB has sparse coverage for this query.
-
-### D — Source diversity  (10 pts)
-
-Number of distinct source files among the returned chunks, capped at 3.
-
-```
-D = min(unique_sources, 3) / 3
-```
-
-Chunks from multiple documents are a mild positive signal — a single document
-dominating the results can indicate an overly narrow match. The signal is weak
-(10 pts max) because a single highly relevant document should not be penalised.
-
----
-
-## Suggestions
-
-When confidence is below Very High, a human-readable suggestion is included in
-the response. Priority order:
-
-1. Failed legs — if any leg errored (infrastructure issue), the suggestion names
-   the unavailable sources regardless of score.
-2. None — no documents found; suggests rephrasing.
-3. Low — few documents; suggests more specific keywords.
-4. Medium — partial results; suggests rephrasing for better coverage.
-5. High / Very High — no suggestion shown.
+Evaluated by the LLM using `EVALUATION_SYSTEM_PROMPT`.
 
 ---
 
@@ -101,11 +75,13 @@ the response. Priority order:
 
 | File | Role |
 |------|------|
-| `backend/app/services/confidence.py` | Core scoring logic (`score_retrieval()`) |
-| `backend/app/services/retrieval.py`  | Annotates each doc with `metadata["_legs"]` inside the single-leg APIs |
-| `backend/app/services/chat_service.py` | Calls `score_retrieval()`, emits result in `2:` stream event |
-| `backend/app/api/api_v1/query.py` | Same for the stateless `/query` endpoint |
-| `frontend/src/components/chat/answer.tsx` | `ConfidenceBar` component + `Answer` prop wiring |
+| `backend/app/services/agentic_rag/nodes.py` | `answer_evaluation_node` — computes final confidence |
+| `backend/app/services/agentic_rag/agent_graph/tooling.py` | `_merge_observation_docs` — computes `best_confidence` from search/rerank scores |
+| `backend/app/services/agentic_rag/evaluator.py` | LLM-based faithfulness/completeness evaluation |
+| `backend/app/services/agentic_rag/graph_state.py` | `best_retrieval_confidence` state field |
+| `backend/app/services/retrieval/retrieval.py` | Stores `score` in document metadata for confidence propagation |
+| `backend/app/services/chat/chat_service.py` | Emits confidence in `d:` stream event |
+| `frontend/src/components/chat/answer.tsx` | `ConfidenceBar` component |
 
 ### Stream event payload (`2:`)
 
