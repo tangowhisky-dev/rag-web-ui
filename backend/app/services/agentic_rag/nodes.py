@@ -159,7 +159,7 @@ async def answer_evaluation_node(
     Single LLM call combines:
     - faithfulness/completeness scoring (needs query + cited context + answer)
     - summary/key_points/data extraction (needs answer)
-    - followups/retry_strategy generation (needs answer + query)
+    - followups generation (needs answer + query)
     """
     with _agent_step("answer_evaluation"):
         from .evaluator import evaluate_answer
@@ -296,7 +296,6 @@ async def answer_evaluation_node(
                 lao.key_points = evaluation.key_points
                 lao.data = data_points
                 lao.followups = evaluation.followups
-                lao.retry_strategy = evaluation.retry_strategy
                 updates["last_answer_object"] = lao
 
         return updates

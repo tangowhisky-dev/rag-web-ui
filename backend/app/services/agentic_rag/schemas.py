@@ -78,7 +78,6 @@ class LastAnswerObject(BaseModel):
     citations: List[CitationRef] = Field(default_factory=list, description="Chunk refs used.")
     chart_options: List[dict] = Field(default_factory=list, description="ECharts option JSON for each chart_generate call this turn, if any.")
     followups: List[str] = Field(default_factory=list, description="Suggested follow-up questions.")
-    retry_strategy: str = Field(default="", description="Suggestion label: widen|narrow|pinpoint|")
 
 
 class Subtask(BaseModel):

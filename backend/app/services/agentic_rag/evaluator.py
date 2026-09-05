@@ -27,7 +27,6 @@ class AnswerEvaluation:
     key_points: List[str] = field(default_factory=list)
     data: List[dict] = field(default_factory=list)  # List of {label, value, unit, context}
     followups: List[str] = field(default_factory=list)
-    retry_strategy: str = ""
     raw_response: str = ""
 
 
@@ -68,7 +67,6 @@ def _parse_evaluation_response(raw: str) -> AnswerEvaluation:
             key_points=data.get("key_points", []) or [],
             data=data.get("data", []) or [],
             followups=data.get("followups", []) or [],
-            retry_strategy=data.get("retry_strategy", ""),
             raw_response=raw,
         )
     except Exception as exc:
@@ -150,7 +148,7 @@ async def evaluate_answer(
     """Evaluate answer quality and extract structured data in one LLM call.
 
     Combines faithfulness/completeness scoring with summary, key_points,
-    data extraction, followup generation, and retry_strategy — all in a
+    data extraction, and followup generation — all in a
     single LLM call to save latency.
 
     Args:

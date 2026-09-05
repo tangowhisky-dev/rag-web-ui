@@ -189,8 +189,8 @@ def _build_last_answer_object_deterministic(
 ) -> LastAnswerObject:
     """Build a LastAnswerObject with deterministic fields only.
 
-    LLM-extracted fields (summary, key_points, data, followups,
-    retry_strategy) are populated later by answer_evaluation_node.
+    LLM-extracted fields (summary, key_points, data, followups)
+    are populated later by answer_evaluation_node.
     """
     # Extract citation refs from cited_docs metadata.
     citations = []
@@ -207,7 +207,6 @@ def _build_last_answer_object_deterministic(
         citations=citations,
         chart_options=chart_options,
         followups=[],  # filled by answer_evaluation_node
-        retry_strategy="",  # filled by answer_evaluation_node
     )
 
 
@@ -297,8 +296,8 @@ async def finalize_node(state, ctx) -> dict:
         writer({"event": "answer_rewrite", "content": final, "citations": cited_docs})
 
         # Build deterministic LastAnswerObject (citations + chart_options).
-        # LLM-extracted fields (summary, key_points, data, followups,
-        # retry_strategy) are filled by answer_evaluation_node.
+        # LLM-extracted fields (summary, key_points, data, followups)
+        # are filled by answer_evaluation_node.
         lao = _build_last_answer_object_deterministic(final, chart_options, cited_docs)
         writer({"event": "last_answer", "last_answer_object": lao.model_dump()})
 

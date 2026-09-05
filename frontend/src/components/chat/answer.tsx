@@ -672,7 +672,6 @@ export const Answer: FC<{
   toolObservations?: Array<Record<string, unknown>>;
   lastAnswerObject?: {
     followups?: string[];
-    retry_strategy?: string;
     [key: string]: unknown;
   };
   chartOptions?: Array<Record<string, unknown>>;
@@ -1018,11 +1017,7 @@ export const Answer: FC<{
       {!isStreaming && lastAnswerObject?.followups && Array.isArray(lastAnswerObject.followups) && lastAnswerObject.followups.length > 0 && onFollowUp && (
         <div className="mt-4 not-prose">
           <p className="text-sm italic text-foreground/80 mb-2">
-            {typeof lastAnswerObject.retry_strategy === "string" && lastAnswerObject.retry_strategy
-              ? (lastAnswerObject.retry_strategy === "widen" ? "Try a broader search:" :
-                 lastAnswerObject.retry_strategy === "narrow" ? "Try a narrower search:" :
-                 lastAnswerObject.retry_strategy === "pinpoint" ? "Look up this exact ID:" : "")
-              : "Do you want me to explore further:"}
+            Would you like me to explore further:
           </p>
           <Suggestions>
             {(lastAnswerObject.followups as string[]).map((s: string, i: number) => (

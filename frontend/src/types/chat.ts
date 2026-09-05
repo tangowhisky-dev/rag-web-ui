@@ -91,5 +91,4 @@ export interface LastAnswerEvent {
   citations?: Array<CitationRef & { page_content?: string }>;
   chart_options?: Array<Record<string, unknown>>;
   followups?: string[];
-  retry_strategy?: string;
 }

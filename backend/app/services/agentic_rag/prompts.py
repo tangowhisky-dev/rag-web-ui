@@ -122,10 +122,11 @@ in the query and retrieved documents when evaluating faithfulness and completene
 - data: Extract numerical values, statistics, or measurements as {{label, value, unit, context}} objects.
   If the answer contains no numbers, set data to [].
 - followups: 1-3 specific follow-up questions the user might ask next, based on the answer.
-  Each should be a self-contained question. Empty list if the answer is definitive.
-- retry_strategy: "widen" if the answer is too narrow and a broader search would help,
-  "narrow" if the answer is too broad and the user should search more specifically,
-  "pinpoint" if the user should look up an exact identifier, or empty string if no retry is needed.
+  Each should be a self-contained question. Aim for variety:
+  one that broadens the scope (a wider search around the topic),
+  one that narrows the scope (a more specific or pinpoint query),
+  and one that is a natural continuation of the conversation.
+  Empty list if the answer is definitive.
 
 ## Output
 
@@ -136,8 +137,7 @@ Output ONLY a valid JSON object with these keys:
   "summary": "<2-3 sentence summary>",
   "key_points": ["<bullet 1>", "<bullet 2>", ...],
   "data": [{{"label": "...", "value": 123, "unit": "...", "context": "..."}}],
-  "followups": ["<follow-up question 1>", ...],
-  "retry_strategy": "widen|narrow|pinpoint|"
+  "followups": ["<follow-up question 1>", ...]
 }}
 """
 
