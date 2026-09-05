@@ -413,8 +413,8 @@ class TestPromptInstructions:
         assert "[Abbreviation Glossary]" in FINALIZE_GUARDRAIL_PROMPT
 
     def test_evaluation_prompt_has_glossary_instruction(self):
-        from app.services.agentic_rag.prompts import EVALUATION_AND_FOLLOWUP_PROMPT
-        assert "[Abbreviation Glossary]" in EVALUATION_AND_FOLLOWUP_PROMPT
+        from app.services.agentic_rag.prompts import EVALUATION_PROMPT
+        assert "[Abbreviation Glossary]" in EVALUATION_PROMPT
 
 
 # ---------------------------------------------------------------------------

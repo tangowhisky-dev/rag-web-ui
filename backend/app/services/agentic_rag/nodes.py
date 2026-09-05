@@ -154,12 +154,11 @@ async def answer_evaluation_node(
     llm: ChatOpenAI | None = None,
     ctx: Any = None,
 ) -> dict:
-    """Evaluate final answer quality, extract structured data, and compute confidence.
+    """Evaluate answer quality and generate follow-ups.
 
-    Single LLM call combines:
-    - faithfulness/completeness scoring (needs query + cited context + answer)
-    - summary/key_points/data extraction (needs answer)
-    - followups generation (needs answer + query)
+    Single LLM call produces faithfulness, completeness, and followups.
+    Structured extraction (summary/key_points/data) runs as a separate
+    background task after the done event — see agent_runner.
     """
     with _agent_step("answer_evaluation"):
         from .evaluator import evaluate_answer
@@ -270,7 +269,6 @@ async def answer_evaluation_node(
         else:
             confidence_level = "none"
 
-        # Update LastAnswerObject with LLM-extracted fields.
         updates = {
             "answer_evaluation_attempts": state.get("answer_evaluation_attempts", 0) + 1,
             "final_confidence": final_confidence,
@@ -280,21 +278,12 @@ async def answer_evaluation_node(
             "retrieval_score": int(retrieval_score),
         }
 
+        # Update LastAnswerObject with followups (user-facing).
+        # Summary/key_points/data are populated by the background
+        # extraction task in agent_runner after the done event.
         if evaluation is not None:
-            # Update the LastAnswerObject with LLM-extracted fields.
             lao = state.get("last_answer_object")
             if lao is not None:
-                from app.services.agentic_rag.schemas import LastAnswerObject, DataPoint
-                # Convert data dicts to DataPoint objects if needed.
-                data_points = None
-                if evaluation.data:
-                    try:
-                        data_points = [DataPoint(**d) if isinstance(d, dict) else d for d in evaluation.data]
-                    except Exception:
-                        data_points = None
-                lao.summary = evaluation.summary
-                lao.key_points = evaluation.key_points
-                lao.data = data_points
                 lao.followups = evaluation.followups
                 updates["last_answer_object"] = lao
 

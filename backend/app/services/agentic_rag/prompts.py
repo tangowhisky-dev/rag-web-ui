@@ -85,13 +85,10 @@ Produce a summary using this EXACT format:
 
 # ── Answer Evaluation ───────────────────────────────────────────────────────
 
-EVALUATION_AND_FOLLOWUP_PROMPT: str = """\
-You are an answer quality evaluator and extraction assistant. Given a user query, the retrieved
-context that was used to generate the answer, and the generated answer itself, you must:
-
-1. Evaluate answer quality against the retrieved context.
-2. Extract a structured summary, key points, and numerical data from the answer.
-3. Generate follow-up questions the user might ask next.
+EVALUATION_PROMPT: str = """\
+You are an answer quality evaluator. Given a user query, the retrieved context that was used
+to generate the answer, and the generated answer itself, evaluate the quality of the answer
+and generate follow-up questions.
 
 If a [Abbreviation Glossary] section is provided in the context, use it to interpret abbreviations
 in the query and retrieved documents when evaluating faithfulness and completeness.
@@ -115,12 +112,8 @@ in the query and retrieved documents when evaluating faithfulness and completene
   - Completeness is independent of faithfulness: a correct answer from general knowledge
     can still score 100 on completeness
 
-## Extraction rules
+## Follow-up rules
 
-- summary: 2-3 sentence summary of the answer.
-- key_points: Up to 8 bullet points capturing the main points.
-- data: Extract numerical values, statistics, or measurements as {{label, value, unit, context}} objects.
-  If the answer contains no numbers, set data to [].
 - followups: 1-3 specific follow-up questions the user might ask next, based on the answer.
   Each should be a self-contained question. Aim for variety:
   one that broadens the scope (a wider search around the topic),
@@ -134,11 +127,26 @@ Output ONLY a valid JSON object with these keys:
 {{
   "faithfulness": <0-100>,
   "completeness": <0-100>,
-  "summary": "<2-3 sentence summary>",
-  "key_points": ["<bullet 1>", "<bullet 2>", ...],
-  "data": [{{"label": "...", "value": 123, "unit": "...", "context": "..."}}],
   "followups": ["<follow-up question 1>", ...]
 }}
+"""
+
+EXTRACTION_PROMPT: str = """\
+Extract structured data from the assistant answer below. Return valid JSON only matching this schema:
+{{
+  "summary": "2-3 sentence summary of the answer",
+  "key_points": ["<bullet 1>", "<bullet 2>", ...],
+  "data": [{{"label": "...", "value": 123, "unit": "...", "context": "..."}}]
+}}
+
+Rules:
+- summary: 2-3 sentence summary of the answer.
+- key_points: Up to 8 bullet points capturing the main points.
+- data: Extract numerical values, statistics, or measurements as {{label, value, unit, context}} objects.
+  If the answer contains no numbers, set data to [].
+
+Answer:
+{answer}
 """
 
 # ── Enterprise Agent Loop Prompts ─────────────────────────────────────────────

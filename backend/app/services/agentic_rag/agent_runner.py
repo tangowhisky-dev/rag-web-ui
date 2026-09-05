@@ -106,14 +106,64 @@ def _handle_scoring_update(state: _LoopState, update: dict) -> Optional[dict]:
     state.usage["completeness"] = update.get("completeness")
     state.usage["retrieval_score"] = update.get("retrieval_score")
 
-    # The scoring node updates last_answer_object with LLM-extracted fields
-    # (summary, key_points, data, followups). Emit a
-    # last_answer event so the frontend receives the updated object.
+    # The scoring node updates last_answer_object with followups.
+    # Emit a last_answer event so the frontend receives the updated object.
     lao = update.get("last_answer_object")
     if lao is not None:
         lao_dict = lao.model_dump() if hasattr(lao, "model_dump") else lao
         return {"event": "last_answer", "last_answer_object": lao_dict}
     return None
+
+
+async def _background_extract_and_persist(
+    message_id: int,
+    answer: str,
+    org_id: Optional[int],
+    eval_kwargs: dict,
+) -> None:
+    """Run structured extraction in the background and update the DB.
+
+    This is fire-and-forget housekeeping for the next turn. It runs after
+    the done event so the user is not blocked. Failures are logged but
+    never propagated — the next turn falls back to raw answer text from
+    conversation history if summary/key_points/data are missing.
+
+    Args:
+        message_id: DB message row to update.
+        answer: Full answer text to extract from.
+        org_id: Org id for LLM config resolution (unused if eval_kwargs has overrides).
+        eval_kwargs: Pre-resolved LLM kwargs (api_base, api_key, query_model).
+    """
+    try:
+        from .evaluator import extract_structured
+        from app.db.session import SessionLocal
+        from app.models.chat import Message
+        from app.services.agentic_rag.schemas import LastAnswerObject, DataPoint
+
+        extraction = await extract_structured(answer=answer, **eval_kwargs)
+
+        db = SessionLocal()
+        try:
+            msg = db.query(Message).filter(Message.id == message_id).first()
+            if not msg or not msg.last_answer_object:
+                return
+
+            # Merge extracted fields into the existing last_answer_object.
+            lao = LastAnswerObject(**msg.last_answer_object)
+            lao.summary = extraction.summary
+            lao.key_points = extraction.key_points
+            if extraction.data:
+                try:
+                    lao.data = [DataPoint(**d) if isinstance(d, dict) else d for d in extraction.data]
+                except Exception:
+                    lao.data = None
+            msg.last_answer_object = lao.model_dump()
+            db.commit()
+            logger.debug("[BG_EXTRACT] persisted extraction for message %d", message_id)
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.warning("[BG_EXTRACT] background extraction failed for message %d: %s", message_id, exc)
 
 
 NODE_HANDLERS = {
@@ -289,3 +339,33 @@ async def run_agent_loop(
 
     for event in _estimate_token_usage(state, query, file_markdown):
         yield event
+
+    # ── Background housekeeping: structured extraction ────────────────
+    # After the done event, spawn a fire-and-forget task to extract
+    # summary/key_points/data from the answer and persist them to the DB.
+    # This is invisible to the user — the next turn reads these fields
+    # from the DB for plan/think context and extract_data caching.
+    if message_id and state.full_answer:
+        try:
+            eval_kwargs: dict = {}
+            try:
+                query_cfg = get_org_llm(org_id, db, role="query")
+                eval_kwargs = {
+                    "api_base": query_cfg["api_base"],
+                    "api_key": query_cfg["api_key"],
+                    "query_model": query_cfg["model_name"],
+                }
+            except Exception:
+                pass
+
+            import asyncio
+            asyncio.create_task(
+                _background_extract_and_persist(
+                    message_id=message_id,
+                    answer=state.full_answer,
+                    org_id=org_id,
+                    eval_kwargs=eval_kwargs,
+                )
+            )
+        except Exception as exc:
+            logger.debug("[agent_runner] failed to spawn background extraction: %s", exc)
