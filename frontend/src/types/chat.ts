@@ -89,8 +89,7 @@ export interface LastAnswerEvent {
   key_points?: string[];
   data?: Array<{ label: string; value: number; unit?: string; context?: string }>;
   citations?: Array<CitationRef & { page_content?: string }>;
-  chart_option?: Record<string, unknown> | null;
+  chart_options?: Array<Record<string, unknown>>;
   followups?: string[];
-  suggestion?: string;
   retry_strategy?: string;
 }

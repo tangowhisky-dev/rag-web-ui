@@ -8,16 +8,13 @@ const EChartsDiagramDynamic = dynamic(
 );
 
 interface AgentLoopPanelProps {
-  chartOption?: Record<string, unknown>;
   chartOptions?: Array<Record<string, unknown>>;
 }
 
 export function AgentLoopPanel({
-  chartOption,
   chartOptions,
 }: AgentLoopPanelProps) {
-  // Older messages only ever had a single chart_option; fall back to it.
-  const charts = chartOptions && chartOptions.length > 0 ? chartOptions : chartOption ? [chartOption] : [];
+  const charts = chartOptions && chartOptions.length > 0 ? chartOptions : [];
 
   if (charts.length === 0) {
     return null;

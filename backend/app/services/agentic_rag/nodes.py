@@ -154,17 +154,32 @@ async def answer_evaluation_node(
     llm: ChatOpenAI | None = None,
     ctx: Any = None,
 ) -> dict:
-    """Evaluate final answer quality and compute final confidence score."""
+    """Evaluate final answer quality, extract structured data, and compute confidence.
+
+    Single LLM call combines:
+    - faithfulness/completeness scoring (needs query + cited context + answer)
+    - summary/key_points/data extraction (needs answer)
+    - followups/retry_strategy generation (needs answer + query)
+    """
     with _agent_step("answer_evaluation"):
         from .evaluator import evaluate_answer
 
         answer = state.get("answer", "")
-        # Evaluate against the user's exact request, not the retrieval rewrite:
-        # completeness is a property of what was asked, not what was searched.
         query = state.get("original_query", "")
-        all_docs = state.get("retrieved_docs", [])
-        # Retrieval confidence from merged docs (max reranker score or
-        # kb_read/kb_search_documents confidence). Written by tool_node.
+        # Use cited_docs from state (set by finalize_node for both evidence
+        # and legacy citation paths). Fall back to cited_doc_indices for
+        # backward compatibility, then to all docs.
+        cited_docs = state.get("cited_docs", [])
+        if cited_docs:
+            docs = cited_docs
+        else:
+            all_docs = state.get("retrieved_docs", [])
+            cited_indices = state.get("cited_doc_indices", [])
+            if cited_indices:
+                docs = [all_docs[i - 1] for i in cited_indices if 0 < i <= len(all_docs)]
+            else:
+                docs = all_docs
+
         retrieval_conf = state.get("best_retrieval_confidence", 0.0)
 
         if not answer:
@@ -176,16 +191,6 @@ async def answer_evaluation_node(
                 "completeness": 0,
                 "retrieval_score": 0,
             }
-
-        # Use only cited docs for evaluation, not the full retrieved set.
-        # The evaluator checks faithfulness against the evidence the answer
-        # actually cites — feeding 50 uncited chunks just inflates the prompt
-        # and slows the LLM call without improving the assessment.
-        cited_indices = state.get("cited_doc_indices", [])
-        if cited_indices:
-            docs = [all_docs[i - 1] for i in cited_indices if 0 < i <= len(all_docs)]
-        else:
-            docs = all_docs
 
         _db = ctx.db if ctx is not None else None
         _org_id = ctx.org_id if ctx is not None else None
@@ -225,14 +230,13 @@ async def answer_evaluation_node(
             )
             faithfulness = evaluation.faithfulness
             completeness = evaluation.completeness
-            confidence_match = evaluation.confidence_match
             eval_flags = evaluation.flags
         except Exception as exc:
             logger.warning("[ANSWER_EVALUATION] failed: %s", exc)
             faithfulness = 50
             completeness = 50
-            confidence_match = True
             eval_flags = ["Evaluation unavailable"]
+            evaluation = None
 
         # If the answer says "no information found", the retrieval score
         # should be low — the retrieved evidence was not used to answer the
@@ -268,13 +272,34 @@ async def answer_evaluation_node(
         else:
             confidence_level = "none"
 
-        return {
+        # Update LastAnswerObject with LLM-extracted fields.
+        updates = {
             "answer_evaluation_attempts": state.get("answer_evaluation_attempts", 0) + 1,
             "final_confidence": final_confidence,
             "confidence_level": confidence_level,
             "faithfulness": faithfulness,
             "completeness": completeness,
             "retrieval_score": int(retrieval_score),
-            "confidence_match": confidence_match,
             "evaluation_flags": eval_flags,
         }
+
+        if evaluation is not None:
+            # Update the LastAnswerObject with LLM-extracted fields.
+            lao = state.get("last_answer_object")
+            if lao is not None:
+                from app.services.agentic_rag.schemas import LastAnswerObject, DataPoint
+                # Convert data dicts to DataPoint objects if needed.
+                data_points = None
+                if evaluation.data:
+                    try:
+                        data_points = [DataPoint(**d) if isinstance(d, dict) else d for d in evaluation.data]
+                    except Exception:
+                        data_points = None
+                lao.summary = evaluation.summary
+                lao.key_points = evaluation.key_points
+                lao.data = data_points
+                lao.followups = evaluation.followups
+                lao.retry_strategy = evaluation.retry_strategy
+                updates["last_answer_object"] = lao
+
+        return updates

@@ -673,13 +673,11 @@ export const Answer: FC<{
   lastAnswerObject?: {
     followups?: string[];
     retry_strategy?: string;
-    suggestion?: string;
     [key: string]: unknown;
   };
-  chartOption?: Record<string, unknown>;
   chartOptions?: Array<Record<string, unknown>>;
   onFollowUp?: (query: string) => void;
-}> = React.memo(({ messageId, chatId, markdown, citations = [], confidence, confidenceScore, suggestion, failedLegs, agentSteps, taskList, progressMessages, isStreaming = false, onDelete, finalConfidence, finalConfidenceLevel, faithfulness, completeness, retrievalScore, toolCalls, toolObservations, chartOption, chartOptions, lastAnswerObject, onFollowUp }) => {
+}> = React.memo(({ messageId, chatId, markdown, citations = [], confidence, confidenceScore, suggestion, failedLegs, agentSteps, taskList, progressMessages, isStreaming = false, onDelete, finalConfidence, finalConfidenceLevel, faithfulness, completeness, retrievalScore, toolCalls, toolObservations, chartOptions, lastAnswerObject, onFollowUp }) => {
   const [citationInfoMap, setCitationInfoMap] = useState<
     Record<string, CitationInfo>
   >({});
@@ -1038,7 +1036,6 @@ export const Answer: FC<{
         // New messages already have the chart(s) inlined as ```echarts fences
         // by finalize_node's marker substitution — only fall back to the
         // panel's own render for older messages that never got one.
-        chartOption={markdown.includes("```echarts") ? undefined : chartOption}
         chartOptions={markdown.includes("```echarts") ? undefined : chartOptions}
       />
 

@@ -21,7 +21,6 @@ from app.services.agentic_rag.nodes import _agent_step, history_to_text, select_
 from app.services.agentic_rag.prompts import (
     FINALIZE_ANSWER_PROMPT,
     FINALIZE_GUARDRAIL_PROMPT,
-    LAST_ANSWER_EXTRACT_PROMPT,
 )
 from app.services.agentic_rag.schemas import LastAnswerObject, Plan
 from app.services.agentic_rag.token_budget import count_tokens
@@ -30,7 +29,7 @@ from app.services.infrastructure import is_cancelled
 from app.services.settings_service import get_setting
 
 from .compaction import _compact_if_needed
-from .helpers import _coerce_observation, _extract_json_block, _substitute_chart_markers, _writer
+from .helpers import _coerce_observation, _substitute_chart_markers, _writer
 from .observations import _non_retrieval_observations_text
 
 logger = logging.getLogger(__name__)
@@ -183,65 +182,33 @@ async def _stream_final_answer(
     return final, answer_usage
 
 
-async def _build_last_answer_object(
-    raw_final: str,
+def _build_last_answer_object_deterministic(
     final: str,
     chart_options: list[dict],
-    ctx: "ToolContext",
+    cited_docs: list[dict],
 ) -> LastAnswerObject:
-    """Extract chart data for raw_for_extraction and construct LastAnswerObject."""
-    # Extraction (Call 4, below) wants the raw marker text — not the
-    # substituted chart JSON — so it isn't fed a large embedded blob.
-    raw_for_extraction = raw_final
-    # Append a readable summary of chart data so the extraction LLM can
-    # see the actual values (the marker text alone says "[[CHART_1]]").
-    if chart_options:
-        chart_parts: list[str] = []
-        for i, opt in enumerate(chart_options, 1):
-            series = opt.get("series", [])
-            xaxis = opt.get("xAxis", {})
-            labels = xaxis.get("data", []) if isinstance(xaxis, dict) else []
-            for s in series:
-                values = s.get("data", [])
-                pairs = ", ".join(
-                    f"{labels[j]}={values[j]}"
-                    for j in range(min(len(labels), len(values)))
-                )
-                chart_parts.append(f"Chart {i} ({s.get('type', 'chart')}): {pairs}")
-        raw_for_extraction += "\n\nChart data:\n" + "\n".join(chart_parts)
+    """Build a LastAnswerObject with deterministic fields only.
 
-    # Build a lightweight LastAnswerObject. Try LLM extraction for data/chart.
-    lao = LastAnswerObject(
-        summary=final[:500],
-        key_points=[s.strip("- ") for s in final.splitlines() if s.strip()][:8],
-        data=None,
-        citations=[],
-        chart_option=None,
-        chart_options=[],
-        followups=[],
+    LLM-extracted fields (summary, key_points, data, followups,
+    retry_strategy) are populated later by answer_evaluation_node.
+    """
+    # Extract citation refs from cited_docs metadata.
+    citations = []
+    for doc in cited_docs:
+        meta = doc.get("metadata", {}) if isinstance(doc, dict) else {}
+        cref = meta.get("citation_ref")
+        if cref:
+            citations.append(cref)
+
+    return LastAnswerObject(
+        summary="",  # filled by answer_evaluation_node
+        key_points=[],  # filled by answer_evaluation_node
+        data=None,  # filled by answer_evaluation_node
+        citations=citations,
+        chart_options=chart_options,
+        followups=[],  # filled by answer_evaluation_node
+        retry_strategy="",  # filled by answer_evaluation_node
     )
-
-    # Use a structured extraction for data if any numeric content; otherwise cheap.
-    llm_query = build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)
-    extracted: Optional[LastAnswerObject] = None
-    for attempt in range(2):
-        try:
-            raw = await llm_query.ainvoke([
-                {"role": "user", "content": LAST_ANSWER_EXTRACT_PROMPT.format(answer=raw_for_extraction[:3000])},
-            ])
-            block = _extract_json_block(str(raw.content))
-            if block:
-                extracted = LastAnswerObject.model_validate_json(block)
-                break
-        except Exception as exc:
-            logger.debug("[finalize_node] last_answer_object extraction attempt %d failed: %s", attempt + 1, exc)
-    if extracted:
-        lao = extracted
-
-    lao.chart_options = chart_options
-    lao.chart_option = chart_options[0] if chart_options else None
-
-    return lao
 
 
 async def finalize_node(state, ctx) -> dict:
@@ -329,16 +296,13 @@ async def finalize_node(state, ctx) -> dict:
             cited_docs = [docs[i - 1] for i in cited_doc_indices]
         writer({"event": "answer_rewrite", "content": final, "citations": cited_docs})
 
-        lao = await _build_last_answer_object(raw_final, final, chart_options, ctx)
+        # Build deterministic LastAnswerObject (citations + chart_options).
+        # LLM-extracted fields (summary, key_points, data, followups,
+        # retry_strategy) are filled by answer_evaluation_node.
+        lao = _build_last_answer_object_deterministic(final, chart_options, cited_docs)
         writer({"event": "last_answer", "last_answer_object": lao.model_dump()})
 
         # Persist the assistant turn into the checkpointed conversation.
-        # Without this the thread holds user questions only, so every
-        # downstream consumer of history (reference resolution, think,
-        # compaction) reads half a conversation and invents the rest.
-        # The `add_messages` reducer appends, and the id is stable per
-        # assistant message row so a resume-after-interrupt replaces rather
-        # than duplicates the turn.
         message_id = state.get("message_id")
         answer_message = AIMessage(
             content=final,
@@ -351,12 +315,9 @@ async def finalize_node(state, ctx) -> dict:
             "answer": final,
             "last_answer_object": lao,
             "retrieved_docs": docs,
+            "cited_docs": cited_docs,
             "messages": [*compaction_updates.get("messages", []), answer_message],
         }
-        # Include cited_doc_indices for legacy format (evidence format
-        # doesn't need this — cited evidence is in the answer_rewrite event).
-        if not has_evidence:
-            updates["cited_doc_indices"] = cited_doc_indices
         if answer_usage:
             updates["answer_usage"] = answer_usage
         return updates

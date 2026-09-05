@@ -105,6 +105,14 @@ def _handle_scoring_update(state: _LoopState, update: dict) -> Optional[dict]:
     state.usage["faithfulness"] = update.get("faithfulness")
     state.usage["completeness"] = update.get("completeness")
     state.usage["retrieval_score"] = update.get("retrieval_score")
+
+    # The scoring node updates last_answer_object with LLM-extracted fields
+    # (summary, key_points, data, followups, retry_strategy). Emit a
+    # last_answer event so the frontend receives the updated object.
+    lao = update.get("last_answer_object")
+    if lao is not None:
+        lao_dict = lao.model_dump() if hasattr(lao, "model_dump") else lao
+        return {"event": "last_answer", "last_answer_object": lao_dict}
     return None
 
 

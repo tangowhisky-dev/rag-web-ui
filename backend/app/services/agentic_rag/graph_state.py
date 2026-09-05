@@ -66,7 +66,8 @@ class AgentState(MessagesState):
     # ── Generation state ────────────────────────────────────────────────
     answer: str = ""
     answer_usage: Annotated[Optional[dict], _last_value] = None  # Provider token usage captured during streaming
-    cited_doc_indices: List[int] = []  # 1-based doc indices cited by the final answer, in display order
+    cited_doc_indices: List[int] = []  # 1-based doc indices cited by the final answer, in display order (legacy format)
+    cited_docs: Annotated[list, _last_value] = []  # Cited evidence docs (both evidence and legacy formats)
 
     # ── Retry budget state ──────────────────────────────────────────────
     answer_evaluation_attempts: Annotated[int, _last_value] = 0
@@ -81,7 +82,6 @@ class AgentState(MessagesState):
     faithfulness: int = 0
     completeness: int = 0
     retrieval_score: int = 0
-    confidence_match: bool = True
     # Best retrieval confidence from merged docs (max reranker score or
     # kb_read/kb_search_documents confidence). Written by tool_node, read
     # by answer_evaluation_node for the final confidence formula.

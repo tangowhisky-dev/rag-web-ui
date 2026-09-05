@@ -105,7 +105,7 @@ from .sufficiency import (
 # Finalization
 from .finalization import (
     _build_finalize_prompt,
-    _build_last_answer_object,
+    _build_last_answer_object_deterministic,
     _stream_final_answer,
     finalize_node,
     save_memory_node,
@@ -133,7 +133,6 @@ from app.services.agentic_rag.prompts import (
     AGENT_SYSTEM_PROMPT,
     FINALIZE_ANSWER_PROMPT,
     FINALIZE_GUARDRAIL_PROMPT,
-    LAST_ANSWER_EXTRACT_PROMPT,
     PLAN_SYSTEM_PROMPT,
     THINK_SYSTEM_PROMPT,
 )
@@ -234,7 +233,7 @@ __all__ = [
     "sufficiency_check_node",
     # Finalization
     "_build_finalize_prompt",
-    "_build_last_answer_object",
+    "_build_last_answer_object_deterministic",
     "_stream_final_answer",
     "finalize_node",
     "save_memory_node",
@@ -271,7 +270,6 @@ __all__ = [
     "AGENT_SYSTEM_PROMPT",
     "FINALIZE_ANSWER_PROMPT",
     "FINALIZE_GUARDRAIL_PROMPT",
-    "LAST_ANSWER_EXTRACT_PROMPT",
     "PLAN_SYSTEM_PROMPT",
     "THINK_SYSTEM_PROMPT",
     # Stdlib

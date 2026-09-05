@@ -1,28 +1,34 @@
-"""Answer quality evaluation for the agentic pipeline.
+"""Answer quality evaluation and structured extraction for the agentic pipeline.
 
 Evaluates generated answers against the retrieved context and original query.
-Returns structured quality metrics that can be displayed in the UI.
+Also extracts summary, key points, numerical data, and follow-up questions
+in a single LLM call.
 """
 
 from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
-from app.services.agentic_rag.prompts import EVALUATION_SYSTEM_PROMPT
+from app.services.agentic_rag.prompts import EVALUATION_AND_FOLLOWUP_PROMPT
+from app.services.agentic_rag.schemas import DataPoint
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class AnswerEvaluation:
-    """Result of answer quality evaluation."""
+    """Result of the combined evaluation + extraction LLM call."""
     faithfulness: int  # 0-100
     completeness: int  # 0-100
-    confidence_match: bool
     flags: List[str]
+    summary: str = ""
+    key_points: List[str] = field(default_factory=list)
+    data: List[dict] = field(default_factory=list)  # List of {label, value, unit, context}
+    followups: List[str] = field(default_factory=list)
+    retry_strategy: str = ""
     raw_response: str = ""
 
 
@@ -59,8 +65,12 @@ def _parse_evaluation_response(raw: str) -> AnswerEvaluation:
         return AnswerEvaluation(
             faithfulness=int(data.get("faithfulness", 50)),
             completeness=int(data.get("completeness", 50)),
-            confidence_match=bool(data.get("confidence_match", True)),
             flags=data.get("flags", []) or [],
+            summary=data.get("summary", ""),
+            key_points=data.get("key_points", []) or [],
+            data=data.get("data", []) or [],
+            followups=data.get("followups", []) or [],
+            retry_strategy=data.get("retry_strategy", ""),
             raw_response=raw,
         )
     except Exception as exc:
@@ -126,7 +136,6 @@ def _default_evaluation(error: str = "") -> AnswerEvaluation:
     return AnswerEvaluation(
         faithfulness=50,
         completeness=50,
-        confidence_match=True,
         flags=[f"Evaluation unavailable: {error}"] if error else ["Evaluation skipped"],
         raw_response="",
     )
@@ -141,19 +150,23 @@ async def evaluate_answer(
     api_key: Optional[str] = None,
     query_model: Optional[str] = None,
 ) -> AnswerEvaluation:
-    """Evaluate answer quality using an LLM call.
+    """Evaluate answer quality and extract structured data in one LLM call.
+
+    Combines faithfulness/completeness scoring with summary, key_points,
+    data extraction, followup generation, and retry_strategy — all in a
+    single LLM call to save latency.
 
     Args:
         query: The original user query.
-        answer: The generated answer text.
-        context_preview: Retrieved context (for faithfulness check), full text, not truncated.
+        answer: The generated answer text (full, not truncated).
+        context_preview: Retrieved cited context (for faithfulness check).
         confidence_level: Retrieval confidence level (very_high/high/medium/low/none).
         api_base: Optional OpenAI-compatible base URL override.
         api_key: Optional API key override.
         query_model: Optional model name override.
 
     Returns:
-        AnswerEvaluation with quality metrics.
+        AnswerEvaluation with quality metrics and extracted fields.
     """
     user_prompt = f"""Query: {query}
 
@@ -163,7 +176,7 @@ Retrieved Context:
 Generated Answer:
 {answer}
 
-Evaluate the quality of this answer based on the retrieved context.
+Evaluate the quality of this answer and extract structured data.
 """
 
     try:
@@ -190,10 +203,10 @@ Evaluate the quality of this answer based on the retrieved context.
         resp = await client.chat.completions.create(
             model=query_model,
             messages=[
-                {"role": "system", "content": EVALUATION_SYSTEM_PROMPT},
+                {"role": "system", "content": EVALUATION_AND_FOLLOWUP_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
-            max_tokens=1000,
+            max_tokens=2000,
             temperature=0,
             stream=False,
             extra_body={"thinking": {"type": "disabled"}},
@@ -212,11 +225,6 @@ def summarize_evaluation(evaluation: AnswerEvaluation) -> str:
     parts = []
     parts.append(f"Faithfulness: {evaluation.faithfulness}/100")
     parts.append(f"Completeness: {evaluation.completeness}/100")
-
-    if evaluation.confidence_match:
-        parts.append("Confidence matches quality: Yes")
-    else:
-        parts.append("Confidence matches quality: No (mismatch detected)")
 
     if evaluation.flags:
         parts.append("Issues: " + "; ".join(evaluation.flags))

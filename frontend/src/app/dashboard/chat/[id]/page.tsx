@@ -76,7 +76,6 @@ interface Message {
   toolCalls?: Array<Record<string, unknown>>;
   toolObservations?: Array<Record<string, unknown>>;
   lastAnswerObject?: Record<string, unknown>;
-  chartOption?: Record<string, unknown>;
   chartOptions?: Array<Record<string, unknown>>;
 }
 
@@ -671,14 +670,13 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       return;
     }
 
-    // la: last_answer — enterprise agent structured summary + chart option
+    // la: last_answer — enterprise agent structured summary + chart options
     if (trimmedLine.startsWith("la:")) {
       try {
         const payload = JSON.parse(trimmedLine.slice(3)) as { last_answer_object?: Record<string, unknown> };
         appendAssistantChunk(assistantId, (message) => ({
           ...message,
           lastAnswerObject: payload.last_answer_object,
-          chartOption: payload.last_answer_object?.chart_option as Record<string, unknown> | undefined,
           chartOptions: payload.last_answer_object?.chart_options as Array<Record<string, unknown>> | undefined,
         }));
       } catch (e) {
@@ -1043,7 +1041,6 @@ function ChatPageInner({ params }: { params: { id: string } }) {
             suggestion: undefined,
             failedLegs: undefined,
             lastAnswerObject: undefined,
-            chartOption: undefined,
             chartOptions: undefined,
           };
         } else {
@@ -1271,7 +1268,6 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                           toolCalls={message.toolCalls}
                           toolObservations={message.toolObservations}
                           lastAnswerObject={message.lastAnswerObject}
-                          chartOption={message.chartOption}
                           chartOptions={message.chartOptions}
                           onFollowUp={handleFollowUp}
                         />

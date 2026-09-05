@@ -80,11 +80,8 @@ def test_last_answer_object_tolerates_extra_keys():
     assert lao.summary == "s"
 
 
-def test_chart_options_defaults_empty_and_reads_legacy_singular_field():
-    # Old stored messages only ever have chart_option (singular); the new
-    # chart_options field must default to empty rather than error.
-    lao = LastAnswerObject.model_validate({"summary": "s", "chart_option": {"series": []}})
-    assert lao.chart_option == {"series": []}
+def test_chart_options_defaults_empty():
+    lao = LastAnswerObject.model_validate({"summary": "s"})
     assert lao.chart_options == []
 
 

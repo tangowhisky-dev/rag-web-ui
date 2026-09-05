@@ -72,14 +72,12 @@ class CitationRef(BaseModel):
 class LastAnswerObject(BaseModel):
     """Structured representation of the assistant's last answer."""
 
-    summary: str = Field(description="2-3 sentence summary of the answer.")
+    summary: str = Field(default="", description="2-3 sentence summary of the answer.")
     key_points: List[str] = Field(default_factory=list, description="Bullet points.")
     data: Optional[List[DataPoint]] = Field(default=None, description="Numbers and statistics mentioned.")
     citations: List[CitationRef] = Field(default_factory=list, description="Chunk refs used.")
-    chart_option: Optional[dict] = Field(default=None, description="Deprecated: first entry of chart_options, kept for backward compatibility with older stored messages.")
     chart_options: List[dict] = Field(default_factory=list, description="ECharts option JSON for each chart_generate call this turn, if any.")
     followups: List[str] = Field(default_factory=list, description="Suggested follow-up questions.")
-    suggestion: str = Field(default="", description="One-line assessment of answer completeness, or empty string.")
     retry_strategy: str = Field(default="", description="Suggestion label: widen|narrow|pinpoint|")
 
 

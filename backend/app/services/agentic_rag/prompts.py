@@ -85,13 +85,19 @@ Produce a summary using this EXACT format:
 
 # ── Answer Evaluation ───────────────────────────────────────────────────────
 
-EVALUATION_SYSTEM_PROMPT: str = """\
-You are an answer quality evaluator. Given a query, retrieved context, and generated answer,
-assess the quality of the answer.
+EVALUATION_AND_FOLLOWUP_PROMPT: str = """\
+You are an answer quality evaluator and extraction assistant. Given a user query, the retrieved
+context that was used to generate the answer, and the generated answer itself, you must:
 
-If a [Abbreviation Glossary] section is provided in the context, use it to interpret abbreviations in the query and retrieved documents when evaluating faithfulness and completeness.
+1. Evaluate answer quality against the retrieved context.
+2. Extract a structured summary, key points, and numerical data from the answer.
+3. Generate follow-up questions the user might ask next.
 
-Rules:
+If a [Abbreviation Glossary] section is provided in the context, use it to interpret abbreviations
+in the query and retrieved documents when evaluating faithfulness and completeness.
+
+## Evaluation rules
+
 - faithfulness (0-100): What percentage of the answer is actually supported by the retrieved context?
   - 100 = everything cited or clearly supported by context
   - 0 = answer is mostly or entirely external knowledge
@@ -100,7 +106,7 @@ Rules:
     retrieved context is indeed irrelevant, faithfulness = 100 (the answer accurately
     reports the lack of evidence). If the context IS relevant but the answer claims
     no information, faithfulness = 0 (the answer ignores available evidence).
-- completeness (0-100): How thoroughly does the answer addresses the query?
+- completeness (0-100): How thoroughly does the answer address the query?
   - 100 = all aspects of the query are fully addressed
   - 0 = answer misses key parts of the query
   - If the answer says "no information found" and the query asks for specific facts,
@@ -108,17 +114,34 @@ Rules:
     genuinely does not exist in the knowledge base.
   - Completeness is independent of faithfulness: a correct answer from general knowledge
     can still score 100 on completeness
-- confidence_match (boolean): Does the confidence level match the answer quality?
-  - true = high quality answer with high confidence, or low quality with low confidence
-  - false = mismatch between answer quality and confidence
+- flags: List of issue descriptions (e.g. ["Answer contains uncited claims", "Partial coverage"]).
+  Empty list if no issues.
 
-Output ONLY a JSON object with these keys:
-{
+## Extraction rules
+
+- summary: 2-3 sentence summary of the answer.
+- key_points: Up to 8 bullet points capturing the main points.
+- data: Extract numerical values, statistics, or measurements as {{label, value, unit, context}} objects.
+  If the answer contains no numbers, set data to [].
+- followups: 1-3 specific follow-up questions the user might ask next, based on the answer.
+  Each should be a self-contained question. Empty list if the answer is definitive.
+- retry_strategy: "widen" if the answer is too narrow and a broader search would help,
+  "narrow" if the answer is too broad and the user should search more specifically,
+  "pinpoint" if the user should look up an exact identifier, or empty string if no retry is needed.
+
+## Output
+
+Output ONLY a valid JSON object with these keys:
+{{
   "faithfulness": <0-100>,
   "completeness": <0-100>,
-  "confidence_match": true/false,
-  "flags": [<list of issue descriptions, empty if no issues>]
-}
+  "flags": [<list of issue descriptions>],
+  "summary": "<2-3 sentence summary>",
+  "key_points": ["<bullet 1>", "<bullet 2>", ...],
+  "data": [{{"label": "...", "value": 123, "unit": "...", "context": "..."}}],
+  "followups": ["<follow-up question 1>", ...],
+  "retry_strategy": "widen|narrow|pinpoint|"
+}}
 """
 
 # ── Enterprise Agent Loop Prompts ─────────────────────────────────────────────
@@ -412,33 +435,6 @@ Temporal reasoning — deciding which document is "latest" or "most recent":
 - When the user asks for "the latest weekly update", they mean the one whose coverage period is most recent, not the one whose file was last touched on disk.
 
 Chart requests: if the plan includes a chart, call extract_data first to turn retrieved docs / the previous answer into structured {{label, value}} rows, then call chart_generate with that structured data. Do NOT hand-roll the ECharts option yourself via code_execute — chart_generate is the only tool that produces a chart_option the UI can render.
-"""
-
-LAST_ANSWER_EXTRACT_PROMPT: str = """\
-Extract a structured summary from the assistant answer below. Return valid JSON only matching this schema:
-{{
-  "summary": "2-3 sentences",
-  "key_points": ["..."],
-  "data": [{{"label": "...", "value": 123, "unit": "...", "context": "..."}}],
-  "citations": [{{"document_id": 1, "citation_kind": "chunk", "chunk_index": 0, "source_tool": "search_dense"}}],
-  "chart_option": null or {{ ... }},
-  "followups": ["..."],
-  "suggestion": "one-line assessment of answer completeness, or empty string",
-  "retry_strategy": "widen|narrow|pinpoint|"
-}}
-
-If the answer contains no numbers, set data to []. If no chart, set chart_option to null. Keep key_points to at most 8 bullets.
-
-For followups: generate 1-3 specific follow-up questions the user might ask next based on the answer. Each should be a self-contained question. Empty list if the answer is definitive.
-
-For suggestion: one sentence assessing whether the answer fully addresses the query, and what might be missing. Empty string if the answer is complete.
-
-For retry_strategy: "widen" if the answer is too narrow and a broader search would help, "narrow" if the answer is too broad and the user should search more specifically, "pinpoint" if the user should look up an exact identifier, or empty string if no retry is needed.
-
-For citations: extract the document_id, citation_kind (chunk, file, section, range, grep, table, outline), chunk_index (if applicable), and source_tool from each [N] citation in the answer. The citation metadata is in the evidence block above the answer.
-
-Answer:
-{answer}
 """
 
 # ── Sufficiency Check Prompt ─────────────────────────────────────────────────
