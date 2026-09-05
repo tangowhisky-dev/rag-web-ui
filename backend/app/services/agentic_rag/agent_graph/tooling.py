@@ -34,6 +34,46 @@ from .helpers import (
 logger = logging.getLogger(__name__)
 
 
+def _tool_label(tool_name: str, tool_calls: list[dict]) -> str:
+    """Get the UI label for a tool from the tool_calls list."""
+    for tc in tool_calls:
+        if tc.get("tool") == tool_name:
+            return tc.get("label") or tool_name
+    return tool_name
+
+
+def _summarize_result(obs: Observation) -> str:
+    """Build a one-line summary of a tool observation result for the UI."""
+    if obs.error:
+        return obs.error[:120]
+    r = obs.result
+    if not isinstance(r, dict):
+        return ""
+    if "hits" in r and isinstance(r["hits"], list):
+        n = len(r["hits"])
+        return f"{n} {'hit' if n == 1 else 'hits'} retrieved"
+    if "docs" in r and isinstance(r["docs"], list):
+        n = len(r["docs"])
+        return f"{n} {'doc' if n == 1 else 'docs'} retrieved"
+    if "matches" in r and isinstance(r["matches"], list):
+        n = len(r["matches"])
+        return f"{n} {'match' if n == 1 else 'matches'} found"
+    if "content" in r:
+        tokens = r.get("total_tokens", "?")
+        return f"Read {tokens} tokens"
+    if "headings" in r and isinstance(r["headings"], list):
+        n = len(r["headings"])
+        return f"{n} {'heading' if n == 1 else 'headings'}"
+    if "points" in r and isinstance(r["points"], list):
+        n = len(r["points"])
+        return f"{n} {'data point' if n == 1 else 'data points'} extracted"
+    if "chart_option" in r:
+        return "Chart generated"
+    if "result" in r and isinstance(r["result"], str):
+        return r["result"][:120]
+    return ""
+
+
 async def _dispatch_tool_calls(
     tool_calls: list[dict],
     tools: dict,
@@ -128,7 +168,7 @@ async def _dispatch_tool_calls(
             if res.get("terminate"):
                 should_terminate = True
         new_observations.append(obs)
-        writer({"event": "tool_observation", **obs.model_dump()})
+        writer({"event": "tool_observation", "tool": obs.tool, "label": _tool_label(obs.tool, tool_calls), "summary": _summarize_result(obs), "error": obs.error})
         # Only count actually-executed calls toward the budget.
         if executed_flags[i]:
             counts[obs.tool] = counts.get(obs.tool, 0) + 1

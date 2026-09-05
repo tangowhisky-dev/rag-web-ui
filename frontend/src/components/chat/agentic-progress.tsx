@@ -7,11 +7,6 @@ import {
 } from "@/components/ai-elements/chain-of-thought";
 import { Shimmer } from "@/components/ai-elements/shimmer";
 import {
-  Tool,
-  ToolContent,
-  ToolHeader,
-  ToolInput,
-  ToolOutput,
   type ToolState,
 } from "@/components/ai-elements/tool";
 import {
@@ -279,20 +274,9 @@ export const AgenticProgress = ({
             const isRunning = state === "input-available" && isStreaming;
             const ToolIcon = TOOL_ICONS[toolName] ?? WrenchIcon;
 
-            // Extract a short summary from the observation result
-            const obsResult = pair.observation?.result as Record<string, unknown> | undefined;
+            // Summary comes from the backend (to: event) or falls back to error
+            const summary = (pair.observation?.summary as string | undefined) ?? undefined;
             const obsError = pair.observation?.error as string | undefined;
-            const resultSummary = obsResult
-              ? typeof obsResult === "object" && "matches" in obsResult
-                ? `${(obsResult.matches as unknown[]).length} matches`
-                : typeof obsResult === "object" && "docs" in obsResult
-                  ? `${(obsResult.docs as unknown[]).length} docs retrieved`
-                  : typeof obsResult === "object" && "content" in obsResult
-                    ? `Read ${(obsResult as Record<string, unknown>).total_tokens ?? "?"} tokens`
-                    : typeof obsResult === "object" && "headings" in obsResult
-                      ? `${(obsResult.headings as unknown[]).length} headings`
-                      : undefined
-              : undefined;
 
             return (
               <ChainOfThoughtStep
@@ -305,23 +289,9 @@ export const AgenticProgress = ({
                     label
                   )
                 }
-                description={resultSummary}
+                description={obsError ? <span className="text-red-600">{obsError}</span> : summary}
                 status={isRunning ? "active" : "complete"}
-              >
-                <Tool defaultOpen={false}>
-                  <ToolHeader
-                    title={label}
-                    state={state}
-                  />
-                  <ToolContent>
-                    <ToolInput input={pair.call.arguments ?? {}} />
-                    <ToolOutput
-                      output={obsResult ? JSON.stringify(obsResult, null, 2) : undefined}
-                      errorText={obsError}
-                    />
-                  </ToolContent>
-                </Tool>
-              </ChainOfThoughtStep>
+              />
             );
           })}
         </ChainOfThoughtContent>
