@@ -830,7 +830,7 @@ export const Answer: FC<{
 
   const contentRef = useRef<HTMLDivElement>(null);
 
-  if (!markdown) {
+  if (!markdown && !(agentSteps?.length)) {
     return (
       <div className="flex flex-col gap-2">
         <Skeleton className="max-w-sm h-4 bg-zinc-200" />
