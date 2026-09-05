@@ -231,11 +231,6 @@ class TestRerankResultsTool:
         mock_setting.return_value = -10.0
         mock_hashdedup.side_effect = lambda x: x
         mock_semidedup.side_effect = lambda x, **kw: x
-        input_hits = [
-            {"content": "doc 0", "document_id": 1, "chunk_index": 0,
-             "title": "Doc0", "content_hash": "h0",
-             "citation_ref": {"document_id": 1, "source_tool": "search_dense"}}
-        ]
         mock_rerank.return_value = [
             Document(page_content="doc 0", metadata={
                 "document_id": 1, "chunk_index": 0, "title": "Doc0",
@@ -255,38 +250,33 @@ class TestRerankResultsTool:
         }
         tool = RerankResultsTool()
         tool.ctx = ctx
-        result = asyncio.run(tool.arun({"query": "test", "hits": input_hits}))
+        result = asyncio.run(tool.arun({"query": "test"}))
         hit = result["result"]["hits"][0]
         assert hit["citation_ref"]["source_tool"] == "rerank_results"
 
     @patch("app.services.agentic_rag.tools.rerank_results.get_setting")
-    def test_fabricated_hits_rejected(self, mock_setting):
-        """Hits not in retrieved_docs are rejected to prevent LLM hallucination."""
+    def test_no_retrieved_docs_returns_error(self, mock_setting):
+        """When no docs in state, return an error telling the LLM to search first."""
         mock_setting.return_value = -10.0
-        input_hits = [
-            {"content": "fabricated content", "document_id": 999, "chunk_index": 0,
-             "title": "Fake Doc", "content_hash": "fake_hash", "citation_ref": {}}
-        ]
         ctx = MagicMock()
         ctx.org_id = 1
         ctx.db = MagicMock()
         ctx.chat_id = 1
         ctx.message_id = 1
-        ctx.state = {"retrieved_docs": []}  # no real docs retrieved
+        ctx.state = {"retrieved_docs": []}
         tool = RerankResultsTool()
         tool.ctx = ctx
-        result = asyncio.run(tool.arun({"query": "test", "hits": input_hits}))
+        result = asyncio.run(tool.arun({"query": "test"}))
         assert result["ok"] is True
         assert result["result"]["output_count"] == 0
-        assert result["result"]["rejected_fabricated"] == 1
-        assert "rejected" in result["error"]
+        assert "search tool first" in result["error"]
 
     @patch("app.services.agentic_rag.tools.rerank_results.rerank")
     @patch("app.services.agentic_rag.tools.rerank_results.dedup_by_content_hash")
     @patch("app.services.agentic_rag.tools.rerank_results.semantic_dedup")
     @patch("app.services.agentic_rag.tools.rerank_results.get_setting")
-    def test_auto_fallback_to_retrieved_docs(self, mock_setting, mock_semidedup, mock_hashdedup, mock_rerank):
-        """When LLM hits are rejected, auto-fallback to reranking retrieved_docs."""
+    def test_reranks_docs_from_state(self, mock_setting, mock_semidedup, mock_hashdedup, mock_rerank):
+        """Reranker reads docs from state.retrieved_docs — no hits argument needed."""
         from langchain_core.documents import Document
         mock_setting.return_value = -10.0
         mock_hashdedup.side_effect = lambda x: x
@@ -297,10 +287,6 @@ class TestRerankResultsTool:
                 "content_hash": "real_hash", "_reranker_score": 1.0,
                 "citation_ref": {},
             })
-        ]
-        fabricated_hits = [
-            {"content": "fake", "document_id": 999, "chunk_index": 0,
-             "title": "Fake", "content_hash": "fake_hash", "citation_ref": {}}
         ]
         ctx = MagicMock()
         ctx.org_id = 1
@@ -317,10 +303,9 @@ class TestRerankResultsTool:
         }
         tool = RerankResultsTool()
         tool.ctx = ctx
-        result = asyncio.run(tool.arun({"query": "test", "hits": fabricated_hits}))
+        result = asyncio.run(tool.arun({"query": "test"}))
         assert result["ok"] is True
         assert result["result"]["output_count"] == 1
-        assert result["result"]["rejected_fabricated"] == 1
 
 
 class TestGraphExpandTool:
