@@ -1232,7 +1232,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                     />
                     {/* Content */}
                     <div className="flex-1 min-w-0 text-sm">
-                      {isLoading && !message.content ? (
+                      {isLoading && !message.content && !(message.id === lastAssistantId && (message.agentSteps?.length || progressMessages.length)) ? (
                         <div className="flex items-center justify-center py-2" aria-label="Generating response…">
                           <div className="relative w-5 h-5">
                             <div className="absolute inset-0 rounded-full bg-primary/40 animate-pulse" />
