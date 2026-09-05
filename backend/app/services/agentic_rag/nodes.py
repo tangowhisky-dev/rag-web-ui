@@ -230,12 +230,10 @@ async def answer_evaluation_node(
             )
             faithfulness = evaluation.faithfulness
             completeness = evaluation.completeness
-            eval_flags = evaluation.flags
         except Exception as exc:
             logger.warning("[ANSWER_EVALUATION] failed: %s", exc)
             faithfulness = 50
             completeness = 50
-            eval_flags = ["Evaluation unavailable"]
             evaluation = None
 
         # If the answer says "no information found", the retrieval score
@@ -280,7 +278,6 @@ async def answer_evaluation_node(
             "faithfulness": faithfulness,
             "completeness": completeness,
             "retrieval_score": int(retrieval_score),
-            "evaluation_flags": eval_flags,
         }
 
         if evaluation is not None:

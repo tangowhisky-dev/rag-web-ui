@@ -86,7 +86,6 @@ async def load_context_node(state, ctx) -> dict:
             "cited_doc_indices": [],
             "compaction_triggered": False,
             "answer_evaluation_attempts": 0,
-            "evaluation_flags": [],
             "answer_usage": None,
             "final_answer": "",
             "answer": "",

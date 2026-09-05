@@ -514,7 +514,6 @@ class TestLoadContextNodeResetsPerTurnState:
             "tool_calls": [{"tool": "chart_generate", "arguments": {}}],
             "compaction_triggered": True,
             "answer_evaluation_attempts": 2,
-            "evaluation_flags": ["low_confidence"],
         }
 
     def test_resets_loop_state_at_start_of_next_turn(self):
@@ -536,7 +535,6 @@ class TestLoadContextNodeResetsPerTurnState:
         assert update["tool_calls"] == []
         assert update["compaction_triggered"] is False
         assert update["answer_evaluation_attempts"] == 0
-        assert update["evaluation_flags"] == []
 
         # observations uses the accumulate reducer; applying the __reset__
         # marker on top of turn 1's list must clear it, not append to it.

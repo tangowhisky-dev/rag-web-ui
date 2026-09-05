@@ -114,8 +114,6 @@ in the query and retrieved documents when evaluating faithfulness and completene
     genuinely does not exist in the knowledge base.
   - Completeness is independent of faithfulness: a correct answer from general knowledge
     can still score 100 on completeness
-- flags: List of issue descriptions (e.g. ["Answer contains uncited claims", "Partial coverage"]).
-  Empty list if no issues.
 
 ## Extraction rules
 
@@ -135,7 +133,6 @@ Output ONLY a valid JSON object with these keys:
 {{
   "faithfulness": <0-100>,
   "completeness": <0-100>,
-  "flags": [<list of issue descriptions>],
   "summary": "<2-3 sentence summary>",
   "key_points": ["<bullet 1>", "<bullet 2>", ...],
   "data": [{{"label": "...", "value": 123, "unit": "...", "context": "..."}}],

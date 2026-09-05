@@ -86,7 +86,6 @@ class AgentState(MessagesState):
     # kb_read/kb_search_documents confidence). Written by tool_node, read
     # by answer_evaluation_node for the final confidence formula.
     best_retrieval_confidence: Annotated[float, _last_value] = 0.0
-    evaluation_flags: Annotated[List[str], _last_value] = []
 
     # ── Configuration ───────────────────────────────────────────────────
     # All configuration keys use _last_value because parallel Send() branches

@@ -23,7 +23,6 @@ class AnswerEvaluation:
     """Result of the combined evaluation + extraction LLM call."""
     faithfulness: int  # 0-100
     completeness: int  # 0-100
-    flags: List[str]
     summary: str = ""
     key_points: List[str] = field(default_factory=list)
     data: List[dict] = field(default_factory=list)  # List of {label, value, unit, context}
@@ -65,7 +64,6 @@ def _parse_evaluation_response(raw: str) -> AnswerEvaluation:
         return AnswerEvaluation(
             faithfulness=int(data.get("faithfulness", 50)),
             completeness=int(data.get("completeness", 50)),
-            flags=data.get("flags", []) or [],
             summary=data.get("summary", ""),
             key_points=data.get("key_points", []) or [],
             data=data.get("data", []) or [],
@@ -136,7 +134,6 @@ def _default_evaluation(error: str = "") -> AnswerEvaluation:
     return AnswerEvaluation(
         faithfulness=50,
         completeness=50,
-        flags=[f"Evaluation unavailable: {error}"] if error else ["Evaluation skipped"],
         raw_response="",
     )
 
@@ -225,8 +222,5 @@ def summarize_evaluation(evaluation: AnswerEvaluation) -> str:
     parts = []
     parts.append(f"Faithfulness: {evaluation.faithfulness}/100")
     parts.append(f"Completeness: {evaluation.completeness}/100")
-
-    if evaluation.flags:
-        parts.append("Issues: " + "; ".join(evaluation.flags))
 
     return " | ".join(parts)
