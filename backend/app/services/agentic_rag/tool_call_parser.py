@@ -13,6 +13,7 @@ import logging
 import re
 from typing import Any, Optional
 
+import json_repair
 from langchain_core.messages import AIMessage
 
 logger = logging.getLogger(__name__)
@@ -87,9 +88,12 @@ def _normalize_tool_calls(raw: Any) -> list[dict]:
                 args = item.get("function", {}).get("arguments") if "function" in item else item.get("arguments", item.get("args", {}))
                 if isinstance(args, str):
                     try:
-                        args = json.loads(args)
+                        args = json_repair.loads(args)
                     except Exception:
-                        args = {}
+                        try:
+                            args = json.loads(args)
+                        except Exception:
+                            args = {}
                 if name:
                     calls.append({"tool": name, "arguments": args})
     return calls
@@ -134,9 +138,12 @@ def _parse_json_text_fallback(raw: str) -> Optional[ParsedThinkResponse]:
         block = _extract_json_block(raw)
         if block:
             try:
-                parsed = json.loads(block)
-            except json.JSONDecodeError:
-                parsed = json.loads(_repair_json_brackets(block))
+                parsed = json_repair.loads(block)
+            except Exception:
+                try:
+                    parsed = json.loads(block)
+                except json.JSONDecodeError:
+                    parsed = json.loads(_repair_json_brackets(block))
             result = _dispatch_parsed_json(parsed)
             if result is not None:
                 return result

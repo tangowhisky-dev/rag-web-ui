@@ -62,6 +62,11 @@ def _tool_call_budget(db, org_id) -> dict:
         "code_execute": get_setting(db, "AGENT_MAX_CODE_EXEC", org_id),
         "extract_data": get_setting(db, "AGENT_MAX_EXTRACT_DATA", org_id),
         "chart_generate": get_setting(db, "AGENT_MAX_CHART_GENERATE", org_id),
+        # Office document generation
+        "office_load_skill": get_setting(db, "AGENT_MAX_OFFICE_LOAD_SKILL", org_id),
+        "office_generate": get_setting(db, "AGENT_MAX_OFFICE_GENERATE", org_id),
+        "office_inspect": get_setting(db, "AGENT_MAX_OFFICE_INSPECT", org_id),
+        "office_edit": get_setting(db, "AGENT_MAX_OFFICE_EDIT", org_id),
     }
 
 
@@ -129,6 +134,23 @@ def _substitute_chart_markers(text: str, chart_options: list[dict]) -> str:
             result = result.replace(marker, fence, 1)
         else:
             result = f"{result}\n\n{fence}"
+    return result
+
+
+def _substitute_office_markers(text: str, office_files: list[dict]) -> str:
+    """Replace [[DOC_N]] placeholders with markdown download links.
+
+    Any file whose marker the model omitted is appended at the end.
+    The frontend intercepts office:// links and renders file chips.
+    """
+    result = text
+    for i, f in enumerate(office_files, start=1):
+        marker = f"[[DOC_{i}]]"
+        link = f"[📄 {f.get('file_name', 'document')}](office://{f['file_id']})"
+        if marker in result:
+            result = result.replace(marker, link, 1)
+        else:
+            result = f"{result}\n\n{link}"
     return result
 
 

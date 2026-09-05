@@ -29,7 +29,7 @@ from app.services.infrastructure import is_cancelled
 from app.services.settings_service import get_setting
 
 from .compaction import _compact_if_needed
-from .helpers import _coerce_observation, _substitute_chart_markers, _writer
+from .helpers import _coerce_observation, _substitute_chart_markers, _substitute_office_markers, _writer
 from .observations import _non_retrieval_observations_text
 
 logger = logging.getLogger(__name__)
@@ -68,6 +68,7 @@ def _build_finalize_prompt(
     history_text: str,
     observations: list,
     ctx: "ToolContext",
+    office_files: list[dict] | None = None,
 ) -> tuple[str, str]:
     """Build the finalize system+user prompt. Returns (system, user)."""
     context_text = format_context_string(docs, file_markdown, db=ctx.db, org_id=ctx.org_id)
@@ -90,6 +91,11 @@ def _build_finalize_prompt(
     elif include_charts:
         from app.services.prompts.loader import append_chart_instructions
         answer_prompt = append_chart_instructions(answer_prompt)
+
+    # Office document placeholder instructions
+    if office_files:
+        from app.services.prompts.loader import append_office_placeholder_instructions
+        answer_prompt = append_office_placeholder_instructions(answer_prompt, office_files)
 
     system = FINALIZE_GUARDRAIL_PROMPT + "\n\n" + answer_prompt
 
@@ -186,6 +192,7 @@ def _build_last_answer_object_deterministic(
     final: str,
     chart_options: list[dict],
     cited_docs: list[dict],
+    office_files: list[dict] | None = None,
 ) -> LastAnswerObject:
     """Build a LastAnswerObject with deterministic fields only.
 
@@ -206,6 +213,7 @@ def _build_last_answer_object_deterministic(
         data=None,  # filled by answer_evaluation_node
         citations=citations,
         chart_options=chart_options,
+        office_files=office_files or [],
         followups=[],  # filled by answer_evaluation_node
     )
 
@@ -237,6 +245,21 @@ async def finalize_node(state, ctx) -> dict:
             if obs.tool == "chart_generate" and obs.result.get("chart_option"):
                 chart_options.append(obs.result["chart_option"])
 
+        # Collect every valid office_generate result for download links.
+        office_files: list[dict] = []
+        for raw_obs in observations:
+            obs = _coerce_observation(raw_obs)
+            if obs.tool == "office_generate" and obs.result.get("file_id"):
+                office_files.append({
+                    "file_id": obs.result["file_id"],
+                    "file_name": obs.result["file_name"],
+                    "format": obs.result["format"],
+                    "title": obs.result.get("title"),
+                    "slide_count": obs.result.get("slide_count"),
+                    "sheet_count": obs.result.get("sheet_count"),
+                    "chart_count": obs.result.get("chart_count"),
+                })
+
         if precomputed:
             final = precomputed
         else:
@@ -246,7 +269,7 @@ async def finalize_node(state, ctx) -> dict:
             system, user = _build_finalize_prompt(
                 docs, state.get("file_markdown"), plan, chart_options,
                 query, retrieval_query, summary_text, history_text,
-                observations, ctx,
+                observations, ctx, office_files,
             )
 
             # Runtime compaction before the generation LLM call. trim_docs=True
@@ -265,7 +288,7 @@ async def finalize_node(state, ctx) -> dict:
                 system, user = _build_finalize_prompt(
                     docs, state.get("file_markdown"), plan, chart_options,
                     query, retrieval_query, summary_text, history_text,
-                    observations, ctx,
+                    observations, ctx, office_files,
                 )
 
             final, answer_usage = await _stream_final_answer(ctx, system, user, writer)
@@ -275,6 +298,8 @@ async def finalize_node(state, ctx) -> dict:
         # Call 4 (last_answer_object extraction) or Call 5 (confidence score).
         raw_final = final
         final = _substitute_chart_markers(final, chart_options)
+        if office_files:
+            final = _substitute_office_markers(final, office_files)
         # Assign citation_id (E1, E2, ...) to each evidence item, then
         # normalize citations. Use evidence-based normalization when docs
         # carry citation_ref metadata; fall back to legacy [KB-N] otherwise.
@@ -298,7 +323,7 @@ async def finalize_node(state, ctx) -> dict:
         # Build deterministic LastAnswerObject (citations + chart_options).
         # LLM-extracted fields (summary, key_points, data, followups)
         # are filled by answer_evaluation_node.
-        lao = _build_last_answer_object_deterministic(final, chart_options, cited_docs)
+        lao = _build_last_answer_object_deterministic(final, chart_options, cited_docs, office_files)
         writer({"event": "last_answer", "last_answer_object": lao.model_dump()})
 
         # Persist the assistant turn into the checkpointed conversation.

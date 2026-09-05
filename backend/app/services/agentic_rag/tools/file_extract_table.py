@@ -19,6 +19,7 @@ class FileExtractTableInput(BaseModel):
     file_id: Optional[int] = Field(default=None)
     table_index: int = Field(default=0)
     filter: Optional[str] = Field(default=None)
+    accumulate: bool = Field(default=False, description="When true and the table has exactly 2 columns (label, value), append rows to state.accumulated_data for chart_generate or office_generate to consume.")
 
 
 def _resolve_file(ctx: ToolContext, file_id: Optional[int]) -> tuple:
@@ -115,6 +116,29 @@ class FileExtractTableTool(BaseAgentTool):
         latency_ms = round((time.monotonic() - t0) * 1000)
         write_audit(ctx, "file_extract_table", input_obj.model_dump(), {"row_count": len(rows), "columns": columns}, latency_ms=latency_ms, status="ok")
 
+        # When accumulate=true and the table is label/value shaped (2 columns),
+        # convert rows to DataPoint format and append to state.accumulated_data
+        # so chart_generate or office_generate can consume them without the
+        # LLM having to re-transcribe the values.
+        accumulated_count = 0
+        if input_obj.accumulate and ctx.state is not None and len(columns) == 2:
+            from app.services.agentic_rag.schemas import DataPoint
+            points = []
+            for row in rows:
+                try:
+                    points.append(DataPoint(
+                        label=str(row[0]),
+                        value=row[1],
+                        unit=None,
+                        context=f"from {cf.file_name}",
+                    ))
+                except Exception:
+                    continue
+            if points:
+                existing = ctx.state.get("accumulated_data", []) or []
+                ctx.state["accumulated_data"] = existing + [p.model_dump() for p in points]
+                accumulated_count = len(points)
+
         return {
             "ok": True,
             "result": {
@@ -122,6 +146,7 @@ class FileExtractTableTool(BaseAgentTool):
                 "rows": rows,
                 "row_count": len(rows),
                 "file_name": cf.file_name,
+                "accumulated": accumulated_count,
             },
             "error": None,
             "tokens": len(str(rows)) // 4,

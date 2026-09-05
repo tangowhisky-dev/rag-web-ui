@@ -141,6 +141,8 @@ class ChatFile(Base):
     # status: processing | ready | error
     status = Column(String(20), nullable=False, default="processing")
     error_message = Column(Text, nullable=True)
+    # True for agent-generated Office documents (OfficeCLI), False for user uploads.
+    is_generated = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     chat = relationship("Chat", back_populates="chat_files")

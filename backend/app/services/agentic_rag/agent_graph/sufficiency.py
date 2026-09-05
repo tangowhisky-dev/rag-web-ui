@@ -63,6 +63,23 @@ async def sufficiency_check_node(state, ctx) -> dict:
             logger.debug("[sufficiency] deterministic check passed: %s", reasoning[:200])
             return {"sufficient": True}
 
+        # Guard: for office/chart intent, don't let the LLM judge "sufficient"
+        # until office_generate (or chart_generate) has been called at least once.
+        # The LLM tends to think "evidence is sufficient" after just retrieval,
+        # without realizing the document hasn't been generated yet.
+        plan = state.get("plan")
+        plan_intent = ""
+        if hasattr(plan, "intent"):
+            plan_intent = plan.intent
+        elif isinstance(plan, dict):
+            plan_intent = plan.get("intent", "")
+        counts = state.get("tool_call_counts", {})
+        has_office_generate = counts.get("office_generate", 0) > 0
+        has_chart_generate = counts.get("chart_generate", 0) > 0
+        if plan_intent in ("office", "chart") and not (has_office_generate or has_chart_generate):
+            logger.debug("[sufficiency] %s intent but office_generate/chart_generate not called yet — routing back to think", plan_intent)
+            return {"sufficient": False}
+
         # Tier 3: LLM sufficiency judgment
         sufficient = await _llm_sufficiency_check(state, ctx, summary)
         if sufficient:
@@ -94,10 +111,30 @@ async def _llm_sufficiency_check(state: dict, ctx: Any, summary: dict) -> bool:
 
     # Deterministic shortcut: if we've already done 2+ search rounds and
     # the evidence hasn't grown, more searches won't help. Finalize.
+    # BUT: skip shortcuts for office/chart intent — those require
+    # post-retrieval tool calls (extract_data, office_generate, etc.)
+    # that haven't happened yet.
+    plan = state.get("plan")
+    plan_intent = ""
+    if hasattr(plan, "intent"):
+        plan_intent = plan.intent
+    elif isinstance(plan, dict):
+        plan_intent = plan.get("intent", "")
+    needs_post_retrieval_tools = plan_intent in ("office", "chart")
+
+    # Also check if office_generate or chart_generate has been called yet.
+    # If the plan requires them but they haven't run, don't shortcut.
+    counts = state.get("tool_call_counts", {})
+    has_office_generate = counts.get("office_generate", 0) > 0
+    has_chart_generate = counts.get("chart_generate", 0) > 0
+
     search_calls = summary["search"]["calls"]
     if search_calls >= 3 and len(docs) <= 5:
-        logger.debug("[sufficiency] deterministic shortcut: %d searches, %d docs — finalizing", search_calls, len(docs))
-        return True
+        if needs_post_retrieval_tools and not (has_office_generate or has_chart_generate):
+            logger.debug("[sufficiency] skipping deterministic shortcut — %s intent requires post-retrieval tools", plan_intent)
+        else:
+            logger.debug("[sufficiency] deterministic shortcut: %d searches, %d docs — finalizing", search_calls, len(docs))
+            return True
 
     # Deterministic shortcut: if the first search returned 10+ hits and
     # we've already reranked, the evidence is likely sufficient.
@@ -107,8 +144,11 @@ async def _llm_sufficiency_check(state: dict, ctx: Any, summary: dict) -> bool:
             for o in observations
         )
         if has_rerank:
-            logger.debug("[sufficiency] deterministic shortcut: %d docs after rerank — finalizing", len(docs))
-            return True
+            if needs_post_retrieval_tools and not (has_office_generate or has_chart_generate):
+                logger.debug("[sufficiency] skipping deterministic shortcut — %s intent requires post-retrieval tools (office_generate/chart_generate not called yet)", plan_intent)
+            else:
+                logger.debug("[sufficiency] deterministic shortcut: %d docs after rerank — finalizing", len(docs))
+                return True
 
     try:
         llm = build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)

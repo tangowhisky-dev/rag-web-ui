@@ -20,6 +20,10 @@ from .kb_metadata import KbMetadataTool
 from .kb_outline import KbOutlineTool
 from .kb_read import KbReadTool
 from .kb_search_documents import KbSearchDocumentsTool
+from .office_edit import OfficeEditTool
+from .office_generate import OfficeGenerateTool
+from .office_inspect import OfficeInspectTool
+from .office_load_skill import OfficeLoadSkillTool
 from .rerank_results import RerankResultsTool
 from .search_dense import SearchDenseTool
 from .search_exact import SearchExactTool
@@ -50,6 +54,11 @@ _TOOL_CLASSES = [
     SummarizeAnswerTool,
     ExtractDataTool,
     KbGrepTool,
+    # Office document generation
+    OfficeLoadSkillTool,
+    OfficeGenerateTool,
+    OfficeInspectTool,
+    OfficeEditTool,
 ]
 
 ALL_TOOLS = _TOOL_CLASSES
@@ -102,6 +111,11 @@ def applicable_tools(ctx: "ToolContext") -> list:
     - rerank_results and graph_expand only after at least one search tool
       has been called (deferred tool gating).
     - extract_data only after a read or search tool has been called.
+    - office_generate always available — the LLM decides when to call it.
+      It can produce text-only documents (no data needed) or data-driven
+      documents (reading from accumulated_data).
+    - office_inspect and office_edit only when generated_files exist in state.
+    - office_load_skill always available.
     """
     tools = build_tools(ctx)
     state = ctx.state
@@ -117,6 +131,10 @@ def applicable_tools(ctx: "ToolContext") -> list:
     # OR after a search/read tool has been called.
     has_read = has_search or any(counts.get(t, 0) > 0 for t in ("kb_read", "kb_search_documents"))
 
+    # Office tools: office_generate is always available (text-only docs
+    # don't need data); office_inspect/office_edit need generated_files.
+    has_generated = bool(state.get("generated_files")) if state is not None else False
+
     if not has_file:
         tools = _filter_tools_by_name(tools, ("file_read", "file_summarize", "file_extract_table"))
     if not has_data and not has_read:
@@ -125,6 +143,11 @@ def applicable_tools(ctx: "ToolContext") -> list:
         tools = _filter_tools_by_name(tools, ("chart_generate",))
     if not has_search:
         tools = _filter_tools_by_name(tools, ("rerank_results", "graph_expand"))
+    if not has_generated:
+        tools = _filter_tools_by_name(tools, ("office_inspect", "office_edit"))
+
+    # office_load_skill is always available — the planner or think node
+    # calls it when office_generate is in the plan.
 
     # KB tools (kb_grep, kb_read, kb_outline, kb_metadata) are always
     # available — every chat has KBs linked (ChatCreate requires

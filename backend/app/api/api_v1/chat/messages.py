@@ -118,6 +118,11 @@ def _serialize_messages_with_citations(
         msg_dict["file_name"] = info[1] if info else None
         msg_dict["file_id"]   = info[0] if info else None
 
+        # Extract office_files from last_answer_object for frontend reload
+        lao = msg.last_answer_object if hasattr(msg, "last_answer_object") else None
+        if isinstance(lao, dict) and lao.get("office_files"):
+            msg_dict["office_files"] = lao["office_files"]
+
         # Reconstruct citations from message_citations table
         citations = (
             db.query(MessageCitation)

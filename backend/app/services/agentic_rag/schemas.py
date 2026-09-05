@@ -69,6 +69,22 @@ class CitationRef(BaseModel):
         return v
 
 
+class OfficeFileRef(BaseModel):
+    """Reference to a generated Office document attached to the answer."""
+
+    file_id: int
+    file_name: str
+    format: str = Field(description="pptx, docx, or xlsx")
+    title: Optional[str] = None
+    summary: Optional[str] = None
+    slide_count: Optional[int] = None
+    sheet_count: Optional[int] = None
+    page_count: Optional[int] = None
+    chart_count: Optional[int] = None
+    quality_status: Optional[str] = None
+    quality_issues: Optional[List[str]] = None
+
+
 class LastAnswerObject(BaseModel):
     """Structured representation of the assistant's last answer."""
 
@@ -77,6 +93,7 @@ class LastAnswerObject(BaseModel):
     data: Optional[List[DataPoint]] = Field(default=None, description="Numbers and statistics mentioned.")
     citations: List[CitationRef] = Field(default_factory=list, description="Chunk refs used.")
     chart_options: List[dict] = Field(default_factory=list, description="ECharts option JSON for each chart_generate call this turn, if any.")
+    office_files: List[dict] = Field(default_factory=list, description="Generated Office documents (OfficeFileRef dicts).")
     followups: List[str] = Field(default_factory=list, description="Suggested follow-up questions.")
 
 

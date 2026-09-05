@@ -119,6 +119,11 @@ class AgentState(MessagesState):
     # data, not raw document content.
     accumulated_data: Annotated[List[dict], _last_value] = []
 
+    # ── Generated Office documents ──────────────────────────────────────
+    # office_generate appends file refs here. office_inspect and office_edit
+    # read from this to know which file to operate on. Not compacted.
+    generated_files: Annotated[List[dict], _last_value] = []
+
     # Wall-clock start of the current turn (time.monotonic()). Must be
     # declared: LangGraph silently drops updates for undeclared keys, which
     # previously made AGENT_MAX_WALL_SECONDS a no-op.

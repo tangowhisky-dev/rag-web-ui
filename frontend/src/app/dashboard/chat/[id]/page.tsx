@@ -77,6 +77,18 @@ interface Message {
   toolObservations?: Array<Record<string, unknown>>;
   lastAnswerObject?: Record<string, unknown>;
   chartOptions?: Array<Record<string, unknown>>;
+  officeFiles?: OfficeFileRef[];
+}
+
+interface OfficeFileRef {
+  file_id: number;
+  file_name: string;
+  format: string;
+  title?: string;
+  summary?: string;
+  slide_count?: number;
+  sheet_count?: number;
+  chart_count?: number;
 }
 
 interface ChatMessage {
@@ -95,6 +107,7 @@ interface ChatMessage {
   file_name?: string;
   file_id?: number;
   citations?: Citation[];
+  office_files?: OfficeFileRef[];
 }
 
 interface ChatMeta {
@@ -275,6 +288,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       retrievalScore: msg.retrieval_score ?? undefined,
       file_name: msg.file_name ?? undefined,
       file_id: msg.file_id ?? undefined,
+      officeFiles: msg.office_files ?? [],
     };
   }, []);
 
@@ -670,17 +684,33 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       return;
     }
 
-    // la: last_answer — enterprise agent structured summary + chart options
+    // la: last_answer — enterprise agent structured summary + chart options + office files
     if (trimmedLine.startsWith("la:")) {
       try {
         const payload = JSON.parse(trimmedLine.slice(3)) as { last_answer_object?: Record<string, unknown> };
+        const officeFiles = payload.last_answer_object?.office_files as OfficeFileRef[] | undefined;
         appendAssistantChunk(assistantId, (message) => ({
           ...message,
           lastAnswerObject: payload.last_answer_object,
           chartOptions: payload.last_answer_object?.chart_options as Array<Record<string, unknown>> | undefined,
+          officeFiles: officeFiles ?? message.officeFiles,
         }));
       } catch (e) {
         console.error("Failed to parse last_answer event:", e);
+      }
+      return;
+    }
+
+    // f: file — generated Office document ready (real-time chip before finalization)
+    if (trimmedLine.startsWith("f:")) {
+      try {
+        const payload = JSON.parse(trimmedLine.slice(2)) as OfficeFileRef;
+        appendAssistantChunk(assistantId, (message) => ({
+          ...message,
+          officeFiles: [...(message.officeFiles ?? []), payload],
+        }));
+      } catch (e) {
+        console.error("Failed to parse file event:", e);
       }
       return;
     }
@@ -1042,6 +1072,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
             failedLegs: undefined,
             lastAnswerObject: undefined,
             chartOptions: undefined,
+            officeFiles: [],
           };
         } else {
           // No assistant reply for this branch — show placeholder
@@ -1269,6 +1300,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                           toolObservations={message.toolObservations}
                           lastAnswerObject={message.lastAnswerObject}
                           chartOptions={message.chartOptions}
+                          officeFiles={message.officeFiles}
                           onFollowUp={handleFollowUp}
                         />
                       )}

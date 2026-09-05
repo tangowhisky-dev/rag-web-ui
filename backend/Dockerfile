@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y \
   netcat-traditional \
   curl \
   ffmpeg \
+  libicu-dev \
   && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements file
@@ -31,11 +32,18 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         pip install -r requirements.txt; \
     fi
 
+# Install OfficeCLI binary (self-contained .NET runtime, ~50MB).
+# The install script detects arch (linux-arm64 / linux-x64) and installs
+# to /root/.local/bin/officecli. Symlink to /usr/local/bin for PATH access.
+# Requires libicu for .NET globalization support.
+RUN curl -fsSL https://d.officecli.ai/install.sh | bash && \
+    ln -sf /root/.local/bin/officecli /usr/local/bin/officecli
+
 # Copy entrypoint script first
 COPY entrypoint.sh .
 RUN chmod +x entrypoint.sh
 
-# Copy application files
+# Copy application files (includes vendored OfficeCLI skill files in skills/)
 COPY . .
 
 # Create uploads directory

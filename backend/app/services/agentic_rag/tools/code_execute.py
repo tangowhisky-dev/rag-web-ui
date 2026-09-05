@@ -23,6 +23,7 @@ class CodeExecuteInput(BaseModel):
     code: str = Field(description="Python code to execute. Set the 'result' variable to return a value, or use print() to capture stdout.")
     data: Optional[dict] = Field(default=None, description="Variables to inject.")
     timeout_s: int = Field(default=30, ge=1, le=180)
+    output_as_data: bool = Field(default=False, description="When true, if 'result' is a list of dicts with 'label' and 'value' keys, append them to state.accumulated_data for chart_generate or office_generate to consume.")
 
 
 _SAFE_IMPORT_TOP_LEVEL = frozenset({
@@ -218,6 +219,26 @@ class CodeExecuteTool(BaseAgentTool):
         latency_ms = round((time.monotonic() - t0) * 1000)
         write_audit(ctx, "code_execute", input_obj.model_dump(), {"stdout_len": len(stdout)}, latency_ms=latency_ms, status="ok")
 
+        # When output_as_data=true and result is a list of {label, value} dicts,
+        # append them to state.accumulated_data so chart_generate or office_generate
+        # can consume the computed values without the LLM re-transcribing them.
+        accumulated_count = 0
+        if input_obj.output_as_data and ctx.state is not None:
+            if isinstance(result, list):
+                points = []
+                for item in result:
+                    if isinstance(item, dict) and "label" in item and "value" in item:
+                        points.append({
+                            "label": str(item["label"]),
+                            "value": item["value"],
+                            "unit": item.get("unit"),
+                            "context": item.get("context", "from code_execute"),
+                        })
+                if points:
+                    existing = ctx.state.get("accumulated_data", []) or []
+                    ctx.state["accumulated_data"] = existing + points
+                    accumulated_count = len(points)
+
         return {
             "ok": True,
             "result": {
@@ -225,6 +246,7 @@ class CodeExecuteTool(BaseAgentTool):
                 "stderr": stderr,
                 "result": result,
                 "plots": plots,
+                "accumulated": accumulated_count,
             },
             "error": None,
             "tokens": len(code) // 4,

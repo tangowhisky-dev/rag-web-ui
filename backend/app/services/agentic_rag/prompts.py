@@ -315,13 +315,17 @@ Available tools:
 - file_summarize: map-reduce summarization of a large attached file.
 - file_extract_table: extract a table from CSV/Excel/HTML in a file.
 - code_execute: run Python for computation or data transformation. Use for calculations, statistics, or transforming already-extracted structured data. Do NOT use it to parse raw text into chart data — use extract_data for that.
-- chart_generate: build an ECharts option from structured data. Reads data automatically from accumulated_data in state (populated by prior extract_data calls). Only pass chart_type, title, and axis labels.
+- chart_generate: build an ECharts option from structured data. Reads data automatically from accumulated_data in state (populated by prior extract_data calls). Only pass chart_type, title, and axis labels. This produces INLINE charts in the chat — use it when the user wants to see a chart in the conversation.
 - summarize_answer: summarize the previous answer.
 - extract_data: pull structured {{label, value}} rows from a previous answer, retrieved docs (with optional document_ids for batch processing), accumulated data, or a file. Use this (not code_execute) to turn raw text into structured data for charting. Results from source="retrieved_docs" accumulate in state — use source="accumulated" to retrieve all accumulated data before chart_generate.
+- office_load_skill: load OfficeCLI design guidelines for the target format (pptx/docx/xlsx). Call BEFORE office_generate to get font sizes, color palettes, layout rules, and quality check criteria. Returns skill content as an observation. Only call once per turn.
+- office_generate: create a new Office document (.pptx, .docx, or .xlsx) from accumulated data. Data is read automatically from state.accumulated_data — do NOT pass data values. Provide only structure: format, title, slides/sections/sheets, chart types, theme. Returns file_id for download. Use this when the user explicitly asks for a PowerPoint, Word, or Excel file.
+- office_inspect: inspect a generated Office document for quality issues. Modes: outline, issues, screenshot, validate, get, query. Use after office_generate to verify quality.
+- office_edit: edit an existing generated Office document with OfficeCLI batch commands. Use after office_inspect finds issues to fix them.
 
 Output a JSON object with this structure:
 {{
-  "intent": "rag|file_action|previous_answer_action|computation|chart|conversation|mixed",
+  "intent": "rag|file_action|previous_answer_action|computation|chart|office|conversation|mixed",
   "subtasks": [
     {{
       "id": "a",
@@ -428,6 +432,23 @@ Aggregate/analysis queries (counting, summarizing across many documents, trends,
 - For chart/table queries: after all batches are processed, call chart_generate — it reads automatically from accumulated_data. Or call extract_data with source="accumulated" to inspect the accumulated data first.
 - Pattern: discover (metadata_only) → read batch 1 → extract_data(batch 1) → read batch 2 → extract_data(batch 2) → ... → chart_generate() → final_answer.
 
+Office document generation (user asks for a PowerPoint, Word, or Excel file):
+- Intent: "office" when the user explicitly requests a downloadable Office document.
+- Pattern: retrieve/extract data → office_load_skill → office_generate → office_inspect → (office_edit if issues) → final_answer
+- Example: "Get Q4 revenue data and make a 3-slide PowerPoint deck" → five subtasks:
+  - Subtask a: tool_hint="search_dense", suggested_query="Q4 revenue", depends_on=[]
+  - Subtask b: tool_hint="extract_data", depends_on=["a"]
+  - Subtask c: tool_hint="office_load_skill", depends_on=["b"] — load pptx design guidelines
+  - Subtask d: tool_hint="office_generate", depends_on=["c"] — generate the deck
+  - Subtask e: tool_hint="office_inspect", depends_on=["d"] — quality check
+- Example: "Upload this CSV and make a 3-slide deck with different chart types" → four subtasks:
+  - Subtask a: tool_hint="file_extract_table", depends_on=[] — extract rows (set accumulate=true)
+  - Subtask b: tool_hint="office_load_skill", depends_on=["a"]
+  - Subtask c: tool_hint="office_generate", depends_on=["b"] — generate with bar/line/pie slides
+  - Subtask d: tool_hint="office_inspect", depends_on=["c"]
+- For large CSV/Excel files needing aggregation: add a code_execute subtask with output_as_data=true between extraction and office_generate.
+- chart_generate and office_generate serve different purposes: chart_generate produces INLINE charts in the chat; office_generate produces DOWNLOADABLE Office documents. Use chart_generate when the user wants to see a chart in the conversation. Use office_generate when the user asks for a PowerPoint/Word/Excel file.
+
 Temporal reasoning — deciding which document is "latest" or "most recent":
 - Call current_datetime FIRST to learn what today's date is. You cannot judge "latest" without knowing "now".
 - kb_search_documents sorts by file_modified_at (filesystem mtime), but a user may accidentally modify an old file, making its mtime recent while the content is actually old. Do NOT blindly trust file_modified_at alone.
@@ -440,6 +461,17 @@ Temporal reasoning — deciding which document is "latest" or "most recent":
 - When the user asks for "the latest weekly update", they mean the one whose coverage period is most recent, not the one whose file was last touched on disk.
 
 Chart requests: if the plan includes a chart, call extract_data first to turn retrieved docs / the previous answer into structured {{label, value}} rows, then call chart_generate — it reads from accumulated_data automatically. Do NOT hand-roll the ECharts option yourself via code_execute — chart_generate is the only tool that produces a chart_option the UI can render.
+
+Office document generation:
+- office_generate can produce text-only documents OR data-driven documents. You decide what's needed.
+- For text-only docs (slides from bullet points, Word from paragraphs): provide slide bullets, section content, or sheet rows directly in the office_generate arguments. No data extraction needed.
+- For data-driven docs (charts, numeric tables): call extract_data(source="retrieved_docs") first to populate accumulated_data, then office_generate reads from it automatically. Do NOT pass raw data values in arguments — only structure (titles, chart types, theme).
+- Call office_load_skill once before office_generate to get design rules (fonts, colors, layout). Do NOT call it again.
+- After office_generate, call office_inspect(mode=issues) to check for problems. If issues are found, call office_edit to fix them. Maximum 3 QA cycles.
+- Do NOT write raw OOXML or officecli commands via code_execute. office_generate and office_edit are the only tools that produce Office files.
+- When the user asks to refine a previously generated document, use office_edit, NOT office_generate.
+- chart_generate produces INLINE charts in the chat; office_generate produces DOWNLOADABLE Office documents.
+- When processing CSV/Excel data for document generation, use file_extract_table with accumulate=true or code_execute with output_as_data=true to flow data into accumulated_data.
 """
 
 # ── Sufficiency Check Prompt ─────────────────────────────────────────────────

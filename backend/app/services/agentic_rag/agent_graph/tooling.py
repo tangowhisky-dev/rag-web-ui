@@ -69,6 +69,21 @@ def _summarize_result(obs: Observation) -> str:
         return f"{n} {'data point' if n == 1 else 'data points'} extracted"
     if "chart_option" in r:
         return "Chart generated"
+    if "file_id" in r and "format" in r:
+        fmt = r["format"].upper()
+        name = r.get("file_name", "")
+        charts = r.get("chart_count", 0)
+        suffix = f" ({charts} charts)" if charts else ""
+        return f"{fmt} generated: {name}{suffix}"
+    if "mode" in r and r.get("mode") in ("issues", "screenshot", "outline", "validate", "annotated", "text", "get", "query"):
+        mode = r["mode"]
+        output = r.get("output", "")
+        if mode == "issues":
+            issue_count = output.count("issue") if isinstance(output, str) else 0
+            return f"QA: {issue_count} issues" if issue_count else "QA: no issues"
+        return f"Inspected ({mode})"
+    if "commands_applied" in r:
+        return f"Edited: {r['commands_applied']} commands applied"
     if "result" in r and isinstance(r["result"], str):
         return r["result"][:120]
     return ""
@@ -96,6 +111,29 @@ async def _dispatch_tool_calls(
     for obs in prior_observations:
         prior_signatures.setdefault(_call_signature(obs.tool, obs.arguments), obs)
 
+    # Consecutive same-tool repeat guard: local models sometimes loop
+    # calling the same tool with slightly different arguments (not exact
+    # duplicates, so the idempotency guard doesn't catch them). Count
+    # consecutive calls to the same tool; if the count exceeds the
+    # configured limit, return an error telling the LLM to change strategy.
+    max_same_repeat = get_setting(ctx.db, "AGENT_MAX_SAME_TOOL_REPEAT", ctx.org_id)
+    # Count consecutive same-tool calls from the end of prior_observations.
+    consecutive_counts: dict[str, int] = {}
+    for obs in reversed(prior_observations):
+        # Stop counting when we hit a different tool — only consecutive runs matter.
+        # But we need per-tool counts, so count the tail run of each tool.
+        pass
+    # Simpler: count how many of the last N observations are the same tool.
+    # We check this per-tool in the loop below.
+    def _consecutive_same_tool_count(tool_name: str) -> int:
+        count = 0
+        for obs in reversed(prior_observations):
+            if obs.tool == tool_name:
+                count += 1
+            else:
+                break
+        return count
+
     async def _budget_exceeded(name, args, cap):
         return {"tool": name, "arguments": args, "result": {}, "error": f"Budget exceeded: {name} call cap is {cap}", "tokens": 0}
 
@@ -115,13 +153,44 @@ async def _dispatch_tool_calls(
     for tc in tool_calls:
         name = tc.get("tool")
         args = tc.get("arguments", {})
+        # Normalize nested dict keys before any processing — some LLM providers
+        # return keys with extra quotes (e.g. '"title"' instead of 'title').
         tool_obj = tools.get(name)
+        if tool_obj and hasattr(tool_obj, "prepare_arguments"):
+            args = tool_obj.prepare_arguments(args)
         label = getattr(tool_obj, "ui_label", None) if tool_obj else None
         writer({"event": "tool_call", "tool": name, "arguments": args, "label": label or name})
         prior = prior_signatures.get(_call_signature(name, args))
         if prior is not None:
             logger.debug("[tool_node] duplicate call skipped, reusing prior observation: tool=%s args=%s", name, args)
-            coros.append(_reuse_prior(prior))
+            # Track consecutive duplicates for the same-tool repeat guard.
+            # If the LLM keeps calling the same tool with the same args, it's
+            # stuck in a loop — return an error to force a strategy change.
+            _consecutive_counts[name] = _consecutive_counts.get(name, 0) + 1
+            if _consecutive_counts[name] >= max_same_repeat:
+                logger.debug("[tool_node] same-tool repeat limit (%d) reached for %s via duplicates — forcing strategy change", max_same_repeat, name)
+                async def _dup_repeat_exceeded(name=name, args=args, limit=max_same_repeat):
+                    return {"tool": name, "arguments": args, "result": {},
+                            "error": f"Tool '{name}' called {limit} times consecutively (including duplicates). "
+                                     f"You already have the result — use it and proceed to the next step. "
+                                     f"For office generation: call extract_data(source='retrieved_docs') next, then office_generate.",
+                            "tokens": 0}
+                coros.append(_dup_repeat_exceeded())
+            else:
+                coros.append(_reuse_prior(prior))
+            executed_flags.append(False)
+            continue
+        # Consecutive same-tool repeat guard: if the same tool was called
+        # consecutively too many times (with different args), force the LLM
+        # to change strategy. This catches local models that loop with
+        # slightly different arguments.
+        if _consecutive_same_tool_count(name) >= max_same_repeat:
+            async def _repeat_exceeded(name=name, args=args, limit=max_same_repeat):
+                return {"tool": name, "arguments": args, "result": {},
+                        "error": f"Tool '{name}' called {limit} times consecutively with different arguments. "
+                                 f"Change strategy: use a different tool, finalize, or ask for clarification.",
+                        "tokens": 0}
+            coros.append(_repeat_exceeded())
             executed_flags.append(False)
             continue
         # Total budget check (across all tools)
@@ -418,6 +487,12 @@ async def tool_node(state, ctx) -> dict:
         if "accumulated_data" in ctx.state:
             state_update["accumulated_data"] = ctx.state["accumulated_data"]
 
+        # Propagate generated_files from office_generate back into graph state.
+        # office_generate writes to ctx.state["generated_files"] directly;
+        # tool_node must surface it so office_inspect/office_edit can see it.
+        if "generated_files" in ctx.state:
+            state_update["generated_files"] = ctx.state["generated_files"]
+
         # Root cause: the acting LLM alone decides when to stop calling tools,
         # and small/local models don\u2019t reliably follow "stop once sufficient"
         # / "don\u2019t repeat calls" prompt rules \u2014 they keep re-emitting tool_calls
@@ -437,7 +512,22 @@ async def tool_node(state, ctx) -> dict:
             # (top-1 score >= threshold AND gap to tail >= gap_threshold),
             # skip reflection and go straight to finalize. Saves ~2-5s of
             # reflect+think LLM latency for confident retrievals.
-            if _reranker_confident(merged_docs, ctx):
+            # BUT: skip for office/chart intent — those require post-retrieval
+            # tool calls (extract_data, office_generate, chart_generate) that
+            # haven't happened yet.
+            plan = state.get("plan")
+            plan_intent = ""
+            if hasattr(plan, "intent"):
+                plan_intent = plan.intent
+            elif isinstance(plan, dict):
+                plan_intent = plan.get("intent", "")
+            counts = state.get("tool_call_counts", {})
+            has_office_generate = counts.get("office_generate", 0) > 0
+            has_chart_generate = counts.get("chart_generate", 0) > 0
+            needs_post_retrieval = plan_intent in ("office", "chart")
+            if needs_post_retrieval and not (has_office_generate or has_chart_generate):
+                logger.debug("[tool_node] skipping reranker confidence short-circuit — %s intent requires post-retrieval tools", plan_intent)
+            elif _reranker_confident(merged_docs, ctx):
                 logger.debug("[tool_node] reranker confidence short-circuit, forcing finalize")
                 state_update["force_finalize"] = True
 
@@ -481,6 +571,11 @@ def _reranker_confident(merged_docs: list[dict], ctx) -> bool:
 
 async def _run_tool(tool, name: str, args: dict) -> dict:
     try:
+        # Normalize nested dict keys — some LLM providers return keys with
+        # extra quotes (e.g. '"title"' instead of 'title'). Call the tool's
+        # prepare_arguments if it exists, otherwise pass through.
+        if hasattr(tool, "prepare_arguments"):
+            args = tool.prepare_arguments(args)
         raw = await tool.arun(args)
         # Tools return {"ok": bool, "result": {...}, "error": str|None, "tokens": int, "terminate": bool}.
         # Unwrap the envelope so obs.result is the inner payload (e.g. {"docs": [...], ...}).

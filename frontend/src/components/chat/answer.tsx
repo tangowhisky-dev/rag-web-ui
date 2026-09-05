@@ -13,6 +13,7 @@ import { AnchorHTMLAttributes } from "react";
 import { Copy, Trash2, FileText, FileImage, FileType } from "lucide-react";
 import { AgenticProgress, AgentStepEvent } from "./agentic-progress";
 import { AgentLoopPanel } from "./agent-loop-panel";
+import { GeneratedFileChip } from "./generated-file-chip";
 import { SelectionActions } from "./selection-actions";
 import { preprocessCitations } from "./citation-utils";
 import {
@@ -675,8 +676,17 @@ export const Answer: FC<{
     [key: string]: unknown;
   };
   chartOptions?: Array<Record<string, unknown>>;
+  officeFiles?: Array<{
+    file_id: number;
+    file_name: string;
+    format: string;
+    title?: string;
+    summary?: string;
+    slide_count?: number;
+    chart_count?: number;
+  }>;
   onFollowUp?: (query: string) => void;
-}> = React.memo(({ messageId, chatId, markdown, citations = [], confidence, confidenceScore, suggestion, failedLegs, agentSteps, taskList, progressMessages, isStreaming = false, onDelete, finalConfidence, finalConfidenceLevel, faithfulness, completeness, retrievalScore, toolCalls, toolObservations, chartOptions, lastAnswerObject, onFollowUp }) => {
+}> = React.memo(({ messageId, chatId, markdown, citations = [], confidence, confidenceScore, suggestion, failedLegs, agentSteps, taskList, progressMessages, isStreaming = false, onDelete, finalConfidence, finalConfidenceLevel, faithfulness, completeness, retrievalScore, toolCalls, toolObservations, chartOptions, officeFiles, lastAnswerObject, onFollowUp }) => {
   const [citationInfoMap, setCitationInfoMap] = useState<
     Record<string, CitationInfo>
   >({});
@@ -1033,6 +1043,18 @@ export const Answer: FC<{
         // panel's own render for older messages that never got one.
         chartOptions={markdown.includes("```echarts") ? undefined : chartOptions}
       />
+
+      {officeFiles && officeFiles.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {officeFiles.map((file) => (
+            <GeneratedFileChip
+              key={file.file_id}
+              file={file}
+              chatId={chatId ?? ""}
+            />
+          ))}
+        </div>
+      )}
 
       <ConfirmDialog
         open={confirmDelete}

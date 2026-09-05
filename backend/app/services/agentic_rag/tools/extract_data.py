@@ -152,10 +152,14 @@ def _extract_from_retrieved_docs(
     if input_obj.document_ids:
         docs = _select_docs_by_ids(docs, input_obj.document_ids)
         if not docs:
-            return "", {"ok": False, "result": {}, "error": "No retrieved docs match the specified document_ids.", "tokens": 0}
+            # Fallback: use all retrieved docs instead of failing. The LLM
+            # often passes citation IDs (e.g. 102, 104) instead of actual
+            # document_ids (e.g. 35718). Rather than failing, just use all docs.
+            logger.warning("[extract_data] document_ids %s did not match any retrieved docs — falling back to all docs", input_obj.document_ids)
+            docs = ctx.state.get("retrieved_docs", []) if ctx.state else []
         # Build text with document headers so the LLM can attribute data.
         parts = []
-        for d in docs:
+        for d in docs[:10]:
             meta = d.get("metadata", {})
             title = meta.get("title", f"doc_{meta.get('document_id', '?')}")
             content = d.get("page_content", "")[:_MAX_CHARS_PER_DOC]

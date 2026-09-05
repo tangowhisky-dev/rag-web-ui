@@ -59,3 +59,34 @@ def append_chart_placeholder_instructions(system_prompt: str, chart_count: int) 
         f"replaced with the actual charts automatically."
     )
     return f"{system_prompt}{instructions}"
+
+
+def append_office_placeholder_instructions(system_prompt: str, office_files: list[dict]) -> str:
+    """Append instructions telling the model to place document download markers.
+
+    Used when office_generate already produced document(s) this turn:
+    the model inserts [[DOC_N]] markers where download links should appear.
+    finalize_node substitutes the markers with actual download links.
+    """
+    if not office_files:
+        return system_prompt
+    count = len(office_files)
+    if count == 1:
+        markers = "the literal marker [[DOC_1]]"
+    else:
+        markers = "the literal markers " + ", ".join(f"[[DOC_{i}]]" for i in range(1, count + 1))
+    file_desc = "; ".join(
+        f"{f.get('format', '').upper()}: {f.get('title') or f.get('file_name', 'document')}"
+        for f in office_files
+    )
+    instructions = (
+        f"\n\n## Office Document Placement\n"
+        f"{count} Office document(s) have been generated: {file_desc}. "
+        f"Insert {markers} at the point(s) in your answer where each "
+        f"download link should appear, each marker exactly once. "
+        f"The markers will be replaced with download links automatically. "
+        f"After each marker, include a one-line summary of what the document contains. "
+        f"Do NOT describe the document's content in detail — the document itself "
+        f"is the detailed output. Summarize what was created and highlight key findings."
+    )
+    return f"{system_prompt}{instructions}"
