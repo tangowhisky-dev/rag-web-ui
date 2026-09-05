@@ -438,10 +438,18 @@ def delete_message(
     *,
     db: Session = Depends(get_db),
     chat_id: int,
-    message_id: int,
+    message_id: str,
     current_user: User = Depends(get_current_user),
 ) -> Any:
-    """Delete a single assistant message (and the user message that prompted it)."""
+    """Delete a single assistant message (and the user message that prompted it).
+
+    Accepts string IDs because the frontend uses client-generated UUIDs
+    for messages that haven't been persisted yet. Non-numeric IDs return 404.
+    """
+    try:
+        msg_id = int(message_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Message not found (no server ID yet)")
     chat = (
         db.query(Chat)
         .filter(Chat.id == chat_id, _chat_owner_filter(current_user))
@@ -452,7 +460,7 @@ def delete_message(
 
     msg = (
         db.query(Message)
-        .filter(Message.id == message_id, Message.chat_id == chat_id)
+        .filter(Message.id == msg_id, Message.chat_id == chat_id)
         .first()
     )
     if not msg:

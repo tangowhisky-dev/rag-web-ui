@@ -1388,6 +1388,12 @@ function ChatPageInner({ params }: { params: { id: string } }) {
           const id = confirmDeleteMsgId;
           setConfirmDeleteMsgId(null);
           if (!id) return;
+          // Messages with non-numeric IDs (client-generated UUIDs) haven't
+          // been persisted to the DB yet — just remove from the UI.
+          if (!/^\d+$/.test(id)) {
+            setMessages((prev) => prev.filter((m) => m.id !== id));
+            return;
+          }
           try {
             await api.delete(`/api/chat/${params.id}/messages/${id}`);
             setMessages((prev) => prev.filter((m) => m.id !== id));
