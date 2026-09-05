@@ -309,16 +309,16 @@ class TestRerankResultsTool:
 
 
 class TestGraphExpandTool:
-    def test_no_seeds_returns_empty(self):
+    def test_no_retrieved_docs_returns_empty(self):
         ctx = MagicMock()
         ctx.org_id = 1
         ctx.db = MagicMock()
-        ctx.state = {"kb_ids": [1]}
+        ctx.state = {"kb_ids": [1], "retrieved_docs": []}
         ctx.chat_id = 1
         with patch("app.services.agentic_rag.tools.graph_expand.enforce_rbac", return_value={"kb_ids": [1]}):
             tool = GraphExpandTool()
             tool.ctx = ctx
-            result = asyncio.run(tool.arun({"kb_ids": [1], "seed_document_ids": None, "seed_chunk_ids": None}))
+            result = asyncio.run(tool.arun({"kb_ids": [1]}))
         assert result["ok"] is True
         assert result["result"]["hits"] == []
 
@@ -333,12 +333,19 @@ class TestGraphExpandTool:
         ctx = MagicMock()
         ctx.org_id = 1
         ctx.db = MagicMock()
-        ctx.state = {"kb_ids": [1]}
+        ctx.state = {
+            "kb_ids": [1],
+            "retrieved_docs": [
+                {"page_content": "doc", "metadata": {"document_id": 42, "qdrant_point_id": "uuid-1"}}
+            ],
+        }
         ctx.chat_id = 1
         ctx.message_id = 1
         tool = GraphExpandTool()
         tool.ctx = ctx
-        result = asyncio.run(tool.arun({"kb_ids": [1], "seed_chunk_ids": ["uuid-1"]}))
+        with patch("app.services.infrastructure.get_qdrant_client") as mock_q:
+            mock_q.return_value.scroll.return_value = ([MagicMock(id="uuid-1")], None)
+            result = asyncio.run(tool.arun({"kb_ids": [1]}))
         assert result["ok"] is True
         assert result["result"]["hits"] == []
         assert result["error"] is None

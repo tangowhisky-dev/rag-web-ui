@@ -18,8 +18,6 @@ logger = logging.getLogger(__name__)
 
 class GraphExpandInput(BaseModel):
     kb_ids: List[int] = Field(default_factory=list, description="Knowledge base IDs to search within.")
-    seed_document_ids: Optional[List[int]] = Field(default=None, description="Document IDs to use as seeds. The tool will find their chunks and traverse the graph.")
-    seed_chunk_ids: Optional[List[str]] = Field(default=None, description="Qdrant point UUIDs to use as seeds directly.")
     top_k: int = Field(default=10, description="Maximum expanded chunks to return.")
 
 
@@ -28,7 +26,7 @@ class GraphExpandTool(BaseAgentTool):
     description: str = (
         "Graph expansion via Neo4j. Finds related chunks through entity relationships. "
         "Call when initial search results are insufficient and the KB has graph data. "
-        "Pass seed_document_ids or seed_chunk_ids from prior search results."
+        "Seeds are read automatically from state.retrieved_docs — no need to pass them."
     )
     args_schema: type = GraphExpandInput
     ui_label: str = "Expanding via graph"
@@ -53,8 +51,21 @@ class GraphExpandTool(BaseAgentTool):
         if not kb_ids:
             return {"ok": True, "result": {"hits": [], "count": 0}, "error": None, "tokens": 0, "terminate": False}
 
-        if not input_obj.seed_document_ids and not input_obj.seed_chunk_ids:
+        if not ctx.state:
             return {"ok": True, "result": {"hits": [], "count": 0}, "error": None, "tokens": 0, "terminate": False}
+
+        # Read seed document IDs from state.retrieved_docs — the LLM
+        # never passes seed IDs. This avoids fabricated IDs and saves
+        # output tokens.
+        retrieved_docs = ctx.state.get("retrieved_docs", [])
+        seed_document_ids = list({
+            (d.get("metadata", {}) or {}).get("document_id")
+            for d in retrieved_docs
+            if isinstance(d, dict) and (d.get("metadata", {}) or {}).get("document_id") is not None
+        })
+
+        if not seed_document_ids:
+            return {"ok": True, "result": {"hits": [], "count": 0}, "error": "No retrieved docs to use as seeds. Call a search tool first.", "tokens": 0, "terminate": False}
 
         from app.services.infrastructure import get_qdrant_client
         from qdrant_client.models import Filter, FieldCondition, MatchAny
@@ -64,43 +75,35 @@ class GraphExpandTool(BaseAgentTool):
         # Build seed docs with qdrant_point_id in metadata
         seed_docs: list[LangchainDocument] = []
 
-        if input_obj.seed_chunk_ids:
-            for pid in input_obj.seed_chunk_ids:
-                seed_docs.append(LangchainDocument(
-                    page_content="",
-                    metadata={"qdrant_point_id": str(pid)},
-                ))
+        # Scroll Qdrant to find chunk point IDs for seed documents
+        client = get_qdrant_client()
+        collections = [f"kb_{kb_id}" for kb_id in kb_ids]
+        if datastore_ids:
+            collections += [f"ds_{ds_id}" for ds_id in datastore_ids]
 
-        if input_obj.seed_document_ids:
-            # Scroll Qdrant to find chunk point IDs for these documents
-            client = get_qdrant_client()
-            collections = [f"kb_{kb_id}" for kb_id in kb_ids]
-            if datastore_ids:
-                collections += [f"ds_{ds_id}" for ds_id in datastore_ids]
-
-            for collection in collections:
-                try:
-                    points, _ = client.scroll(
-                        collection_name=collection,
-                        scroll_filter=Filter(
-                            must=[
-                                FieldCondition(
-                                    key="document_id",
-                                    match=MatchAny(any=input_obj.seed_document_ids),
-                                )
-                            ]
-                        ),
-                        limit=100,
-                        with_payload=False,
-                        with_vectors=False,
-                    )
-                    for pt in points:
-                        seed_docs.append(LangchainDocument(
-                            page_content="",
-                            metadata={"qdrant_point_id": str(pt.id)},
-                        ))
-                except Exception as exc:
-                    logger.debug("[graph_expand] scroll collection %s failed: %s", collection, exc)
+        for collection in collections:
+            try:
+                points, _ = client.scroll(
+                    collection_name=collection,
+                    scroll_filter=Filter(
+                        must=[
+                            FieldCondition(
+                                key="document_id",
+                                match=MatchAny(any=seed_document_ids),
+                            )
+                        ]
+                    ),
+                    limit=100,
+                    with_payload=False,
+                    with_vectors=False,
+                )
+                for pt in points:
+                    seed_docs.append(LangchainDocument(
+                        page_content="",
+                        metadata={"qdrant_point_id": str(pt.id)},
+                    ))
+            except Exception as exc:
+                logger.debug("[graph_expand] scroll collection %s failed: %s", collection, exc)
 
         if not seed_docs:
             return {"ok": True, "result": {"hits": [], "count": 0}, "error": None, "tokens": 0, "terminate": False}

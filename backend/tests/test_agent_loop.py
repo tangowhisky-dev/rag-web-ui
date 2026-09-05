@@ -103,102 +103,59 @@ class TestToolRegistry:
 
 
 class TestChartGenerateTool:
-    def _tool(self):
+    def _tool(self, data=None):
         tool = ChartGenerateTool()
         tool.ctx = _make_ctx()
+        if data is not None:
+            tool.ctx.state["accumulated_data"] = data
         return tool
 
     def test_bar_chart(self):
-        tool = self._tool()
-        result = asyncio.run(
-            tool.arun(
-                {
-                    "chart_type": "bar",
-                    "data": [
-                        {"label": "A", "value": 10},
-                        {"label": "B", "value": 20},
-                    ],
-                    "title": "Demo",
-                }
-            )
-        )
+        tool = self._tool(data=[{"label": "A", "value": 10}, {"label": "B", "value": 20}])
+        result = asyncio.run(tool.arun({"chart_type": "bar", "title": "Demo"}))
         assert result["ok"] is True
         assert "bar" in result["result"]["chart_option"]["series"][0]["type"]
         assert result["result"]["valid"] is True
 
     def test_pie_chart(self):
-        tool = self._tool()
-        result = asyncio.run(
-            tool.arun(
-                {
-                    "chart_type": "pie",
-                    "data": [{"label": "A", "value": 5}],
-                    "title": "Demo",
-                }
-            )
-        )
+        tool = self._tool(data=[{"label": "A", "value": 5}])
+        result = asyncio.run(tool.arun({"chart_type": "pie", "title": "Demo"}))
         assert result["ok"] is True
         assert result["result"]["chart_type"] == "pie"
 
     def test_rejects_empty_data(self):
-        tool = self._tool()
-        result = asyncio.run(tool.arun({"chart_type": "bar", "data": []}))
+        tool = self._tool(data=[])
+        result = asyncio.run(tool.arun({"chart_type": "bar"}))
         assert result["ok"] is False
 
     def test_radar_chart(self):
-        tool = self._tool()
-        result = asyncio.run(
-            tool.arun(
-                {
-                    "chart_type": "radar",
-                    "data": [{"label": "Speed", "value": 80}, {"label": "Power", "value": 60}],
-                    "title": "Demo",
-                }
-            )
-        )
+        tool = self._tool(data=[{"label": "Speed", "value": 80}, {"label": "Power", "value": 60}])
+        result = asyncio.run(tool.arun({"chart_type": "radar", "title": "Demo"}))
         assert result["ok"] is True
         assert result["result"]["chart_option"]["series"][0]["type"] == "radar"
         assert len(result["result"]["chart_option"]["radar"]["indicator"]) == 2
 
     def test_gauge_chart(self):
-        tool = self._tool()
-        result = asyncio.run(
-            tool.arun({"chart_type": "gauge", "data": [{"label": "Completion", "value": 72}], "title": "Demo"})
-        )
+        tool = self._tool(data=[{"label": "Completion", "value": 72}])
+        result = asyncio.run(tool.arun({"chart_type": "gauge", "title": "Demo"}))
         assert result["ok"] is True
         assert result["result"]["chart_option"]["series"][0]["type"] == "gauge"
 
     def test_funnel_chart(self):
-        tool = self._tool()
-        result = asyncio.run(
-            tool.arun(
-                {
-                    "chart_type": "funnel",
-                    "data": [{"label": "Visit", "value": 100}, {"label": "Signup", "value": 40}],
-                    "title": "Demo",
-                }
-            )
-        )
+        tool = self._tool(data=[{"label": "Visit", "value": 100}, {"label": "Signup", "value": 40}])
+        result = asyncio.run(tool.arun({"chart_type": "funnel", "title": "Demo"}))
         assert result["ok"] is True
         assert result["result"]["chart_option"]["series"][0]["type"] == "funnel"
 
     def test_effect_scatter_chart(self):
-        tool = self._tool()
-        result = asyncio.run(
-            tool.arun(
-                {
-                    "chart_type": "effectScatter",
-                    "data": [{"label": "A", "value": 10}, {"label": "B", "value": 20}],
-                    "title": "Demo",
-                }
-            )
-        )
+        tool = self._tool(data=[{"label": "A", "value": 10}, {"label": "B", "value": 20}])
+        result = asyncio.run(tool.arun({"chart_type": "effectScatter", "title": "Demo"}))
         assert result["ok"] is True
         assert result["result"]["chart_option"]["series"][0]["type"] == "effectScatter"
 
     def test_unsupported_type_still_errors(self):
-        tool = self._tool()
-        result = asyncio.run(tool.arun({"chart_type": "sankey", "data": [{"label": "A", "value": 1}]}))
+        tool = self._tool(data=[{"label": "A", "value": 1}])
+        result = asyncio.run(tool.arun({"chart_type": "sankey"}))
         assert result["ok"] is False
         assert "Unsupported chart type" in result["error"]
 

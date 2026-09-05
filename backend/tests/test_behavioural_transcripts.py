@@ -252,6 +252,22 @@ def _setup_graph(monkeypatch, scripted_llm: _ScriptedLLM, ctx: ToolContext,
     for _tool_cls in (SearchExactTool, SearchSparseTool, SearchDenseTool):
         monkeypatch.setattr(_tool_cls, "_execute", _mock_search_execute)
 
+    # Patch chart_generate to inject test data into state.accumulated_data
+    # before running, since the LLM no longer passes data as an argument.
+    from app.services.agentic_rag.tools.chart_generate import ChartGenerateTool
+    _real_chart_execute = ChartGenerateTool._execute
+    async def _mock_chart_execute(self, input_obj):
+        if self.ctx and self.ctx.state is not None:
+            if not self.ctx.state.get("accumulated_data"):
+                self.ctx.state["accumulated_data"] = [
+                    {"label": "Q1", "value": 10},
+                    {"label": "Q2", "value": 20},
+                    {"label": "Q3", "value": 30},
+                    {"label": "Q4", "value": 40},
+                ]
+        return await _real_chart_execute(self, input_obj)
+    monkeypatch.setattr(ChartGenerateTool, "_execute", _mock_chart_execute)
+
     # Mock answer_evaluation_node to skip the LLM eval call.
     async def _mock_eval_node(state, ctx=None):
         return {
@@ -711,12 +727,11 @@ class TestCodeExecuteChartGenerate:
             "tool_calls": [{"tool": "code_execute", "arguments": {"code": "result = [10, 20, 30, 40]; print(result)"}}],
         }))
         llm.script("sufficiency", json.dumps({"sufficient": False}))
-        # Second think: call chart_generate.
+        # Second think: call chart_generate. Data comes from state.accumulated_data,
+        # not from the LLM arguments. Set it up via a mock extract_data call.
         llm.script("think", json.dumps({
             "tool_calls": [{"tool": "chart_generate", "arguments": {
                 "chart_type": "bar",
-                "data": [{"label": "Q1", "value": 10}, {"label": "Q2", "value": 20},
-                         {"label": "Q3", "value": 30}, {"label": "Q4", "value": 40}],
                 "title": "Quarterly Growth",
             }}],
         }))

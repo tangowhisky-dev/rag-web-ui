@@ -305,7 +305,7 @@ Available tools:
 - search_sparse: SPLADE sparse embedding search. Good for keyword variation and term expansion. Use when exact search misses but the query has distinctive terms.
 - search_dense: semantic vector search. Good for conceptual/meaning-based queries. Use when the query is about a concept, not a specific keyword.
 - rerank_results: cross-encoder reranking of search hits. Call after one or more search tools to improve precision and deduplicate. Only pass the query — the reranker reads all retrieved docs from state automatically. No need to pass hits.
-- graph_expand: expand search hits via the Neo4j knowledge graph. Call after a search to find related chunks.
+- graph_expand: expand search hits via the Neo4j knowledge graph. Call after a search to find related chunks. Seeds are read automatically from state.retrieved_docs — no need to pass seed IDs.
 - kb_search_documents: document-level retrieval by title, filename, content type, or date range. Queries the documents table directly, deduplicates same-title versions (keeps latest by file_modified_at), and returns the FULL converted markdown of each matching document. No chunks, no reranker. Use when the query names a specific document (e.g. "weekly update", "Q3 report") or asks for the latest/most recent version. For aggregate queries ("how many weekly updates this year"), use metadata_only=true with date filters to discover all matching documents first, then follow up to read specific ones. Set top_n based on the query: 3 for "latest", 20-50+ for aggregate queries. Supports modified_after/modified_before for date filtering.
 - kb_outline: get the heading structure (table of contents) of a KB document. Use when the query is about a specific document and search results don't cover the full answer.
 - kb_read: read a specific section (by heading name) or character range of a KB document. Use after kb_outline to read the relevant section in full.
@@ -315,7 +315,7 @@ Available tools:
 - file_summarize: map-reduce summarization of a large attached file.
 - file_extract_table: extract a table from CSV/Excel/HTML in a file.
 - code_execute: run Python for computation or data transformation. Use for calculations, statistics, or transforming already-extracted structured data. Do NOT use it to parse raw text into chart data — use extract_data for that.
-- chart_generate: build an ECharts option from structured data. If no data argument is passed, reads from accumulated_data (populated by prior extract_data calls).
+- chart_generate: build an ECharts option from structured data. Reads data automatically from accumulated_data in state (populated by prior extract_data calls). Only pass chart_type, title, and axis labels.
 - summarize_answer: summarize the previous answer.
 - extract_data: pull structured {{label, value}} rows from a previous answer, retrieved docs (with optional document_ids for batch processing), accumulated data, or a file. Use this (not code_execute) to turn raw text into structured data for charting. Results from source="retrieved_docs" accumulate in state — use source="accumulated" to retrieve all accumulated data before chart_generate.
 
@@ -425,7 +425,7 @@ Aggregate/analysis queries (counting, summarizing across many documents, trends,
 - Use kb_search_documents with metadata_only=true first to discover all matching documents (title, date, type) without loading content. Then read specific documents in a second call.
 - When reading many documents (10+), read them in batches: call kb_search_documents with document_ids for 5-10 documents at a time, using a lower max_tokens_per_doc (e.g. 4000-8000) to fit within the context window.
 - After reading each batch, call extract_data with source="retrieved_docs" and document_ids=[...] to extract structured data from that batch. Results accumulate automatically — each extract_data call appends to a persistent accumulated_data store that is NOT subject to context compaction.
-- For chart/table queries: after all batches are processed, call chart_generate with no data argument — it automatically reads from accumulated_data. Or call extract_data with source="accumulated" to inspect the accumulated data first.
+- For chart/table queries: after all batches are processed, call chart_generate — it reads automatically from accumulated_data. Or call extract_data with source="accumulated" to inspect the accumulated data first.
 - Pattern: discover (metadata_only) → read batch 1 → extract_data(batch 1) → read batch 2 → extract_data(batch 2) → ... → chart_generate() → final_answer.
 
 Temporal reasoning — deciding which document is "latest" or "most recent":
@@ -439,7 +439,7 @@ Temporal reasoning — deciding which document is "latest" or "most recent":
 - Only when title and content dates are ambiguous or absent should you fall back to file_modified_at as the tiebreaker.
 - When the user asks for "the latest weekly update", they mean the one whose coverage period is most recent, not the one whose file was last touched on disk.
 
-Chart requests: if the plan includes a chart, call extract_data first to turn retrieved docs / the previous answer into structured {{label, value}} rows, then call chart_generate with that structured data. Do NOT hand-roll the ECharts option yourself via code_execute — chart_generate is the only tool that produces a chart_option the UI can render.
+Chart requests: if the plan includes a chart, call extract_data first to turn retrieved docs / the previous answer into structured {{label, value}} rows, then call chart_generate — it reads from accumulated_data automatically. Do NOT hand-roll the ECharts option yourself via code_execute — chart_generate is the only tool that produces a chart_option the UI can render.
 """
 
 # ── Sufficiency Check Prompt ─────────────────────────────────────────────────
