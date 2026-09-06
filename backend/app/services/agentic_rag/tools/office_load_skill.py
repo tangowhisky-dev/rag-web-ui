@@ -1,8 +1,12 @@
 """office_load_skill tool — load OfficeCLI design guidelines on demand.
 
-Returns a condensed summary of the relevant OfficeCLI skill file so the LLM
-knows design guidelines, font hierarchies, quality standards, and command
-syntax for the target format. The LLM calls this BEFORE office_generate.
+Reads the vendored OfficeCLI skill files from backend/skills/ and extracts
+the sections the LLM needs: design principles, creating/editing (charts,
+animations, connectors, groups), QA workflow, and pitfalls. Setup, help,
+and shell-quoting sections are stripped (irrelevant — office_generate uses
+the Python SDK, not the CLI). Specialized profiles (pitch-deck, data-dashboard,
+financial-model, academic-paper) are returned in full minus the same
+irrelevant sections.
 """
 
 from __future__ import annotations
@@ -21,7 +25,9 @@ from app.services.agentic_rag.tools.base import BaseAgentTool
 logger = logging.getLogger(__name__)
 
 # Skill files are vendored at backend/skills/ (copied from the OfficeCLI repo).
-_SKILLS_BASE = os.path.join(os.path.dirname(__file__), "..", "..", "..", "skills")
+# __file__ is at backend/app/services/agentic_rag/tools/office_load_skill.py
+# Four dirs up = backend/ (the project root inside the container is /app).
+_SKILLS_BASE = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "skills")
 
 SKILL_MAP: dict[str, dict[str, str]] = {
     "pptx": {
@@ -39,100 +45,94 @@ SKILL_MAP: dict[str, dict[str, str]] = {
     },
 }
 
-# Condensed design rules per format — extracted from the full skill files.
-# These are the key rules the LLM needs; the full files are too large (40-67KB)
-# to inject into the think prompt without flooding the context window.
-_CONDENSED_RULES: dict[str, str] = {
-    "pptx": """## PowerPoint Design Rules (Condensed)
-
-### Typography
-- Title: >=36pt bold, Georgia or Trebuchet MS
-- Body: >=18pt, Calibri
-- Maximum 2 fonts per deck
-- One idea per slide
-
-### Color Palette (pick one theme)
-- midnight: bg=#0D1B2A, text=#FFFFFF, accent=#CADCFC
-- coral: bg=#FFFFFF, text=#333333, accent=#F96167
-- ocean: bg=#1A1A2E, text=#FFFFFF, accent=#16213E
-- forest: bg=#F5F5F0, text=#1B1B1B, accent=#2D5016
-- slate: bg=#1E2761, text=#FFFFFF, accent=#CADCFC
-
-### Layout (widescreen 33.87cm x 19.05cm)
-- Margins: 1.27cm all sides
-- Title: x=1.27cm, y=1.27cm, width=31.33cm, height=2.5cm
-- Body: x=1.27cm, y=4cm, width=31.33cm, height=12cm
-- Chart: x=2cm, y=5cm (or 11cm if bullets above), width=29cm, height=7cm
-
-### Charts
-- Chart types: bar, line, pie, column, scatter, area, doughnut
-- Data format: categories="Q1,Q2,Q3,Q4", data="Series1:1,2,3,4;Series2:5,6,7,8"
-- Multi-series: separate series with semicolons
-- Always include legend: "bottom"
-
-### Quality Checks
-- Every slide should have a non-text visual (chart or image)
-- Speaker notes on content slides
-- No text overflow — keep bullets to 5 per slide, 1 line each
-- Validate with office_inspect(mode=issues) after generation
-""",
-    "docx": """## Word Document Design Rules (Condensed)
-
-### Typography
-- Title: 24pt bold, Georgia, accent color
-- H1: 18pt bold, Georgia, accent color
-- H2: 14pt bold, Georgia, accent color
-- H3: 12pt bold, Georgia, accent color
-- Body: 11pt, Calibri, #333333, line spacing 1.15
-
-### Color Palette
-- accent: #2D5016 (forest) or #1E2761 (slate) or #F96167 (coral)
-- body text: #333333
-- muted: #666666
-
-### Structure
-- Title page: Title (24pt) + subtitle (14pt, muted)
-- Body: H1 → H2 → H3 → paragraphs
-- Tables: header row bold with accent color, 100% width
-- Charts: 15cm wide, 8cm tall
-
-### Charts
-- Same data format as PPTX: categories="...", data="Series:..."
-- Chart types: bar, line, pie, column, scatter, area
-
-### Quality Checks
-- Clear heading hierarchy (H1 > H2 > H3)
-- No empty sections
-- Validate with office_inspect(mode=issues) after generation
-""",
-    "xlsx": """## Excel Workbook Design Rules (Condensed)
-
-### Structure
-- Sheet names: max 31 chars, descriptive
-- First row: bold headers with accent color
-- Data starts row 2
-- One sheet per topic
-
-### Formatting
-- Headers: bold, accent color (e.g. #2D5016 or #1E2761)
-- Number columns: right-aligned
-- Date columns: ISO format (YYYY-MM-DD)
-
-### Charts
-- Chart types: bar, line, pie, column, scatter, area
-- Data range: "SheetName!A1:D10" (includes header row)
-- Title: descriptive, matches sheet purpose
-
-### Formulas
-- Use formulas for computed columns (e.g. =SUM(B2:B10), =AVERAGE(C2:C10))
-- Reference cells by address (A1, B2, etc.)
-
-### Quality Checks
-- No empty sheets
-- Headers present on all sheets
-- Validate with office_inspect(mode=issues) after generation
-""",
+# Sections to always strip — irrelevant because office_generate uses the
+# Python SDK, not the CLI shell. These are the first 2-3 sections in every
+# skill file.
+_STRIP_SECTIONS: set[str] = {
+    "## Setup",
+    "## ⚠️ Help-First Rule",
+    "## Help-First Rule",
+    "## Shell & Execution Discipline",
+    "## Mental Model & Inheritance",
+    "## Mental Model",
 }
+
+# For base skills only: extract only these sections (skip Common Workflow,
+# Quick Start, Reading & Analysis, CSV/bulk import, Raw-set XML appendix).
+# These sections are CLI-usage tutorials not needed by the SDK-based generator.
+_KEEP_SECTIONS_BASE: set[str] = {
+    "## Requirements for Outputs",
+    "## Design Principles",
+    "## Creating & Editing",
+    "## Chart Axis-by-Role",
+    "## QA (Required)",
+    "## Common Pitfalls",
+    "## Known Issues & Pitfalls",
+}
+
+
+def _strip_frontmatter(content: str) -> str:
+    """Remove YAML frontmatter (--- ... ---) if present."""
+    if content.startswith("---"):
+        end = content.find("---", 3)
+        if end != -1:
+            return content[end + 3:].lstrip()
+    return content
+
+
+def _extract_sections(content: str, keep: set[str] | None = None) -> str:
+    """Split by ## headers and return selected sections.
+
+    If keep is None, returns all sections except those in _STRIP_SECTIONS
+    (used for specialized profiles).
+    If keep is provided, returns only those sections that are in both
+    keep and not in _STRIP_SECTIONS (used for base skills).
+    """
+    lines = content.split("\n")
+    sections: list[tuple[str, list[str]]] = []
+    current_header: str | None = None
+    current_body: list[str] = []
+
+    for line in lines:
+        if line.startswith("## "):
+            if current_header is not None:
+                sections.append((current_header, current_body))
+            current_header = line.strip()
+            current_body = []
+        else:
+            current_body.append(line)
+    if current_header is not None:
+        sections.append((current_header, current_body))
+
+    result_parts: list[str] = []
+    for header, body in sections:
+        if header in _STRIP_SECTIONS:
+            continue
+        if keep is not None and header not in keep:
+            continue
+        result_parts.append(header + "\n" + "\n".join(body).rstrip())
+
+    return "\n\n".join(result_parts).strip()
+
+
+def _load_skill_content(skill_rel: str, is_base: bool) -> str:
+    """Read and extract relevant sections from a vendored skill file.
+
+    Base skills: extract only design principles, creating/editing, QA, pitfalls.
+    Specialized profiles: return full file minus setup/help/shell sections.
+    """
+    skill_path = os.path.join(_SKILLS_BASE, skill_rel)
+    if not os.path.exists(skill_path):
+        raise FileNotFoundError(f"Skill file not found: {skill_rel}")
+
+    with open(skill_path, encoding="utf-8") as f:
+        raw = f.read()
+
+    content = _strip_frontmatter(raw)
+    if is_base:
+        return _extract_sections(content, keep=_KEEP_SECTIONS_BASE)
+    else:
+        return _extract_sections(content, keep=None)
 
 
 class OfficeLoadSkillInput(BaseModel):
@@ -149,8 +149,8 @@ class OfficeLoadSkillTool(BaseAgentTool):
     description: str = (
         "Load OfficeCLI design guidelines for the target document format. "
         "Call this BEFORE office_generate to get font sizes, color palettes, "
-        "layout rules, and quality check criteria. Returns a condensed summary "
-        "of key design rules. Only call once per turn."
+        "layout rules, chart formats, QA workflow, and quality check criteria. "
+        "Only call once per turn."
     )
     args_schema: type[BaseModel] = OfficeLoadSkillInput
 
@@ -173,20 +173,16 @@ class OfficeLoadSkillTool(BaseAgentTool):
             available = ", ".join(format_map.keys())
             return {"ok": False, "result": {}, "error": f"Skill '{skill_name}' not found for format {fmt}. Available: {available}", "tokens": 0}
 
-        # Return condensed rules instead of the full skill file (which is 40-67KB).
-        # The condensed rules contain the key design parameters the LLM needs.
-        content = _CONDENSED_RULES.get(fmt, "")
-        if not content:
-            # Fallback: read the full file but truncate to first 2000 chars
-            skill_path = os.path.join(_SKILLS_BASE, skill_rel)
-            if os.path.exists(skill_path):
-                with open(skill_path, encoding="utf-8") as f:
-                    content = f.read()[:2000] + "\n... (truncated)"
-            else:
-                return {"ok": False, "result": {}, "error": f"Skill file not found: {skill_rel}", "tokens": 0}
+        is_base = skill_name == "base"
+        try:
+            content = _load_skill_content(skill_rel, is_base)
+        except FileNotFoundError as exc:
+            return {"ok": False, "result": {}, "error": str(exc), "tokens": 0}
 
         latency_ms = round((time.monotonic() - t0) * 1000)
-        write_audit(ctx, "office_load_skill", input_obj.model_dump(), {"format": fmt, "skill": skill_name, "content_len": len(content)}, latency_ms=latency_ms, status="ok")
+        write_audit(ctx, "office_load_skill", input_obj.model_dump(),
+                    {"format": fmt, "skill": skill_name, "content_len": len(content)},
+                    latency_ms=latency_ms, status="ok")
 
         return {
             "ok": True,

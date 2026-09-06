@@ -57,14 +57,21 @@ class OfficeSlideSpec(BaseModel):
     content: Optional[str] = Field(default=None, description="Slide body text (alternative to bullets — will be split into bullets by newline)")
     chart_type: Optional[str] = Field(default=None, description="bar, line, pie, column, scatter, area, doughnut")
     chart_title: Optional[str] = None
-    notes: Optional[str] = Field(default=None, description="Speaker notes")
     background: Optional[str] = Field(default=None, description="Hex color override, e.g. 1A1A2E")
 
     @model_validator(mode="before")
     @classmethod
     def _normalize_bullets(cls, data: Any) -> Any:
-        """Normalize bullets: accept string (split by comma/newline) or content field."""
+        """Normalize bullets and accept field aliases from skill files."""
         if isinstance(data, dict):
+            # Accept aliases from skill files: title_text → title, subtitle_text → subtitle.
+            # Drop speaker_notes and slide_number (not used — keeps tool calls small).
+            if "title_text" in data and "title" not in data:
+                data["title"] = data.pop("title_text")
+            if "subtitle_text" in data and "subtitle" not in data:
+                data["subtitle"] = data.pop("subtitle_text")
+            data.pop("speaker_notes", None)
+            data.pop("slide_number", None)
             # If 'content' is provided but 'bullets' is not, split content into bullets.
             if data.get("content") and not data.get("bullets"):
                 data["bullets"] = [b.strip() for b in str(data["content"]).split("\n") if b.strip()]
@@ -144,6 +151,7 @@ class OfficeGenerateInput(BaseModel):
     theme: Optional[str] = Field(default="midnight", description="Color theme: midnight, coral, ocean, forest, slate")
     font_heading: Optional[str] = Field(default=None, description="Override heading font")
     font_body: Optional[str] = Field(default=None, description="Override body font")
+    append: bool = Field(default=False, description="If True, append to the last generated file of the same format instead of creating a new one. Use this for multi-slide decks: call office_generate with 1-2 slides at a time, append=True for all calls after the first.")
 
 
 # ── Data translation helpers ─────────────────────────────────────────────────
@@ -276,11 +284,6 @@ def _build_pptx_batch(spec: OfficeGenerateInput, data: list[dict]) -> list[dict]
                                          "x": "2cm", "y": chart_y,
                                          "width": "29cm", "height": "7cm",
                                          "legend": "bottom"}})
-
-        # Speaker notes
-        if slide.notes:
-            items.append({"command": "add", "parent": f"/slide[{i}]", "type": "notes",
-                           "props": {"text": slide.notes}})
 
     return items
 
@@ -419,9 +422,13 @@ class OfficeGenerateTool(BaseAgentTool):
     name: str = "office_generate"
     ui_label: str = "Generating Office document"
     description: str = (
-        "Create a new Office document (.pptx, .docx, or .xlsx) from accumulated data. "
+        "Create or append to an Office document. Only three formats supported: pptx, docx, xlsx. "
+        "Any other format will be rejected. "
         "Data is read automatically from state.accumulated_data — do NOT pass data values. "
         "Provide only structure: format, title, slides/sections/sheets, chart types, theme. "
+        "For multi-slide decks: call office_generate with 1-2 slides at a time. "
+        "First call creates the file (append=false). Subsequent calls use append=true "
+        "to add slides to the same file. This avoids JSON corruption from large tool calls. "
         "Call office_load_skill first to get design guidelines. "
         "Returns file_id for download."
     )
@@ -470,11 +477,9 @@ class OfficeGenerateTool(BaseAgentTool):
         chat_work_dir = os.path.join(work_dir, str(ctx.chat_id or "default"))
         os.makedirs(chat_work_dir, exist_ok=True)
 
-        file_name = _generate_filename(input_obj)
-        file_path = os.path.join(chat_work_dir, file_name)
+        fmt = input_obj.format.lower()
 
         # 4. Build batch items
-        fmt = input_obj.format.lower()
         if fmt == "pptx":
             items = _build_pptx_batch(input_obj, data)
         elif fmt == "docx":
@@ -487,22 +492,58 @@ class OfficeGenerateTool(BaseAgentTool):
         if not items:
             return {"ok": False, "result": {}, "error": "No content generated. Provide slides, sections, or sheets.", "tokens": 0}
 
-        # 5. Execute via OfficeCLI SDK
+        # 5. Determine file path — append to existing or create new
+        existing_file_id = None
+        existing_chat_file = None
+
+        if input_obj.append and ctx.state:
+            # Find the last generated file of the same format
+            gen_files = ctx.state.get("generated_files", []) or []
+            last_match = None
+            for f in reversed(gen_files):
+                if f.get("format") == fmt:
+                    last_match = f
+                    break
+            if last_match:
+                existing_file_id = last_match["file_id"]
+                existing_chat_file = ctx.db.query(ChatFile).filter(ChatFile.id == existing_file_id).first()
+                if existing_chat_file and os.path.exists(existing_chat_file.stored_path):
+                    # Copy existing file to work dir for modification
+                    file_name = existing_chat_file.file_name
+                    file_path = os.path.join(chat_work_dir, file_name)
+                    shutil.copy2(existing_chat_file.stored_path, file_path)
+                else:
+                    existing_chat_file = None
+                    input_obj.append = False
+
+        if not input_obj.append:
+            file_name = _generate_filename(input_obj)
+            file_path = os.path.join(chat_work_dir, file_name)
+
+        # 6. Execute via OfficeCLI SDK
         try:
             import officecli
-            with officecli.create(file_path, "--force", binary=binary, auto_install=False) as doc:
-                # Batch in chunks of 50 to avoid pipe buffer limits
-                for chunk_start in range(0, len(items), 50):
-                    chunk = items[chunk_start:chunk_start + 50]
-                    doc.batch(chunk)
-                doc.send({"command": "save"})
+            if input_obj.append and existing_chat_file:
+                # Open existing file and add items
+                with officecli.open(file_path, binary=binary, auto_install=False) as doc:
+                    for chunk_start in range(0, len(items), 50):
+                        chunk = items[chunk_start:chunk_start + 50]
+                        doc.batch(chunk)
+                    doc.send({"command": "save"})
+            else:
+                # Create new file
+                with officecli.create(file_path, "--force", binary=binary, auto_install=False) as doc:
+                    for chunk_start in range(0, len(items), 50):
+                        chunk = items[chunk_start:chunk_start + 50]
+                        doc.batch(chunk)
+                    doc.send({"command": "save"})
         except ImportError:
             return {"ok": False, "result": {}, "error": "officecli SDK not installed. Run: pip install officecli-sdk", "tokens": 0}
         except Exception as exc:
             logger.warning("[office_generate] OfficeCLI failed: %s", exc)
             return {"ok": False, "result": {}, "error": f"OfficeCLI error: {exc}", "tokens": 0}
 
-        # 6. Read the generated file
+        # 7. Read the generated file
         if not os.path.exists(file_path):
             return {"ok": False, "result": {}, "error": "OfficeCLI did not produce a file.", "tokens": 0}
 
@@ -512,25 +553,33 @@ class OfficeGenerateTool(BaseAgentTool):
         if not file_bytes:
             return {"ok": False, "result": {}, "error": "Generated file is empty.", "tokens": 0}
 
-        # 7. Save to ephemeral storage
+        # 8. Save to ephemeral storage (overwrites prior stored_path on append)
         stored_path = save_ephemeral_file(ctx.chat_id, file_name, file_bytes)
 
-        # 8. Create ChatFile record
-        chat_file = ChatFile(
-            chat_id=ctx.chat_id,
-            message_id=ctx.message_id,
-            file_name=file_name,
-            stored_path=stored_path,
-            file_size=len(file_bytes),
-            content_type=_CONTENT_TYPES.get(fmt, "application/octet-stream"),
-            status="ready",
-            is_generated=True,
-        )
-        ctx.db.add(chat_file)
-        ctx.db.commit()
-        ctx.db.refresh(chat_file)
+        if existing_chat_file:
+            # Update existing ChatFile record with new size and path
+            existing_chat_file.stored_path = stored_path
+            existing_chat_file.file_size = len(file_bytes)
+            ctx.db.commit()
+            ctx.db.refresh(existing_chat_file)
+            chat_file = existing_chat_file
+        else:
+            # Create new ChatFile record
+            chat_file = ChatFile(
+                chat_id=ctx.chat_id,
+                message_id=ctx.message_id,
+                file_name=file_name,
+                stored_path=stored_path,
+                file_size=len(file_bytes),
+                content_type=_CONTENT_TYPES.get(fmt, "application/octet-stream"),
+                status="ready",
+                is_generated=True,
+            )
+            ctx.db.add(chat_file)
+            ctx.db.commit()
+            ctx.db.refresh(chat_file)
 
-        # 9. Update state
+        # 9. Update state — replace existing file_ref or add new one
         file_ref = {
             "file_id": chat_file.id,
             "file_name": file_name,
@@ -540,7 +589,13 @@ class OfficeGenerateTool(BaseAgentTool):
         }
         if ctx.state is not None:
             existing = ctx.state.get("generated_files", []) or []
-            ctx.state["generated_files"] = existing + [file_ref]
+            if existing_file_id:
+                ctx.state["generated_files"] = [
+                    file_ref if f.get("file_id") == existing_file_id else f
+                    for f in existing
+                ]
+            else:
+                ctx.state["generated_files"] = existing + [file_ref]
 
         # 10. Clean up temp file
         try:
@@ -572,7 +627,7 @@ class OfficeGenerateTool(BaseAgentTool):
                 chart_count += 1
 
         latency_ms = round((time.monotonic() - t0) * 1000)
-        write_audit(ctx, "office_generate", {"format": fmt, "title": input_obj.title},
+        write_audit(ctx, "office_generate", {"format": fmt, "title": input_obj.title, "append": input_obj.append},
                     {"file_id": chat_file.id, "file_size": len(file_bytes), "chart_count": chart_count},
                     latency_ms=latency_ms, status="ok")
 
@@ -585,7 +640,8 @@ class OfficeGenerateTool(BaseAgentTool):
                 "title": input_obj.title,
                 "path": stored_path,
                 "file_size": len(file_bytes),
-                "slide_count": (len(input_obj.slides) + (1 if input_obj.title or input_obj.subtitle else 0)) if input_obj.slides else None,
+                "appended": input_obj.append,
+                "slide_count": len(input_obj.slides) if input_obj.slides else None,
                 "section_count": len(input_obj.sections) if input_obj.sections else None,
                 "sheet_count": len(input_obj.sheets) if input_obj.sheets else None,
                 "chart_count": chart_count,

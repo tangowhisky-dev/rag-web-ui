@@ -319,7 +319,7 @@ Available tools:
 - summarize_answer: summarize the previous answer.
 - extract_data: pull structured {{label, value}} rows from a previous answer, retrieved docs (with optional document_ids for batch processing), accumulated data, or a file. Use this (not code_execute) to turn raw text into structured data for charting. Results from source="retrieved_docs" accumulate in state — use source="accumulated" to retrieve all accumulated data before chart_generate.
 - office_load_skill: load OfficeCLI design guidelines for the target format (pptx/docx/xlsx). Call BEFORE office_generate to get font sizes, color palettes, layout rules, and quality check criteria. Returns skill content as an observation. Only call once per turn.
-- office_generate: create a new Office document (.pptx, .docx, or .xlsx) from accumulated data. Data is read automatically from state.accumulated_data — do NOT pass data values. Provide only structure: format, title, slides/sections/sheets, chart types, theme. Returns file_id for download. Use this when the user explicitly asks for a PowerPoint, Word, or Excel file.
+- office_generate: create or append to an Office document (.pptx, .docx, or .xlsx). Data is read automatically from state.accumulated_data — do NOT pass data values. Provide only structure: format, title, slides/sections/sheets, chart types, theme. For multi-slide decks: emit 1-2 slides per call. First call creates the file (append=false). Subsequent calls use append=true to add slides to the same file. Returns file_id for download.
 - office_inspect: inspect a generated Office document for quality issues. Modes: outline, issues, screenshot, validate, get, query. Use after office_generate to verify quality.
 - office_edit: edit an existing generated Office document with OfficeCLI batch commands. Use after office_inspect finds issues to fix them.
 
@@ -434,17 +434,20 @@ Aggregate/analysis queries (counting, summarizing across many documents, trends,
 
 Office document generation (user asks for a PowerPoint, Word, or Excel file):
 - Intent: "office" when the user explicitly requests a downloadable Office document.
-- Pattern: retrieve/extract data → office_load_skill → office_generate → office_inspect → (office_edit if issues) → final_answer
+- Supported formats: pptx (PowerPoint/slides/deck/presentation), docx (Word/document), xlsx (Excel/spreadsheet). These are the ONLY downloadable file types the system can produce.
+- If the user asks for any other file type (PDF, TXT, CSV download, JSON, HTML, Markdown file, image, etc.), do NOT attempt to generate it. Tell the user the system can only produce .pptx, .docx, or .xlsx files, and offer to create one of those instead.
+- Pattern: retrieve/extract data → office_load_skill → office_generate (1-2 slides at a time, append=true after first) → office_inspect → (office_edit if issues) → final_answer
 - Example: "Get Q4 revenue data and make a 3-slide PowerPoint deck" → five subtasks:
   - Subtask a: tool_hint="search_dense", suggested_query="Q4 revenue", depends_on=[]
   - Subtask b: tool_hint="extract_data", depends_on=["a"]
   - Subtask c: tool_hint="office_load_skill", depends_on=["b"] — load pptx design guidelines
-  - Subtask d: tool_hint="office_generate", depends_on=["c"] — generate the deck
-  - Subtask e: tool_hint="office_inspect", depends_on=["d"] — quality check
+  - Subtask d: tool_hint="office_generate", depends_on=["c"] — generate slides 1-2 (append=false)
+  - Subtask e: tool_hint="office_generate", depends_on=["d"] — generate slide 3 (append=true)
+  - Subtask f: tool_hint="office_inspect", depends_on=["e"] — quality check
 - Example: "Upload this CSV and make a 3-slide deck with different chart types" → four subtasks:
   - Subtask a: tool_hint="file_extract_table", depends_on=[] — extract rows (set accumulate=true)
   - Subtask b: tool_hint="office_load_skill", depends_on=["a"]
-  - Subtask c: tool_hint="office_generate", depends_on=["b"] — generate with bar/line/pie slides
+  - Subtask c: tool_hint="office_generate", depends_on=["b"] — generate with bar/line/pie slides (1-2 at a time, append=true after first)
   - Subtask d: tool_hint="office_inspect", depends_on=["c"]
 - For large CSV/Excel files needing aggregation: add a code_execute subtask with output_as_data=true between extraction and office_generate.
 - chart_generate and office_generate serve different purposes: chart_generate produces INLINE charts in the chat; office_generate produces DOWNLOADABLE Office documents. Use chart_generate when the user wants to see a chart in the conversation. Use office_generate when the user asks for a PowerPoint/Word/Excel file.
@@ -463,11 +466,13 @@ Temporal reasoning — deciding which document is "latest" or "most recent":
 Chart requests: if the plan includes a chart, call extract_data first to turn retrieved docs / the previous answer into structured {{label, value}} rows, then call chart_generate — it reads from accumulated_data automatically. Do NOT hand-roll the ECharts option yourself via code_execute — chart_generate is the only tool that produces a chart_option the UI can render.
 
 Office document generation:
+- office_generate supports ONLY three formats: pptx, docx, xlsx. If the user asks for any other file type (PDF, TXT, CSV, JSON, HTML, etc.), do NOT call office_generate — tell them only pptx/docx/xlsx are supported and offer to create one of those instead.
 - office_generate can produce text-only documents OR data-driven documents. You decide what's needed.
 - For text-only docs (slides from bullet points, Word from paragraphs): provide slide bullets, section content, or sheet rows directly in the office_generate arguments. No data extraction needed.
 - For data-driven docs (charts, numeric tables): call extract_data(source="retrieved_docs") first to populate accumulated_data, then office_generate reads from it automatically. Do NOT pass raw data values in arguments — only structure (titles, chart types, theme).
 - Call office_load_skill once before office_generate to get design rules (fonts, colors, layout). Do NOT call it again.
-- After office_generate, call office_inspect(mode=issues) to check for problems. If issues are found, call office_edit to fix them. Maximum 3 QA cycles.
+- MULTI-SLIDE DECKS: emit slides 1-2 at a time to avoid JSON corruption. First call: office_generate(format=pptx, slides=[slide1], append=false). Next call: office_generate(format=pptx, slides=[slide2], append=true). Continue with append=true for each additional batch. The file accumulates — each append call adds to the same file.
+- After the last office_generate call, call office_inspect(mode=issues) to check for problems. If issues are found, call office_edit to fix them. Maximum 3 QA cycles.
 - Do NOT write raw OOXML or officecli commands via code_execute. office_generate and office_edit are the only tools that produce Office files.
 - When the user asks to refine a previously generated document, use office_edit, NOT office_generate.
 - chart_generate produces INLINE charts in the chat; office_generate produces DOWNLOADABLE Office documents.

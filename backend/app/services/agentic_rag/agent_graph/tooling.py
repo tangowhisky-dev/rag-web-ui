@@ -117,14 +117,12 @@ async def _dispatch_tool_calls(
     # consecutive calls to the same tool; if the count exceeds the
     # configured limit, return an error telling the LLM to change strategy.
     max_same_repeat = get_setting(ctx.db, "AGENT_MAX_SAME_TOOL_REPEAT", ctx.org_id)
+    # Track duplicate attempts within this tool node execution — duplicates
+    # don't create new observations, so _consecutive_same_tool_count alone
+    # can't detect loops where the LLM keeps calling the same tool with the
+    # same args.
+    _dup_attempt_counts: dict[str, int] = {}
     # Count consecutive same-tool calls from the end of prior_observations.
-    consecutive_counts: dict[str, int] = {}
-    for obs in reversed(prior_observations):
-        # Stop counting when we hit a different tool — only consecutive runs matter.
-        # But we need per-tool counts, so count the tail run of each tool.
-        pass
-    # Simpler: count how many of the last N observations are the same tool.
-    # We check this per-tool in the loop below.
     def _consecutive_same_tool_count(tool_name: str) -> int:
         count = 0
         for obs in reversed(prior_observations):
@@ -163,11 +161,12 @@ async def _dispatch_tool_calls(
         prior = prior_signatures.get(_call_signature(name, args))
         if prior is not None:
             logger.debug("[tool_node] duplicate call skipped, reusing prior observation: tool=%s args=%s", name, args)
-            # Track consecutive duplicates for the same-tool repeat guard.
-            # If the LLM keeps calling the same tool with the same args, it's
-            # stuck in a loop — return an error to force a strategy change.
-            _consecutive_counts[name] = _consecutive_counts.get(name, 0) + 1
-            if _consecutive_counts[name] >= max_same_repeat:
+            # Track duplicate attempts within this tool node. If the LLM
+            # keeps calling the same tool with the same args, it's stuck —
+            # return an error to force a strategy change.
+            _dup_attempt_counts[name] = _dup_attempt_counts.get(name, 0) + 1
+            total_consecutive = _consecutive_same_tool_count(name) + _dup_attempt_counts[name]
+            if total_consecutive >= max_same_repeat:
                 logger.debug("[tool_node] same-tool repeat limit (%d) reached for %s via duplicates — forcing strategy change", max_same_repeat, name)
                 async def _dup_repeat_exceeded(name=name, args=args, limit=max_same_repeat):
                     return {"tool": name, "arguments": args, "result": {},
