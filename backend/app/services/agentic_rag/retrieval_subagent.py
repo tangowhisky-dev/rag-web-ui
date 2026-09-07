@@ -150,21 +150,24 @@ def _extract_evidence_from_observations(observations: list[Observation]) -> list
                 "source_tool": obs.tool,
             })
 
-        # kb_search_documents returns "docs"
+        # kb_search_documents returns "docs" with structure:
+        # {"page_content": "...", "metadata": {"document_id": N, "title": "...", ...}}
         docs = result.get("docs", [])
         for doc in docs:
-            doc_id = doc.get("id") or doc.get("document_id")
+            meta = doc.get("metadata", {}) if isinstance(doc, dict) else {}
+            doc_id = doc.get("id") or doc.get("document_id") or meta.get("document_id")
             content = doc.get("page_content") or doc.get("content") or ""
-            title = doc.get("title") or doc.get("file_name") or ""
+            title = meta.get("title") or meta.get("file_name") or doc.get("title") or doc.get("file_name") or ""
+            file_name = meta.get("file_name") or doc.get("file_name", "")
             if content:
                 evidence.append({
                     "document_id": doc_id,
-                    "chunk_index": None,
-                    "page": None,
+                    "chunk_index": meta.get("chunk_index"),
+                    "page": meta.get("page"),
                     "title": title,
-                    "file_name": doc.get("file_name", ""),
-                    "content": content[:1000],
-                    "score": doc.get("score", 0.0),
+                    "file_name": file_name,
+                    "content": content[:2000],
+                    "score": meta.get("_reranker_score", meta.get("score", 0.0)),
                     "citation_ref": {
                         "document_id": doc_id,
                         "citation_kind": "document",
