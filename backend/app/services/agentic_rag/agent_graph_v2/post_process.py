@@ -186,7 +186,7 @@ async def post_process_node_v2(state, ctx) -> dict:
                     docs, state.get("file_markdown"), Plan(), chart_options,
                     query, query, summary_text, history_text, observations, ctx, office_files,
                 )
-            final, answer_usage = await _stream_final_answer(ctx, system, user, writer)
+            final, answer_usage = await _stream_final_answer(ctx, system, user, writer, docs)
 
         # Substitute chart and office markers.
         final = _substitute_chart_markers(final, chart_options)

@@ -128,6 +128,7 @@ async def _stream_final_answer(
     system: str,
     user: str,
     writer,
+    docs: list | None = None,
 ) -> tuple[str, Optional[dict]]:
     """Stream the final answer from the LLM. Returns (final, answer_usage)."""
     answer_usage: Optional[dict] = None
@@ -291,7 +292,7 @@ async def finalize_node(state, ctx) -> dict:
                     observations, ctx, office_files,
                 )
 
-            final, answer_usage = await _stream_final_answer(ctx, system, user, writer)
+            final, answer_usage = await _stream_final_answer(ctx, system, user, writer, docs)
 
         # Keep that copy before substituting, then rewrite citations and
         # stream the display-ready answer immediately, without waiting on

@@ -139,6 +139,24 @@ def _build_v2_user_prompt(
     return "".join(parts)
 
 
+# Keywords that indicate the user wants a downloadable file created.
+_OFFICE_CREATE_VERBS = {"create", "generate", "make", "build", "produce", "export"}
+_OFFICE_FORMAT_KEYWORDS = {
+    "powerpoint": "pptx", "pptx": "pptx", "ppt": "pptx", "slides": "pptx", "deck": "pptx",
+    "presentation": "pptx",
+    "word": "docx", "docx": "docx", "doc": "docx", "document": "docx",
+    "excel": "xlsx", "xlsx": "xlsx", "spreadsheet": "xlsx", "xls": "xlsx",
+}
+
+
+def _needs_office_creation(query: str) -> bool:
+    """Detect if the query asks for a downloadable Office file creation."""
+    q_lower = query.lower()
+    has_verb = any(v in q_lower for v in _OFFICE_CREATE_VERBS)
+    has_format = any(k in q_lower for k in _OFFICE_FORMAT_KEYWORDS)
+    return has_verb and has_format
+
+
 async def think_node_v2(state, ctx) -> dict:
     """Unified think node: LLM reasons and either calls tools or writes the answer."""
     with _agent_step("think"):
@@ -217,6 +235,18 @@ async def think_node_v2(state, ctx) -> dict:
         # At max iterations, force answer even if LLM emitted tool calls.
         if iteration >= max_iter:
             tool_calls = []
+
+        # Guard: if the query asks for a file creation but create_office_document
+        # was never called, force another iteration with a reminder. This catches
+        # smaller models that write "I have created..." without calling the tool.
+        if not tool_calls and iteration < max_iter:
+            counts = state.get("tool_call_counts", {})
+            if _needs_office_creation(query) and counts.get("create_office_document", 0) == 0:
+                logger.info("[think_v2] query requests file creation but create_office_document not called — forcing retry")
+                tool_calls = [{
+                    "tool": "create_office_document",
+                    "arguments": {"request": query},
+                }]
 
         if tool_calls:
             return {**compaction_updates, "iteration": iteration, "tool_calls": tool_calls}

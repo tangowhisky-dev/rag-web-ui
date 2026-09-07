@@ -43,6 +43,22 @@ class OfficeEditTool(BaseAgentTool):
     )
     args_schema: type[BaseModel] = OfficeEditInput
 
+    def prepare_arguments(self, args: dict) -> dict:
+        """Inject file_id from last office_generate observation if missing."""
+        if not args.get("file_id") and self.ctx is not None:
+            state = self.ctx.state
+            if state is not None:
+                for obs in reversed(state.get("observations") or []):
+                    tool = obs.get("tool") if isinstance(obs, dict) else getattr(obs, "tool", "")
+                    result = obs.get("result") if isinstance(obs, dict) else getattr(obs, "result", {})
+                    error = obs.get("error") if isinstance(obs, dict) else getattr(obs, "error", None)
+                    if tool == "office_generate" and not error and isinstance(result, dict):
+                        fid = result.get("file_id")
+                        if fid:
+                            args["file_id"] = fid
+                        break
+        return args
+
     def _run(self, *args: Any, **kwargs: Any) -> Any:
         raise NotImplementedError("Use arun() for agent tools.")
 

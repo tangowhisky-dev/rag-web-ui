@@ -44,11 +44,14 @@ You are an Office document generation specialist. You create polished,\
 - office_load_skill: Load design guidelines. Call ONCE first.\
  Args: {{"format": "pptx|docx|xlsx", "skill": "base"}}
 - office_generate: Create or append to a document.\
- Args: {{"format": "...", "title": "...", "append": false,\
+ Returns file_id. Args: {{"format": "...", "title": "...", "append": false,\
  "slides": [...], "sections": [...], "sheets": [...]}}
 - office_inspect: Check document quality.\
- Args: {{"mode": "outline|issues|screenshot|validate", "file_id": N}}
-- office_edit: Fix issues. Args: {{"file_id": N, "commands": [...]}}
+ Args: {{"mode": "outline|issues|screenshot|validate", "file_id": N}}\
+ (file_id comes from office_generate result)
+- office_edit: Fix issues.\
+ Args: {{"file_id": N, "commands": [...]}}\
+ (file_id comes from office_generate result)
 
 # Field Names (CRITICAL — wrong names cause validation errors)
 
@@ -272,6 +275,11 @@ async def run_office_subagent(
             )
             observations.append(obs)
             counts[name] = counts.get(name, 0) + 1
+
+            # Sync observations to ctx.state so prepare_arguments on
+            # office_inspect/office_edit can find file_id from office_generate.
+            if ctx.state is not None:
+                ctx.state["observations"] = observations
 
             # Emit observation
             summary_text = ""
