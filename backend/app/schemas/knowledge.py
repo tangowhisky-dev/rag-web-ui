@@ -79,6 +79,7 @@ class ProcessingTask(ProcessingTaskBase):
 class DocumentResponse(DocumentBase):
     id: int
     knowledge_base_id: int
+    conversion_status: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     processing_tasks: List[ProcessingTask] = []

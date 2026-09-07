@@ -19,6 +19,12 @@ Endpoints (prefix ``/api/knowledge-base``):
     POST   /{kb_id}/documents/{doc_id}/retry   - retry failed ingestion
     GET    /{kb_id}/documents/{doc_id}         - get document details
     GET    /{kb_id}/documents/{doc_id}/download - download document
+    GET    /{kb_id}/documents/{doc_id}/markdown - get converted markdown
+    PUT    /{kb_id}/documents/{doc_id}/markdown - save edited markdown + re-ingest
+    GET    /{kb_id}/documents/{doc_id}/ingest-status - current ingestion/graph status
+    POST   /{kb_id}/documents/{doc_id}/graph-pause  - pause graph ingestion for a file
+    POST   /{kb_id}/documents/{doc_id}/graph-resume - resume graph ingestion for a file
+    POST   /{kb_id}/documents/{doc_id}/graph-build  - start graph ingestion for a file
     POST   /{kb_id}/link-datastore             - link datastore to KB
     DELETE /{kb_id}/unlink-datastore/{ds_id}   - unlink datastore from KB
 

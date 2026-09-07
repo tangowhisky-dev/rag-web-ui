@@ -155,6 +155,44 @@ def cancel_graph_builds_for_datastore(datastore_id: int) -> int:
     return cancelled
 
 
+def cancel_graph_build_for_document(task_id: int) -> bool:
+    """Signal cancellation for a single document's in-flight graph build.
+
+    Sets the cancel event for the given task_id so the graph build loop
+    aborts on its next check.  Also marks pending graph_status as failed
+    so a queued (not-yet-started) build won't run.
+
+    Returns True if a build was cancelled or marked failed.
+    """
+    cancelled = False
+
+    # 1. Signal in-flight graph build to stop.
+    with _graph_cancel_lock:
+        event = _graph_cancel_events.get(task_id)
+    if event:
+        event.set()
+        cancelled = True
+
+    # 2. Mark pending graph build as failed in DB.
+    try:
+        db: Session = SessionLocal()
+        try:
+            task = db.query(ProcessingTask).filter(
+                ProcessingTask.id == task_id,
+            ).first()
+            if task and task.graph_status == "pending":
+                task.graph_status = "failed"
+                task.graph_error = "Cancelled — markdown edited"
+                db.commit()
+                cancelled = True
+        finally:
+            db.close()
+    except Exception:
+        pass
+
+    return cancelled
+
+
 def _clear_needs_reprocess(document_id: Optional[int]) -> None:
     if document_id is None:
         return
@@ -214,6 +252,7 @@ def run_ingestion_in_thread(
     file_size: Optional[int] = None,
     content_type: Optional[str] = None,
     skip_conversion: bool = False,
+    enable_graph: Optional[bool] = None,
 ) -> None:
     """Run ingestion in a brand-new event loop (for thread contexts).
 
@@ -263,6 +302,7 @@ def run_ingestion_in_thread(
                 file_path=file_path if data_store_id is not None else None,
                 db=None,
                 skip_conversion=skip_conversion,
+                enable_graph=enable_graph,
             )
 
         graph_request = loop.run_until_complete(_do())

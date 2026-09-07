@@ -36,9 +36,11 @@ def get_client_config(current_user: User = Depends(get_current_user)):
     try:
         chunk_size = get_setting(db, "CHUNK_SIZE", None)
         overlap_pct = get_setting(db, "OVERLAP_PERCENTAGE", None)
+        graphrag_enabled = get_setting(db, "GRAPHRAG_ENABLED", None)
         return {
             "chunk_size": chunk_size,
             "chunk_overlap": int(chunk_size * overlap_pct),
+            "graphrag_enabled": bool(graphrag_enabled),
         }
     finally:
         db.close()

@@ -6,27 +6,12 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { Tabs, TabsContent } from "@/components/ui/tabs";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/components/ui/use-toast";
-import { Loader2, Upload, X, Settings, FileText } from "lucide-react";
+import { Loader2, Upload, X, Settings } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { api, ApiError } from "@/lib/api";
 import { useDropzone } from "react-dropzone";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
-  Accordion,
-  AccordionContent,
-  AccordionItem,
-  AccordionTrigger,
-} from "@/components/ui/accordion";
 
 interface DocumentUploadStepsProps {
   knowledgeBaseId: number;
@@ -59,16 +44,6 @@ interface UploadResult {
   temp_path?: string;
 }
 
-interface PreviewChunk {
-  content: string;
-  metadata: Record<string, any>;
-}
-
-interface PreviewResponse {
-  chunks: PreviewChunk[];
-  total_chunks: number;
-}
-
 interface TaskResponse {
   tasks: Array<{
     upload_id: number;
@@ -98,33 +73,18 @@ export function DocumentUploadSteps({
 }: DocumentUploadStepsProps) {
   const [currentStep, setCurrentStep] = useState(1);
   const [files, setFiles] = useState<FileStatus[]>([]);
-  const [uploadedDocuments, setUploadedDocuments] = useState<{
-    [key: number]: PreviewResponse;
-  }>({});
-  const [selectedDocumentId, setSelectedDocumentId] = useState<number | null>(
-    null
-  );
   const [taskStatuses, setTaskStatuses] = useState<{
     [key: number]: TaskStatus;
   }>({});
   const [isLoading, setIsLoading] = useState(false);
-  const [chunkSize, setChunkSize] = useState(1500);
-  const [chunkOverlap, setChunkOverlap] = useState(300);
   // Per-file OCR toggle. Defaults to false for PDFs >5 MB (memory pressure),
   // true for everything else (images, scanned docs genuinely need it).
   const [ocrEnabled, setOcrEnabled] = useState<{ [uploadId: number]: boolean }>({});
   const [ocrAvailable, setOcrAvailable] = useState(true);
+  // Per-file graph ingestion toggle. Defaults to true (if GRAPHRAG_ENABLED).
+  const [graphEnabled, setGraphEnabled] = useState<{ [uploadId: number]: boolean }>({});
+  const [graphAvailable, setGraphAvailable] = useState(false);
   const { toast } = useToast();
-
-  // Fetch server-side chunk defaults from .env so the UI stays in sync.
-  useEffect(() => {
-    api.get("/api/config").then((data: { chunk_size: number; chunk_overlap: number }) => {
-      setChunkSize(data.chunk_size);
-      setChunkOverlap(data.chunk_overlap);
-    }).catch(() => {
-      // Non-fatal — fall back to hardcoded defaults if the endpoint fails.
-    });
-  }, []);
 
   // Check whether OCR is available (VISION_MODEL configured).
   useEffect(() => {
@@ -132,6 +92,15 @@ export function DocumentUploadSteps({
       setOcrAvailable(data.ocr_available);
     }).catch(() => {
       // Non-fatal — assume available if the endpoint fails.
+    });
+  }, []);
+
+  // Check whether graph ingestion is available (GRAPHRAG_ENABLED).
+  useEffect(() => {
+    api.get("/api/config").then((data: { graphrag_enabled?: boolean }) => {
+      setGraphAvailable(!!data.graphrag_enabled);
+    }).catch(() => {
+      // Non-fatal — assume unavailable if the endpoint fails.
     });
   }, []);
 
@@ -197,8 +166,9 @@ export function DocumentUploadSteps({
         }
       )) as UploadResult[];
 
-      // Update file statuses and initialise OCR defaults
+      // Update file statuses and initialise OCR + graph defaults
       const newOcrDefaults: { [id: number]: boolean } = {};
+      const newGraphDefaults: { [id: number]: boolean } = {};
       setFiles((prev) =>
         prev.map((f) => {
           const uploadResult = data.find((d) => d.file_name === f.file.name);
@@ -211,7 +181,10 @@ export function DocumentUploadSteps({
               const isPdf = f.file.name.toLowerCase().endsWith(".pdf");
               const isLarge = f.file.size > 5 * 1024 * 1024;
               const defaultOcr = !(isPdf && isLarge);
-              if (uploadResult.upload_id != null) newOcrDefaults[uploadResult.upload_id] = defaultOcr;
+              if (uploadResult.upload_id != null) {
+                newOcrDefaults[uploadResult.upload_id] = defaultOcr;
+                newGraphDefaults[uploadResult.upload_id] = true;
+              }
               return { ...f, status: "uploaded", uploadId: uploadResult.upload_id, tempPath: uploadResult.temp_path };
             }
           }
@@ -219,8 +192,8 @@ export function DocumentUploadSteps({
         })
       );
       setOcrEnabled((prev) => ({ ...prev, ...newOcrDefaults }));
+      setGraphEnabled((prev) => ({ ...prev, ...newGraphDefaults }));
 
-      // 移除自动处理的逻辑，只更新步骤
       setCurrentStep(2);
       toast({
         title: "Upload successful",
@@ -238,44 +211,7 @@ export function DocumentUploadSteps({
     }
   };
 
-  // Step 2: Preview chunks
-  const handlePreview = async () => {
-    const selectedFile = files.find(
-      (f) =>
-        f.documentId === selectedDocumentId || f.uploadId === selectedDocumentId
-    );
-    if (!selectedFile) return;
-
-    setIsLoading(true);
-    try {
-      const data = await api.post(
-        `/api/knowledge-base/${knowledgeBaseId}/documents/preview`,
-        {
-          document_ids: [selectedDocumentId],
-          chunk_size: chunkSize,
-          chunk_overlap: chunkOverlap,
-        }
-      );
-
-      setUploadedDocuments(data);
-
-      toast({
-        title: "Preview generated",
-        description: "Document preview generated successfully.",
-      });
-    } catch (error) {
-      toast({
-        title: "Preview failed",
-        description:
-          error instanceof ApiError ? error.message : "Something went wrong",
-        variant: "destructive",
-      });
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  // Step 3: Process documents
+  // Step 2: Process documents
   const handleProcess = async (uploadResults?: UploadResult[]) => {
     const resultsToProcess =
       uploadResults ||
@@ -288,6 +224,7 @@ export function DocumentUploadSteps({
           skip_processing: false,
           temp_path: f.tempPath!,
           enable_ocr: ocrEnabled[f.uploadId!] ?? true,
+          enable_graph: graphEnabled[f.uploadId!] ?? true,
         }));
 
     if (resultsToProcess.length === 0) return;
@@ -417,8 +354,7 @@ export function DocumentUploadSteps({
         <div className="flex justify-between mb-2">
           {[
             { step: 1, icon: Upload, label: "Upload" },
-            { step: 2, icon: FileText, label: "Preview" },
-            { step: 3, icon: Settings, label: "Process" },
+            { step: 2, icon: Settings, label: "Process" },
           ].map(({ step, icon: Icon, label }, index, array) => (
             <div
               key={step}
@@ -540,135 +476,6 @@ export function DocumentUploadSteps({
 
         <TabsContent value="2" className="mt-6">
           <Card className="p-6">
-            <div className="space-y-6">
-              <h3 className="text-lg font-medium">
-                Select Document to Preview
-              </h3>
-              <div className="flex items-center space-x-4">
-                <Select
-                  value={selectedDocumentId?.toString()}
-                  onValueChange={(value: string) =>
-                    setSelectedDocumentId(parseInt(value))
-                  }
-                >
-                  <SelectTrigger className="w-full">
-                    <SelectValue placeholder="Select a document to preview" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {files
-                      .filter((f) => f.status === "uploaded")
-                      .map((f) => (
-                        <SelectItem
-                          key={f.uploadId}
-                          value={f.uploadId!.toString()}
-                        >
-                          {f.file.name}
-                        </SelectItem>
-                      ))}
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <Accordion type="single" collapsible className="w-full">
-                <AccordionItem value="settings">
-                  <AccordionTrigger>Advanced Settings</AccordionTrigger>
-                  <AccordionContent>
-                    <div className="grid gap-4 md:grid-cols-2 pt-4">
-                      <div className="space-y-2">
-                        <Label htmlFor="chunk-size">Chunk Size (characters)</Label>
-                        <Input
-                          id="chunk-size"
-                          type="number"
-                          value={chunkSize}
-                          onChange={(e) =>
-                            setChunkSize(parseInt(e.target.value))
-                          }
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <Label htmlFor="chunk-overlap">
-                          Chunk Overlap (characters)
-                        </Label>
-                        <Input
-                          id="chunk-overlap"
-                          type="number"
-                          value={chunkOverlap}
-                          onChange={(e) =>
-                            setChunkOverlap(parseInt(e.target.value))
-                          }
-                        />
-                      </div>
-                    </div>
-                    <p className="mt-3 text-xs text-amber-600 dark:text-amber-400">
-                      These settings apply to this preview only and do not affect
-                      actual ingestion. Ingestion always uses the values set in{" "}
-                      <code className="font-mono">.env</code> (
-                      CHUNK_SIZE&nbsp;/&nbsp;OVERLAP_PERCENTAGE).
-                    </p>
-                  </AccordionContent>
-                </AccordionItem>
-              </Accordion>
-
-              <div className="flex space-x-4">
-                <Button
-                  onClick={handlePreview}
-                  disabled={isLoading || !selectedDocumentId}
-                  className="flex-1"
-                >
-                  {isLoading && (
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  )}
-                  Preview Chunks
-                </Button>
-                <Button
-                  onClick={() => setCurrentStep(3)}
-                  variant="secondary"
-                  className="flex-1"
-                >
-                  Continue
-                </Button>
-              </div>
-
-              {selectedDocumentId && uploadedDocuments[selectedDocumentId] && (
-                <div className="space-y-4">
-                  <div className="mt-4">
-                    <div className="flex items-center justify-between mb-4">
-                      <h3 className="text-lg font-medium">
-                        {
-                          files.find((f) => f.uploadId === selectedDocumentId)
-                            ?.file.name
-                        }
-                      </h3>
-                      <span className="text-sm text-muted-foreground">
-                        {uploadedDocuments[selectedDocumentId].chunks.length}{" "}
-                        chunks
-                      </span>
-                    </div>
-                    <div className="h-[400px] overflow-y-auto space-y-2 rounded-lg border p-4">
-                      {uploadedDocuments[selectedDocumentId].chunks.map(
-                        (chunk: PreviewChunk, index: number) => (
-                          <div
-                            key={index}
-                            className="p-4 bg-muted rounded-lg space-y-2"
-                          >
-                            <div className="text-sm text-muted-foreground">
-                              Chunk {index + 1}
-                            </div>
-                            <pre className="whitespace-pre-wrap text-sm">
-                              {chunk.content}
-                            </pre>
-                          </div>
-                        )
-                      )}
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-          </Card>
-        </TabsContent>
-        <TabsContent value="3" className="mt-6">
-          <Card className="p-6">
             <div className="space-y-4">
               <div className="max-h-[300px] overflow-y-auto space-y-2 rounded-lg border p-4">
                 {files
@@ -724,6 +531,23 @@ export function DocumentUploadSteps({
                                 title={ocrAvailable ? undefined : "OCR is not available — no vision model configured"}
                               >
                                 OCR{!ocrAvailable && " (unavailable)"}
+                              </label>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <Switch
+                                id={`graph-${file.uploadId}`}
+                                checked={graphAvailable && (graphEnabled[file.uploadId!] ?? true)}
+                                onCheckedChange={(v) =>
+                                  setGraphEnabled((prev) => ({ ...prev, [file.uploadId!]: v }))
+                                }
+                                disabled={isLoading || !graphAvailable}
+                              />
+                              <label
+                                htmlFor={`graph-${file.uploadId}`}
+                                className="text-xs text-muted-foreground cursor-pointer select-none"
+                                title={graphAvailable ? undefined : "Graph ingestion is not enabled — set GRAPHRAG_ENABLED=true"}
+                              >
+                                Graph{!graphAvailable && " (unavailable)"}
                               </label>
                             </div>
                             {task?.status === "failed" && (

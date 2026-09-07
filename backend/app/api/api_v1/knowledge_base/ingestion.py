@@ -207,15 +207,17 @@ async def process_kb_documents(
     task_info = []
     upload_ids = []
 
-    # Build a map of upload_id -> enable_ocr from the client request,
-    # deduplicating upload_ids (preserves first occurrence's OCR setting).
+    # Build a map of upload_id -> enable_ocr/enable_graph from the client request,
+    # deduplicating upload_ids (preserves first occurrence's settings).
     enable_ocr_map: Dict[int, Any] = {}
+    enable_graph_map: Dict[int, Any] = {}
     for result in upload_results:
         if result.get("skip_processing"):
             continue
         uid = result["upload_id"]
         if uid not in enable_ocr_map:
             enable_ocr_map[uid] = result.get("enable_ocr")
+            enable_graph_map[uid] = result.get("enable_graph")
             upload_ids.append(uid)
 
     if not upload_ids:
@@ -283,6 +285,7 @@ async def process_kb_documents(
                 "temp_path": upload.temp_path,
                 "file_name": upload.file_name,
                 "enable_ocr": enable_ocr_map.get(upload_id),
+                "enable_graph": enable_graph_map.get(upload_id),
             })
 
     task_info.extend(new_task_info)
@@ -308,6 +311,7 @@ async def add_processing_tasks_to_queue(task_data, kb_id, user_id):
                 None,
                 user_id,
                 enable_ocr=data.get("enable_ocr"),
+                enable_graph=data.get("enable_graph"),
             )
         )
     logger.debug(f"Added {len(task_data)} document processing tasks to queue")
@@ -322,8 +326,17 @@ async def _process_and_graph(
     user_id: int,
     enable_ocr: Optional[bool] = None,
     document_id: Optional[int] = None,
+    enable_graph: Optional[bool] = None,
+    file_hash: Optional[str] = None,
+    file_size: Optional[int] = None,
+    content_type: Optional[str] = None,
 ) -> None:
-    """Run ingestion, then fire graph build as a background task if needed."""
+    """Run ingestion, then fire graph build as a background task if needed.
+
+    When ``enable_graph`` is explicitly False, graph build is skipped even
+    if GRAPHRAG_ENABLED is true globally.  When None or True, the global
+    setting controls whether graph build runs.
+    """
     from app.services.ingestion.ingestion_dispatcher import _start_graph_build_thread
     graph_req = await process_document_background(
         temp_path,
@@ -334,6 +347,10 @@ async def _process_and_graph(
         user_id,
         enable_ocr=enable_ocr,
         document_id=document_id,
+        enable_graph=enable_graph,
+        file_hash=file_hash,
+        file_size=file_size,
+        content_type=content_type,
     )
     if graph_req is not None:
         _start_graph_build_thread(graph_req)

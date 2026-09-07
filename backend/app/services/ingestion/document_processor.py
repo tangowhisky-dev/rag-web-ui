@@ -473,6 +473,7 @@ async def _update_search_indices(
     progress_cb: Optional[callable],
     pt: Optional[ProgressTimeout],
     _prog: callable,
+    enable_graph: Optional[bool] = None,
 ) -> Optional[GraphBuildRequest]:
     """Update Qdrant/graph indices."""
     # Upsert to Qdrant
@@ -499,8 +500,11 @@ async def _update_search_indices(
     db.commit()
     logger.debug("[INGEST] document_id=%s completed chunks=%d", document.id, len(qdrant_payloads))
 
-    # Return graph build request
+    # Return graph build request — skip if explicitly disabled per-file
     from app.services.settings_service import get_setting as _gs
+    if enable_graph is False:
+        logger.debug("[INGEST] graph_skipped document_id=%s — disabled per-file", document.id)
+        return None
     if _gs(db, "GRAPHRAG_ENABLED", None):
         return GraphBuildRequest(
             document_id=document.id,
@@ -524,6 +528,7 @@ async def ingest_document(
     db: Session = None,
     progress_cb: Optional[callable] = None,
     pt: Optional[ProgressTimeout] = None,
+    enable_graph: Optional[bool] = None,
 ) -> Optional[GraphBuildRequest]:
     """Chunk a document's markdown, embed, and store in Qdrant.
 
@@ -560,6 +565,7 @@ async def ingest_document(
         return await _update_search_indices(
             qdrant_payloads, kb_id, document, file_name,
             data_store_id, task, task_id, db, progress_cb, pt, _prog,
+            enable_graph=enable_graph,
         )
 
     except Exception as e:
@@ -619,9 +625,13 @@ def _resolve_doc_metadata(
             os.path.splitext(file_name)[1].lower(), "application/octet-stream",
         )
     else:
-        doc_file_hash = file_hash if file_hash else task.document_upload.file_hash
-        doc_file_size = file_size if file_size else task.document_upload.file_size
-        doc_content_type = content_type if content_type else task.document_upload.content_type
+        upload = task.document_upload
+        doc_file_hash = file_hash if file_hash else (upload.file_hash if upload else None)
+        doc_file_size = file_size if file_size else (upload.file_size if upload else None)
+        doc_content_type = content_type if content_type else (
+            upload.content_type if upload else
+            CONTENT_TYPE_MAP.get(os.path.splitext(file_name)[1].lower(), "application/octet-stream")
+        )
     return doc_file_hash, doc_file_size, doc_content_type
 
 
@@ -850,6 +860,7 @@ async def process_document_full(
     file_size: Optional[int] = None,
     content_type: Optional[str] = None,
     skip_conversion: bool = False,
+    enable_graph: Optional[bool] = None,
 ) -> Optional[GraphBuildRequest]:
     """Full pipeline: convert → ingest.  Replaces process_document_background.
 
@@ -857,6 +868,10 @@ async def process_document_full(
     document was successfully ingested, so the caller can fire the graph
     build as a separate background task. Returns None if graph is disabled
     or ingestion failed.
+
+    When ``enable_graph`` is explicitly False, graph build is skipped even
+    if GRAPHRAG_ENABLED is true globally.  When None or True, the global
+    setting controls whether graph build runs.
     """
     if db is None:
         db = SessionLocal()
@@ -957,6 +972,7 @@ async def process_document_full(
                 db=db,
                 progress_cb=_set_progress,
                 pt=pt,
+                enable_graph=enable_graph,
             )
 
             logger.debug("[PROGRESS_TIMEOUT] task_id=%s completed_ok=true", task_id)

@@ -120,6 +120,19 @@ def update_document_markdown(
             detail="Document has not been converted yet — run re-convert first",
         )
 
+    # Cancel any in-flight graph build for this document so the old
+    # graph data doesn't race with the re-ingestion that will follow.
+    from app.services.ingestion.ingestion_dispatcher import cancel_graph_build_for_document
+    from app.models.knowledge import ProcessingTask as _PT
+    latest_task = (
+        db.query(_PT)
+        .filter(_PT.document_id == document_id)
+        .order_by(_PT.id.desc())
+        .first()
+    )
+    if latest_task:
+        cancel_graph_build_for_document(latest_task.id)
+
     # Persist new markdown + bump lock version + earmark for reprocessing
     doc.converted_markdown = body.markdown
     doc.conversion_status = "completed"
@@ -129,7 +142,7 @@ def update_document_markdown(
     db.commit()
 
     logger.debug(
-        "[EDITOR] markdown_saved doc_id=%s datastore_id=%s — earmarked for reprocessing",
+        "[EDITOR] markdown_saved doc_id=%s datastore_id=%s — earmarked for reprocessing (graph cancelled)",
         document_id, datastore_id,
     )
 

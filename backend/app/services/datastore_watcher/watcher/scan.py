@@ -152,30 +152,27 @@ class ScanMixin:
             ) or 0
             ds.last_scan_total_files = total_files_on_disk
 
-            # On resume from pause, start the progress counter at the number
-            # of already-completed selected documents.  Without this, the UI
-            # shows 0/16 even though 4 files were fully ingested before the
-            # pause — the actual ingestion correctly skips them (discovery
-            # manifest comparison), but the counter makes it look like a
-            # restart from scratch.
-            if previous_status == "paused":
-                completed_count = (
-                    db.query(func.count(Document.id))
-                    .filter(
-                        Document.data_store_id == datastore_id,
-                        Document.is_selected == True,  # noqa: E712
-                        Document.chunks.any(),
-                    )
-                    .scalar()
-                ) or 0
-                ds.last_scan_processed = completed_count
-                logger.debug(
-                    "[WATCHER] scan_resume scan_id=%d datastore_id=%d completed_before=%d total=%d",
-                    scan_id, datastore_id, completed_count, selected_count,
+            # Always start the progress counter at the number of already-
+            # completed selected documents (those with chunks).  Without
+            # this, a second manual scan after selecting more files shows
+            # 0/22 even though 16 were already ingested — the actual
+            # ingestion correctly skips them (discovery manifest
+            # comparison), but the counter makes it look like a restart
+            # from scratch.  This also covers the pause/resume case.
+            completed_count = (
+                db.query(func.count(Document.id))
+                .filter(
+                    Document.data_store_id == datastore_id,
+                    Document.is_selected == True,  # noqa: E712
+                    Document.chunks.any(),
                 )
-            else:
-                completed_count = 0
-                ds.last_scan_processed = 0
+                .scalar()
+            ) or 0
+            ds.last_scan_processed = completed_count
+            logger.debug(
+                "[WATCHER] scan_init_progress scan_id=%d datastore_id=%d completed_before=%d total=%d previous_status=%s",
+                scan_id, datastore_id, completed_count, selected_count, previous_status,
+            )
 
             db.commit()
 

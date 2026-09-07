@@ -15,10 +15,21 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { FileText, Trash2, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
+import {
+  FileText,
+  Trash2,
+  Loader2,
+  CheckCircle2,
+  AlertCircle,
+  Pencil,
+  Network,
+  Pause,
+  Play,
+} from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { LoadingDots } from "@/components/ui/loading-dots";
+import { useRouter } from "next/navigation";
 
 interface ProcessingTask {
   id: number;
@@ -38,6 +49,7 @@ interface Document {
   file_path: string;
   file_size: number;
   content_type: string;
+  conversion_status?: string | null;
   created_at: string;
   processing_tasks: ProcessingTask[];
 }
@@ -98,11 +110,13 @@ function processTaskResponse(
 }
 
 export function DocumentList({ knowledgeBaseId, refreshKey }: DocumentListProps) {
+  const router = useRouter();
   const [documents, setDocuments] = useState<Document[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const [confirmDoc, setConfirmDoc] = useState<Document | null>(null);
+  const [graphLoadingId, setGraphLoadingId] = useState<number | null>(null);
   // live progress keyed by task id — overlays the static data from KB GET
   const [taskProgress, setTaskProgress] = useState<Record<number, ProcessingTask>>({});
   const taskProgressRef = useRef(taskProgress);
@@ -216,6 +230,62 @@ export function DocumentList({ knowledgeBaseId, refreshKey }: DocumentListProps)
     }
   };
 
+  const handleEdit = (doc: Document) => {
+    router.push(`/dashboard/knowledge/${knowledgeBaseId}/documents/${doc.id}`);
+  };
+
+  const handleGraphPause = async (doc: Document) => {
+    setGraphLoadingId(doc.id);
+    try {
+      await api.post(`/api/knowledge-base/${knowledgeBaseId}/documents/${doc.id}/graph-pause`);
+      toast({ title: "Graph ingestion paused", description: `"${doc.file_name}"` });
+      // Refresh to get updated status
+      const fresh = await fetchDocuments();
+      if (fresh) docsRef.current = fresh;
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : "Failed to pause graph ingestion";
+      toast({ title: "Pause failed", description: msg, variant: "destructive" });
+    } finally {
+      setGraphLoadingId(null);
+    }
+  };
+
+  const handleGraphResume = async (doc: Document) => {
+    setGraphLoadingId(doc.id);
+    try {
+      await api.post(`/api/knowledge-base/${knowledgeBaseId}/documents/${doc.id}/graph-resume`);
+      toast({ title: "Graph ingestion resumed", description: `"${doc.file_name}"` });
+      const fresh = await fetchDocuments();
+      if (fresh) {
+        docsRef.current = fresh;
+        schedulePoll();
+      }
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : "Failed to resume graph ingestion";
+      toast({ title: "Resume failed", description: msg, variant: "destructive" });
+    } finally {
+      setGraphLoadingId(null);
+    }
+  };
+
+  const handleGraphBuild = async (doc: Document) => {
+    setGraphLoadingId(doc.id);
+    try {
+      await api.post(`/api/knowledge-base/${knowledgeBaseId}/documents/${doc.id}/graph-build`);
+      toast({ title: "Graph ingestion started", description: `"${doc.file_name}"` });
+      const fresh = await fetchDocuments();
+      if (fresh) {
+        docsRef.current = fresh;
+        schedulePoll();
+      }
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : "Failed to start graph ingestion";
+      toast({ title: "Start failed", description: msg, variant: "destructive" });
+    } finally {
+      setGraphLoadingId(null);
+    }
+  };
+
   const getTaskDisplay = (doc: Document): ProcessingTask | null => {
     const task = doc.processing_tasks[0];
     if (!task) return null;
@@ -268,7 +338,8 @@ export function DocumentList({ knowledgeBaseId, refreshKey }: DocumentListProps)
           <TableHead>Size</TableHead>
           <TableHead>Created</TableHead>
           <TableHead>Status</TableHead>
-          <TableHead className="w-16" />
+          <TableHead className="w-32">Graph</TableHead>
+          <TableHead className="w-24" />
         </TableRow>
       </TableHeader>
       <TableBody>
@@ -276,6 +347,12 @@ export function DocumentList({ knowledgeBaseId, refreshKey }: DocumentListProps)
           const taskDisplay = getTaskDisplay(doc);
           const isInProgress =
             taskDisplay?.status === "pending" || taskDisplay?.status === "processing";
+          const isCompleted = taskDisplay?.status === "completed";
+          const canEdit = isCompleted && doc.conversion_status === "completed";
+          const graphStatus = taskDisplay?.graph_status;
+          const canPauseGraph = graphStatus === "pending";
+          const canResumeGraph = graphStatus === "failed" && isCompleted;
+          const canStartGraph = !graphStatus && isCompleted;
           return (
             <TableRow key={doc.id}>
               <TableCell className="font-medium">
@@ -311,21 +388,6 @@ export function DocumentList({ knowledgeBaseId, refreshKey }: DocumentListProps)
                       >
                         {taskDisplay.status}
                       </Badge>
-                      {taskDisplay.graph_status === "pending" && (
-                        <span title={taskDisplay.graph_progress_message || "Building knowledge graph"}>
-                          <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
-                        </span>
-                      )}
-                      {taskDisplay.graph_status === "completed" && (
-                        <span title="Knowledge graph built">
-                          <CheckCircle2 className="h-3.5 w-3.5 text-muted-foreground" />
-                        </span>
-                      )}
-                      {taskDisplay.graph_status === "failed" && (
-                        <span title={taskDisplay.graph_error || "Graph extraction failed"}>
-                          <AlertCircle className="h-3.5 w-3.5 text-amber-500" />
-                        </span>
-                      )}
                     </div>
                     {isInProgress && (
                       <div className="space-y-0.5">
@@ -344,23 +406,109 @@ export function DocumentList({ knowledgeBaseId, refreshKey }: DocumentListProps)
                 )}
               </TableCell>
               <TableCell>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  disabled={deletingId === doc.id || !!isInProgress}
-                  onClick={() => setConfirmDoc(doc)}
-                  className="h-8 w-8 text-muted-foreground hover:text-destructive hover:bg-destructive/10"
-                  title={isInProgress ? "Cannot delete while processing" : "Delete document"}
-                >
-                  {deletingId === doc.id ? (
-                    <span
-                      className="w-3 h-3 rounded-full bg-current"
-                      style={{ animation: "loading-dot-pulse 1.4s ease-in-out infinite" }}
-                    />
-                  ) : (
-                    <Trash2 className="h-4 w-4" />
+                <div className="flex items-center gap-1.5">
+                  {graphStatus === "pending" && (
+                    <span title={taskDisplay?.graph_progress_message || "Building knowledge graph"}>
+                      <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                    </span>
                   )}
-                </Button>
+                  {graphStatus === "completed" && (
+                    <span title="Knowledge graph built">
+                      <CheckCircle2 className="h-3.5 w-3.5 text-muted-foreground" />
+                    </span>
+                  )}
+                  {graphStatus === "failed" && (
+                    <span title={taskDisplay?.graph_error || "Graph extraction failed"}>
+                      <AlertCircle className="h-3.5 w-3.5 text-amber-500" />
+                    </span>
+                  )}
+                  {!graphStatus && isCompleted && (
+                    <span title="Graph ingestion not started">
+                      <Network className="h-3.5 w-3.5 text-muted-foreground/40" />
+                    </span>
+                  )}
+                  {/* Per-file graph controls */}
+                  {canPauseGraph && (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6"
+                      disabled={graphLoadingId === doc.id}
+                      onClick={() => handleGraphPause(doc)}
+                      title="Pause graph ingestion"
+                    >
+                      {graphLoadingId === doc.id ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : (
+                        <Pause className="h-3 w-3" />
+                      )}
+                    </Button>
+                  )}
+                  {canResumeGraph && (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6"
+                      disabled={graphLoadingId === doc.id}
+                      onClick={() => handleGraphResume(doc)}
+                      title="Resume graph ingestion"
+                    >
+                      {graphLoadingId === doc.id ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : (
+                        <Play className="h-3 w-3" />
+                      )}
+                    </Button>
+                  )}
+                  {canStartGraph && (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6"
+                      disabled={graphLoadingId === doc.id}
+                      onClick={() => handleGraphBuild(doc)}
+                      title="Start graph ingestion"
+                    >
+                      {graphLoadingId === doc.id ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : (
+                        <Network className="h-3 w-3" />
+                      )}
+                    </Button>
+                  )}
+                </div>
+              </TableCell>
+              <TableCell>
+                <div className="flex items-center gap-1">
+                  {canEdit && (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 text-muted-foreground hover:text-primary"
+                      onClick={() => handleEdit(doc)}
+                      title="View / edit markdown"
+                    >
+                      <Pencil className="h-4 w-4" />
+                    </Button>
+                  )}
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    disabled={deletingId === doc.id || !!isInProgress}
+                    onClick={() => setConfirmDoc(doc)}
+                    className="h-8 w-8 text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+                    title={isInProgress ? "Cannot delete while processing" : "Delete document"}
+                  >
+                    {deletingId === doc.id ? (
+                      <span
+                        className="w-3 h-3 rounded-full bg-current"
+                        style={{ animation: "loading-dot-pulse 1.4s ease-in-out infinite" }}
+                      />
+                    ) : (
+                      <Trash2 className="h-4 w-4" />
+                    )}
+                  </Button>
+                </div>
               </TableCell>
             </TableRow>
           );
