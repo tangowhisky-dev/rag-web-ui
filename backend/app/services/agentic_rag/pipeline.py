@@ -19,9 +19,20 @@ async def run_agentic_rag(
     user_id: Optional[int] = None,
     message_id: Optional[int] = None,
 ) -> AsyncGenerator[dict, None]:
-    """Run the enterprise agent loop and stream SSE events."""
-    from .agent_runner import run_agent_loop
-    async for event in run_agent_loop(
+    """Run the enterprise agent loop and stream SSE events.
+
+    Uses agentic-v2 (unified think ⇄ tool loop) by default.
+    Set USE_AGENTIC_V1=true in settings to fall back to the old pipeline.
+    """
+    from app.services.settings_service import get_setting
+    use_v1 = get_setting(db, "USE_AGENTIC_V1", org_id)
+    if use_v1:
+        from .agent_runner import run_agent_loop
+        runner = run_agent_loop
+    else:
+        from .agent_runner_v2 import run_agent_loop_v2
+        runner = run_agent_loop_v2
+    async for event in runner(
         query=query,
         kb_ids=knowledge_base_ids,
         db=db,

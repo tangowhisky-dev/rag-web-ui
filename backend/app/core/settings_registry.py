@@ -260,6 +260,9 @@ _ORG_OVERRIDABLE = [
                description="Bounds hub-entity fan-out."),
 
     # Agentic features
+    SettingDef("USE_AGENTIC_V1", "Agentic", "Use v1 pipeline (legacy)",
+               "bool", False, scope="org", reload="next_request",
+               description="Fall back to the old multi-node pipeline (planner/sufficiency/finalizer). Default: v2 unified loop."),
     SettingDef("AGENT_MAX_ITERATIONS", "Agentic", "Max agent iterations",
                "int", 8, scope="org", reload="next_request", min_value=1,
                description="Hard cap on think-act-observe cycles. When reached, the agent finalizes with whatever it has."),
