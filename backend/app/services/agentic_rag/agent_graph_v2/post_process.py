@@ -52,20 +52,49 @@ def _collect_chart_options(observations: list) -> list[dict]:
     return chart_options
 
 
-def _collect_office_files(observations: list) -> list[dict]:
+def _collect_office_files(observations: list, generated_files: list | None = None) -> list[dict]:
+    """Collect office file metadata from observations and state."""
     office_files: list[dict] = []
+    seen_ids: set = set()
+
+    # From create_office_document wrapper observations
     for raw_obs in observations:
         obs = _coerce_observation(raw_obs)
+        if obs.tool == "create_office_document" and obs.result.get("file_id"):
+            fid = obs.result["file_id"]
+            if fid not in seen_ids:
+                seen_ids.add(fid)
+                office_files.append({
+                    "file_id": fid,
+                    "file_name": obs.result.get("file_name", ""),
+                    "format": obs.result.get("format", ""),
+                })
+        # Also check direct office_generate (in case sub-agent observations leak)
         if obs.tool == "office_generate" and obs.result.get("file_id"):
+            fid = obs.result["file_id"]
+            if fid not in seen_ids:
+                seen_ids.add(fid)
+                office_files.append({
+                    "file_id": fid,
+                    "file_name": obs.result.get("file_name", ""),
+                    "format": obs.result.get("format", ""),
+                    "title": obs.result.get("title"),
+                    "slide_count": obs.result.get("slide_count"),
+                    "sheet_count": obs.result.get("sheet_count"),
+                    "chart_count": obs.result.get("chart_count"),
+                })
+
+    # Also from state.generated_files (updated by office_generate internally)
+    for gf in generated_files or []:
+        fid = gf.get("file_id")
+        if fid and fid not in seen_ids:
+            seen_ids.add(fid)
             office_files.append({
-                "file_id": obs.result["file_id"],
-                "file_name": obs.result["file_name"],
-                "format": obs.result["format"],
-                "title": obs.result.get("title"),
-                "slide_count": obs.result.get("slide_count"),
-                "sheet_count": obs.result.get("sheet_count"),
-                "chart_count": obs.result.get("chart_count"),
+                "file_id": fid,
+                "file_name": gf.get("file_name", ""),
+                "format": gf.get("format", ""),
             })
+
     return office_files
 
 

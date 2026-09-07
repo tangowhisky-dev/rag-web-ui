@@ -50,14 +50,11 @@ Data & Computation:
 - summarize_answer: Summarize/reformat the previous answer.
 
 Office document generation (downloadable files):
-- office_load_skill: Load OfficeCLI design guidelines for pptx/docx/xlsx.\
- Call ONCE before office_generate. Returns fonts, colors, layout rules, QA criteria.
-- office_generate: Create or append to an Office document.\
- Data read from accumulated_data automatically — pass only structure (title, slides, sections, sheets).\
- For multi-slide decks: emit 1-2 slides per call. First call append=false, subsequent calls append=true.
-- office_inspect: Check generated document for quality issues.\
- Modes: outline, issues, screenshot, validate, get, query, annotated, text.
-- office_edit: Fix issues found by office_inspect.
+- create_office_document: Create a PowerPoint (pptx), Word (docx), or Excel (xlsx) document.\
+ Pass a natural language description of what to create — the tool handles loading design\
+ guidelines, generating the file, inspecting quality, and fixing issues automatically.\
+ Data from accumulated_data is used automatically for data-driven documents.\
+ Returns file_id for download. Use this for ANY document creation request.
 
 # Search Strategy
 
@@ -92,19 +89,13 @@ where N matches the evidence item number from the retrieved context.\
 
 - Supported formats: pptx, docx, xlsx ONLY.\
  If the user asks for PDF, TXT, CSV, JSON, HTML, or any other file type:\
- do NOT call office_generate. Tell them only pptx/docx/xlsx are supported.
-- For text-only documents: provide slide bullets, section content, or sheet rows directly.
-- For data-driven documents: call extract_data first, then office_generate reads from accumulated_data.
+ do NOT call create_office_document. Tell them only pptx/docx/xlsx are supported.
 - MANDATORY: When the user asks to "create", "generate", "make" a document/presentation/spreadsheet,\
- you MUST call office_generate. Do NOT just describe what you would create — actually call the tool.\
- The answer text should describe what was created, but the file must exist because office_generate ran.
-- office_generate field names:\
-  pptx slides: {{layout, title, subtitle, bullets (list of strings), chart, speaker_notes}}\
-  docx sections: {{heading (required), level, paragraphs (list of strings), table, chart}}\
-  xlsx sheets: {{name, headers (list), rows (list of lists), chart}}\
-  Do NOT use "content" or "title" for sections — use "heading" and "paragraphs".
-- Pattern: retrieve/extract → office_load_skill → office_generate (1-2 slides, append) → office_inspect → office_edit if needed.
-- chart_generate = INLINE chart in chat. office_generate = DOWNLOADABLE Office file.\
+ you MUST call create_office_document. Do NOT just describe what you would create — actually call the tool.\
+ The answer text should describe what was created, but the file must exist because the tool ran.
+- For data-driven documents: call extract_data first, then create_office_document uses accumulated_data.
+- Pattern: retrieve/extract → create_office_document → describe what was created in your answer.
+- chart_generate = INLINE chart in chat. create_office_document = DOWNLOADABLE Office file.\
  Use the right one for the user's request.
 
 # Critical Rules

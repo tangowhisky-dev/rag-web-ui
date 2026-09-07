@@ -59,6 +59,7 @@ class TestToolRegistry:
             "kb_read",
             "kb_outline",
             "kb_metadata",
+            "create_office_document",
             "office_load_skill",
             "office_generate",
             "office_inspect",
@@ -76,14 +77,16 @@ class TestToolRegistry:
         assert "search_dense" in names
 
     def test_office_generate_always_available(self):
-        """office_generate should be available even without data —
+        """create_office_document should be available even without data —
         text-only documents (slides from bullets, Word from paragraphs)
-        don't need numeric data."""
+        don't need numeric data. The 4 individual office tools are filtered
+        out of applicable_tools — only the wrapper is exposed."""
         ctx = _make_ctx(has_file=False, has_data=False)
         tools = applicable_tools(ctx)
         names = {t.name for t in tools}
-        assert "office_generate" in names
-        assert "office_load_skill" in names
+        assert "create_office_document" in names
+        assert "office_generate" not in names
+        assert "office_load_skill" not in names
 
     def test_applicable_tools_includes_chart_when_data_present(self):
         ctx = _make_ctx(has_file=True, has_data=True)

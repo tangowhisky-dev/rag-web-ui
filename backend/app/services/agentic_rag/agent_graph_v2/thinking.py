@@ -118,22 +118,22 @@ def _build_v2_user_prompt(
         )
 
     # Forceful reminder: if the user asked to create/generate a document and
-    # office_generate hasn't been called yet, remind the LLM to call it.
+    # create_office_document hasn't been called yet, remind the LLM to call it.
     _office_keywords = ("create", "generate", "make", "build", "produce")
     _office_targets = ("document", "word", "docx", "powerpoint", "pptx", "slide",
                        "excel", "xlsx", "spreadsheet", "presentation", "deck")
     original_lower = original.lower()
     asks_for_office = any(k in original_lower for k in _office_keywords) and \
                       any(t in original_lower for t in _office_targets)
-    office_generated = any(
-        _coerce_observation(o).tool == "office_generate"
+    office_called = any(
+        _coerce_observation(o).tool == "create_office_document"
         for o in observations
     )
-    if asks_for_office and not office_generated and iteration < max_iter:
+    if asks_for_office and not office_called and iteration < max_iter:
         parts.append(
-            "\n⚠ IMPORTANT: The user asked to CREATE a document. You MUST call office_generate "
-            "to actually create the file. Do NOT just describe what you would create. "
-            "Call office_load_skill first (if not already loaded), then office_generate."
+            "\n⚠ IMPORTANT: The user asked to CREATE a document. You MUST call "
+            "create_office_document to actually create the file. Do NOT just describe "
+            "what you would create — call the tool."
         )
 
     return "".join(parts)
