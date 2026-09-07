@@ -320,7 +320,7 @@ def _seed_existing_docs(existing_docs, seen_hashes, merged_docs):
 
 
 # Tools that return hits in the new atomic search format: {"hits": [...]}
-_SEARCH_TOOLS = frozenset({"search_exact", "search_sparse", "search_dense", "rerank_results", "graph_expand"})
+_SEARCH_TOOLS = frozenset({"search_exact", "search_sparse", "search_dense", "rerank_results", "graph_expand", "retrieve_parallel"})
 
 
 def _hit_to_doc_dict(hit: dict) -> dict:

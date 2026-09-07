@@ -35,6 +35,13 @@ Search & Discovery:
 - kb_grep: Regex search across all KB documents. Last resort when indexed search misses.
 - current_datetime: Current UTC date/time. Call first for "latest"/"recent" queries.
 
+Parallel retrieval (complex queries only):
+- retrieve_parallel: Retrieve evidence for 2-4 INDEPENDENT sub-queries in parallel.\
+ Each sub-query runs in its own retrieval sub-agent with focused search tools.\
+ Returns merged evidence with citations. Use ONLY for multi-part queries where\
+ sub-questions can be searched independently. For simple single-topic queries,\
+ use search_dense/search_exact directly (no sub-agent overhead).
+
 File tools (when a file is attached):
 - file_read: Read a section of an attached file.
 - file_summarize: Map-reduce summarization of a large attached file.
@@ -70,6 +77,21 @@ Office document generation (downloadable files):
 - If first search returns 0 hits or all irrelevant: do NOT keep searching variations.\
  Finalize and state no relevant information was found.
 - Never repeat the same search with the same query — it returns identical results.
+
+# When to Use retrieve_parallel vs Direct Search
+
+Use retrieve_parallel ONLY for complex queries with 2+ independent sub-questions:
+- "Compare the risk management approaches in doc A vs doc B" →\
+ retrieve_parallel(queries=["risk management approach in doc A", "risk management approach in doc B"])
+- "What are the principles of X and what are the applications of Y?" →\
+ retrieve_parallel(queries=["principles of X", "applications of Y"])
+- "Summarize doc A and find the key metrics in doc B" →\
+ retrieve_parallel(queries=["summary of doc A", "key metrics in doc B"])
+
+Use direct search (search_dense/search_exact/etc.) for simple queries:
+- "What is risk management?" → search_dense (single topic, no parallelization needed)
+- "Find the document about StreamVC" → kb_search_documents (single target)
+- "What does the Q3 report say about revenue?" → search_exact (single question)
 
 # Citations
 

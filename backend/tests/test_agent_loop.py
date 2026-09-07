@@ -60,6 +60,7 @@ class TestToolRegistry:
             "kb_outline",
             "kb_metadata",
             "create_office_document",
+            "retrieve_parallel",
             "office_load_skill",
             "office_generate",
             "office_inspect",

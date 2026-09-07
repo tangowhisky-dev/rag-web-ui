@@ -108,8 +108,25 @@ def _build_last_answer_object(
     for doc in cited_docs:
         meta = doc.get("metadata", {}) if isinstance(doc, dict) else {}
         cref = meta.get("citation_ref")
-        if cref:
-            citations.append(cref)
+        if cref and isinstance(cref, dict):
+            # Normalize: ensure document_id is int or None, citation_kind is valid
+            doc_id = cref.get("document_id")
+            if doc_id is not None:
+                try:
+                    doc_id = int(doc_id)
+                except (TypeError, ValueError):
+                    doc_id = None
+            kind = cref.get("citation_kind", "chunk")
+            if kind not in ("chunk", "file", "section", "range", "grep", "table", "outline"):
+                kind = "chunk"
+            # Skip citations with no document_id — can't link to a source
+            if doc_id is None:
+                continue
+            citations.append({
+                **cref,
+                "document_id": doc_id,
+                "citation_kind": kind,
+            })
     return LastAnswerObject(
         summary="",
         key_points=[],

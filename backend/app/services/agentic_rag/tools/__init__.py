@@ -25,6 +25,7 @@ from .office_generate import OfficeGenerateTool
 from .office_inspect import OfficeInspectTool
 from .office_load_skill import OfficeLoadSkillTool
 from .create_office_document import CreateOfficeDocumentTool
+from .retrieve_parallel import RetrieveParallelTool
 from .rerank_results import RerankResultsTool
 from .search_dense import SearchDenseTool
 from .search_exact import SearchExactTool
@@ -57,6 +58,8 @@ _TOOL_CLASSES = [
     KbGrepTool,
     # Office document generation — sub-agent wrapper (replaces 4 individual tools)
     CreateOfficeDocumentTool,
+    # Parallel retrieval sub-agent wrapper (used for complex multi-part queries)
+    RetrieveParallelTool,
     # Individual office tools kept for sub-agent internal use
     OfficeLoadSkillTool,
     OfficeGenerateTool,
@@ -117,6 +120,9 @@ def applicable_tools(ctx: "ToolContext") -> list:
     - create_office_document always available — delegates to a sub-agent
       that handles office_load_skill, office_generate, office_inspect,
       and office_edit internally. The main agent never sees those 4 tools.
+    - retrieve_parallel always available — the LLM decides when to use it
+      (only for complex multi-part queries with independent sub-questions).
+      Simple queries use search_dense/search_exact directly.
     """
     tools = build_tools(ctx)
     state = ctx.state
