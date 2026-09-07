@@ -25,10 +25,35 @@ from app.services.agentic_rag.token_budget import count_tokens
 from app.services.settings_service import get_setting
 
 from ..agent_graph.compaction import _compact_if_needed
-from ..agent_graph.helpers import _wall_clock_exceeded, _writer
-from ..agent_graph.observations import _observations_metadata_text, _tool_descriptions_text, _tried_search_queries
+from ..agent_graph.helpers import _coerce_observation, _wall_clock_exceeded, _writer
+from ..agent_graph.observations import (
+    _observations_metadata_text,
+    _tool_descriptions_text,
+    _tried_search_queries,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _format_retrieved_docs_for_think(docs: list[dict], max_docs: int = 10, max_chars: int = 400) -> str:
+    """Format retrieved docs with content previews for the think prompt.
+
+    In v2, the think node IS the finalizer — the LLM needs to see the actual
+    evidence content to decide if it's sufficient and to write the answer.
+    """
+    if not docs:
+        return ""
+    parts: list[str] = []
+    for i, doc in enumerate(docs[:max_docs], 1):
+        if not isinstance(doc, dict):
+            continue
+        content = (doc.get("page_content") or "")[:max_chars]
+        meta = doc.get("metadata") or {}
+        title = meta.get("title") or meta.get("file_name") or "Unknown"
+        score = meta.get("_reranker_score", meta.get("score", 0))
+        score_str = f" score={score:.3f}" if score else ""
+        parts.append(f"[E{i}] {title}{score_str}\n  {content}")
+    return "\n\n".join(parts)
 
 
 def _build_v2_user_prompt(
@@ -39,6 +64,7 @@ def _build_v2_user_prompt(
     history_text: str,
     lao,
     observations: list,
+    retrieved_docs: list,
     tools_text: str,
     kb_profile_text: str,
     file_markdown: str | None,
@@ -57,6 +83,7 @@ def _build_v2_user_prompt(
     )
 
     obs_text = _observations_metadata_text(observations)
+    docs_text = _format_retrieved_docs_for_think(retrieved_docs)
 
     parts: list[str] = []
     if kb_profile_text:
@@ -74,6 +101,8 @@ def _build_v2_user_prompt(
         parts.append(tried_queries_text)
     if obs_text:
         parts.append(f"Tool observations so far:\n{obs_text}\n\n")
+    if docs_text:
+        parts.append(f"Retrieved evidence (cite these as [N](N) in your answer):\n{docs_text}\n\n")
     parts.append(f"Round: {iteration}/{max_iter}\n")
     parts.append(f"User message: {original}\n")
     if iteration >= max_iter:
@@ -84,8 +113,29 @@ def _build_v2_user_prompt(
     else:
         parts.append(
             "\nCall the next tool(s) to gather evidence, or write your final answer as plain text "
-            "(no tool calls) when you have enough to respond."
+            "(no tool calls) when you have enough to respond. "
+            "When writing your answer, cite evidence using [N](N) format where N matches the evidence item number."
         )
+
+    # Forceful reminder: if the user asked to create/generate a document and
+    # office_generate hasn't been called yet, remind the LLM to call it.
+    _office_keywords = ("create", "generate", "make", "build", "produce")
+    _office_targets = ("document", "word", "docx", "powerpoint", "pptx", "slide",
+                       "excel", "xlsx", "spreadsheet", "presentation", "deck")
+    original_lower = original.lower()
+    asks_for_office = any(k in original_lower for k in _office_keywords) and \
+                      any(t in original_lower for t in _office_targets)
+    office_generated = any(
+        _coerce_observation(o).tool == "office_generate"
+        for o in observations
+    )
+    if asks_for_office and not office_generated and iteration < max_iter:
+        parts.append(
+            "\n⚠ IMPORTANT: The user asked to CREATE a document. You MUST call office_generate "
+            "to actually create the file. Do NOT just describe what you would create. "
+            "Call office_load_skill first (if not already loaded), then office_generate."
+        )
+
     return "".join(parts)
 
 
@@ -115,10 +165,11 @@ async def think_node_v2(state, ctx) -> dict:
         kb_profile_text = format_profile_summary(state.get("kb_profile", {}))
 
         system = AGENT_V2_PROMPT.format(max_iterations=max_iter)
+        retrieved_docs = state.get("retrieved_docs", [])
         user = _build_v2_user_prompt(
             iteration, max_iter, query, summary_text, history_text,
-            state.get("last_answer_object"), observations, tools_text,
-            kb_profile_text, state.get("file_markdown"),
+            state.get("last_answer_object"), observations, retrieved_docs,
+            tools_text, kb_profile_text, state.get("file_markdown"),
         )
 
         # Compaction: if the prompt exceeds context budget, compact before calling LLM.
@@ -128,6 +179,7 @@ async def think_node_v2(state, ctx) -> dict:
         if compaction_local:
             state = {**state, **compaction_local}
             observations = state.get("observations", [])
+            retrieved_docs = state.get("retrieved_docs", [])
             recent = select_recent_history(
                 state.get("messages", []),
                 max_pairs=get_setting(ctx.db, "AGENT_HISTORY_PAIRS", ctx.org_id),
@@ -136,8 +188,8 @@ async def think_node_v2(state, ctx) -> dict:
             summary_text = state.get("compaction_summary") or ""
             user = _build_v2_user_prompt(
                 iteration, max_iter, query, summary_text, history_text,
-                state.get("last_answer_object"), observations, tools_text,
-                kb_profile_text, state.get("file_markdown"),
+                state.get("last_answer_object"), observations, retrieved_docs,
+                tools_text, kb_profile_text, state.get("file_markdown"),
             )
 
         mode = get_setting(ctx.db, "TOOL_CALL_MODE", None)

@@ -95,6 +95,14 @@ where N matches the evidence item number from the retrieved context.\
  do NOT call office_generate. Tell them only pptx/docx/xlsx are supported.
 - For text-only documents: provide slide bullets, section content, or sheet rows directly.
 - For data-driven documents: call extract_data first, then office_generate reads from accumulated_data.
+- MANDATORY: When the user asks to "create", "generate", "make" a document/presentation/spreadsheet,\
+ you MUST call office_generate. Do NOT just describe what you would create — actually call the tool.\
+ The answer text should describe what was created, but the file must exist because office_generate ran.
+- office_generate field names:\
+  pptx slides: {{layout, title, subtitle, bullets (list of strings), chart, speaker_notes}}\
+  docx sections: {{heading (required), level, paragraphs (list of strings), table, chart}}\
+  xlsx sheets: {{name, headers (list), rows (list of lists), chart}}\
+  Do NOT use "content" or "title" for sections — use "heading" and "paragraphs".
 - Pattern: retrieve/extract → office_load_skill → office_generate (1-2 slides, append) → office_inspect → office_edit if needed.
 - chart_generate = INLINE chart in chat. office_generate = DOWNLOADABLE Office file.\
  Use the right one for the user's request.
