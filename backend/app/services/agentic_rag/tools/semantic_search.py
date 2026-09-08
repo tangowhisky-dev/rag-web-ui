@@ -1,4 +1,4 @@
-"""MySQL FULLTEXT search tool — exact terms, code identifiers, title fragments."""
+"""Semantic search tool — dense vector search for conceptual/conceptual matching."""
 
 from __future__ import annotations
 
@@ -10,31 +10,32 @@ from pydantic import BaseModel, Field
 from app.services.agentic_rag.tool_context import ToolContext, enforce_rbac, write_audit
 from app.services.agentic_rag.tools.base import BaseAgentTool
 from app.services.retrieval import get_effective_datastore_ids
-from app.services.retrieval.retrieval import exact_search_docs
+from app.services.retrieval.retrieval import dense_search_docs
 from app.services.settings_service import get_setting
 
-from ._search_helpers import _emit_progress, expand_synonyms, resolve_filter_to_doc_ids
+from ._search_helpers import _emit_progress, resolve_filter_to_doc_ids
 
 logger = logging.getLogger(__name__)
 
 
-class SearchExactInput(BaseModel):
-    query: str = Field(description="Search query — exact terms, code, identifiers, or title fragments.")
+class SemanticSearchInput(BaseModel):
+    query: str = Field(description="Search query for semantic/conceptual matching.")
     kb_ids: List[int] = Field(default_factory=list, description="Knowledge base IDs to search.")
     document_ids: Optional[List[int]] = Field(default=None, description="Restrict to these document IDs.")
     filters: Optional[dict] = Field(default=None, description="Metadata filters: title_contains, file_name_contains, content_type, file_modified_after, file_modified_before, file_created_after, file_created_before.")
-    top_k: int = Field(default=20, description="Maximum hits to return. Increase for aggregate queries.")
+    top_k: int = Field(default=20, description="Maximum hits to return.")
 
 
-class SearchExactTool(BaseAgentTool):
-    name: str = "search_exact"
-    description: str = (
-        "MySQL fulltext search across chunk text and document titles. "
-        "Fast. Best for exact terms, code identifiers, title fragments. "
-        "Returns ranked chunks with scores and citation metadata."
-    )
-    args_schema: type = SearchExactInput
-    ui_label: str = "Searching (exact)"
+class SemanticSearchTool(BaseAgentTool):
+    name: str = "semantic_search"
+    description: str = "Dense vector search for semantic/conceptual matching. Finds chunks by meaning, not exact wording. Best for natural-language questions, paraphrased queries, and conceptual lookups."
+    prompt_snippet: str = "Semantic retrieval (dense vectors)"
+    prompt_guidelines: list[str] = [
+        "semantic_search: Best for conceptual, natural-language, paraphrased, and meaning-based questions. Use when relevant documents may not share the user's exact wording.",
+        "semantic_search: Default first choice for most questions. Switch to keyword_search for code/IDs or title_search to find whole documents by name.",
+    ]
+    args_schema: type = SemanticSearchInput
+    ui_label: str = "Searching (semantic)"
 
     def prepare_arguments(self, args: dict) -> dict:
         """Normalize kb_ids to list of ints."""
@@ -44,7 +45,7 @@ class SearchExactTool(BaseAgentTool):
         args["kb_ids"] = [int(k) for k in kb_ids]
         return args
 
-    async def _execute(self, input_obj: SearchExactInput) -> dict:
+    async def _execute(self, input_obj: SemanticSearchInput) -> dict:
         ctx = self.ctx
         if ctx is None:
             return {"ok": False, "result": {}, "error": "No context", "tokens": 0, "terminate": False}
@@ -54,7 +55,7 @@ class SearchExactTool(BaseAgentTool):
         if not kb_ids and ctx.state is not None:
             kb_ids = ctx.state.get("kb_ids", [])
         if not kb_ids:
-            return {"ok": True, "result": {"hits": [], "query_used": input_obj.query, "search_type": "exact", "count": 0}, "error": None, "tokens": 0, "terminate": False}
+            return {"ok": True, "result": {"hits": [], "query_used": input_obj.query, "search_type": "semantic", "count": 0}, "error": None, "tokens": 0, "terminate": False}
 
         datastore_ids = get_effective_datastore_ids(kb_ids, ctx.org_id, ctx.db) if ctx.db else []
 
@@ -64,16 +65,13 @@ class SearchExactTool(BaseAgentTool):
             if doc_ids is not None:
                 _emit_progress("filtering", f"Filtering to {len(doc_ids)} matching documents …")
                 if not doc_ids:
-                    return {"ok": True, "result": {"hits": [], "query_used": input_obj.query, "search_type": "exact", "count": 0}, "error": None, "tokens": 0, "terminate": False}
+                    return {"ok": True, "result": {"hits": [], "query_used": input_obj.query, "search_type": "semantic", "count": 0}, "error": None, "tokens": 0, "terminate": False}
 
-        # Synonym expansion (Redis-cached) — exact benefits from keyword variants
-        query, extra_queries = await expand_synonyms(input_obj.query, ctx)
-
-        min_score = get_setting(ctx.db, "EXACT_MIN_SCORE", ctx.org_id)
+        min_score = get_setting(ctx.db, "DENSE_MIN_SCORE", ctx.org_id)
 
         try:
-            docs = exact_search_docs(
-                query=query,
+            docs = dense_search_docs(
+                query=input_obj.query,
                 kb_ids=kb_ids,
                 datastore_ids=datastore_ids,
                 db=ctx.db,
@@ -81,10 +79,9 @@ class SearchExactTool(BaseAgentTool):
                 top_k=input_obj.top_k,
                 min_score=min_score,
                 doc_ids=doc_ids,
-                extra_queries=extra_queries,
             )
         except Exception as exc:
-            logger.warning("[search_exact] failed: %s", exc)
+            logger.warning("[semantic_search] failed: %s", exc)
             return {"ok": False, "result": {}, "error": str(exc), "tokens": 0, "terminate": False}
 
         hits = []
@@ -106,21 +103,21 @@ class SearchExactTool(BaseAgentTool):
                     "chunk_index": meta.get("chunk_index"),
                     "page": meta.get("page"),
                     "quoted_text": doc.page_content[:200],
-                    "source_tool": "search_exact",
+                    "source_tool": "semantic_search",
                     "citation_id": "",
                 },
             }
             hits.append(hit)
 
-        write_audit(ctx, "search_exact", input_obj.model_dump(),
+        write_audit(ctx, "semantic_search", input_obj.model_dump(),
                      {"hit_count": len(hits)}, status="ok")
 
         return {
             "ok": True,
             "result": {
                 "hits": hits,
-                "query_used": query,
-                "search_type": "exact",
+                "query_used": input_obj.query,
+                "search_type": "semantic",
                 "count": len(hits),
             },
             "error": None,

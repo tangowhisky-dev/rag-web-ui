@@ -1,7 +1,7 @@
-"""Shared helpers for atomic search tools.
+"""Shared helpers for search tools.
 
-Extracted from the original monolithic retrieval tool so all search tools (search_exact,
-search_sparse, search_dense) share the same filter resolution and
+Extracted from the original monolithic retrieval tool so all search tools (keyword_search,
+semantic_search) share the same filter resolution and
 synonym expansion logic.
 """
 
@@ -50,13 +50,15 @@ def resolve_filter_to_doc_ids(
         return None
 
     from app.models.knowledge import Document
+    from app.services.retrieval.retrieval import get_effective_datastore_ids
     from datetime import datetime as _dt
-    from sqlalchemy import or_, and_
+    from sqlalchemy import or_
 
+    ds_ids = get_effective_datastore_ids(kb_ids, None, db)
     q = db.query(Document.id).filter(
         or_(
             Document.knowledge_base_id.in_(kb_ids),
-            and_(Document.knowledge_base_id.is_(None), Document.data_store_id.isnot(None)),
+            Document.data_store_id.in_(ds_ids) if ds_ids else False,
         )
     )
 
@@ -142,7 +144,8 @@ async def expand_synonyms(query: str, ctx: ToolContext) -> tuple[str, list[str]]
 
     # Call LLM with query role
     try:
-        llm = build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)
+        tool_temp = get_setting(ctx.db, "TOOL_CALL_TEMPERATURE", ctx.org_id)
+        llm = build_chat_llm(ctx.org_id, ctx.db, role="utility", temperature=tool_temp)
         prompt = SYNONYM_EXPANSION_PROMPT.format(n=n)
         resp = await llm.ainvoke([
             {"role": "system", "content": prompt},

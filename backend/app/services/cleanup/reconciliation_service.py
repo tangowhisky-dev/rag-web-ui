@@ -59,6 +59,21 @@ def run_reconciliation() -> dict:
         except Exception:
             pass
 
+    # Safety guard: if both ID lists are empty, the query likely failed
+    # silently (stale connection, DB not ready during rapid restarts) rather
+    # than every KB and DataStore actually being deleted.  Skip Qdrant and
+    # Neo4j reconciliation entirely — deleting all collections as "stale"
+    # when the active-ID query returned empty is catastrophic data loss.
+    if not active_kb_ids and not active_ds_ids:
+        logger.warning(
+            "[RECONCILE] active_kb_ids and active_ds_ids are both empty — "
+            "skipping Qdrant/Neo4j reconciliation to avoid false-positive "
+            "collection drops. This usually means the MySQL query returned "
+            "empty due to a transient connection issue, not that all KBs/DSs "
+            "were deleted."
+        )
+        return summary
+
     # ── 1. MySQL orphan cleanup ──────────────────────────────────────
     try:
         _reconcile_mysql(summary)
@@ -140,14 +155,24 @@ def _drop_stale_collections(
     label: str,
     summary: dict,
 ) -> None:
+    if not active_ids:
+        logger.warning(
+            "[RECONCILE] Qdrant: active_%s_ids is empty — skipping %s collection drop pass "
+            "to avoid false-positive deletion of all %s_* collections.",
+            label, label, prefix,
+        )
+        return
     active_names = {f"{prefix}{id}" for id in active_ids}
     stale = [c for c in collections if c.startswith(prefix) and c not in active_names]
     logger.debug("[RECONCILE] Qdrant: active_%s_names=%s stale_%s_collections=%s", label, active_names, label, stale)
     for cname in stale:
         try:
-            logger.debug("[RECONCILE] Qdrant: dropping stale collection %s", cname)
+            logger.info(
+                "[QDRANT-DELETE] dropping collection=%s cause=reconciliation_stale_%s active_ids=%s",
+                cname, label, active_ids,
+            )
             qdrant.delete_collection(cname)
-            logger.debug("[RECONCILE] Qdrant: dropped stale collection %s", cname)
+            logger.info("[QDRANT-DELETE] dropped collection=%s", cname)
         except Exception as e:
             logger.warning("[RECONCILE] Qdrant: failed to drop %s: %s", cname, e)
     summary["qdrant"]["dropped_collections"] += len(stale)

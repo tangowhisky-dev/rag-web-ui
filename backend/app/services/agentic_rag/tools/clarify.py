@@ -40,12 +40,12 @@ class ClarifyInput(BaseModel):
 class ClarifyTool(BaseAgentTool):
     name: str = "clarify"
     ui_label: str = "Asking for clarification"
-    description: str = (
-        "Ask the user for clarification when the query is ambiguous or lacks "
-        "specifics needed to proceed. Call this BEFORE searching when the "
-        "query could refer to multiple things. Do NOT call this for simple "
-        "queries or when you can find the answer from evidence."
-    )
+    description: str = "Ask the user a question to resolve ambiguity in their query."
+    prompt_snippet: str = "Ask the user to resolve query ambiguity"
+    prompt_guidelines: list[str] = [
+        "clarify: Use only when ambiguity materially changes the retrieval target or answer. If a reasonable interpretation can be searched or answered, do not clarify.",
+        "clarify: Ask concise questions. Max 2 calls per turn. The tool pauses the pipeline and resumes on user response.",
+    ]
     args_schema: type[BaseModel] = ClarifyInput
 
     def _run(self, *args: Any, **kwargs: Any) -> Any:

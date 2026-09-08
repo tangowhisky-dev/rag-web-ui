@@ -33,11 +33,11 @@ LangGraph components:
   redis_memory.py  - Redis-backed checkpoint memory
   evaluator.py     - Answer evaluation helpers
   llm_factory.py   - LLM client construction
-  tools/           - Atomic tool implementations (search_exact, search_sparse,
-                     search_dense, rerank_results, graph_expand, kb_read, kb_grep,
-                     kb_outline, kb_search_documents, kb_metadata, code_execute,
-                     chart_generate, extract_data, summarize_answer, current_datetime,
-                     file_read, file_summarize, file_extract_table)
+  tools/           - Tool implementations (keyword_search, semantic_search,
+                     rerank_results, graph_expand, file_read, kb_grep,
+                     kb_outline, title_search, kb_metadata, code_execute,
+                     chart_generate, extract_data, summarize, current_datetime,
+                     file_extract_table)
 
 SSE Event Protocol:
   p:  progress         - transient status messages

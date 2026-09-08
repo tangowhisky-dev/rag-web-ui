@@ -1,7 +1,7 @@
 """kb_outline tool — return heading structure of a KB document.
 
 Gives the agent a "table of contents" so it can decide which section to
-read with kb_read. Pure regex parse of converted_markdown — no LLM call.
+read with file_read. Pure regex parse of converted_markdown — no LLM call.
 """
 
 from __future__ import annotations
@@ -30,11 +30,12 @@ class KbOutlineInput(BaseModel):
 class KbOutlineTool(BaseAgentTool):
     name: str = "kb_outline"
     ui_label: str = "Reading document outline"
-    description: str = (
-        "Get the heading structure (table of contents) of a KB document. "
-        "Returns heading levels, text, and character offsets. Use after "
-        "kb_grep to see which sections exist before reading with kb_read."
-    )
+    description: str = "Get the heading structure (table of contents) of a KB document. Returns heading levels, text, and character offsets."
+    prompt_snippet: str = "Inspect document structure (table of contents)"
+    prompt_guidelines: list[str] = [
+        "kb_outline: Best before targeted reading of a large document. Use to locate relevant sections and avoid reading unnecessary content.",
+        "kb_outline: Use after kb_grep to see the structure around matching lines.",
+    ]
     args_schema: type[BaseModel] = KbOutlineInput
 
     def _run(self, *args: Any, **kwargs: Any) -> Any:
@@ -50,7 +51,12 @@ class KbOutlineTool(BaseAgentTool):
 
         markdown = doc.converted_markdown or ""
         headings = [
-            {"level": len(m.group(1)), "text": m.group(2).strip(), "char_offset": m.start()}
+            {
+                "level": len(m.group(1)),
+                "text": m.group(2).strip(),
+                "char_offset": m.start(),
+                "line_number": markdown[:m.start()].count("\n") + 1,
+            }
             for m in _HEADING_RE.finditer(markdown)
         ]
 

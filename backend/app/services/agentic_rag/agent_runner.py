@@ -141,7 +141,7 @@ been updated for v2 compatibility.
 #         message_id: DB message row to update.
 #         answer: Full answer text to extract from.
 #         org_id: Org id for LLM config resolution (unused if eval_kwargs has overrides).
-#         eval_kwargs: Pre-resolved LLM kwargs (api_base, api_key, query_model).
+#         eval_kwargs: Pre-resolved LLM kwargs (api_base, api_key, utility_model).
 #     """
 #     try:
 #         from .evaluator import extract_structured
@@ -358,11 +358,11 @@ been updated for v2 compatibility.
 #         try:
 #             eval_kwargs: dict = {}
 #             try:
-#                 query_cfg = get_org_llm(org_id, db, role="query")
+#                 utility_cfg = get_org_llm(org_id, db, role="utility")
 #                 eval_kwargs = {
-#                     "api_base": query_cfg["api_base"],
-#                     "api_key": query_cfg["api_key"],
-#                     "query_model": query_cfg["model_name"],
+#                     "api_base": utility_cfg["api_base"],
+#                     "api_key": utility_cfg["api_key"],
+#                     "utility_model": utility_cfg["model_name"],
 #                 }
 #             except Exception:
 #                 pass

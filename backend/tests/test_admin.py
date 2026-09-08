@@ -603,7 +603,7 @@ def test_effective_llm_config_fallback(db):
     cfg = get_effective_llm_config(None, db)
     assert cfg["api_base"] == get_setting(db, "OPENAI_API_BASE", None)
     assert cfg["model_name"] == get_setting(db, "OPENAI_MODEL", None)
-    assert cfg["query_model"] == get_setting(db, "QUERY_MODEL", None) or get_setting(db, "OPENAI_MODEL", None)
+    assert cfg["utility_model"] == get_setting(db, "UTILITY_MODEL", None) or get_setting(db, "OPENAI_MODEL", None)
 
 
 def test_effective_llm_config_org_override(db):
@@ -615,9 +615,9 @@ def test_effective_llm_config_org_override(db):
     org = create_org(db, "LLMConfigOrg5")
     upsert_org_setting(db, org.id, "OPENAI_API_BASE", "https://custom.example.com")
     upsert_org_setting(db, org.id, "OPENAI_MODEL", "custom-model")
-    upsert_org_setting(db, org.id, "QUERY_MODEL", "custom-query-model")
+    upsert_org_setting(db, org.id, "UTILITY_MODEL", "custom-query-model")
 
     cfg = get_effective_llm_config(org.id, db)
     assert cfg["api_base"] == "https://custom.example.com"
     assert cfg["model_name"] == "custom-model"
-    assert cfg["query_model"] == "custom-query-model"
+    assert cfg["utility_model"] == "custom-query-model"

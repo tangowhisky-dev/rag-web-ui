@@ -14,13 +14,11 @@ from .current_datetime import CurrentDatetimeTool
 from .extract_data import ExtractDataTool
 from .file_extract_table import FileExtractTableTool
 from .file_read import FileReadTool
-from .file_summarize import FileSummarizeTool
 from .graph_expand import GraphExpandTool
 from .kb_grep import KbGrepTool
 from .kb_metadata import KbMetadataTool
 from .kb_outline import KbOutlineTool
-from .kb_read import KbReadTool
-from .kb_search_documents import KbSearchDocumentsTool
+from .keyword_search import KeywordSearchTool
 from .office_edit import OfficeEditTool
 from .office_generate import OfficeGenerateTool
 from .office_inspect import OfficeInspectTool
@@ -28,35 +26,31 @@ from .office_load_skill import OfficeLoadSkillTool
 from .create_office_document import CreateOfficeDocumentTool
 from .retrieve_parallel import RetrieveParallelTool
 from .rerank_results import RerankResultsTool
-from .search_dense import SearchDenseTool
-from .search_exact import SearchExactTool
-from .search_sparse import SearchSparseTool
-from .summarize_answer import SummarizeAnswerTool
+from .semantic_search import SemanticSearchTool
+from .summarize import SummarizeTool
+from .title_search import TitleSearchTool
 
 
 _TOOL_CLASSES = [
     # Human-in-the-loop clarification (always available)
     ClarifyTool,
-    # Atomic search tools
-    SearchExactTool,
-    SearchSparseTool,
-    SearchDenseTool,
+    # Search tools
+    KeywordSearchTool,
+    SemanticSearchTool,
     RerankResultsTool,
     GraphExpandTool,
     # Discovery
-    KbSearchDocumentsTool,
+    TitleSearchTool,
     KbMetadataTool,
     KbOutlineTool,
     CurrentDatetimeTool,
-    # Read
-    KbReadTool,
+    # Read (KB documents + attached chat files)
     FileReadTool,
-    FileSummarizeTool,
     FileExtractTableTool,
     # Processing
     CodeExecuteTool,
     ChartGenerateTool,
-    SummarizeAnswerTool,
+    SummarizeTool,
     ExtractDataTool,
     KbGrepTool,
     # Office document generation — sub-agent wrapper (replaces 4 individual tools)
@@ -113,7 +107,10 @@ def _filter_tools_by_name(tools: list, excluded: tuple[str, ...]) -> list:
 def applicable_tools(ctx: "ToolContext") -> list:
     """Filter tools based on the current turn context.
 
-    - File tools only if a file is attached.
+    - File tools (file_extract_table) only if a file is attached.
+    - file_read is always available — it handles both KB documents
+      (via document_id) and attached chat files (via file_id).
+    - summarize is always available — the model passes text directly.
     - Chart only if there is data to chart (last_answer_object.data,
       retrieved docs, or a successful code_execute / extract_data
       observation earlier in the same turn).
@@ -125,7 +122,7 @@ def applicable_tools(ctx: "ToolContext") -> list:
       and office_edit internally. The main agent never sees those 4 tools.
     - retrieve_parallel always available — the LLM decides when to use it
       (only for complex multi-part queries with independent sub-questions).
-      Simple queries use search_dense/search_exact directly.
+      Simple queries use semantic_search/keyword_search directly.
     """
     tools = build_tools(ctx)
     state = ctx.state
@@ -135,14 +132,14 @@ def applicable_tools(ctx: "ToolContext") -> list:
 
     # Deferred tool gating: check tool_call_counts for prior tool use
     counts = state.get("tool_call_counts", {}) if state is not None else {}
-    has_search = any(counts.get(t, 0) > 0 for t in ("search_exact", "search_sparse", "search_dense"))
+    has_search = any(counts.get(t, 0) > 0 for t in ("keyword_search", "semantic_search"))
     # extract_data is available when there's data to extract from (retrieved_docs,
     # last_answer_object.data, or a successful code_execute/extract_data observation)
     # OR after a search/read tool has been called.
-    has_read = has_search or any(counts.get(t, 0) > 0 for t in ("kb_read", "kb_search_documents"))
+    has_read = has_search or any(counts.get(t, 0) > 0 for t in ("file_read", "title_search"))
 
     if not has_file:
-        tools = _filter_tools_by_name(tools, ("file_read", "file_summarize", "file_extract_table"))
+        tools = _filter_tools_by_name(tools, ("file_extract_table",))
     if not has_data and not has_read:
         tools = _filter_tools_by_name(tools, ("chart_generate", "extract_data"))
     elif not has_data:
@@ -160,7 +157,7 @@ def applicable_tools(ctx: "ToolContext") -> list:
     # office_load_skill is always available — the planner or think node
     # calls it when office_generate is in the plan.
 
-    # KB tools (kb_grep, kb_read, kb_outline, kb_metadata) are always
+    # KB tools (kb_grep, file_read, kb_outline, kb_metadata) are always
     # available — every chat has KBs linked (ChatCreate requires
     # knowledge_base_ids). Each KB tool handles empty kb_ids gracefully
     # via enforce_rbac.

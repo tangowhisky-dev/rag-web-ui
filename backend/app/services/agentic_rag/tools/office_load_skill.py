@@ -146,12 +146,11 @@ class OfficeLoadSkillInput(BaseModel):
 class OfficeLoadSkillTool(BaseAgentTool):
     name: str = "office_load_skill"
     ui_label: str = "Loading OfficeCLI design guidelines"
-    description: str = (
-        "Load OfficeCLI design guidelines for the target document format. "
-        "Call this BEFORE office_generate to get font sizes, color palettes, "
-        "layout rules, chart formats, QA workflow, and quality check criteria. "
-        "Only call once per turn."
-    )
+    description: str = "Load OfficeCLI design guidelines for the target document format."
+    prompt_snippet: str = "Load Office generation guidance (fonts, colors, layout)"
+    prompt_guidelines: list[str] = [
+        "office_load_skill: Call once before using the office_generate workflow. Do not call when using the simpler create_office_document path unless required by that workflow.",
+    ]
     args_schema: type[BaseModel] = OfficeLoadSkillInput
 
     def _run(self, *args: Any, **kwargs: Any) -> Any:

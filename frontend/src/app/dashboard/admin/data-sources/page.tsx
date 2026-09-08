@@ -58,12 +58,7 @@ interface DataStore {
   last_recovered_at: string | null;
   // Real-time scan progress (populated when a scan is running)
   scan_progress?: {
-    total_files: number;
-    processed_files: number;
     status: string;
-    new_files: number;
-    skipped_files: number;
-    error_files: number;
   };
   pending_changes: number;
   // Selected files waiting for ingestion (no chunks, no task yet)
@@ -82,14 +77,12 @@ interface DataStore {
 }
 
 interface ScanProgress {
-  total_files: number;
-  processed_files: number;
+  total: number;
+  ingested: number;
+  pending: number;
+  failed: number;
+  skipped: number;
   status: string;
-  scanned?: number;
-  new_files?: number;
-  modified_files?: number;
-  skipped_files?: number;
-  error_files?: number;
   error_message?: string;
 }
 
@@ -169,7 +162,7 @@ export default function DataSourcesPage() {
     folder_path: '',
     scan_pattern: '*',
     auto_process_enabled: false,
-    auto_process_interval_minutes: 30,
+    auto_process_interval_minutes: 5,
     select_all_files: false,
   };
 
@@ -373,7 +366,7 @@ export default function DataSourcesPage() {
 
   async function handleTriggerScan(dsId: number) {
     setTriggering((prev) => new Set(prev).add(dsId));
-    setScanProgress((prev) => ({ ...prev, [dsId]: { total_files: 0, processed_files: 0, status: 'running' } }));
+    setScanProgress((prev) => ({ ...prev, [dsId]: { total: 0, ingested: 0, pending: 0, failed: 0, skipped: 0, status: 'running' } }));
 
     // Close any existing SSE connection before opening a new one.
     if (scanEventSourceRef.current) {
@@ -414,40 +407,36 @@ export default function DataSourcesPage() {
         try {
           const data = JSON.parse(event.data) as ScanProgress;
 
-          // "waiting" status is a keep-alive from the backend while the
-          // scan registers — don't update UI for it.
           if (data.status === 'waiting') return;
 
           setScanProgress((prev) => ({
             ...prev,
             [dsId]: {
-              total_files: data.total_files || 0,
-              processed_files: data.processed_files || 0,
+              total: data.total || 0,
+              ingested: data.ingested || 0,
+              pending: data.pending || 0,
+              failed: data.failed || 0,
+              skipped: data.skipped || 0,
               status: data.status || 'running',
-              new_files: data.new_files || 0,
-              modified_files: data.modified_files || 0,
-              skipped_files: data.skipped_files || 0,
-              error_files: data.error_files || 0,
               error_message: data.error_message,
             },
           }));
 
           if (data.status === 'completed') {
             const parts = [
-              `Scanned: ${data.processed_files || 0}`,
-              `New: ${data.new_files || 0}`,
-              `Modified: ${data.modified_files || 0}`,
-              `Skipped: ${data.skipped_files || 0}`,
+              `Ingested: ${data.ingested || 0}`,
+              `Pending: ${data.pending || 0}`,
+              `Skipped: ${data.skipped || 0}`,
             ];
-            if (data.error_files && data.error_files > 0) {
-              parts.push(`Errors: ${data.error_files}`);
+            if (data.failed && data.failed > 0) {
+              parts.push(`Failed: ${data.failed}`);
             }
             toast({ title: 'Processing completed (less graph ingestion)', description: parts.join(' | ') });
             setScanProgress((prev) => ({ ...prev, [dsId]: undefined }));
             cleanup();
             fetchData();
           } else if (data.status === 'error') {
-            const errorMsg = data.error_message || `Errors: ${data.error_files || 1}`;
+            const errorMsg = data.error_message || `Failed: ${data.failed || 1}`;
             toast({ title: 'Processing failed', description: errorMsg, variant: 'destructive' });
             setScanProgress((prev) => ({ ...prev, [dsId]: undefined }));
             cleanup();
@@ -699,8 +688,8 @@ export default function DataSourcesPage() {
                     {(() => {
                       const progress = scanProgress[ds.id];
                       if (progress && progress.status !== 'completed' && progress.status !== 'paused') {
-                        const pct = progress.total_files > 0
-                          ? Math.min((progress.processed_files / Math.max(progress.total_files, 1)) * 100, 100)
+                        const pct = progress.total > 0
+                          ? Math.min((progress.ingested / Math.max(progress.total, 1)) * 100, 100)
                           : 0;
                         const finalizing = pct >= 100 && progress.status === 'running';
                         return (
@@ -710,48 +699,49 @@ export default function DataSourcesPage() {
                               <span className="text-xs text-blue-600">{finalizing ? 'Finalizing ingestion...' : 'Processing...'}</span>
                             </div>
                             <div className="w-full bg-gray-200 rounded-full h-2">
-                              <div 
+                              <div
                                 className="bg-blue-500 h-2 rounded-full transition-all duration-300"
                                 style={{ width: `${pct}%` }}
                               ></div>
                             </div>
                             <div className="flex justify-between text-xs text-muted-foreground">
-                              <span>{progress.processed_files} / {progress.total_files}</span>
+                              <span>{progress.ingested} / {progress.total}</span>
                               <span>{pct.toFixed(0)}%</span>
                             </div>
                             <div className="flex flex-wrap gap-2 text-[10px] text-muted-foreground">
-                              {progress.new_files != null && progress.new_files > 0 && <span>New: {progress.new_files}</span>}
-                              {progress.modified_files != null && progress.modified_files > 0 && <span>Modified: {progress.modified_files}</span>}
-                              {progress.skipped_files != null && progress.skipped_files > 0 && <span>Skipped: {progress.skipped_files}</span>}
-                              {progress.error_files != null && progress.error_files > 0 && <span className="text-red-500">Errors: {progress.error_files}</span>}
+                              {progress.pending > 0 && <span>Pending: {progress.pending}</span>}
+                              {progress.skipped > 0 && <span>Skipped: {progress.skipped}</span>}
+                              {progress.failed > 0 && <span className="text-red-500">Failed: {progress.failed}</span>}
                             </div>
                           </div>
                         );
                       }
                       if (ds.last_scan_status === 'paused') {
-                        const denom = ds.selected_files || ds.last_scan_total_files || 1;
-                        const pct = Math.min((ds.last_scan_processed / Math.max(denom, 1)) * 100, 100);
+                        const denom = ds.selected_files || 1;
+                        const ingested = ds.processed_files || 0;
+                        const pct = Math.min((ingested / Math.max(denom, 1)) * 100, 100);
                         return (
                           <div className="space-y-2">
                             <div className="flex items-center gap-2">
                               <span className="text-xs text-amber-600 font-medium">Paused</span>
                             </div>
                             <div className="w-full bg-gray-200 rounded-full h-2">
-                              <div 
+                              <div
                                 className="bg-amber-500 h-2 rounded-full"
                                 style={{ width: `${pct}%` }}
                               ></div>
                             </div>
                             <div className="flex justify-between text-xs text-muted-foreground">
-                              <span>{ds.last_scan_processed} / {denom}</span>
+                              <span>{ingested} / {denom}</span>
                               <span>{pct.toFixed(0)}%</span>
                             </div>
                           </div>
                         );
                       }
                       if (ds.last_scan_status === 'running') {
-                        const denom = ds.selected_files || ds.last_scan_total_files || 1;
-                        const pct = Math.min((ds.last_scan_processed / Math.max(denom, 1)) * 100, 100);
+                        const denom = ds.selected_files || 1;
+                        const ingested = ds.processed_files || 0;
+                        const pct = Math.min((ingested / Math.max(denom, 1)) * 100, 100);
                         const finalizing = pct >= 100;
                         return (
                           <div className="space-y-2">
@@ -760,13 +750,13 @@ export default function DataSourcesPage() {
                               <span className="text-xs text-blue-600">{finalizing ? 'Finalizing ingestion...' : 'Processing...'}</span>
                             </div>
                             <div className="w-full bg-gray-200 rounded-full h-2">
-                              <div 
+                              <div
                                 className="bg-blue-500 h-2 rounded-full transition-all duration-300"
                                 style={{ width: `${pct}%` }}
                               ></div>
                             </div>
                             <div className="flex justify-between text-xs text-muted-foreground">
-                              <span>{ds.last_scan_processed} / {denom}</span>
+                              <span>{ingested} / {denom}</span>
                               <span>{pct.toFixed(0)}%</span>
                             </div>
                           </div>
@@ -784,11 +774,11 @@ export default function DataSourcesPage() {
                       }
                       return (
                         <div className="text-xs">
-                          {ds.last_scan_total_files} files
+                          {ds.processed_files} ingested
                           <br />
                           {ds.selected_files} selected
                           <br />
-                          {ds.processed_files} processed
+                          {ds.last_scan_total_files} total
                           {ds.processing && (
                             <div className="mt-1 flex items-center gap-1">
                               <div className="w-2 h-2 rounded-full bg-orange-500 animate-pulse"></div>

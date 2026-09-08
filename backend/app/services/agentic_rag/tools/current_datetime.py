@@ -26,12 +26,11 @@ class CurrentDatetimeInput(BaseModel):
 class CurrentDatetimeTool(BaseAgentTool):
     name: str = "current_datetime"
     ui_label: str = "Checking current date and time"
-    description: str = (
-        "Returns the current UTC date and time. Call this before deciding which "
-        "document is 'latest', 'most recent', or 'newest' — you need to know what "
-        "'now' is to compare dates in document titles and content. "
-        "No arguments needed."
-    )
+    description: str = "Returns the current UTC date and time. No arguments needed."
+    prompt_snippet: str = "Get current UTC date/time"
+    prompt_guidelines: list[str] = [
+        "current_datetime: Use when interpreting relative or freshness-sensitive terms such as today, latest, recent, newest, or last quarter. Not needed for absolute dates.",
+    ]
     args_schema: type[BaseModel] = CurrentDatetimeInput
     ctx: ToolContext | None = None  # type: ignore[assignment]
 

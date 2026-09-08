@@ -2,17 +2,17 @@
 test_settings_phase0.py — Phase 0: config.py / registry separation.
 
 Verifies:
-  1. REASONING_MODEL is registered in the settings registry (not on Settings).
+  1. UTILITY_MODEL is registered in the settings registry (not on Settings).
   2. Registry-managed keys are NOT on the Settings class.
   3. Infrastructure settings (DB, Redis, Qdrant, etc.) ARE on the Settings class.
 """
 from app.core.config import Settings
 
 
-def test_reasoning_model_declared():
-    """REASONING_MODEL must be registered in the settings registry."""
+def test_utility_model_declared():
+    """UTILITY_MODEL must be registered in the settings registry."""
     from app.core.settings_registry import get_def
-    assert get_def("REASONING_MODEL") is not None
+    assert get_def("UTILITY_MODEL") is not None
 
 
 def test_registry_keys_not_on_settings():

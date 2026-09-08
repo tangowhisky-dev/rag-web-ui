@@ -158,8 +158,8 @@ async def main():
         db.commit()
         db.refresh(chat)
     chat_id = chat.id
-    # Use KB 1 which has 9 documents
-    kb_ids = [1]
+    # Use KB 2 which maps to DS 88 (has 21 docs in Qdrant)
+    kb_ids = [2]
     db.close()
 
     results: list[dict] = []

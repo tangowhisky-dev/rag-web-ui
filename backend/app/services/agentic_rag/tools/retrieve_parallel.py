@@ -38,12 +38,13 @@ class RetrieveParallelTool(BaseTool):
     name: str = "retrieve_parallel"
     description: str = (
         "Retrieve evidence for MULTIPLE independent sub-queries in parallel. "
-        "Use ONLY when the user's question has 2+ distinct parts that can be "
-        "searched independently (e.g. comparisons, multi-topic questions). "
-        "For simple single-topic queries, use search_dense/search_exact directly. "
-        "Returns merged evidence chunks with citation metadata. "
-        "Pass 2-4 sub-queries as a list."
+        "Returns merged evidence chunks with citation metadata. Pass 2-4 sub-queries as a list."
     )
+    prompt_snippet: str = "Run independent retrieval tasks concurrently"
+    prompt_guidelines: list[str] = [
+        "retrieve_parallel: Use only when the query contains 2-4 genuinely independent information needs. Each sub-query must be self-contained.",
+        "retrieve_parallel: Do not parallelize sequential or dependent retrieval. For simple single-topic queries, use semantic_search/keyword_search directly — no sub-agent overhead.",
+    ]
     args_schema: type = RetrieveParallelInput
     ctx: Any = None
 
@@ -70,7 +71,7 @@ class RetrieveParallelTool(BaseTool):
                 "ok": False,
                 "result": {},
                 "error": "retrieve_parallel requires 2+ sub-queries. "
-                "For single queries, use search_dense or search_exact directly.",
+                "For single queries, use semantic_search or keyword_search directly.",
                 "tokens": 0,
                 "terminate": False,
             }

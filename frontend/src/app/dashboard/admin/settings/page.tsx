@@ -156,7 +156,7 @@ export default function SuperAdminSettingsPage() {
 
   // Tab groupings: each tab maps to a set of categories
   const TAB_GROUPS: { tab: string; cats: string[] }[] = [
-    { tab: 'Models & Embeddings', cats: ['Embeddings', 'Vision / OCR', 'Response Model', 'Query Rewrite Model', 'Reasoning Model', 'GraphRAG'] },
+    { tab: 'Models & Embeddings', cats: ['Embeddings', 'Vision / OCR', 'Response Model', 'Utility Model', 'GraphRAG'] },
     { tab: 'Retrieval', cats: ['Retrieval', 'Adaptive Retrieval', 'Reranker'] },
     { tab: 'Ingestion', cats: ['Ingestion'] },
     { tab: 'Agent', cats: ['Agentic'] },

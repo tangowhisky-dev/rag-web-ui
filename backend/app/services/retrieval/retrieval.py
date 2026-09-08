@@ -183,7 +183,7 @@ def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
                 continue
             doc = _qdrant_payload_to_doc(hit.payload or {})
             # Store the Qdrant similarity score in metadata so downstream
-            # tools (search_dense, rerank_results) can access it for
+            # tools (semantic_search, rerank_results) can access it for
             # confidence scoring.
             doc.metadata["score"] = float(score)
             # Store dense vector for downstream semantic dedup.

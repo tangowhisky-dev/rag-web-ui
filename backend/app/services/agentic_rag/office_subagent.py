@@ -218,6 +218,16 @@ async def run_office_subagent(
         if calls_used >= tool_budget:
             break
 
+    # Snapshot generated_files at start — files from previous turns persist
+    # in the checkpointer. We only want to report success if NEW files were
+    # created during THIS subagent run.
+    pre_existing_file_ids = set()
+    if ctx.state:
+        for f in ctx.state.get("generated_files", []) or []:
+            if f.get("file_id"):
+                pre_existing_file_ids.add(f["file_id"])
+
+    for iteration in range(1, max_iterations + 1):
         user = _build_subagent_user_prompt(
             request, evidence_text, accumulated_data_text,
             tools_text, iteration, tool_budget, calls_used, observations,
@@ -226,7 +236,8 @@ async def run_office_subagent(
         writer({"event": "office_subagent_step", "iteration": iteration, "phase": "think"})
 
         try:
-            llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=0.0)
+            tool_temp = get_setting(ctx.db, "TOOL_CALL_TEMPERATURE", ctx.org_id)
+            llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=tool_temp)
             resp = await llm.bind_tools(tools_list).ainvoke([
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -242,15 +253,33 @@ async def run_office_subagent(
             # Sub-agent wrote a summary — we're done
             if isinstance(parsed.final_answer, str) and parsed.final_answer.strip():
                 summary = parsed.final_answer.strip()
+            # If the sub-agent was forced to stop at max iterations without
+            # writing a summary, include the last error so the main agent
+            # knows the generation failed.
+            if not summary:
+                errors = [o.error for o in observations if o.error]
+                if errors and not ctx.state.get("generated_files"):
+                    summary = f"Failed to generate document: {errors[-1]}"
             writer({"event": "office_subagent", "status": "done", "summary": summary[:300]})
             break
 
         # Execute tool calls
         writer({"event": "office_subagent_step", "iteration": iteration, "phase": "tool"})
+        total_budget = get_setting(ctx.db, "AGENT_TOTAL_TOOL_BUDGET", ctx.org_id)
         for tc in tool_calls:
             name = tc.get("tool")
             args = tc.get("arguments", {})
             tool = tools.get(name)
+
+            # Total tool-call budget (shared with main agent)
+            if sum(counts.values()) >= total_budget:
+                observations.append(Observation(
+                    tool=name, arguments=args, result={},
+                    error=f"Total tool-call budget ({total_budget}) reached. Write your summary now.",
+                    tokens=0,
+                ))
+                break
+
             if tool is None:
                 observations.append(Observation(
                     tool=name, arguments=args, result={},
@@ -279,10 +308,11 @@ async def run_office_subagent(
             counts[name] = counts.get(name, 0) + 1
             calls_used += 1
 
-            # Sync observations to ctx.state so prepare_arguments on
-            # office_inspect/office_edit can find file_id from office_generate.
+            # Sync observations to ctx.state under a sub-agent-specific key so
+            # office_inspect/office_edit can find file_id from office_generate
+            # without polluting the main agent's observations.
             if ctx.state is not None:
-                ctx.state["observations"] = observations
+                ctx.state["_office_subagent_observations"] = observations
 
             # Emit observation
             summary_text = ""
@@ -298,10 +328,14 @@ async def run_office_subagent(
                     "label": f"office: {obs.tool}", "summary": summary_text,
                     "error": obs.error})
 
-    # Collect results from state
+    # Collect results from state — only files generated during THIS run count.
     generated_files = ctx.state.get("generated_files", []) if ctx.state else []
-    if generated_files:
-        latest = generated_files[-1]
+    new_files = [
+        f for f in generated_files
+        if f.get("file_id") and f["file_id"] not in pre_existing_file_ids
+    ]
+    if new_files:
+        latest = new_files[-1]
         return {
             "ok": True,
             "file_id": latest.get("file_id"),
@@ -313,11 +347,12 @@ async def run_office_subagent(
 
     # No file generated — check observations for errors
     errors = [o.error for o in observations if o.error]
+    error_msg = errors[-1] if errors else "No document was generated"
     return {
         "ok": False,
         "file_id": None,
         "file_name": None,
         "format": None,
-        "summary": summary or "Failed to create document",
-        "error": errors[-1] if errors else "No document was generated",
+        "summary": summary if (summary := locals().get("summary", "")) else f"Failed to generate document: {error_msg}",
+        "error": error_msg,
     }

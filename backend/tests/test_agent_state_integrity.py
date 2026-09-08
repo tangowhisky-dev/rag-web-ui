@@ -155,7 +155,7 @@ class TestDeclaredStateKeys:
 
         monkeypatch.setattr("app.services.agentic_rag.agent_graph.helpers.get_setting", _mock_get_setting)
         monkeypatch.setattr("app.services.agentic_rag.agent_graph.thinking.get_setting", _mock_get_setting)
-        state = {"started_at": 0.0, "iteration": 1, "tool_calls": [{"tool": "search_dense"}]}
+        state = {"started_at": 0.0, "iteration": 1, "tool_calls": [{"tool": "semantic_search"}]}
         assert _wall_clock_exceeded(state) is True
         # In the new topology, route_think returns "finalize" when wall clock is exceeded
         assert route_think(state) == "finalize"
@@ -175,7 +175,7 @@ class TestObservationAccumulation:
 
     def _obs(self, n: int) -> Observation:
         return Observation(
-            tool="search_dense",
+            tool="semantic_search",
             arguments={"query": f"q{n}"},
             result={"docs": [{"page_content": f"doc{n}"}]},
             error=None,
@@ -255,14 +255,14 @@ class TestSubtaskVerification:
         return Plan(
             intent="rag",
             subtasks=[
-                Subtask(id=chr(97 + i), description=f"part {i}", tool_hint="search_dense")
+                Subtask(id=chr(97 + i), description=f"part {i}", tool_hint="semantic_search")
                 for i in range(n)
             ],
         )
 
     def _obs(self, n: int) -> Observation:
         return Observation(
-            tool="search_dense", arguments={"query": f"q{n}"},
+            tool="semantic_search", arguments={"query": f"q{n}"},
             result={"hits": [{"content": f"doc{n}"}]}, error=None, tokens=1,
         )
 
@@ -273,7 +273,7 @@ class TestSubtaskVerification:
         summary = _build_execution_summary({
             "plan": self._plan(3),
             "observations": [self._obs(1)],
-            "tool_call_counts": {"search_dense": 1},
+            "tool_call_counts": {"semantic_search": 1},
             "iteration": 1,
         })
         assert [s["completed"] for s in summary["subtasks"]] == [True, False, False]
@@ -286,7 +286,7 @@ class TestSubtaskVerification:
         summary = _build_execution_summary({
             "plan": self._plan(3),
             "observations": [self._obs(1), self._obs(2), self._obs(3)],
-            "tool_call_counts": {"search_dense": 3},
+            "tool_call_counts": {"semantic_search": 3},
             "iteration": 3,
         })
         assert all(s["completed"] for s in summary["subtasks"])

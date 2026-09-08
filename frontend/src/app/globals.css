@@ -195,6 +195,12 @@ h3[data-stat] {
 .prose h6 { font-size: 0.85em; }
 
 /* ── Reasoning content — force all elements to inherit muted color ── */
+.reasoning-content {
+  overflow-wrap: break-word;
+  word-break: break-word;
+  max-width: 100%;
+  overflow: hidden;
+}
 .reasoning-content h1,
 .reasoning-content h2,
 .reasoning-content h3,
@@ -246,7 +252,7 @@ h3[data-stat] {
 /* ── Custom components ──────────────────────────────────────────── */
 
 .language-think {
-  @apply text-muted-foreground whitespace-pre-wrap m-0 relative border-l-2 border-l-border/30 bg-transparent rounded-none py-0 my-2;
+  @apply text-muted-foreground whitespace-pre-wrap break-words m-0 relative border-l-2 border-l-border/30 bg-transparent rounded-none py-0 my-2;
 }
 
 .hljs {

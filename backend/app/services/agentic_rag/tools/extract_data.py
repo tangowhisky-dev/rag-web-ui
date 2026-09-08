@@ -47,7 +47,7 @@ class ExtractDataInput(BaseModel):
     document_ids: Optional[List[int]] = Field(
         default=None,
         description="For source='retrieved_docs': extract from only these document_ids "
-        "(from kb_search_documents metadata). If null, extracts from all retrieved docs "
+        "(from title_search metadata). If null, extracts from all retrieved docs "
         "(first 10). Use this for batch processing: call extract_data with document_ids "
         "for 5-10 docs at a time, then chart_generate with source='accumulated'.",
     )
@@ -229,7 +229,9 @@ async def _extract_with_llm(text: str, ctx: ToolContext, focus: Optional[str]) -
     )
     points: list[dict] = []
     try:
-        llm = build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)
+        from app.services.settings_service import get_setting
+        tool_temp = get_setting(ctx.db, "TOOL_CALL_TEMPERATURE", ctx.org_id)
+        llm = build_chat_llm(ctx.org_id, ctx.db, role="utility", temperature=tool_temp)
 
         for attempt in range(_MAX_LLM_RETRIES):
             try:
@@ -279,14 +281,12 @@ def _validate_points(points: list[dict]) -> list[dict]:
 class ExtractDataTool(BaseAgentTool):
     name: str = "extract_data"
     ui_label: str = "Extracting data"
-    description: str = (
-        "Extract structured data from the previous answer, retrieved documents, "
-        "an attached file, a specified message, or previously accumulated data. "
-        "Use source='retrieved_docs' with document_ids to extract from specific "
-        "documents in batches. Results accumulate in state — call with "
-        "source='accumulated' to retrieve all accumulated data before chart_generate. "
-        "Sources: last_answer, retrieved_docs, accumulated, file, specified."
-    )
+    description: str = "Extract structured {label, value} rows from the previous answer, retrieved documents, an attached file, or accumulated data. Results accumulate in state."
+    prompt_snippet: str = "Convert sources into structured data for downstream tools"
+    prompt_guidelines: list[str] = [
+        "extract_data: Best before charts, spreadsheets, or data-driven Office documents. Extract only fields required by the downstream artifact and preserve provenance where available.",
+        "extract_data: Use source='retrieved_docs' with document_ids for batch extraction. Use source='accumulated' to retrieve all accumulated data. Sources: last_answer, retrieved_docs, accumulated, file, specified.",
+    ]
     args_schema: type[BaseModel] = ExtractDataInput
 
     def _run(self, *args: Any, **kwargs: Any) -> Any:

@@ -12,6 +12,7 @@ the answer as its final message.
 from __future__ import annotations
 
 import logging
+import time
 
 from langchain_core.messages import AIMessage
 
@@ -22,6 +23,7 @@ from app.services.agentic_rag.prompts_v2 import AGENT_V2_PROMPT
 from app.services.agentic_rag.tool_call_parser import parse_think_response
 from app.services.agentic_rag.tools import applicable_tools
 from app.services.agentic_rag.token_budget import count_tokens
+from app.services.infrastructure import is_cancelled
 from app.services.settings_service import get_setting
 
 from ..agent_graph.compaction import _compact_if_needed
@@ -141,24 +143,6 @@ def _build_v2_user_prompt(
     return "".join(parts)
 
 
-# Keywords that indicate the user wants a downloadable file created.
-_OFFICE_CREATE_VERBS = {"create", "generate", "make", "build", "produce", "export"}
-_OFFICE_FORMAT_KEYWORDS = {
-    "powerpoint": "pptx", "pptx": "pptx", "ppt": "pptx", "slides": "pptx", "deck": "pptx",
-    "presentation": "pptx",
-    "word": "docx", "docx": "docx", "doc": "docx", "document": "docx",
-    "excel": "xlsx", "xlsx": "xlsx", "spreadsheet": "xlsx", "xls": "xlsx",
-}
-
-
-def _needs_office_creation(query: str) -> bool:
-    """Detect if the query asks for a downloadable Office file creation."""
-    q_lower = query.lower()
-    has_verb = any(v in q_lower for v in _OFFICE_CREATE_VERBS)
-    has_format = any(k in q_lower for k in _OFFICE_FORMAT_KEYWORDS)
-    return has_verb and has_format
-
-
 async def think_node_v2(state, ctx) -> dict:
     """Unified think node: LLM reasons and either calls tools or writes the answer."""
     with _agent_step("think"):
@@ -214,15 +198,31 @@ async def think_node_v2(state, ctx) -> dict:
             )
 
         mode = get_setting(ctx.db, "TOOL_CALL_MODE", None)
+
+        # Cancellation check before the expensive LLM call.
+        # Return no tool calls and empty precomputed_answer so the graph
+        # routes to post_process, which detects cancellation and skips
+        # generation/persistence entirely.
+        chat_id = ctx.chat_id if ctx is not None else None
+        if chat_id is not None and is_cancelled(chat_id):
+            logger.debug("[think_v2] cancelled before LLM call | chat_id=%s", chat_id)
+            return {"iteration": iteration, "tool_calls": [], "precomputed_answer": ""}
+
+        # Emit "thinking..." event so the frontend shows the thinking indicator.
+        writer = _writer()
+        writer({"event": "thinking", "content": "", "done": False})
+        think_start = time.monotonic()
+
         try:
+            tool_temp = get_setting(ctx.db, "TOOL_CALL_TEMPERATURE", ctx.org_id)
             if mode == "json_text":
-                llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=0.0)
+                llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=tool_temp)
                 resp = await llm.ainvoke([
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ])
             else:
-                llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=0.0)
+                llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=tool_temp)
                 resp = await llm.bind_tools(tools).ainvoke([
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
@@ -231,7 +231,26 @@ async def think_node_v2(state, ctx) -> dict:
             logger.warning("[think_v2] LLM call failed: %s", exc)
             return {"iteration": iteration, "tool_calls": [], "force_finalize": True}
 
+        # Emit "thought for N seconds" with reasoning content (if any).
+        think_elapsed = time.monotonic() - think_start
         parsed = parse_think_response(resp, mode=mode)
+        if parsed.reasoning:
+            writer({
+                "event": "thinking",
+                "content": parsed.reasoning,
+                "done": True,
+                "elapsed": round(think_elapsed, 1),
+            })
+        else:
+            # No reasoning content — close the thinking indicator with
+            # elapsed time but empty content (non-thinking model).
+            writer({
+                "event": "thinking",
+                "content": "",
+                "done": True,
+                "elapsed": round(think_elapsed, 1),
+            })
+
         tool_calls = parsed.tool_calls
         final_answer_text = parsed.final_answer
 
@@ -239,18 +258,6 @@ async def think_node_v2(state, ctx) -> dict:
         budget_exhausted = tool_calls_used >= tool_budget
         if budget_exhausted:
             tool_calls = []
-
-        # Guard: if the query asks for a file creation but create_office_document
-        # was never called, force another iteration with a reminder. This catches
-        # smaller models that write "I have created..." without calling the tool.
-        if not tool_calls and not budget_exhausted:
-            counts = state.get("tool_call_counts", {})
-            if _needs_office_creation(query) and counts.get("create_office_document", 0) == 0:
-                logger.info("[think_v2] query requests file creation but create_office_document not called — forcing retry")
-                tool_calls = [{
-                    "tool": "create_office_document",
-                    "arguments": {"request": query},
-                }]
 
         if tool_calls:
             return {**compaction_updates, "iteration": iteration, "tool_calls": tool_calls}

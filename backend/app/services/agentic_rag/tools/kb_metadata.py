@@ -72,15 +72,12 @@ class KbMetadataInput(BaseModel):
 class KbMetadataTool(BaseAgentTool):
     name: str = "kb_metadata"
     ui_label: str = "Inspecting KB metadata"
-    description: str = (
-        "Inspect knowledge base metadata to discover what documents exist and "
-        "what fields you can filter on. Call BEFORE search tools when the query "
-        "implies filtering by title, date, file type, or filename. "
-        "Actions: list_fields (available filter fields), "
-        "unique_values (distinct values for a field), "
-        "date_range (min/max dates for a field), "
-        "list_documents (recent documents with title, filename, date, type)."
-    )
+    description: str = "Inspect KB metadata: list_fields, unique_values, date_range, list_documents, count_only. Discover what documents exist and what filters are available."
+    prompt_snippet: str = "Discover KB schema and metadata values"
+    prompt_guidelines: list[str] = [
+        "kb_metadata: Use when the required filter values or document attributes are unknown. Best for exploring available document types, date ranges, fields, and valid metadata values.",
+        "kb_metadata: Do not call when filters are already known — go directly to title_search or search tools.",
+    ]
     args_schema: type[BaseModel] = KbMetadataInput
 
     async def _execute(self, input_obj: KbMetadataInput) -> dict:

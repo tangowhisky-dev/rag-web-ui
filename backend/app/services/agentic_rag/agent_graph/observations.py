@@ -30,8 +30,13 @@ _COMPACT_KEEP_STDOUT_LINES = 20
 
 def _tool_descriptions_text(tools: list) -> str:
     lines = []
+    guidelines: list[str] = []
     for t in tools:
-        lines.append(f"- {t.name}: {t.description}")
+        snippet = getattr(t, "prompt_snippet", "")
+        if snippet:
+            lines.append(f"- {t.name}: {snippet}")
+        else:
+            lines.append(f"- {t.name}: {t.description}")
         # Include the args schema so the LLM knows the exact field names and
         # types. Essential for json_text mode where bind_tools is not called;
         # harmless in native mode (the schema is redundant but consistent).
@@ -47,6 +52,14 @@ def _tool_descriptions_text(tools: list) -> str:
         if field_lines:
             lines.append("  args:")
             lines.extend(field_lines)
+        # Collect per-tool guidelines for the Guidelines section.
+        for g in getattr(t, "prompt_guidelines", []) or []:
+            guidelines.append(g)
+    if guidelines:
+        lines.append("")
+        lines.append("Guidelines:")
+        for g in guidelines:
+            lines.append(f"- {g}")
     return "\n".join(lines)
 
 
@@ -183,13 +196,13 @@ def _observations_text(observations: list[Observation], full: bool = False) -> s
             parts.append(f"  error: {obs.error}")
             continue
         result = obs.result if isinstance(obs.result, dict) else {}
-        # kb_search_documents returns {"ok":..., "result":{"docs":[...]}}
+        # title_search returns {"ok":..., "result":{"docs":[...]}}
         # — unwrap the nested result to access docs/confidence.
         if "docs" not in result and isinstance(result.get("result"), dict):
             result = result["result"]
         if "docs" not in result:
             # Non-retrieval tools (code_execute, chart_generate, extract_data,
-            # file_read, etc.) don't use the docs/confidence shape — render
+            # etc.) don't use the docs/confidence shape — render
             # their result directly. Without this, the LLM never sees these
             # tools' output and re-issues the same call repeatedly, believing
             # it got nothing back.
@@ -220,8 +233,8 @@ def _non_retrieval_observations_text(observations: list[Observation]) -> str:
     LLM for answer synthesis.
     """
     _retrieval_tools = frozenset({
-        "kb_search_documents", "kb_read",
-        "search_exact", "search_sparse", "search_dense",
+        "title_search", "file_read",
+        "keyword_search", "semantic_search",
         "rerank_results", "graph_expand",
     })
     parts = []
@@ -230,7 +243,7 @@ def _non_retrieval_observations_text(observations: list[Observation]) -> str:
         result = obs.result if isinstance(obs.result, dict) else {}
         # Skip retrieval tools whose docs are already in retrieved_docs.
         # Check both the top-level result and the nested "result" key
-        # (kb_search_documents returns {"ok":..., "result":{"docs":[...]}}).
+        # (title_search returns {"ok":..., "result":{"docs":[...]}}).
         nested = result.get("result", {}) if isinstance(result.get("result"), dict) else {}
         if "docs" in result or "docs" in nested or "hits" in result or obs.tool in _retrieval_tools:
             continue
@@ -247,16 +260,16 @@ def _observations_metadata_text(observations: list[Observation]) -> str:
     """Format observations for think_node: metadata-only for search/retrieval
     tools, full result for non-retrieval tools.
 
-    Search tools (search_exact, search_sparse, search_dense, rerank_results,
+    Search tools (keyword_search, semantic_search, rerank_results,
     graph_expand): the reranker already determined relevance.
     think_node only needs to know *what was found* (hit_count, best_score)
     to decide whether to call another tool or finalize — not the chunk content.
 
-    Non-retrieval tools (code_execute, chart_generate, extract_data, file_read):
+    Non-retrieval tools (code_execute, chart_generate, extract_data):
     the LLM needs the full result to decide the next step.
     """
     _search_tools = frozenset({
-        "search_exact", "search_sparse", "search_dense",
+        "keyword_search", "semantic_search",
         "rerank_results", "graph_expand",
     })
     parts = []
@@ -278,10 +291,14 @@ def _observations_metadata_text(observations: list[Observation]) -> str:
             continue
         if "docs" not in result:
             # Non-retrieval tool — full result needed for next-step reasoning.
-            # Truncate kb_read content to avoid bloating the think prompt.
-            if obs.tool == "kb_read" and "content" in result:
+            # file_read: show line range + continuation hint so the model can page.
+            if obs.tool == "file_read" and "content" in result:
                 content_preview = str(result.get("content", ""))[:300]
-                parts.append(f"  document_id={result.get('document_id')} section={result.get('section')}")
+                parts.append(f"  source_type={result.get('source_type')} title={result.get('title')}")
+                parts.append(f"  lines={result.get('start_line')}-{result.get('end_line')}/{result.get('total_lines')} truncated={result.get('truncated')}")
+                hint = result.get("continuation_hint", "")
+                if hint:
+                    parts.append(f"  {hint}")
                 parts.append(f"  content_preview: {content_preview}…")
                 continue
             if obs.tool == "office_load_skill":
@@ -297,7 +314,7 @@ def _observations_metadata_text(observations: list[Observation]) -> str:
             summary = json.dumps(result, default=str)
             parts.append(f"  result: {summary}")
             continue
-        # kb_search_documents — metadata only, no chunk content.
+        # title_search — metadata only, no chunk content.
         doc_count = len(result.get("docs", []))
         confidence = result.get("confidence", "N/A")
         sufficient = result.get("sufficient")
@@ -318,7 +335,7 @@ def _tried_search_queries(observations: list[Observation]) -> list[str]:
     tool_node reuses the prior observation instead of re-running it).
     """
     seen: list[str] = []
-    _search_tools = {"search_exact", "search_sparse", "search_dense", "rerank_results"}
+    _search_tools = {"keyword_search", "semantic_search", "rerank_results"}
     for raw_obs in observations:
         obs = _coerce_observation(raw_obs)
         if obs.tool in _search_tools:
@@ -339,7 +356,7 @@ def _compact_observations(observations: list[Observation]) -> list[Observation]:
     Returns a new list; original observations are not mutated.
     """
     _search_tools = frozenset({
-        "search_exact", "search_sparse", "search_dense",
+        "keyword_search", "semantic_search",
         "rerank_results", "graph_expand",
     })
     compacted = []

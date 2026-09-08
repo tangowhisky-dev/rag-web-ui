@@ -81,12 +81,12 @@ def _search_documents(documents: list, regex: re.Pattern, max_results: int) -> l
 class KbGrepTool(BaseAgentTool):
     name: str = "kb_grep"
     ui_label: str = "Searching KB documents"
-    description: str = (
-        "Search for exact terms or regex patterns across all documents in authorized "
-        "knowledge bases. Returns matching lines with document IDs and line numbers. "
-        "Use as a last resort when search tools return insufficient evidence and you "
-        "need to find specific keywords that vector search may have missed."
-    )
+    description: str = "Search for exact terms or regex patterns across all KB documents. Returns matching lines with document IDs and line numbers."
+    prompt_snippet: str = "Search raw document text (regex/keyword fallback)"
+    prompt_guidelines: list[str] = [
+        "kb_grep: Use as a fallback for literal text, rare strings, regex patterns, or when indexed retrieval misses expected content. Not a default retrieval method.",
+        "kb_grep: Returns lines, not chunks. Use file_read to get full context around matches.",
+    ]
     args_schema: type[BaseModel] = KbGrepInput
 
     def _run(self, *args: Any, **kwargs: Any) -> Any:

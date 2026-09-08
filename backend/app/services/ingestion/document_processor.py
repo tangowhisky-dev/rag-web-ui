@@ -476,6 +476,18 @@ async def _update_search_indices(
     enable_graph: Optional[bool] = None,
 ) -> Optional[GraphBuildRequest]:
     """Update Qdrant/graph indices."""
+    # Check cancellation before the expensive Qdrant upsert
+    from app.services.infrastructure import is_cancelled
+    _cancel_scope = "ds" if data_store_id is not None else "doc"
+    _cancel_id = data_store_id if data_store_id is not None else document.id
+    if is_cancelled(_cancel_scope, _cancel_id):
+        logger.debug("[INGEST] document_id=%s cancelled before Qdrant upsert", document.id)
+        if task:
+            task.status = "failed"
+            task.error_message = "Cancelled by admin"
+            db.commit()
+        return None
+
     # Upsert to Qdrant
     _prog(40, f"Embedding {len(qdrant_payloads)} chunks…")
     await _upsert_to_qdrant(
@@ -916,6 +928,23 @@ async def process_document_full(
         from app.services.settings_service import get_setting
         silence_s = get_setting(db, "PROCESSING_TIMEOUT_SILENCE_S", None) or 600
 
+        # Determine the cancellation scope for this task.
+        # DataStore docs check "ds" scope; KB docs check "doc" scope.
+        _cancel_scope = "ds" if data_store_id is not None else "doc"
+        _cancel_id = data_store_id if data_store_id is not None else (document_id or 0)
+
+        # Clear any stale cancel flag from a previous run.  Without this,
+        # a retry after cancellation would immediately abort because the
+        # old Redis key is still set.  The "ds" scope is cleared by scan
+        # init; the "doc" scope has no other cleanup path.
+        if _cancel_scope == "doc" and _cancel_id:
+            from app.services.infrastructure import clear_cancel
+            clear_cancel("doc", _cancel_id)
+
+        def _is_cancelled() -> bool:
+            from app.services.infrastructure import is_cancelled
+            return is_cancelled(_cancel_scope, _cancel_id)
+
         def _on_timeout() -> None:
             logger.warning(
                 "[PROGRESS_TIMEOUT] task_id=%s silence_s=%s — cancelling",
@@ -956,12 +985,26 @@ async def process_document_full(
             document, document_was_created = doc_result
 
             # ── Phase 1: Convert ──────────────────────────────────────────────
+            if _is_cancelled():
+                logger.debug("[INGEST] task_id=%s cancelled before conversion", task_id)
+                task.status = "failed"
+                task.error_message = "Cancelled by admin"
+                db.commit()
+                return
+
             markdown_text = await _convert_or_reuse_markdown(
                 skip_conversion, document, permanent_path, file_path, temp_path,
                 data_store_id, file_name, enable_ocr, db, task_id, _set_progress,
             )
 
             # ── Phase 2: Ingest ────────────────────────────────────────────────
+            if _is_cancelled():
+                logger.debug("[INGEST] task_id=%s cancelled before chunking", task_id)
+                task.status = "failed"
+                task.error_message = "Cancelled by admin"
+                db.commit()
+                return
+
             graph_request = await ingest_document(
                 document_id=document.id,
                 file_name=file_name,

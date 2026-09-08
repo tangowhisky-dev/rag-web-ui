@@ -46,7 +46,7 @@ class DataStore(Base):
     # Auto-process settings — when enabled, file changes are detected by
     # the watcher and processed (ingested) at the configured interval.
     auto_process_enabled = Column(Boolean, default=False)
-    auto_process_interval_minutes = Column(Integer, default=60)
+    auto_process_interval_minutes = Column(Integer, default=5)
 
     # Ingestion tracking — manual scans
     last_scan_at = Column(DateTime, nullable=True)

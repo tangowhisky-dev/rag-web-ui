@@ -10,6 +10,7 @@ Pipeline types: ``"kb"`` or ``"ds"``.
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointIdsList
@@ -29,6 +30,79 @@ from app.services.graph import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ── Cancel in-flight tasks before deletion ───────────────────────────────────
+
+
+def _cancel_inflight_tasks(
+    db: Session,
+    scope: str,
+    scope_id: int,
+    document_ids: list[int] | None = None,
+    wait_seconds: float = 5.0,
+) -> int:
+    """Signal cancellation for all in-flight ingestion/graph tasks.
+
+    Sets Redis cancel flags and graph-build cancel events so running
+    threads detect cancellation and abort.  Waits up to *wait_seconds*
+    for tasks to transition out of "processing"/"pending" status.
+
+    Returns the number of tasks that were signalled.
+    """
+    from app.services.infrastructure import set_cancel
+    from app.services.ingestion.ingestion_dispatcher import (
+        cancel_graph_build_for_document,
+        cancel_graph_builds_for_datastore,
+    )
+
+    signalled = 0
+
+    # 1. Signal cancellation via Redis (for OCR/conversion/embedding threads)
+    set_cancel(scope, scope_id, reason="deletion")
+    if document_ids:
+        for doc_id in document_ids:
+            set_cancel("doc", doc_id, reason="deletion")
+
+    # 2. Cancel graph builds
+    if scope == "ds":
+        signalled += cancel_graph_builds_for_datastore(scope_id)
+    elif document_ids:
+        for doc_id in document_ids:
+            tasks = (
+                db.query(ProcessingTask)
+                .filter(ProcessingTask.document_id == doc_id)
+                .all()
+            )
+            for t in tasks:
+                if cancel_graph_build_for_document(t.id):
+                    signalled += 1
+
+    # 3. Wait for tasks to observe cancellation
+    if wait_seconds <= 0:
+        return signalled
+
+    deadline = time.time() + wait_seconds
+    while time.time() < deadline:
+        # Expire all cached objects so we see committed changes from
+        # other sessions (ingestion threads use their own sessions).
+        db.expire_all()
+        still_running = (
+            db.query(ProcessingTask)
+            .filter(
+                ProcessingTask.status.in_(["processing", "pending"]),
+            )
+        )
+        if document_ids:
+            still_running = still_running.filter(
+                ProcessingTask.document_id.in_(document_ids)
+            )
+        count = still_running.count()
+        if count == 0:
+            break
+        time.sleep(0.25)
+
+    return signalled
 
 
 def _get_qdrant() -> QdrantClient:
@@ -59,9 +133,12 @@ def _delete_qdrant_for_kb(kb_id: int) -> None:
     collection_name = f"kb_{kb_id}"
     try:
         qdrant = _get_qdrant()
-        logger.warning("[DELETE] _delete_qdrant_for_kb: deleting collection %s", collection_name)
+        logger.info(
+            "[QDRANT-DELETE] dropping collection=%s cause=kb_deletion kb_id=%d",
+            collection_name, kb_id,
+        )
         qdrant.delete_collection(collection_name)
-        logger.debug("DeletionService: deleted Qdrant collection %s", collection_name)
+        logger.info("[QDRANT-DELETE] dropped collection=%s", collection_name)
     except Exception as e:
         logger.warning("DeletionService: Qdrant delete failed for kb_%d: %s", kb_id, e)
 
@@ -101,9 +178,12 @@ def _delete_qdrant_for_ds(db: Session, datastore_id: int) -> None:
         try:
             collections = [c.name for c in qdrant.get_collections().collections]
             if collection_name in collections:
-                logger.warning("[DELETE] _delete_qdrant_for_ds: deleting collection %s", collection_name)
+                logger.info(
+                    "[QDRANT-DELETE] dropping collection=%s cause=datastore_deletion datastore_id=%d",
+                    collection_name, datastore_id,
+                )
                 qdrant.delete_collection(collection_name)
-                logger.debug("DeletionService: deleted Qdrant collection %s", collection_name)
+                logger.info("[QDRANT-DELETE] dropped collection=%s", collection_name)
         except Exception as e:
             logger.warning("DeletionService: Qdrant collection delete failed: %s", e)
     except Exception as e:
@@ -199,6 +279,18 @@ def delete_kb(
     datastore_docs = [doc for doc in kb.documents if doc.data_store_id is not None]
     cleanup_errors = []
 
+    # ── 0. Cancel in-flight ingestion/graph tasks ────────────────────────
+    all_doc_ids = [d.id for d in kb.documents]
+    if all_doc_ids:
+        cancelled = _cancel_inflight_tasks(
+            db, "kb", kb_id, document_ids=all_doc_ids, wait_seconds=5.0,
+        )
+        if cancelled:
+            logger.info(
+                "KB %d deletion: cancelled %d in-flight tasks before cleanup",
+                kb_id, cancelled,
+            )
+
     # ── 1. Filesystem cleanup (direct uploads only) ──────────────────────
     if direct_docs:
         try:
@@ -283,6 +375,17 @@ def delete_datastore(
 
     # Get all document IDs for this datastore (needed for Qdrant/Neo4j cleanup)
     doc_ids = [d.id for d in datastore_docs]
+
+    # ── 0. Cancel in-flight scan/ingestion/graph tasks ───────────────────
+    if doc_ids:
+        cancelled = _cancel_inflight_tasks(
+            db, "ds", datastore_id, document_ids=doc_ids, wait_seconds=5.0,
+        )
+        if cancelled:
+            logger.info(
+                "Datastore %d deletion: cancelled %d in-flight tasks before cleanup",
+                datastore_id, cancelled,
+            )
 
     # ── 1. DB cleanup ────────────────────────────────────────────────────
     # Delete DB records first. If this commit fails, vector/graph data is

@@ -5,7 +5,7 @@ individual graph mechanics), these tests run the **full agent graph** with
 mocked LLMs that return scripted responses per node.  The graph mechanics
 (routing, state propagation, reference resolution, tool dispatch, citation
 normalisation, conversation history) are real; only the LLM outputs and the
-search_dense tool's vector search are mocked.
+semantic_search tool's vector search are mocked.
 
 Each transcript is a sequence of turns.  After each turn we assert on the
 final graph state — the answer text, retrieved docs, observations, citations,
@@ -52,7 +52,7 @@ def _mock_docs(*pairs: tuple[str, str]) -> list[dict]:
     """Build mock retrieved docs from (content, source) pairs.
 
     Each doc gets a unique content_hash derived from the content itself,
-    so docs from different search_dense calls are not deduplicated by the
+    so docs from different semantic_search calls are not deduplicated by the
     tool_node's content_hash-based merge.
     """
     import hashlib
@@ -188,9 +188,9 @@ class _ScriptedLLM:
 
 def _setup_graph(monkeypatch, scripted_llm: _ScriptedLLM, ctx: ToolContext,
                  rag_results: dict[str, list[dict]] | None = None):
-    """Wire up a full agent graph with mocked LLMs and search_dense.
+    """Wire up a full agent graph with mocked LLMs and semantic_search.
 
-    ``rag_results`` maps a query string to the docs that search_dense should
+    ``rag_results`` maps a query string to the docs that semantic_search should
     return for that query.  Queries not in the map return empty docs.
     If ``ctx.redis_memory`` already has a checkpointer (from a prior call),
     it is reused so the graph state persists across calls.
@@ -214,7 +214,7 @@ def _setup_graph(monkeypatch, scripted_llm: _ScriptedLLM, ctx: ToolContext,
             monkeypatch.setattr(_mod, "build_chat_llm", lambda *a, **kw: scripted_llm)
 
     # Mock the atomic search tools to return scripted hits.
-    # All search tools (search_exact, search_sparse, search_dense) share the
+    # All search tools (keyword_search, semantic_search) share the
     # same mock — they return hits based on the query string.
     async def _mock_search_execute(self, input_obj):
         query = input_obj.query
@@ -235,7 +235,7 @@ def _setup_graph(monkeypatch, scripted_llm: _ScriptedLLM, ctx: ToolContext,
                     "document_id": meta.get("document_id", 1),
                     "citation_kind": "chunk",
                     "chunk_index": meta.get("chunk_index", 0),
-                    "source_tool": "search_dense",
+                    "source_tool": "semantic_search",
                     "citation_id": "",
                 },
             })
@@ -249,11 +249,10 @@ def _setup_graph(monkeypatch, scripted_llm: _ScriptedLLM, ctx: ToolContext,
             "tokens": 50,
         }
 
-    # Patch all three search tools' _execute methods
-    from app.services.agentic_rag.tools.search_exact import SearchExactTool
-    from app.services.agentic_rag.tools.search_sparse import SearchSparseTool
-    from app.services.agentic_rag.tools.search_dense import SearchDenseTool
-    for _tool_cls in (SearchExactTool, SearchSparseTool, SearchDenseTool):
+    # Patch the search tools' _execute methods
+    from app.services.agentic_rag.tools.keyword_search import KeywordSearchTool
+    from app.services.agentic_rag.tools.semantic_search import SemanticSearchTool
+    for _tool_cls in (KeywordSearchTool, SemanticSearchTool):
         monkeypatch.setattr(_tool_cls, "_execute", _mock_search_execute)
 
     # Patch chart_generate to inject test data into state.accumulated_data
@@ -342,15 +341,15 @@ class TestMultiTurnReferenceResolution:
         llm = _ScriptedLLM()
         ctx = _make_ctx(chat_id=1, message_id=101)
 
-        # Turn 1 plan: single search_dense for StreamVC.
+        # Turn 1 plan: single semantic_search for StreamVC.
         llm.script("plan", json.dumps({
             "intent": "rag",
-            "subtasks": [{"id": "a", "description": "Retrieve StreamVC overview", "tool_hint": "search_dense", "suggested_query": "StreamVC model overview"}],
+            "subtasks": [{"id": "a", "description": "Retrieve StreamVC overview", "tool_hint": "semantic_search", "suggested_query": "StreamVC model overview"}],
             "needs_clarification": False,
         }))
-        # Turn 1 think: call search_dense.
+        # Turn 1 think: call semantic_search.
         llm.script("think", json.dumps({
-            "tool_calls": [{"tool": "search_dense", "arguments": {"query": "StreamVC model overview"}}],
+            "tool_calls": [{"tool": "semantic_search", "arguments": {"query": "StreamVC model overview"}}],
         }))
         # Turn 1 finalize: answer about StreamVC.
         llm.script("finalize", "StreamVC is a voice conversion model based on streaming architecture [1](1).")
@@ -385,11 +384,11 @@ class TestMultiTurnReferenceResolution:
         ctx.message_id = 102
         llm.script("plan", json.dumps({
             "intent": "rag",
-            "subtasks": [{"id": "a", "description": "Retrieve StreamVC limitations", "tool_hint": "search_dense", "suggested_query": "StreamVC limitations"}],
+            "subtasks": [{"id": "a", "description": "Retrieve StreamVC limitations", "tool_hint": "semantic_search", "suggested_query": "StreamVC limitations"}],
             "needs_clarification": False,
         }))
         llm.script("think", json.dumps({
-            "tool_calls": [{"tool": "search_dense", "arguments": {"query": "StreamVC limitations"}}],
+            "tool_calls": [{"tool": "semantic_search", "arguments": {"query": "StreamVC limitations"}}],
         }))
         llm.script("finalize", "StreamVC has limitations in real-time latency and speaker adaptation [1](1).")
         llm.script("extract", json.dumps({
@@ -411,7 +410,7 @@ class TestMultiTurnReferenceResolution:
         search_queries = [
             _coerce_observation(o).arguments.get("query", "")
             for o in observations
-            if _coerce_observation(o).tool in ("search_exact", "search_sparse", "search_dense")
+            if _coerce_observation(o).tool in ("keyword_search", "semantic_search")
         ]
         assert any("StreamVC" in q or "streamvc" in q.lower() for q in search_queries), \
             f"Turn 2: search query should resolve 'its' to 'StreamVC', got: {search_queries}"
@@ -447,11 +446,11 @@ class TestTopicCarryover:
         # Turn 1: Kubernetes autoscaling.
         llm.script("plan", json.dumps({
             "intent": "rag",
-            "subtasks": [{"id": "a", "description": "Retrieve K8s autoscaling", "tool_hint": "search_dense", "suggested_query": "Kubernetes autoscaling overview"}],
+            "subtasks": [{"id": "a", "description": "Retrieve K8s autoscaling", "tool_hint": "semantic_search", "suggested_query": "Kubernetes autoscaling overview"}],
             "needs_clarification": False,
         }))
         llm.script("think", json.dumps({
-            "tool_calls": [{"tool": "search_dense", "arguments": {"query": "Kubernetes autoscaling overview"}}],
+            "tool_calls": [{"tool": "semantic_search", "arguments": {"query": "Kubernetes autoscaling overview"}}],
         }))
         llm.script("finalize", "Kubernetes autoscaling adjusts pod count based on load [1](1).")
         llm.script("extract", json.dumps({"summary": "K8s autoscaling adjusts pods based on load."}))
@@ -471,11 +470,11 @@ class TestTopicCarryover:
         ctx.message_id = 202
         llm.script("plan", json.dumps({
             "intent": "rag",
-            "subtasks": [{"id": "a", "description": "Retrieve Redis caching", "tool_hint": "search_dense", "suggested_query": "Redis caching strategies"}],
+            "subtasks": [{"id": "a", "description": "Retrieve Redis caching", "tool_hint": "semantic_search", "suggested_query": "Redis caching strategies"}],
             "needs_clarification": False,
         }))
         llm.script("think", json.dumps({
-            "tool_calls": [{"tool": "search_dense", "arguments": {"query": "Redis caching strategies"}}],
+            "tool_calls": [{"tool": "semantic_search", "arguments": {"query": "Redis caching strategies"}}],
         }))
         llm.script("finalize", "Redis caching uses TTL and LRU eviction [1](1).")
         llm.script("extract", json.dumps({"summary": "Redis caching uses TTL and LRU."}))
@@ -493,7 +492,7 @@ class TestTopicCarryover:
         search_queries2 = [
             _coerce_observation(o).arguments.get("query", "")
             for o in observations2
-            if _coerce_observation(o).tool in ("search_exact", "search_sparse", "search_dense")
+            if _coerce_observation(o).tool in ("keyword_search", "semantic_search")
         ]
         assert not any("kubernetes" in q.lower() for q in search_queries2), \
             f"Turn 2: search should not leak topic A (Kubernetes) into topic B, got: {search_queries2}"
@@ -504,17 +503,17 @@ class TestTopicCarryover:
         llm.script("plan", json.dumps({
             "intent": "rag",
             "subtasks": [
-                {"id": "a", "description": "Retrieve K8s autoscaling", "tool_hint": "search_dense", "suggested_query": "Kubernetes autoscaling comparison"},
-                {"id": "b", "description": "Retrieve Redis caching", "tool_hint": "search_dense", "depends_on": ["a"], "suggested_query": "Redis caching comparison"},
+                {"id": "a", "description": "Retrieve K8s autoscaling", "tool_hint": "semantic_search", "suggested_query": "Kubernetes autoscaling comparison"},
+                {"id": "b", "description": "Retrieve Redis caching", "tool_hint": "semantic_search", "depends_on": ["a"], "suggested_query": "Redis caching comparison"},
             ],
             "needs_clarification": False,
         }))
         llm.script("think", json.dumps({
-            "tool_calls": [{"tool": "search_dense", "arguments": {"query": "Kubernetes autoscaling comparison"}}],
+            "tool_calls": [{"tool": "semantic_search", "arguments": {"query": "Kubernetes autoscaling comparison"}}],
         }))
         llm.script("sufficiency", json.dumps({"sufficient": False}))
         llm.script("think", json.dumps({
-            "tool_calls": [{"tool": "search_dense", "arguments": {"query": "Redis caching comparison"}}],
+            "tool_calls": [{"tool": "semantic_search", "arguments": {"query": "Redis caching comparison"}}],
         }))
         llm.script("finalize", "K8s autoscaling and Redis caching serve different purposes [1](1) [2](2).")
         llm.script("extract", json.dumps({"summary": "Comparison of K8s autoscaling and Redis caching."}))
@@ -587,11 +586,11 @@ class TestClarificationInterruptResume:
         # After clarification, plan again with the answer, then proceed.
         llm.script("plan", json.dumps({
             "intent": "rag",
-            "subtasks": [{"id": "a", "description": "Retrieve PostgreSQL replication", "tool_hint": "search_dense", "suggested_query": "PostgreSQL replication configuration"}],
+            "subtasks": [{"id": "a", "description": "Retrieve PostgreSQL replication", "tool_hint": "semantic_search", "suggested_query": "PostgreSQL replication configuration"}],
             "needs_clarification": False,
         }))
         llm.script("think", json.dumps({
-            "tool_calls": [{"tool": "search_dense", "arguments": {"query": "PostgreSQL replication configuration"}}],
+            "tool_calls": [{"tool": "semantic_search", "arguments": {"query": "PostgreSQL replication configuration"}}],
         }))
         llm.script("finalize", "PostgreSQL replication is configured via streaming replication [1](1).")
         llm.script("extract", json.dumps({"summary": "PostgreSQL replication via streaming."}))
@@ -629,14 +628,14 @@ class TestClarificationInterruptResume:
         assert len(msgs) >= 2, f"Should have multiple messages after clarification, got {len(msgs)}"
 
 
-# ─── Transcript 4: Multi-tool plan (2+ search_dense subtasks) ──────────────
+# ─── Transcript 4: Multi-tool plan (2+ semantic_search subtasks) ──────────────
 
 
 class TestMultiToolPlan:
-    """A single turn with a plan requiring 2 search_dense subtasks.
+    """A single turn with a plan requiring 2 semantic_search subtasks.
 
     Verifies that:
-    - Both subtasks execute (2 search_dense calls).
+    - Both subtasks execute (2 semantic_search calls).
     - Observations accumulate correctly (no duplication).
     - Retrieved docs from both calls are merged into retrieved_docs.
     - The plan is marked complete only after both subtasks have results.
@@ -649,17 +648,17 @@ class TestMultiToolPlan:
         llm.script("plan", json.dumps({
             "intent": "rag",
             "subtasks": [
-                {"id": "a", "description": "Retrieve revenue data", "tool_hint": "search_dense", "suggested_query": "Q3 revenue data"},
-                {"id": "b", "description": "Retrieve cost data", "tool_hint": "search_dense", "depends_on": ["a"], "suggested_query": "Q3 cost data"},
+                {"id": "a", "description": "Retrieve revenue data", "tool_hint": "semantic_search", "suggested_query": "Q3 revenue data"},
+                {"id": "b", "description": "Retrieve cost data", "tool_hint": "semantic_search", "depends_on": ["a"], "suggested_query": "Q3 cost data"},
             ],
             "needs_clarification": False,
         }))
         # First think is skipped — precomputed_tool_calls from plan handles subtask a.
         # First sufficiency check: not sufficient (still need costs).
         llm.script("sufficiency", json.dumps({"sufficient": False}))
-        # Second think: call search_dense for costs.
+        # Second think: call semantic_search for costs.
         llm.script("think", json.dumps({
-            "tool_calls": [{"tool": "search_dense", "arguments": {"query": "Q3 cost data"}}],
+            "tool_calls": [{"tool": "semantic_search", "arguments": {"query": "Q3 cost data"}}],
         }))
         # Second sufficiency check: sufficient (both queries done).
         llm.script("sufficiency", json.dumps({"sufficient": True}))
@@ -681,13 +680,13 @@ class TestMultiToolPlan:
         _run_turn(graph, config, "What were Q3 revenue and costs?", message_id=401)
         state = _get_state(graph, config)
 
-        # Verify 2 search_dense observations.
+        # Verify 2 semantic_search observations.
         observations = state.get("observations", [])
         from app.services.agentic_rag.agent_graph import _coerce_observation
         rag_obs = [_coerce_observation(o) for o in observations
-                   if _coerce_observation(o).tool == "search_dense"]
+                   if _coerce_observation(o).tool == "semantic_search"]
         assert len(rag_obs) == 2, \
-            f"Should have 2 search_dense observations, got {len(rag_obs)}: {[_coerce_observation(o).tool for o in observations]}"
+            f"Should have 2 semantic_search observations, got {len(rag_obs)}: {[_coerce_observation(o).tool for o in observations]}"
 
         # Verify both docs are in retrieved_docs.
         docs = state.get("retrieved_docs", [])
@@ -810,11 +809,11 @@ class TestEntityAdditionRate:
 
             llm.script("plan", json.dumps({
                 "intent": "rag",
-                "subtasks": [{"id": "a", "description": f"Retrieve {entity} overview", "tool_hint": "search_dense", "suggested_query": f"{entity} overview"}],
+                "subtasks": [{"id": "a", "description": f"Retrieve {entity} overview", "tool_hint": "semantic_search", "suggested_query": f"{entity} overview"}],
                 "needs_clarification": False,
             }))
             llm.script("think", json.dumps({
-                "tool_calls": [{"tool": "search_dense", "arguments": {"query": f"{entity} overview"}}],
+                "tool_calls": [{"tool": "semantic_search", "arguments": {"query": f"{entity} overview"}}],
             }))
             llm.script("finalize", f"{entity} is a programming language with unique features [1](1).")
             llm.script("extract", json.dumps({"summary": f"{entity} is a programming language."}))
@@ -894,11 +893,11 @@ class TestUnsupportedCitationRejection:
 
         llm.script("plan", json.dumps({
             "intent": "rag",
-            "subtasks": [{"id": "a", "description": "Retrieve data", "tool_hint": "search_dense", "suggested_query": "important data"}],
+            "subtasks": [{"id": "a", "description": "Retrieve data", "tool_hint": "semantic_search", "suggested_query": "important data"}],
             "needs_clarification": False,
         }))
         llm.script("think", json.dumps({
-            "tool_calls": [{"tool": "search_dense", "arguments": {"query": "important data"}}],
+            "tool_calls": [{"tool": "semantic_search", "arguments": {"query": "important data"}}],
         }))
         # Finalize cites [1] (valid) and [3] (out of range — only 1 doc).
         llm.script("finalize", "The key finding is in [1](1), also referenced in [3](3).")
@@ -934,7 +933,7 @@ class TestUnsupportedCitationRejection:
 
 
 class TestObservationNonDuplicationAcrossTurns:
-    """Two turns, each calling search_dense. Observations from Turn 1 should
+    """Two turns, each calling semantic_search. Observations from Turn 1 should
     not leak into Turn 2.
 
     Verifies that:
@@ -949,11 +948,11 @@ class TestObservationNonDuplicationAcrossTurns:
         # Turn 1.
         llm.script("plan", json.dumps({
             "intent": "rag",
-            "subtasks": [{"id": "a", "description": "Retrieve topic A", "tool_hint": "search_dense", "suggested_query": "topic A details"}],
+            "subtasks": [{"id": "a", "description": "Retrieve topic A", "tool_hint": "semantic_search", "suggested_query": "topic A details"}],
             "needs_clarification": False,
         }))
         llm.script("think", json.dumps({
-            "tool_calls": [{"tool": "search_dense", "arguments": {"query": "topic A details"}}],
+            "tool_calls": [{"tool": "semantic_search", "arguments": {"query": "topic A details"}}],
         }))
         llm.script("finalize", "Topic A is about algorithms [1](1).")
         llm.script("extract", json.dumps({"summary": "Topic A is about algorithms."}))
@@ -975,11 +974,11 @@ class TestObservationNonDuplicationAcrossTurns:
         ctx.message_id = 802
         llm.script("plan", json.dumps({
             "intent": "rag",
-            "subtasks": [{"id": "a", "description": "Retrieve topic B", "tool_hint": "search_dense", "suggested_query": "topic B details"}],
+            "subtasks": [{"id": "a", "description": "Retrieve topic B", "tool_hint": "semantic_search", "suggested_query": "topic B details"}],
             "needs_clarification": False,
         }))
         llm.script("think", json.dumps({
-            "tool_calls": [{"tool": "search_dense", "arguments": {"query": "topic B details"}}],
+            "tool_calls": [{"tool": "semantic_search", "arguments": {"query": "topic B details"}}],
         }))
         llm.script("finalize", "Topic B is about data structures [1](1).")
         llm.script("extract", json.dumps({"summary": "Topic B is about data structures."}))
@@ -993,15 +992,15 @@ class TestObservationNonDuplicationAcrossTurns:
         coerced2 = [_coerce_observation(o) for o in obs2]
         assert len(coerced2) == 1, \
             f"Turn 2: should have 1 observation (reset), got {len(coerced2)}"
-        assert coerced2[0].tool == "search_dense", \
-            f"Turn 2: observation should be search_dense, got {coerced2[0].tool}"
+        assert coerced2[0].tool == "semantic_search", \
+            f"Turn 2: observation should be semantic_search, got {coerced2[0].tool}"
 
         # The query should be "topic B details", not "topic A details".
         assert "topic B" in coerced2[0].arguments.get("query", ""), \
             f"Turn 2: observation should be for topic B, got: {coerced2[0].arguments}"
 
 
-# ─── Transcript 9: Previous answer action (summarize_answer) ───────────────
+# ─── Transcript 9: Previous answer action (summarize) ───────────────
 
 
 class TestPreviousAnswerAction:
@@ -1010,7 +1009,7 @@ class TestPreviousAnswerAction:
     Verifies that:
     - The plan recognizes intent="previous_answer_action".
     - The last_answer_object from Turn 1 is available to Turn 2.
-    - The summarize_answer tool is used.
+    - The summarize tool is used.
     """
 
     def test_summarize_previous_answer(self, monkeypatch):
@@ -1020,11 +1019,11 @@ class TestPreviousAnswerAction:
         # Turn 1: normal RAG turn.
         llm.script("plan", json.dumps({
             "intent": "rag",
-            "subtasks": [{"id": "a", "description": "Retrieve data", "tool_hint": "search_dense", "suggested_query": "machine learning basics"}],
+            "subtasks": [{"id": "a", "description": "Retrieve data", "tool_hint": "semantic_search", "suggested_query": "machine learning basics"}],
             "needs_clarification": False,
         }))
         llm.script("think", json.dumps({
-            "tool_calls": [{"tool": "search_dense", "arguments": {"query": "machine learning basics"}}],
+            "tool_calls": [{"tool": "semantic_search", "arguments": {"query": "machine learning basics"}}],
         }))
         llm.script("finalize", "Machine learning is a subset of AI that learns from data [1](1).")
         llm.script("extract", json.dumps({
@@ -1053,11 +1052,11 @@ class TestPreviousAnswerAction:
         ctx.message_id = 902
         llm.script("plan", json.dumps({
             "intent": "previous_answer_action",
-            "subtasks": [{"id": "a", "description": "Summarize previous answer", "tool_hint": "summarize_answer"}],
+            "subtasks": [{"id": "a", "description": "Summarize previous answer", "tool_hint": "summarize"}],
             "needs_clarification": False,
         }))
         llm.script("think", json.dumps({
-            "tool_calls": [{"tool": "summarize_answer", "arguments": {"action": "summarize"}}],
+            "tool_calls": [{"tool": "summarize", "arguments": {"text": "Machine learning is a subset of AI."}}],
         }))
         llm.script("finalize", "In summary: ML is a subset of AI that learns from data.")
         llm.script("extract", json.dumps({"summary": "Summary of ML answer."}))

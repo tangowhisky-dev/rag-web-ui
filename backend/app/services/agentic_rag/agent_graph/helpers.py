@@ -49,6 +49,26 @@ def _writer():
 def _tool_call_budget(db, org_id) -> dict:
     return {
         "clarify": get_setting(db, "AGENT_MAX_CLARIFY", org_id),
+        # Search tools
+        "keyword_search": get_setting(db, "AGENT_MAX_SEARCH_EXACT", org_id),
+        "semantic_search": get_setting(db, "AGENT_MAX_SEARCH_DENSE", org_id),
+        "rerank_results": get_setting(db, "AGENT_MAX_RERANK", org_id),
+        "graph_expand": get_setting(db, "AGENT_MAX_GRAPH_EXPAND", org_id),
+        # Discovery
+        "title_search": get_setting(db, "AGENT_MAX_KB_SEARCH", org_id),
+        # Read (KB documents + attached chat files)
+        "kb_grep": get_setting(db, "AGENT_MAX_KB_GREP", org_id),
+        "file_read": get_setting(db, "AGENT_MAX_KB_READ", org_id),
+        "kb_outline": get_setting(db, "AGENT_MAX_KB_READ", org_id),
+        # Processing
+        "code_execute": get_setting(db, "AGENT_MAX_CODE_EXEC", org_id),
+        "extract_data": get_setting(db, "AGENT_MAX_EXTRACT_DATA", org_id),
+        "chart_generate": get_setting(db, "AGENT_MAX_CHART_GENERATE", org_id),
+        # Office document generation
+        "office_load_skill": get_setting(db, "AGENT_MAX_OFFICE_LOAD_SKILL", org_id),
+        "office_generate": get_setting(db, "AGENT_MAX_OFFICE_GENERATE", org_id),
+        "office_inspect": get_setting(db, "AGENT_MAX_OFFICE_INSPECT", org_id),
+        "office_edit": get_setting(db, "AGENT_MAX_OFFICE_EDIT", org_id),
     }
 
 

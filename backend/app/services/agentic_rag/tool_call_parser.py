@@ -22,9 +22,15 @@ logger = logging.getLogger(__name__)
 class ParsedThinkResponse:
     """Normalized result of parsing a `think_node` LLM response."""
 
-    def __init__(self, final_answer: Optional[str] = None, tool_calls: Optional[list[dict]] = None):
+    def __init__(
+        self,
+        final_answer: Optional[str] = None,
+        tool_calls: Optional[list[dict]] = None,
+        reasoning: Optional[str] = None,
+    ):
         self.final_answer = final_answer
         self.tool_calls = tool_calls or []
+        self.reasoning = reasoning
 
 
 def _repair_json_brackets(text: str) -> str:
@@ -114,7 +120,7 @@ def _dispatch_parsed_json(parsed: Any) -> Optional[ParsedThinkResponse]:
         return ParsedThinkResponse(final_answer=parsed["final_answer"])
     elif isinstance(parsed, dict) and len(parsed) == 1:
         # Malformed shorthand some local models emit, e.g.
-        # {"search_dense": {"query": "..."}} instead of the
+        # {"semantic_search": {"query": "..."}} instead of the
         # documented {"tool": ..., "arguments": ...} shape.
         # Treat the single key as the tool name.
         (name, args), = parsed.items()
@@ -156,18 +162,51 @@ def parse_think_response(
     response: AIMessage,
     mode: str = "auto",
 ) -> ParsedThinkResponse:
-    """Parse an LLM response into either a final answer or a list of tool calls."""
+    """Parse an LLM response into either a final answer or a list of tool calls.
+
+    Also extracts reasoning/thinking content from the response. For models that
+    expose ``reasoning_content`` in ``additional_kwargs`` (native API support),
+    that is used directly. For models that emit inline thinking tags
+    (````, ``<reasoning>...</reasoning>``,
+    ``<|channel>thought ... <channel|>``), the tags are parsed and stripped
+    from the content before tool-call parsing.
+    """
     tool_calls: list[dict] = []
     final_answer: Optional[str] = None
+    reasoning: Optional[str] = None
 
+    # ── Reasoning extraction ──────────────────────────────────────────
+    # 1. Check additional_kwargs for native reasoning_content (LM Studio /
+    #    OpenAI o-series expose it here when the gateway separates it).
+    native_reasoning = (
+        response.additional_kwargs.get("reasoning_content")
+        if response.additional_kwargs
+        else None
+    )
+    if native_reasoning and isinstance(native_reasoning, str) and native_reasoning.strip():
+        reasoning = native_reasoning.strip()
+
+    # 2. If no native reasoning, extract from inline thinking tags in content.
+    #    This handles DeepSeek/Qwen (<think>), Gemma (<|channel>thought), etc.
+    raw = str(response.content) if response.content else ""
+    if reasoning is None and raw:
+        from app.services.infrastructure.reasoning_tags import extract_reasoning
+        extracted_reasoning, cleaned_content, _is_complete = extract_reasoning(raw)
+        if extracted_reasoning is not None:
+            reasoning = extracted_reasoning
+            # Replace the response content with the cleaned version so
+            # downstream parsing sees only the actual answer/tool-call text.
+            # We can't mutate the AIMessage directly, so we'll use
+            # cleaned_content for parsing instead of raw.
+            raw = cleaned_content
+
+    # ── Tool-call parsing (on cleaned content) ────────────────────────
     # Tier 1: native function-calling.
     if mode in ("auto", "native") and getattr(response, "tool_calls", None):
         tool_calls = _normalize_tool_calls(response.tool_calls)
         if tool_calls:
             logger.debug("[tool_call_parser] native tool_calls: %s", tool_calls)
-            return ParsedThinkResponse(tool_calls=tool_calls)
-
-    raw = str(response.content) if response.content else ""
+            return ParsedThinkResponse(tool_calls=tool_calls, reasoning=reasoning)
 
     if mode == "auto":
         logger.warning("[tool_call_parser] gateway returned no native tool_calls — falling back to JSON-text parsing")
@@ -176,7 +215,8 @@ def parse_think_response(
     if mode in ("auto", "json_text"):
         result = _parse_json_text_fallback(raw)
         if result is not None:
+            result.reasoning = reasoning
             return result
 
     # Tier 3: final-answer default.
-    return ParsedThinkResponse(final_answer=raw)
+    return ParsedThinkResponse(final_answer=raw, reasoning=reasoning)

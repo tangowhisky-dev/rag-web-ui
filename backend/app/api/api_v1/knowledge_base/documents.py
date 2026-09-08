@@ -173,6 +173,12 @@ async def delete_document(
     cleanup_warnings = []
 
     try:
+        # 0. Cancel any in-flight ingestion/graph tasks for this document
+        from app.services.cleanup.deletion_service import _cancel_inflight_tasks
+        _cancel_inflight_tasks(
+            db, "doc", doc_id, document_ids=[doc_id], wait_seconds=5.0,
+        )
+
         # 1. Collect chunk IDs before deleting them (needed for Qdrant point IDs).
         scope_filter = _get_chunk_scope_filter(document, kb_id)
         chunk_ids = [

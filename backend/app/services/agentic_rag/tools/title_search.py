@@ -1,4 +1,4 @@
-"""kb_search_documents tool — document-level retrieval by title.
+"""title_search tool — document-level retrieval by title/filename/metadata.
 
 Queries the documents table directly (no chunks, no Qdrant, no reranker).
 Finds documents by title/filename/date filters, deduplicates same-title
@@ -21,12 +21,13 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
-from sqlalchemy import or_, and_
+from sqlalchemy import or_
 
 from app.models.knowledge import Document
 from app.services.agentic_rag.tool_context import ToolContext, enforce_rbac, write_audit
 from app.services.agentic_rag.token_budget import count_tokens
 from app.services.agentic_rag.tools.base import BaseAgentTool
+from app.services.retrieval.retrieval import get_effective_datastore_ids
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,7 @@ def _parse_date(s: str) -> Optional[datetime]:
         return None
 
 
-class KbSearchDocumentsInput(BaseModel):
+class TitleSearchInput(BaseModel):
     title_contains: Optional[str] = Field(
         default=None,
         description="Case-insensitive substring to match against document titles "
@@ -73,10 +74,9 @@ class KbSearchDocumentsInput(BaseModel):
         "Use metadata_only=true when requesting many documents to avoid token overflow.",
     )
     max_tokens_per_doc: int = Field(
-        default=16000, ge=500, le=32000,
+        default=50000, ge=500,
         description="Token budget per document. The full markdown is truncated if it exceeds this. "
-        "Note: some tokenizers (e.g. Gemma) count tokens at ~3x the rate of the estimator, "
-        "so 16000 estimated tokens may be ~48000 actual tokens for the provider.",
+        "Set high to read full documents, or low to skim. If truncated, use file_read to read the rest.",
     )
     metadata_only: bool = Field(
         default=False,
@@ -87,26 +87,21 @@ class KbSearchDocumentsInput(BaseModel):
     )
 
 
-class KbSearchDocumentsTool(BaseAgentTool):
-    name: str = "kb_search_documents"
+class TitleSearchTool(BaseAgentTool):
+    name: str = "title_search"
     ui_label: str = "Searching documents by title"
-    description: str = (
-        "Find and read full documents from the knowledge base by title, filename, "
-        "content type, or date range. Queries the document table directly — no chunk "
-        "retrieval, no reranking. Returns the complete converted markdown of matching "
-        "documents (or metadata only if metadata_only=true), deduplicated to the latest "
-        "version by file_modified_at. Use when the query names a specific document "
-        "(e.g. 'weekly update', 'Q3 report') or asks for the latest/most recent version. "
-        "For aggregate queries ('how many weekly updates this year'), use metadata_only=true "
-        "with date filters to discover all matching documents first. For conceptual queries "
-        "that don't name a specific document, use search_dense or search_sparse instead."
-    )
-    args_schema: type[BaseModel] = KbSearchDocumentsInput
+    description: str = "Find and read full documents by title, filename, content type, or date range. Queries the document table directly — no chunk retrieval, no reranking. Returns complete converted markdown."
+    prompt_snippet: str = "Retrieve documents by title/filename/metadata"
+    prompt_guidelines: list[str] = [
+        "title_search: Best for finding documents by title, filename, type, author, or date. Use metadata_only=true for discovery or aggregation; use full content for content questions.",
+        "title_search: For conceptual queries that don't name a specific document, use semantic_search or keyword_search instead.",
+    ]
+    args_schema: type[BaseModel] = TitleSearchInput
 
     def _run(self, *args: Any, **kwargs: Any) -> Any:
         raise NotImplementedError("Use arun() for agent tools.")
 
-    async def _execute(self, input_obj: KbSearchDocumentsInput) -> dict:
+    async def _execute(self, input_obj: TitleSearchInput) -> dict:
         t0 = time.monotonic()
         ctx: ToolContext = self.ctx
 
@@ -117,11 +112,15 @@ class KbSearchDocumentsTool(BaseAgentTool):
         if not kb_ids:
             return {"ok": False, "result": {}, "error": "No authorized knowledge bases for this chat.", "tokens": 0}
 
-        # Build query with optional filters.
+        # Build query — search KB documents plus documents in datastores
+        # linked to those KBs. The datastore association is resolved
+        # internally via get_effective_datastore_ids so the agent never
+        # sees which datastore collections are being searched.
+        ds_ids = get_effective_datastore_ids(kb_ids, ctx.org_id, ctx.db)
         q = ctx.db.query(Document).filter(
             or_(
                 Document.knowledge_base_id.in_(kb_ids),
-                and_(Document.knowledge_base_id.is_(None), Document.data_store_id.isnot(None)),
+                Document.data_store_id.in_(ds_ids) if ds_ids else False,
             )
         )
 
@@ -151,7 +150,7 @@ class KbSearchDocumentsTool(BaseAgentTool):
         rows = q.limit(200).all()
         if not rows:
             logger.debug(
-                "[kb_search_documents] no documents matching title=%r modified_after=%r modified_before=%r",
+                "[title_search] no documents matching title=%r modified_after=%r modified_before=%r",
                 input_obj.title_contains, input_obj.modified_after, input_obj.modified_before,
             )
             return {
@@ -201,7 +200,7 @@ class KbSearchDocumentsTool(BaseAgentTool):
                         "file_created_at": file_created_iso,
                         "_file_created_at": file_created_iso,
                         "_file_modified_at": file_modified_iso,
-                        "source": "kb_search_documents",
+                        "source": "title_search",
                     },
                 }
                 docs_result.append(doc_dict)
@@ -209,7 +208,7 @@ class KbSearchDocumentsTool(BaseAgentTool):
 
             markdown = doc.converted_markdown or ""
             if not markdown:
-                logger.debug("[kb_search_documents] doc %d has no converted_markdown, skipping", doc.id)
+                logger.debug("[title_search] doc %d has no converted_markdown, skipping", doc.id)
                 continue
 
             tokens = count_tokens(markdown)
@@ -230,7 +229,7 @@ class KbSearchDocumentsTool(BaseAgentTool):
                     "file_created_at": file_created_iso,
                     "_file_created_at": file_created_iso,
                     "_file_modified_at": file_modified_iso,
-                    "source": "kb_search_documents",
+                    "source": "title_search",
                     "_reranker_score": 1.0,
                     "truncated": truncated,
                     "total_tokens": tokens,
@@ -238,7 +237,7 @@ class KbSearchDocumentsTool(BaseAgentTool):
                         "document_id": doc.id,
                         "citation_kind": "file",
                         "quoted_text": (markdown or "")[:200],
-                        "source_tool": "kb_search_documents",
+                        "source_tool": "title_search",
                         "citation_id": "",
                     },
                 },
@@ -248,12 +247,12 @@ class KbSearchDocumentsTool(BaseAgentTool):
 
         latency_ms = round((time.monotonic() - t0) * 1000)
         logger.debug(
-            "[kb_search_documents] title=%r | matched=%d | selected=%d | metadata_only=%s | tokens=%d | latency=%dms",
+            "[title_search] title=%r | matched=%d | selected=%d | metadata_only=%s | tokens=%d | latency=%dms",
             input_obj.title_contains, len(rows), len(docs_result), input_obj.metadata_only, total_tokens, latency_ms,
         )
 
         write_audit(
-            ctx, "kb_search_documents", input_obj.model_dump(),
+            ctx, "title_search", input_obj.model_dump(),
             {
                 "title_contains": input_obj.title_contains,
                 "matched_documents": len(rows),

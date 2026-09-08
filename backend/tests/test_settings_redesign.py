@@ -78,8 +78,7 @@ def test_hybrid_weights_not_in_registry():
 
 @pytest.mark.parametrize("key", [
     "OPENAI_API_KEY",
-    "QUERY_API_KEY",
-    "REASONING_API_KEY",
+    "UTILITY_API_KEY",
     "VISION_API_KEY",
     "GRAPHRAG_API_KEY",
     "EMBEDDING_API_KEY",
@@ -94,8 +93,7 @@ def test_api_key_settings_registered(key):
 
 @pytest.mark.parametrize("key", [
     "OPENAI_API_BASE",
-    "QUERY_API_BASE",
-    "REASONING_API_BASE",
+    "UTILITY_API_BASE",
     "OPENAI_VISION_API_BASE",
     "GRAPHRAG_API_BASE",
     "EMBEDDING_API_BASE",
@@ -210,13 +208,13 @@ def test_get_org_llm_chat_role(db_session):
     assert "api_key" in cfg
 
 
-def test_get_org_llm_query_role_falls_back(db_session):
-    """get_org_llm with query role falls back to OPENAI_MODEL when QUERY_MODEL unset."""
+def test_get_org_llm_utility_role_falls_back(db_session):
+    """get_org_llm with utility role falls back to OPENAI_MODEL when UTILITY_MODEL unset."""
     from app.services.agentic_rag.llm_factory import get_org_llm
     from app.services.settings_service import get_setting, clear_cache
     clear_cache()
-    cfg = get_org_llm(None, db_session, role="query")
-    # query_model falls back to OPENAI_MODEL (registry default)
+    cfg = get_org_llm(None, db_session, role="utility")
+    # utility_model falls back to OPENAI_MODEL (registry default)
     expected = get_setting(db_session, "OPENAI_MODEL", None)
     assert cfg["model_name"] == expected
 

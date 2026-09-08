@@ -229,17 +229,17 @@ class TestAuthentication:
         assert resp.status_code == 401
 
 
-# ── 2. Single-turn search_dense against real KB + real LLM ──────────────────
+# ── 2. Single-turn semantic_search against real KB + real LLM ──────────────────
 
 
 class TestSingleTurnRetrieval:
     """Send a factual question about computer architecture and verify:
-      - The agent graph runs plan → think → search_dense → finalize.
+      - The agent graph runs plan → think → semantic_search → finalize.
       - Retrieved docs are returned in the context event.
       - The answer is a non-empty, relevant string.
     """
 
-    def test_search_dense_returns_answer(self, token, chat_id):
+    def test_semantic_search_returns_answer(self, token, chat_id):
         result = _send_message(
             token, chat_id,
             "What is a cache line and why is it important for CPU performance?",
@@ -395,7 +395,7 @@ class TestSummarizeAndExtract:
     """
 
     def test_summarize_chunks(self, token, chat_id):
-        """Ask for a summary of a topic — the agent should use search_dense
+        """Ask for a summary of a topic — the agent should use semantic_search
         and possibly summarize_chunks for a multi-document synthesis."""
         result = _send_message(
             token, chat_id,

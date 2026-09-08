@@ -1,20 +1,19 @@
-"""Tests for atomic search tools (search_exact, search_sparse, search_dense, rerank_results, graph_expand)."""
+"""Tests for search tools (keyword_search, semantic_search, rerank_results, graph_expand)."""
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.services.agentic_rag.tools.search_dense import SearchDenseInput, SearchDenseTool
-from app.services.agentic_rag.tools.search_exact import SearchExactInput, SearchExactTool
-from app.services.agentic_rag.tools.search_sparse import SearchSparseInput, SearchSparseTool
+from app.services.agentic_rag.tools.keyword_search import KeywordSearchInput, KeywordSearchTool
+from app.services.agentic_rag.tools.semantic_search import SemanticSearchInput, SemanticSearchTool
 from app.services.agentic_rag.tools.rerank_results import RerankResultsInput, RerankResultsTool
 from app.services.agentic_rag.tools.graph_expand import GraphExpandInput, GraphExpandTool
 
 
-class TestSearchExactTool:
+class TestKeywordSearchTool:
     def test_schema_has_required_fields(self):
-        schema = SearchExactInput.model_json_schema()
+        schema = KeywordSearchInput.model_json_schema()
         assert "query" in schema["required"]
         assert "kb_ids" in schema["properties"]
         assert "document_ids" in schema["properties"]
@@ -27,31 +26,40 @@ class TestSearchExactTool:
         ctx.db = MagicMock()
         ctx.state = {"kb_ids": []}
         ctx.chat_id = 1
-        # enforce_rbac returns empty kb_ids
-        with patch("app.services.agentic_rag.tools.search_exact.enforce_rbac", return_value={"kb_ids": []}):
-            tool = SearchExactTool()
+        with patch("app.services.agentic_rag.tools.keyword_search.enforce_rbac", return_value={"kb_ids": []}):
+            tool = KeywordSearchTool()
             tool.ctx = ctx
             result = asyncio.run(tool.arun({"query": "test", "kb_ids": []}))
         assert result["ok"] is True
         assert result["result"]["hits"] == []
         assert result["result"]["count"] == 0
 
-    @patch("app.services.agentic_rag.tools.search_exact.exact_search_docs")
-    @patch("app.services.agentic_rag.tools.search_exact.expand_synonyms", new_callable=AsyncMock)
-    @patch("app.services.agentic_rag.tools.search_exact.enforce_rbac")
-    @patch("app.services.agentic_rag.tools.search_exact.get_effective_datastore_ids")
-    @patch("app.services.agentic_rag.tools.search_exact.get_setting")
-    def test_returns_hits_with_citation_ref(self, mock_setting, mock_ds, mock_rbac, mock_syn, mock_search):
+    @patch("app.services.agentic_rag.tools.keyword_search.sparse_search_docs")
+    @patch("app.services.agentic_rag.tools.keyword_search.exact_search_docs")
+    @patch("app.services.agentic_rag.tools.keyword_search.expand_synonyms", new_callable=AsyncMock)
+    @patch("app.services.agentic_rag.tools.keyword_search.enforce_rbac")
+    @patch("app.services.agentic_rag.tools.keyword_search.get_effective_datastore_ids")
+    @patch("app.services.agentic_rag.tools.keyword_search.get_setting")
+    def test_returns_merged_hits_with_citation_ref(self, mock_setting, mock_ds, mock_rbac, mock_syn, mock_exact, mock_sparse):
         from langchain_core.documents import Document
         mock_setting.return_value = 0.0
         mock_ds.return_value = []
         mock_rbac.return_value = {"kb_ids": [1]}
         mock_syn.return_value = ("test", [])
-        mock_search.return_value = [
-            Document(page_content="test content", metadata={
+        mock_exact.return_value = [
+            Document(page_content="exact hit", metadata={
                 "document_id": 1, "chunk_index": 0, "page": 1,
                 "title": "Test Doc", "file_name": "test.pdf",
                 "content_hash": "abc123", "qdrant_point_id": "uuid-1",
+                "score": 0.9,
+            })
+        ]
+        mock_sparse.return_value = [
+            Document(page_content="sparse hit", metadata={
+                "document_id": 2, "chunk_index": 5, "page": 3,
+                "title": "Sparse Doc", "file_name": "sparse.pdf",
+                "content_hash": "def456", "qdrant_point_id": "uuid-2",
+                "score": 0.7,
             })
         ]
         ctx = MagicMock()
@@ -60,45 +68,118 @@ class TestSearchExactTool:
         ctx.state = {"kb_ids": [1]}
         ctx.chat_id = 1
         ctx.message_id = 1
-        tool = SearchExactTool()
+        tool = KeywordSearchTool()
+        tool.ctx = ctx
+        result = asyncio.run(tool.arun({"query": "test", "kb_ids": [1]}))
+        assert result["ok"] is True
+        assert len(result["result"]["hits"]) == 2
+        # Sorted by score descending
+        assert result["result"]["hits"][0]["document_id"] == 1
+        assert result["result"]["hits"][1]["document_id"] == 2
+        for hit in result["result"]["hits"]:
+            assert hit["citation_ref"]["source_tool"] == "keyword_search"
+            assert hit["citation_ref"]["citation_kind"] == "chunk"
+
+    @patch("app.services.agentic_rag.tools.keyword_search.sparse_search_docs")
+    @patch("app.services.agentic_rag.tools.keyword_search.exact_search_docs")
+    @patch("app.services.agentic_rag.tools.keyword_search.expand_synonyms", new_callable=AsyncMock)
+    @patch("app.services.agentic_rag.tools.keyword_search.enforce_rbac")
+    @patch("app.services.agentic_rag.tools.keyword_search.get_effective_datastore_ids")
+    @patch("app.services.agentic_rag.tools.keyword_search.get_setting")
+    def test_dedup_by_content_hash(self, mock_setting, mock_ds, mock_rbac, mock_syn, mock_exact, mock_sparse):
+        """Same content_hash from both backends should appear once."""
+        from langchain_core.documents import Document
+        mock_setting.return_value = 0.0
+        mock_ds.return_value = []
+        mock_rbac.return_value = {"kb_ids": [1]}
+        mock_syn.return_value = ("test", [])
+        mock_exact.return_value = [
+            Document(page_content="same content", metadata={
+                "document_id": 1, "chunk_index": 0,
+                "content_hash": "dup1", "score": 0.5,
+            })
+        ]
+        mock_sparse.return_value = [
+            Document(page_content="same content", metadata={
+                "document_id": 1, "chunk_index": 0,
+                "content_hash": "dup1", "score": 0.8,
+            })
+        ]
+        ctx = MagicMock()
+        ctx.org_id = 1
+        ctx.db = MagicMock()
+        ctx.state = {"kb_ids": [1]}
+        ctx.chat_id = 1
+        ctx.message_id = 1
+        tool = KeywordSearchTool()
         tool.ctx = ctx
         result = asyncio.run(tool.arun({"query": "test", "kb_ids": [1]}))
         assert result["ok"] is True
         assert len(result["result"]["hits"]) == 1
-        hit = result["result"]["hits"][0]
-        assert hit["document_id"] == 1
-        assert hit["citation_ref"]["citation_kind"] == "chunk"
-        assert hit["citation_ref"]["source_tool"] == "search_exact"
-        assert hit["citation_ref"]["document_id"] == 1
+        assert result["result"]["hits"][0]["score"] == 0.8
+
+    @patch("app.services.agentic_rag.tools.keyword_search.sparse_search_docs")
+    @patch("app.services.agentic_rag.tools.keyword_search.exact_search_docs")
+    @patch("app.services.agentic_rag.tools.keyword_search.expand_synonyms", new_callable=AsyncMock)
+    @patch("app.services.agentic_rag.tools.keyword_search.enforce_rbac")
+    @patch("app.services.agentic_rag.tools.keyword_search.get_effective_datastore_ids")
+    @patch("app.services.agentic_rag.tools.keyword_search.get_setting")
+    def test_partial_failure_still_returns_hits(self, mock_setting, mock_ds, mock_rbac, mock_syn, mock_exact, mock_sparse):
+        """If one backend fails, the other backend's results still return."""
+        from langchain_core.documents import Document
+        mock_setting.return_value = 0.0
+        mock_ds.return_value = []
+        mock_rbac.return_value = {"kb_ids": [1]}
+        mock_syn.return_value = ("test", [])
+        mock_exact.side_effect = Exception("MySQL FTS failed")
+        mock_sparse.return_value = [
+            Document(page_content="sparse result", metadata={
+                "document_id": 3, "chunk_index": 0,
+                "content_hash": "sparse_only", "score": 0.6,
+            })
+        ]
+        ctx = MagicMock()
+        ctx.org_id = 1
+        ctx.db = MagicMock()
+        ctx.state = {"kb_ids": [1]}
+        ctx.chat_id = 1
+        ctx.message_id = 1
+        tool = KeywordSearchTool()
+        tool.ctx = ctx
+        result = asyncio.run(tool.arun({"query": "test", "kb_ids": [1]}))
+        assert result["ok"] is True
+        assert len(result["result"]["hits"]) == 1
+        assert result["result"]["hits"][0]["document_id"] == 3
 
 
-class TestSearchSparseTool:
-    def test_schema_matches_dense(self):
-        sparse_schema = SearchSparseInput.model_json_schema()
-        dense_schema = SearchDenseInput.model_json_schema()
-        assert set(sparse_schema["properties"].keys()) == set(dense_schema["properties"].keys())
+class TestSemanticSearchTool:
+    def test_schema_has_required_fields(self):
+        schema = SemanticSearchInput.model_json_schema()
+        assert "query" in schema["required"]
+        assert "kb_ids" in schema["properties"]
+        assert "document_ids" in schema["properties"]
+        assert "filters" in schema["properties"]
+        assert "top_k" in schema["properties"]
 
-
-class TestSearchDenseTool:
     def test_prepare_arguments_normalizes_kb_ids(self):
-        tool = SearchDenseTool()
+        tool = SemanticSearchTool()
         result = tool.prepare_arguments({"kb_ids": "5", "query": "test"})
         assert result["kb_ids"] == [5]
 
     def test_prepare_arguments_handles_int(self):
-        tool = SearchDenseTool()
+        tool = SemanticSearchTool()
         result = tool.prepare_arguments({"kb_ids": 5, "query": "test"})
         assert result["kb_ids"] == [5]
 
     def test_prepare_arguments_handles_list(self):
-        tool = SearchDenseTool()
+        tool = SemanticSearchTool()
         result = tool.prepare_arguments({"kb_ids": [1, 2, 3], "query": "test"})
         assert result["kb_ids"] == [1, 2, 3]
 
-    @patch("app.services.agentic_rag.tools.search_dense.dense_search_docs")
-    @patch("app.services.agentic_rag.tools.search_dense.enforce_rbac")
-    @patch("app.services.agentic_rag.tools.search_dense.get_effective_datastore_ids")
-    @patch("app.services.agentic_rag.tools.search_dense.get_setting")
+    @patch("app.services.agentic_rag.tools.semantic_search.dense_search_docs")
+    @patch("app.services.agentic_rag.tools.semantic_search.enforce_rbac")
+    @patch("app.services.agentic_rag.tools.semantic_search.get_effective_datastore_ids")
+    @patch("app.services.agentic_rag.tools.semantic_search.get_setting")
     def test_returns_hits_with_citation_ref(self, mock_setting, mock_ds, mock_rbac, mock_search):
         from langchain_core.documents import Document
         mock_setting.return_value = 0.0
@@ -117,13 +198,13 @@ class TestSearchDenseTool:
         ctx.state = {"kb_ids": [1]}
         ctx.chat_id = 1
         ctx.message_id = 1
-        tool = SearchDenseTool()
+        tool = SemanticSearchTool()
         tool.ctx = ctx
         result = asyncio.run(tool.arun({"query": "semantic test", "kb_ids": [1]}))
         assert result["ok"] is True
         assert len(result["result"]["hits"]) == 1
         hit = result["result"]["hits"][0]
-        assert hit["citation_ref"]["source_tool"] == "search_dense"
+        assert hit["citation_ref"]["source_tool"] == "semantic_search"
         assert hit["citation_ref"]["citation_kind"] == "chunk"
 
 
@@ -144,10 +225,9 @@ class TestRerankResultsTool:
     def test_no_top_n_cap(self, mock_setting, mock_semidedup, mock_hashdedup, mock_rerank):
         """Verify that top_n=None returns all hits passing threshold."""
         from langchain_core.documents import Document
-        mock_setting.return_value = -10.0  # low threshold so all pass
+        mock_setting.return_value = -10.0
         mock_hashdedup.side_effect = lambda x: x
         mock_semidedup.side_effect = lambda x, **kw: x
-        # Mock rerank to return all 5 docs with scores
         input_hits = [
             {"content": f"doc {i}", "document_id": i, "chunk_index": 0,
              "title": f"Doc{i}", "content_hash": f"h{i}", "citation_ref": {}}
@@ -167,7 +247,6 @@ class TestRerankResultsTool:
         ctx.db = MagicMock()
         ctx.chat_id = 1
         ctx.message_id = 1
-        # Populate retrieved_docs so hit provenance validation passes
         ctx.state = {
             "retrieved_docs": [
                 {"page_content": f"doc {i}", "metadata": {"document_id": i, "chunk_index": 0, "content_hash": f"h{i}"}}
@@ -178,7 +257,7 @@ class TestRerankResultsTool:
         tool.ctx = ctx
         result = asyncio.run(tool.arun({"query": "test", "hits": input_hits, "top_n": None}))
         assert result["ok"] is True
-        assert len(result["result"]["hits"]) == 5  # no cap
+        assert len(result["result"]["hits"]) == 5
 
     @patch("app.services.agentic_rag.tools.rerank_results.rerank")
     @patch("app.services.agentic_rag.tools.rerank_results.dedup_by_content_hash")
@@ -235,7 +314,7 @@ class TestRerankResultsTool:
             Document(page_content="doc 0", metadata={
                 "document_id": 1, "chunk_index": 0, "title": "Doc0",
                 "content_hash": "h0", "_reranker_score": 1.0,
-                "citation_ref": {"document_id": 1, "source_tool": "search_dense"},
+                "citation_ref": {"document_id": 1, "source_tool": "semantic_search"},
             })
         ]
         ctx = MagicMock()
@@ -352,15 +431,14 @@ class TestGraphExpandTool:
 
 
 class TestToolRegistry:
-    def test_build_tools_returns_atomic_search_tools(self):
+    def test_build_tools_returns_search_tools(self):
         from app.services.agentic_rag.tools import build_tools
         ctx = MagicMock()
         ctx.state = {}
         tools = build_tools(ctx)
         names = {t.name for t in tools}
-        assert "search_exact" in names
-        assert "search_sparse" in names
-        assert "search_dense" in names
+        assert "keyword_search" in names
+        assert "semantic_search" in names
         assert "rerank_results" in names
         assert "graph_expand" in names
         assert "rag_retrieve" not in names
@@ -377,7 +455,7 @@ class TestToolRegistry:
     def test_applicable_tools_includes_rerank_after_search(self):
         from app.services.agentic_rag.tools import applicable_tools
         ctx = MagicMock()
-        ctx.state = {"tool_call_counts": {"search_dense": 1}}
+        ctx.state = {"tool_call_counts": {"semantic_search": 1}}
         tools = applicable_tools(ctx)
         names = {t.name for t in tools}
         assert "rerank_results" in names

@@ -257,7 +257,7 @@ async def get_suggestions(
     recent_queries = [r.query for r in rows]
 
     # Resolve LLM config
-    model_name = get_setting(db, "QUERY_MODEL", None) or get_setting(db, "OPENAI_MODEL", None)
+    model_name = get_setting(db, "UTILITY_MODEL", None) or get_setting(db, "OPENAI_MODEL", None)
     api_base = get_setting(db, "OPENAI_API_BASE", None)
     api_key = get_setting(db, "OPENAI_API_KEY", None)
     if not model_name or not api_base:

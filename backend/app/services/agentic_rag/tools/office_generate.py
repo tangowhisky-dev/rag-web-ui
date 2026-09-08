@@ -423,15 +423,15 @@ class OfficeGenerateTool(BaseAgentTool):
     ui_label: str = "Generating Office document"
     description: str = (
         "Create or append to an Office document. Only three formats supported: pptx, docx, xlsx. "
-        "Any other format will be rejected. "
         "Data is read automatically from state.accumulated_data — do NOT pass data values. "
         "Provide only structure: format, title, slides/sections/sheets, chart types, theme. "
-        "For multi-slide decks: call office_generate with 1-2 slides at a time. "
-        "First call creates the file (append=false). Subsequent calls use append=true "
-        "to add slides to the same file. This avoids JSON corruption from large tool calls. "
-        "Call office_load_skill first to get design guidelines. "
         "Returns file_id for download."
     )
+    prompt_snippet: str = "Incrementally generate or append to Office artifacts"
+    prompt_guidelines: list[str] = [
+        "office_generate: Best for complex, iterative, or highly designed DOCX/PPTX/XLSX generation. Generate in small logical units, typically 1-2 slides at a time.",
+        "office_generate: Call office_load_skill first. Pass instructions and structure rather than raw unprocessed data — data is read from state.accumulated_data automatically.",
+    ]
     args_schema: type[BaseModel] = OfficeGenerateInput
 
     @staticmethod
@@ -552,6 +552,28 @@ class OfficeGenerateTool(BaseAgentTool):
 
         if not file_bytes:
             return {"ok": False, "result": {}, "error": "Generated file is empty.", "tokens": 0}
+
+        # 7b. Verify the file has actual content (slides/sections/sheets).
+        # OfficeCLI can silently produce an empty deck if the batch commands
+        # don't match the file format. Detect this and return an error so
+        # the model can fix its approach instead of retrying blindly.
+        try:
+            import subprocess
+            verify_cmd = [binary, "view", file_path, "outline"]
+            verify_proc = subprocess.run(verify_cmd, capture_output=True, text=True, timeout=30)
+            verify_output = verify_proc.stdout or ""
+            if fmt == "pptx":
+                slide_count = verify_output.count("slide[")
+                if slide_count == 0:
+                    return {"ok": False, "result": {}, "error": "Generated PPTX has 0 slides. The batch commands did not produce any slides. Ensure you pass slides=[...] with title and bullets for each slide.", "tokens": 0}
+            elif fmt == "docx":
+                if "paragraph" not in verify_output and "heading" not in verify_output:
+                    return {"ok": False, "result": {}, "error": "Generated DOCX has no content. Ensure you pass sections=[...] with heading and paragraphs.", "tokens": 0}
+            elif fmt == "xlsx":
+                if "Sheet" not in verify_output and "sheet" not in verify_output:
+                    return {"ok": False, "result": {}, "error": "Generated XLSX has no sheets. Ensure you pass sheets=[...] with name and data.", "tokens": 0}
+        except Exception as exc:
+            logger.debug("[office_generate] verification check failed (non-fatal): %s", exc)
 
         # 8. Save to ephemeral storage (overwrites prior stored_path on append)
         stored_path = save_ephemeral_file(ctx.chat_id, file_name, file_bytes)

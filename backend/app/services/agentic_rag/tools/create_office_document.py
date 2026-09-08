@@ -42,6 +42,13 @@ class CreateOfficeDocumentTool(BaseTool):
         "Data from accumulated_data is used automatically for data-driven documents. "
         "For text-only documents, describe the content structure in the request."
     )
+    prompt_snippet: str = "Create Office artifacts (DOCX, PPTX, XLSX)"
+    prompt_guidelines: list[str] = [
+        "create_office_document: Use for explicit requests to create downloadable DOCX, PPTX, or XLSX files. For data-driven artifacts, extract/prepare structured data first.",
+        "create_office_document: Handles embedded charts internally — do NOT call chart_generate separately for charts that belong inside a document.",
+        "create_office_document: Supported formats: pptx, docx, xlsx ONLY. If the user asks for PDF/TXT/CSV/JSON/HTML, tell them only pptx/docx/xlsx are supported.",
+        "create_office_document: The tool call is the ONLY way to produce a file. Writing a description without calling the tool is a failure.",
+    ]
     args_schema: type = CreateOfficeDocumentInput
     ctx: Any = None
 

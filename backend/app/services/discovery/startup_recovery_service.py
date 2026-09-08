@@ -301,26 +301,19 @@ class StartupRecoveryService:
         self, datastore_id: int, total_files: int | None = None,
         processed: int | None = None, status: str | None = None,
     ) -> None:
-        """Update DataStore last_scan_* fields.
+        """Update DataStore last_scan_at only.
 
-        Recovery does NOT set last_scan_status — that field belongs to
-        manual scans and the UI uses it to show scan progress.  Recovery
+        Recovery does NOT set last_scan_status, last_scan_processed, or
+        last_scan_total_files — those belong to manual scans.  Progress
+        is computed from Document/Chunk state on-the-fly.  Recovery
         progress is shown in the separate Recovery column via the
-        recovery-status endpoint.  Overwriting last_scan_status would
-        make the UI show a fake "running" scan with the wrong denominator.
-
-        We only update last_scan_total_files (for the Files column display)
-        and last_scan_processed (for the completed-scan summary).
+        recovery-status endpoint.
         """
         db: Session = SessionLocal()
         try:
             ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
             if not ds:
                 return
-            if total_files is not None:
-                ds.last_scan_total_files = total_files
-            if processed is not None:
-                ds.last_scan_processed = processed
             # Set last_scan_at if it was never set (new datastore)
             if ds.last_scan_at is None:
                 ds.last_scan_at = datetime.now(timezone.utc)

@@ -24,12 +24,12 @@ class RerankResultsInput(BaseModel):
 
 class RerankResultsTool(BaseAgentTool):
     name: str = "rerank_results"
-    description: str = (
-        "Cross-encoder reranker. Deduplicates and reranks all retrieved docs from state. "
-        "Call AFTER one or more search tools when you have multiple hits and need to prioritize. "
-        "Only pass the query — the reranker reads hits from state automatically. "
-        "No hard top_n cap — all hits passing the threshold are returned."
-    )
+    description: str = "Cross-encoder reranker. Deduplicates and reranks all retrieved docs from state. Only pass the query — hits are read from state automatically."
+    prompt_snippet: str = "Score, merge, and deduplicate retrieval candidates"
+    prompt_guidelines: list[str] = [
+        "rerank_results: Use after combining results from multiple retrieval paths or when the candidate set is large or noisy. Not needed after a single small, high-confidence result set.",
+        "rerank_results: Return the highest-ranked non-duplicate results that fit the available evidence/context budget. Preserve additional candidates only when needed for diversity or unresolved sub-questions.",
+    ]
     args_schema: type = RerankResultsInput
     ui_label: str = "Reranking results"
 

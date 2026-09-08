@@ -95,12 +95,13 @@ def _build_compaction_llm(ctx: Optional["ToolContext"]):
     """Return the org-configured summarisation LLM, falling back to globals."""
     if ctx is not None:
         try:
-            return build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)
+            tool_temp = get_setting(ctx.db, "TOOL_CALL_TEMPERATURE", ctx.org_id)
+            return build_chat_llm(ctx.org_id, ctx.db, role="utility", temperature=tool_temp)
         except Exception as exc:
             logger.warning("[compaction] org LLM unavailable (%s) — falling back to global config", exc)
     from app.services.agentic_rag.nodes import _get_llm
 
-    return _get_llm(temperature=0.0, streaming=False)
+    return _get_llm(temperature=0.7, streaming=False)
 
 
 def _trim_docs_to_budget(docs: list[dict], overflow_tokens: int) -> list[dict]:

@@ -19,7 +19,7 @@ work with current shared modules which have been updated for v2.
 # an answer. Used by tool_node (after every tool round) and sufficiency_check
 # (the replacement for reflect_final).
 #
-# Rewritten for atomic tools: counts search_exact/search_sparse/search_dense
+# Rewritten for atomic tools: counts keyword_search/semantic_search
 # instead of the legacy composite retrieval tool.
 # """
 # """
@@ -41,7 +41,7 @@ work with current shared modules which have been updated for v2.
 # #
 # # # Tools that count as "search" for retrieval budget tracking.
 # # _SEARCH_TOOLS = frozenset({
-# #     "search_exact", "search_sparse", "search_dense",
+# #     "keyword_search", "semantic_search",
 # #     "rerank_results", "graph_expand",
 # # })
 # #
@@ -88,7 +88,7 @@ work with current shared modules which have been updated for v2.
 # #         if o.tool in _SEARCH_TOOLS and not o.error:
 # #             hits = o.result.get("hits", [])
 # #             total += len(hits)
-# #         elif o.tool == "kb_search_documents" and not o.error:
+# #         elif o.tool == "title_search" and not o.error:
 # #             total += len(o.result.get("docs", []))
 # #     return total
 # #

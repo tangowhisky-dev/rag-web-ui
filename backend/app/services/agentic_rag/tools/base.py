@@ -17,23 +17,49 @@ class BaseAgentTool(BaseTool):
         {"ok": bool, "result": dict, "error": str|None, "tokens": int, "terminate": bool}
     The ``terminate`` field defaults to False. When True, the tool node sets
     ``force_finalize = True`` to short-circuit the agent loop.
+
+    ``prompt_guidelines`` is a list of short directives appended to the system
+    prompt's Guidelines section, telling the LLM *when* to use this tool and
+    *when not to*. Mirrors pi's promptGuidelines pattern.
     """
 
     ctx: Optional[ToolContext] = Field(default=None, exclude=True)
     # Human-readable label shown in the frontend during tool execution.
     # Short, action-oriented, third-person: "Retrieving from knowledge base".
     ui_label: str = "Running tool"
+    # One-line "what this tool is for" shown in the system prompt tool list.
+    prompt_snippet: str = ""
+    # Bullet directives telling the LLM when to use / not use this tool.
+    prompt_guidelines: list[str] = []
 
     def prepare_arguments(self, args: dict) -> dict:
         """Normalize/validate arguments before execution. Override in subclasses."""
         return args
 
     async def _arun(self, *args: Any, **kwargs: Any) -> Any:
-        """Parse validated input and call the concrete implementation."""
+        """Parse validated input and call the concrete implementation.
+
+        Checks for cancellation before executing the tool. If cancelled,
+        returns a sentinel envelope so the agent loop can finalize early.
+        """
+        from app.services.infrastructure import is_cancelled
+
         kwargs.pop("run_manager", None)
         if args and isinstance(args[0], dict):
             kwargs = args[0]
         kwargs = self.prepare_arguments(kwargs)
+
+        # Check cancellation before tool execution
+        chat_id = self.ctx.chat_id if self.ctx else None
+        if chat_id is not None and is_cancelled(chat_id):
+            return {
+                "ok": False,
+                "result": {},
+                "error": "cancelled",
+                "tokens": 0,
+                "terminate": True,
+            }
+
         input_obj = self.args_schema(**kwargs)
         return await self._execute(input_obj)
 

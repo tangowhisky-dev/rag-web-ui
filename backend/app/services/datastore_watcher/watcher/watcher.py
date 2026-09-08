@@ -375,7 +375,7 @@ class DataStoreWatcher(
                 datastore_ids.add(ds_id)
                 org_id = assignment_map.get(ds_id)  # None for unassigned
                 if ds.auto_process_enabled:
-                    interval = ds.auto_process_interval_minutes or 60
+                    interval = ds.auto_process_interval_minutes or 5
                 else:
                     interval = -1  # track-only mode
                 self.add_datastore(

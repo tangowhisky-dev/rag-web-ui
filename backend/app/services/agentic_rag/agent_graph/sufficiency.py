@@ -169,7 +169,7 @@ work with current shared modules which have been updated for v2.
 # #                 return True
 # #
 # #     try:
-# #         llm = build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)
+# #         llm = build_chat_llm(ctx.org_id, ctx.db, role="utility", temperature=0.0)
 # #         prompt = SUFFICIENCY_CHECK_PROMPT.format(
 # #             query=query[:500],
 # #             observations=obs_text[:2000],

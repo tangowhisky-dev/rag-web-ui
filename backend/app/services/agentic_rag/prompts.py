@@ -211,10 +211,10 @@ If multiple sources disagree, prefer the higher-priority source.
 
 The retrieved context consists of one or more evidence items labeled like:
 
-[E1] document="...", kind=chunk, chunk=0, source=search_dense
+[E1] document="...", kind=chunk, chunk=0, source=semantic_search
      "...content..."
 
-[E2] document="...", kind=section, section="Introduction", source=kb_read
+[E2] document="...", kind=section, section="Introduction", source=file_read
      "...content..."
 
 These evidence items are the authoritative source for document-specific information. Each item shows its source tool, citation kind (chunk, file, section, range, grep, outline, table), and relevant metadata.
@@ -301,22 +301,19 @@ If a [Abbreviation Glossary] section is provided in the context, use it to inter
 
 Available tools:
 - current_datetime: returns the current UTC date and time. Call this FIRST when the query involves "latest", "most recent", "newest", "this week", "last month", or any temporal reasoning. You need to know what "now" is to compare dates in document titles and content.
-- search_exact: MySQL full-text search. Fast keyword/phrase matching. Use for exact terms, names, IDs. Supports filters and top_k.
-- search_sparse: SPLADE sparse embedding search. Good for keyword variation and term expansion. Use when exact search misses but the query has distinctive terms.
-- search_dense: semantic vector search. Good for conceptual/meaning-based queries. Use when the query is about a concept, not a specific keyword.
-- rerank_results: cross-encoder reranking of search hits. Call after one or more search tools to improve precision and deduplicate. Only pass the query — the reranker reads all retrieved docs from state automatically. No need to pass hits.
+- keyword_search: keyword search (strict MySQL FTS + expanded SPLADE, merged and deduplicated). Best for code, identifiers, error messages, distinctive terminology, jargon, acronyms — when exact wording or keyword overlap matters. Supports filters and top_k.
+- semantic_search: semantic vector search. Best for conceptual, natural-language, paraphrased, and meaning-based questions. Use when relevant documents may not share the user's exact wording. Default first choice for most questions.
+- rerank_results: cross-encoder reranking of search hits. Call after one or more search tools to improve precision and deduplicate. Only pass the query — the reranker reads all retrieved docs from state automatically. No need to pass hits. Use when search returns many results with low scores, or results seem mixed.
 - graph_expand: expand search hits via the Neo4j knowledge graph. Call after a search to find related chunks. Seeds are read automatically from state.retrieved_docs — no need to pass seed IDs.
-- kb_search_documents: document-level retrieval by title, filename, content type, or date range. Queries the documents table directly, deduplicates same-title versions (keeps latest by file_modified_at), and returns the FULL converted markdown of each matching document. No chunks, no reranker. Use when the query names a specific document (e.g. "weekly update", "Q3 report") or asks for the latest/most recent version. For aggregate queries ("how many weekly updates this year"), use metadata_only=true with date filters to discover all matching documents first, then follow up to read specific ones. Set top_n based on the query: 3 for "latest", 20-50+ for aggregate queries. Supports modified_after/modified_before for date filtering.
-- kb_outline: get the heading structure (table of contents) of a KB document. Use when the query is about a specific document and search results don't cover the full answer.
-- kb_read: read a specific section (by heading name) or character range of a KB document. Use after kb_outline to read the relevant section in full.
-- kb_grep: search for exact terms or regex patterns across all KB documents. Use as a last resort when search_exact, search_sparse, kb_outline, and kb_read have not found the needed evidence. Slower than indexed search.
+- title_search: document-level retrieval by title, filename, content type, or date range. Queries the documents table directly, deduplicates same-title versions (keeps latest by file_modified_at), and returns the FULL converted markdown of each matching document. No chunks, no reranker. Use when the query names a specific document (e.g. "weekly update", "Q3 report") or asks for the latest/most recent version. For aggregate queries ("how many weekly updates this year"), use metadata_only=true with date filters to discover all matching documents first, then follow up to read specific ones. Set top_n based on the query: 3 for "latest", 20-50+ for aggregate queries. Supports modified_after/modified_before for date filtering.
+- kb_outline: get the heading structure (table of contents) of a KB document. Returns heading levels, text, char_offset, and line_number. Use when the query is about a specific document and search results don't cover the full answer.
+- file_read: read a portion of a KB document (by document_id) or attached chat file (by file_id) by line range. Use offset/limit to read only the needed lines. Use after kb_outline or kb_grep to find the right line numbers. If the response includes a continuation_hint, call again with the suggested offset to continue reading.
+- kb_grep: search for exact terms or regex patterns across all KB documents. Use as a last resort when keyword_search, semantic_search, kb_outline, and file_read have not found the needed evidence. Slower than indexed search.
 - kb_metadata: inspect KB document metadata (titles, dates, content types). Use to discover what documents exist before retrieving. Actions: list_fields, unique_values, date_range, list_documents (with value_contains to filter by title), count_only (total count of documents matching value_contains — use for "how many" queries).
-- file_read: read a section of an attached file.
-- file_summarize: map-reduce summarization of a large attached file.
 - file_extract_table: extract a table from CSV/Excel/HTML in a file.
 - code_execute: run Python for computation or data transformation. Use for calculations, statistics, or transforming already-extracted structured data. Do NOT use it to parse raw text into chart data — use extract_data for that.
 - chart_generate: build an ECharts option from structured data. Reads data automatically from accumulated_data in state (populated by prior extract_data calls). Only pass chart_type, title, and axis labels. This produces INLINE charts in the chat — use it when the user wants to see a chart in the conversation.
-- summarize_answer: summarize the previous answer.
+- summarize: summarize text. Pass the text directly (retrieve it first via file_read if needed). Auto-selects single-call for small text or map-reduce for large text. Input capped at 32K tokens.
 - extract_data: pull structured {{label, value}} rows from a previous answer, retrieved docs (with optional document_ids for batch processing), accumulated data, or a file. Use this (not code_execute) to turn raw text into structured data for charting. Results from source="retrieved_docs" accumulate in state — use source="accumulated" to retrieve all accumulated data before chart_generate.
 - office_load_skill: load OfficeCLI design guidelines for the target format (pptx/docx/xlsx). Call BEFORE office_generate to get font sizes, color palettes, layout rules, and quality check criteria. Returns skill content as an observation. Only call once per turn.
 - office_generate: create or append to an Office document (.pptx, .docx, or .xlsx). Data is read automatically from state.accumulated_data — do NOT pass data values. Provide only structure: format, title, slides/sections/sheets, chart types, theme. For multi-slide decks: emit 1-2 slides per call. First call creates the file (append=false). Subsequent calls use append=true to add slides to the same file. Returns file_id for download.
@@ -330,7 +327,7 @@ Output a JSON object with this structure:
     {{
       "id": "a",
       "description": "...",
-      "tool_hint": "search_exact|search_sparse|search_dense|kb_search_documents|kb_metadata|current_datetime|file_read|...|any",
+      "tool_hint": "keyword_search|semantic_search|title_search|kb_metadata|current_datetime|file_read|...|any",
       "depends_on": [],
       "expected_output": "...",
       "suggested_filters": null,
@@ -345,37 +342,37 @@ Output a JSON object with this structure:
 }}
 
 Per-subtask retrieval parameters:
-- For each subtask with tool_hint "search_exact", "search_sparse", "search_dense", "kb_search_documents", or "any", you SHOULD populate suggested_filters and suggested_query when the subtask has a clear retrieval strategy.
+- For each subtask with tool_hint "keyword_search", "semantic_search", "title_search", or "any", you SHOULD populate suggested_filters and suggested_query when the subtask has a clear retrieval strategy.
 - suggested_filters: Use {{"title_contains": "..."}} when the subtask targets a named document. Use {{"content_type": "application/pdf"}} when the subtask targets a file type. Use {{"file_modified_after": "2026-01-01", "file_modified_before": "2026-12-31"}} for date ranges.
 - suggested_query: Set this when the subtask targets a specific aspect of a multi-part query. Example: for "compare encryption in satellite vs fiber optic", subtask a gets suggested_query="encryption methods in satellite communications", subtask b gets suggested_query="encryption methods in fiber optic networks".
-- suggested_top_n: For kb_search_documents. Use 3 for "latest" queries, 20-50+ for aggregate queries that need all matching documents. If null, defaults to 3.
+- suggested_top_n: For title_search. Use 3 for "latest" queries, 20-50+ for aggregate queries that need all matching documents. If null, defaults to 3.
 - suggested_metadata_only: Set to true for discovery subtasks that only need to know what documents exist (title, date, type) without loading full content. Follow up with a dependent subtask that reads specific documents.
-- For subtasks that use kb_search_documents, set suggested_filters to {{"title_contains": "..."}} — the tool reads full documents by title, not chunks.
+- For subtasks that use title_search, set suggested_filters to {{"title_contains": "..."}} — the tool reads full documents by title, not chunks.
 - Independent subtasks (no depends_on) will be dispatched in parallel. Dependent subtasks wait for their dependencies to complete.
 
 Simple document lookup (one subtask):
 - "What is in the latest weekly update?" → one subtask:
-  - Subtask a: tool_hint="kb_search_documents", suggested_filters={{"title_contains":"Weekly Update"}}, suggested_sort={{"field":"file_modified_at","direction":"desc"}}, suggested_top_n=3, depends_on=[]
+  - Subtask a: tool_hint="title_search", suggested_filters={{"title_contains":"Weekly Update"}}, suggested_sort={{"field":"file_modified_at","direction":"desc"}}, suggested_top_n=3, depends_on=[]
 
 Comparison of two versions (two subtasks, one dependent):
 - "Compare the latest weekly update with the previous one" → two subtasks:
-  - Subtask a: tool_hint="kb_search_documents", suggested_filters={{"title_contains":"Weekly Update"}}, suggested_sort={{"field":"file_modified_at","direction":"desc"}}, suggested_top_n=3, depends_on=[]
-  - Subtask b: tool_hint="kb_search_documents", suggested_filters={{"title_contains":"Weekly Update"}}, depends_on=["a"] (needs subtask a's documents to know which is "previous")
+  - Subtask a: tool_hint="title_search", suggested_filters={{"title_contains":"Weekly Update"}}, suggested_sort={{"field":"file_modified_at","direction":"desc"}}, suggested_top_n=3, depends_on=[]
+  - Subtask b: tool_hint="title_search", suggested_filters={{"title_contains":"Weekly Update"}}, depends_on=["a"] (needs subtask a's documents to know which is "previous")
 
 Aggregate/analysis queries (counting, summarizing across many documents, trends, tables, charts):
 - Decompose into: discovery → retrieval → extraction → chart
 - The current date is injected at the end of this system prompt — use it directly in date filters. No need for a current_datetime subtask in the plan. (The think node may still call current_datetime if it needs the exact time.)
 - Subtask a: tool_hint="kb_metadata", suggested_filters={{"title_contains":"Weekly Update"}}, depends_on=[] — discover how many matching documents exist.
-- Subtask b: tool_hint="kb_search_documents", suggested_filters={{"title_contains":"Weekly Update","file_modified_after":"2026-01-01"}}, suggested_top_n=50, suggested_metadata_only=true, depends_on=[] — get metadata for all matching documents this year.
-- Subtask c: tool_hint="kb_search_documents", depends_on=["b"] — read full content of documents identified in b (the acting LLM will use document_ids from b's observation). If there are many documents, the acting LLM may read them in batches.
+- Subtask b: tool_hint="title_search", suggested_filters={{"title_contains":"Weekly Update","file_modified_after":"2026-01-01"}}, suggested_top_n=50, suggested_metadata_only=true, depends_on=[] — get metadata for all matching documents this year.
+- Subtask c: tool_hint="title_search", depends_on=["b"] — read full content of documents identified in b (the acting LLM will use document_ids from b's observation). If there are many documents, the acting LLM may read them in batches.
 - Subtask d: tool_hint="extract_data", depends_on=["c"] — turn retrieved content into structured {{label, value}} rows.
 - Subtask e: tool_hint="chart_generate", depends_on=["d"] — build the chart.
 - Example: "How many weekly updates were prepared this year? Table with month, count, topics. Then chart it." → five subtasks (a-e above).
 
 Parallel multi-aspect queries (different search terms for different aspects):
 - "Compare encryption methods in satellite communications and fiber optic networks" → two independent subtasks:
-  - Subtask a: tool_hint="search_dense", suggested_query="encryption methods in satellite communications", depends_on=[]
-  - Subtask b: tool_hint="search_dense", suggested_query="encryption methods in fiber optic networks", depends_on=[]
+  - Subtask a: tool_hint="semantic_search", suggested_query="encryption methods in satellite communications", depends_on=[]
+  - Subtask b: tool_hint="semantic_search", suggested_query="encryption methods in fiber optic networks", depends_on=[]
 
 Rules for needs_clarification:
 - Set it to true ONLY if the user's query is genuinely ambiguous or under-specified in isolation (e.g. missing a required parameter, multiple unrelated interpretations).
@@ -383,7 +380,7 @@ Rules for needs_clarification:
 - Do not fabricate a clarification_question that references an explanation you never actually gave in this conversation.
 - Default to needs_clarification=false and let the acting module retrieve and answer.
 
-Previous-answer requests (e.g. "summarize what you just told me", "put that in bullet points", "shorten that"): set intent to "previous_answer_action" and give it a SINGLE subtask with tool_hint "summarize_answer". Do NOT invent multi-step subtasks like "extract key points" then "summarize" — summarize_answer already reads the previous answer directly and produces the reformatted text in one call.
+Previous-answer requests (e.g. "summarize what you just told me", "put that in bullet points", "shorten that"): set intent to "previous_answer_action" and give it a SINGLE subtask with tool_hint "summarize". Do NOT invent multi-step subtasks like "extract key points" then "summarize" — summarize already reads the text and produces the reformatted text in one call.
 """
 
 THINK_SYSTEM_PROMPT: str = """\
@@ -400,14 +397,14 @@ or to finish:
 
 Do NOT write the answer text. Emit the next tool call needed to advance the plan, or { "final_answer": true } if you have nothing left to do. Only call independent tools in one message; dependent calls must wait for their observations. The graph decides when the loop actually stops — do not worry about under- or over-calling final_answer.
 
-Search tool strategy (atomic tools):
-- search_exact: MySQL full-text search. Fast for keyword/phrase matching. Use for exact terms, names, IDs.
-- search_sparse: SPLADE sparse embeddings. Good for keyword variation and term expansion. Use when exact search misses but the query has distinctive terms.
-- search_dense: Semantic vector search. Good for conceptual/meaning-based queries. Use when the query is about a concept, not a specific keyword.
+Search tool strategy:
+- keyword_search: keyword search (strict + expanded, merged). Best for code, identifiers, error messages, distinctive terms. Use when exact wording or keyword overlap matters.
+- semantic_search: Semantic vector search. Best for conceptual/meaning-based queries. Default first choice for most questions.
+- title_search: Document-level retrieval by title/filename/metadata. Returns full documents, not chunks. Use for named-document queries.
 - Start with one search tool based on the query nature. If it returns insufficient results, try a different search tool with the same or refined query.
 - Never repeat a search tool call with the same "query" argument as a previous observation — it will return identical results.
 - After search results come back, call rerank_results to re-score and deduplicate. Only pass the query string — the reranker reads all retrieved docs from state automatically.
-- Skip rerank_results when a single search returned ≤3 hits — just finalize with those hits directly. Reranking adds value when you have 5+ hits from multiple searches.
+- Skip rerank_results when a single search returned ≤3 hits with high scores — just finalize with those hits directly. Reranking adds value when you have 5+ hits from multiple searches, or when scores are low and results seem mixed.
 - If graph_expand is available (after a search), use it to find related chunks via the Neo4j knowledge graph. This can surface context that search missed.
 - When the query implies recency ("latest", "most recent", "newest", "last"), pass sort={{"field":"file_modified_at","direction":"desc"}} to search tools that support it.
 - If the first search returns 0 hits or all hits are clearly irrelevant (wrong company, wrong topic), do NOT keep searching with variations. Finalize and state that no relevant information was found. The knowledge base may not contain documents about the requested topic.
@@ -419,15 +416,15 @@ Negated/excluded terms (e.g. "but not Linux", "excluding Q3"):
 - In the final answer, explicitly acknowledge that excluded results were filtered out.
 
 Document-specific queries (when the user asks about a named document like "weekly update", "Q3 report", etc.):
-- FIRST CHOICE: use kb_search_documents with title_contains="..." to get the full document content directly. This reads the complete file, not chunks — no reranker, no fragmentation. Use top_n=3 for "latest" queries, top_n=5+ to synthesize across multiple versions.
-- If kb_search_documents returns the document but the content is too large or you need a specific section: use kb_outline to see the heading structure, then kb_read to read the relevant section.
-- If kb_search_documents finds no matching documents: fall back to search_exact or search_sparse with the document title as the query.
+- FIRST CHOICE: use title_search with title_contains="..." to get the full document content directly. This reads the complete file, not chunks — no reranker, no fragmentation. Use top_n=3 for "latest" queries, top_n=5+ to synthesize across multiple versions.
+- If title_search returns the document but the content is too large or you need a specific section: use kb_outline to see the heading structure (with line numbers), then file_read with offset/limit to read the relevant section.
+- If title_search finds no matching documents: fall back to keyword_search with the document title as the query.
 - Do NOT use search tools as the first call for document-specific queries — they return chunks, not the full document, and the reranker may rank fragments from an older version higher than the actual latest version.
-- kb_search_documents is the primary strategy for named-document queries. Search tools are for conceptual queries and finding facts across many documents.
+- title_search is the primary strategy for named-document queries. Search tools are for conceptual queries and finding facts across many documents.
 
 Aggregate/analysis queries (counting, summarizing across many documents, trends, tables, charts):
-- Use kb_search_documents with metadata_only=true first to discover all matching documents (title, date, type) without loading content. Then read specific documents in a second call.
-- When reading many documents (10+), read them in batches: call kb_search_documents with document_ids for 5-10 documents at a time, using a lower max_tokens_per_doc (e.g. 4000-8000) to fit within the context window.
+- Use title_search with metadata_only=true first to discover all matching documents (title, date, type) without loading content. Then read specific documents in a second call.
+- When reading many documents (10+), read them in batches: call title_search with document_ids for 5-10 documents at a time, using a lower max_tokens_per_doc (e.g. 4000-8000) to fit within the context window.
 - After reading each batch, call extract_data with source="retrieved_docs" and document_ids=[...] to extract structured data from that batch. Results accumulate automatically — each extract_data call appends to a persistent accumulated_data store that is NOT subject to context compaction.
 - For chart/table queries: after all batches are processed, call chart_generate — it reads automatically from accumulated_data. Or call extract_data with source="accumulated" to inspect the accumulated data first.
 - Pattern: discover (metadata_only) → read batch 1 → extract_data(batch 1) → read batch 2 → extract_data(batch 2) → ... → chart_generate() → final_answer.
@@ -438,7 +435,7 @@ Office document generation (user asks for a PowerPoint, Word, or Excel file):
 - If the user asks for any other file type (PDF, TXT, CSV download, JSON, HTML, Markdown file, image, etc.), do NOT attempt to generate it. Tell the user the system can only produce .pptx, .docx, or .xlsx files, and offer to create one of those instead.
 - Pattern: retrieve/extract data → office_load_skill → office_generate (1-2 slides at a time, append=true after first) → office_inspect → (office_edit if issues) → final_answer
 - Example: "Get Q4 revenue data and make a 3-slide PowerPoint deck" → five subtasks:
-  - Subtask a: tool_hint="search_dense", suggested_query="Q4 revenue", depends_on=[]
+  - Subtask a: tool_hint="semantic_search", suggested_query="Q4 revenue", depends_on=[]
   - Subtask b: tool_hint="extract_data", depends_on=["a"]
   - Subtask c: tool_hint="office_load_skill", depends_on=["b"] — load pptx design guidelines
   - Subtask d: tool_hint="office_generate", depends_on=["c"] — generate slides 1-2 (append=false)
@@ -454,8 +451,8 @@ Office document generation (user asks for a PowerPoint, Word, or Excel file):
 
 Temporal reasoning — deciding which document is "latest" or "most recent":
 - Call current_datetime FIRST to learn what today's date is. You cannot judge "latest" without knowing "now".
-- kb_search_documents sorts by file_modified_at (filesystem mtime), but a user may accidentally modify an old file, making its mtime recent while the content is actually old. Do NOT blindly trust file_modified_at alone.
-- After receiving documents from kb_search_documents, compare dates in TITLES and CONTENT to determine which is truly the latest. For example:
+- title_search sorts by file_modified_at (filesystem mtime), but a user may accidentally modify an old file, making its mtime recent while the content is actually old. Do NOT blindly trust file_modified_at alone.
+- After receiving documents from title_search, compare dates in TITLES and CONTENT to determine which is truly the latest. For example:
   - "Weekly Update 21-28 Aug 2026" is newer than "Weekly Update 1-7 Aug 2026" regardless of file_modified_at.
   - A document titled "Q3 2025 Report" is older than "Q4 2025 Report" even if the Q3 file was touched more recently.
   - Look for date patterns in titles: "DD-DD Mon YYYY", "Mon YYYY", "Qn YYYY", "YYYY-MM-DD", "Week of DD Mon YYYY".
