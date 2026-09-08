@@ -179,6 +179,30 @@
       <div class="node-tag">LLM (chat role) · tool-calling</div>
     </div>
 
+    <!-- Prompt composition -->
+    <div class="sub-pipeline" style="margin-top: 12px;">
+      <div class="sub-pipeline-label">THINK PROMPT COMPOSITION</div>
+      <div class="node-desc" style="text-align: left;">
+        <strong>System:</strong> AGENT_V2_PROMPT — role, process, tool selection, evidence sufficiency, retrieve_parallel guidance, citations, formatting, critical rules.<br><br>
+        <strong>User message (composed in this order):</strong>
+        <ol style="margin: 8px 0 0 20px; line-height: 1.8;">
+          <li><strong>KB profile summary</strong> — doc counts, fields, content types, date ranges of linked knowledge bases.</li>
+          <li><strong>Earlier conversation summary</strong> — compacted rolling summary (if compaction ran).</li>
+          <li><strong>Recent conversation history</strong> — last N user/assistant pairs (not citable).</li>
+          <li><strong>Previous answer context</strong> — summary + key points from LastAnswerObject, if any.</li>
+          <li><strong>Already tried queries</strong> — deduplicated queries from prior observations (do NOT repeat).</li>
+          <li><strong>Tool observations so far</strong> — compact metadata for each observation (tool, args, top-line result, hit counts).</li>
+          <li><strong>Retrieved evidence</strong> — top 10 docs, first 400 chars each, formatted as [E1] title\n  content, used for [N](N) citations.</li>
+          <li><strong>Attached file metadata</strong> — first 2000 chars of markdown if a file is attached.</li>
+          <li><strong>Available tools</strong> — filtered tool list with schemas and prompt_guidelines.</li>
+          <li><strong>Tool calls remaining</strong> — remaining / AGENT_TOTAL_TOOL_BUDGET.</li>
+          <li><strong>User message</strong> — original query, plus a forced reminder to call create_office_document if the user requested a file and it has not been called.</li>
+        </ol>
+        <br>
+        <strong>Context compaction:</strong> If the full prompt exceeds the configured context budget, the retrieved docs and history are compacted in-place (doc previews shortened, old observations summarized) and the user message is rebuilt before the LLM call.
+      </div>
+    </div>
+
     <!-- route_think branch -->
     <div class="branch-label" style="margin-top: 12px;">route_think: tool_calls present AND budget/wall-clock not exhausted?</div>
 
@@ -221,7 +245,8 @@
         <div class="sub-agent-box" style="margin-top: 12px;">
           <div class="sub-agent-label">SUB-AGENT: retrieve_parallel (complex queries only)</div>
           <div class="node-desc" style="margin-bottom: 8px;">
-            The LLM decides when to parallelize. For simple queries, it calls keyword_search/semantic_search directly. For complex multi-part queries with independent sub-questions, it calls retrieve_parallel. Each sub-agent runs a mini think→tool loop with retrieval tools, returns concise evidence with citations.
+            The LLM decides when to parallelize. For simple queries, it calls keyword_search/semantic_search directly. For complex multi-part queries with independent sub-questions, it calls retrieve_parallel. Each sub-agent runs a mini think→tool loop with retrieval tools, returns concise evidence with citations.<br><br>
+            <strong>Retrieval sub-agent prompt composition:</strong> system prompt (retrieval specialist) + user message built from sub-query, available retrieval tools, prior tool calls (args + hit counts/errors), and remaining tool budget. Output: JSON summary with evidence_found, summary, and query.
           </div>
           <div class="tools-grid">
             <div class="tool-item-sub"><strong>keyword_search</strong><small>MySQL FTS + SPLADE</small></div>
@@ -242,7 +267,8 @@
         <div class="sub-agent-box" style="margin-top: 12px;">
           <div class="sub-agent-label">SUB-AGENT: create_office_document (Office generation)</div>
           <div class="node-desc" style="margin-bottom: 8px;">
-            Main agent calls create_office_document with a natural language request. The sub-agent handles the full Office generation flow internally: load skill → generate → inspect → edit if needed. Returns file metadata. Main agent describes what was created in the final answer.
+            Main agent calls create_office_document with a natural language request. The sub-agent handles the full Office generation flow internally: load skill → generate → inspect → edit if needed. Returns file metadata. Main agent describes what was created in the final answer.<br><br>
+            <strong>Office sub-agent prompt composition:</strong> system prompt (Office specialist + field names) + user message built from the document request, source evidence text, structured accumulated_data, available Office tools, prior tool calls, and remaining tool budget.
           </div>
           <div class="tools-grid">
             <div class="tool-item-sub"><strong>office_load_skill</strong><small>Load design guidelines</small></div>
