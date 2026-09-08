@@ -77,13 +77,11 @@ const TOOL_ICONS: Record<string, LucideIcon> = {
   kb_metadata: DatabaseIcon,
   kb_grep: ScanTextIcon,
   kb_outline: BookOpenIcon,
-  kb_read: FileTextIcon,
   file_read: FileTextIcon,
-  file_summarize: FileTextIcon,
   file_extract_table: FileTextIcon,
   code_execute: CodeIcon,
   chart_generate: BarChartIcon,
-  summarize_answer: SparklesIcon,
+  summarize: SparklesIcon,
   extract_data: WrenchIcon,
 };
 

@@ -48,17 +48,16 @@ def _tool_call_budget(db, org_id) -> dict:
     return {
         # Clarification (human-in-the-loop)
         "clarify": get_setting(db, "AGENT_MAX_CLARIFY", org_id),
-        # Atomic search tools
-        "search_exact": get_setting(db, "AGENT_MAX_SEARCH_EXACT", org_id),
-        "search_sparse": get_setting(db, "AGENT_MAX_SEARCH_SPARSE", org_id),
-        "search_dense": get_setting(db, "AGENT_MAX_SEARCH_DENSE", org_id),
+        # Search tools
+        "keyword_search": get_setting(db, "AGENT_MAX_SEARCH_EXACT", org_id),
+        "semantic_search": get_setting(db, "AGENT_MAX_SEARCH_DENSE", org_id),
         "rerank_results": get_setting(db, "AGENT_MAX_RERANK", org_id),
         "graph_expand": get_setting(db, "AGENT_MAX_GRAPH_EXPAND", org_id),
         # Discovery
-        "kb_search_documents": get_setting(db, "AGENT_MAX_KB_SEARCH", org_id),
-        # Read
+        "title_search": get_setting(db, "AGENT_MAX_KB_SEARCH", org_id),
+        # Read (KB documents + attached chat files)
         "kb_grep": get_setting(db, "AGENT_MAX_KB_GREP", org_id),
-        "kb_read": get_setting(db, "AGENT_MAX_KB_READ", org_id),
+        "file_read": get_setting(db, "AGENT_MAX_KB_READ", org_id),
         "kb_outline": get_setting(db, "AGENT_MAX_KB_READ", org_id),
         # Processing
         "code_execute": get_setting(db, "AGENT_MAX_CODE_EXEC", org_id),

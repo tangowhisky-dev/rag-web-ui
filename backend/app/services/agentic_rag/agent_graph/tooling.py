@@ -319,7 +319,7 @@ def _seed_existing_docs(existing_docs, seen_hashes, merged_docs):
 
 
 # Tools that return hits in the new atomic search format: {"hits": [...]}
-_SEARCH_TOOLS = frozenset({"search_exact", "search_sparse", "search_dense", "rerank_results", "graph_expand", "retrieve_parallel"})
+_SEARCH_TOOLS = frozenset({"keyword_search", "semantic_search", "rerank_results", "graph_expand", "retrieve_parallel"})
 
 
 def _hit_to_doc_dict(hit: dict) -> dict:
@@ -358,9 +358,9 @@ def _merge_observation_docs(all_observations, seen_hashes, merged_docs):
                 # Search hits with reranker scores or dense scores contribute confidence.
                 # _reranker_score (from rerank_results) is a cross-encoder score
                 # that can be negative; normalize via sigmoid to 0-1.
-                # score from search_dense is cosine similarity (0-1).
-                # score from search_sparse is SPLADE dot product (0-10+); clamp to 0-1.
-                # score from search_exact is MySQL FTS score (0-10+); clamp to 0-1.
+                # score from semantic_search is cosine similarity (0-1).
+                # score from keyword_search (exact leg) is MySQL FTS score (0-10+); clamp to 0-1.
+                # score from keyword_search (sparse leg) is SPLADE dot product (0-10+); clamp to 0-1.
                 for h in hits:
                     rs = h.get("_reranker_score")
                     if rs is not None:
@@ -376,7 +376,7 @@ def _merge_observation_docs(all_observations, seen_hashes, merged_docs):
                     "[tool_node] merged search hits: tool=%s hits=%d best_confidence=%.3f",
                     obs.tool, len(hits), best_confidence,
                 )
-        elif obs.tool == "kb_search_documents" and not obs.error:
+        elif obs.tool == "title_search" and not obs.error:
             docs = obs.result.get("docs")
             if isinstance(docs, list):
                 for doc in docs:
@@ -389,8 +389,8 @@ def _merge_observation_docs(all_observations, seen_hashes, merged_docs):
                 # Document-level matches are high-confidence by definition.
                 if best_confidence < 0.9:
                     best_confidence = 0.9
-        elif obs.tool == "kb_read" and not obs.error:
-            # kb_read returns a single document's content, not a docs list.
+        elif obs.tool == "file_read" and not obs.error:
+            # file_read returns a single document/file's content, not a docs list.
             # Convert to the standard doc dict shape so it gets a [KB-N]
             # label in the finalize prompt and becomes citable evidence.
             content = obs.result.get("content", "")
@@ -400,10 +400,11 @@ def _merge_observation_docs(all_observations, seen_hashes, merged_docs):
                     "page_content": content,
                     "metadata": {
                         "document_id": obs.result.get("document_id"),
+                        "file_id": obs.result.get("file_id"),
+                        "source_type": obs.result.get("source_type"),
                         "title": obs.result.get("title") or obs.result.get("file_name"),
                         "file_name": obs.result.get("file_name"),
-                        "section": obs.result.get("section"),
-                        "source": "kb_read",
+                        "source": "file_read",
                         "_reranker_score": 1.0,
                         "truncated": obs.result.get("truncated", False),
                         "citation_ref": citation_ref,

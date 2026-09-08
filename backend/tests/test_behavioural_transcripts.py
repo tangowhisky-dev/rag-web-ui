@@ -1001,7 +1001,7 @@ class TestObservationNonDuplicationAcrossTurns:
             f"Turn 2: observation should be for topic B, got: {coerced2[0].arguments}"
 
 
-# ─── Transcript 9: Previous answer action (summarize_answer) ───────────────
+# ─── Transcript 9: Previous answer action (summarize) ───────────────
 
 
 class TestPreviousAnswerAction:
@@ -1010,7 +1010,7 @@ class TestPreviousAnswerAction:
     Verifies that:
     - The plan recognizes intent="previous_answer_action".
     - The last_answer_object from Turn 1 is available to Turn 2.
-    - The summarize_answer tool is used.
+    - The summarize tool is used.
     """
 
     def test_summarize_previous_answer(self, monkeypatch):
@@ -1053,11 +1053,11 @@ class TestPreviousAnswerAction:
         ctx.message_id = 902
         llm.script("plan", json.dumps({
             "intent": "previous_answer_action",
-            "subtasks": [{"id": "a", "description": "Summarize previous answer", "tool_hint": "summarize_answer"}],
+            "subtasks": [{"id": "a", "description": "Summarize previous answer", "tool_hint": "summarize"}],
             "needs_clarification": False,
         }))
         llm.script("think", json.dumps({
-            "tool_calls": [{"tool": "summarize_answer", "arguments": {"action": "summarize"}}],
+            "tool_calls": [{"tool": "summarize", "arguments": {"text": "Machine learning is a subset of AI."}}],
         }))
         llm.script("finalize", "In summary: ML is a subset of AI that learns from data.")
         llm.script("extract", json.dumps({"summary": "Summary of ML answer."}))

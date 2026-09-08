@@ -1,7 +1,7 @@
 """kb_outline tool — return heading structure of a KB document.
 
 Gives the agent a "table of contents" so it can decide which section to
-read with kb_read. Pure regex parse of converted_markdown — no LLM call.
+read with file_read. Pure regex parse of converted_markdown — no LLM call.
 """
 
 from __future__ import annotations
@@ -51,7 +51,12 @@ class KbOutlineTool(BaseAgentTool):
 
         markdown = doc.converted_markdown or ""
         headings = [
-            {"level": len(m.group(1)), "text": m.group(2).strip(), "char_offset": m.start()}
+            {
+                "level": len(m.group(1)),
+                "text": m.group(2).strip(),
+                "char_offset": m.start(),
+                "line_number": markdown[:m.start()].count("\n") + 1,
+            }
             for m in _HEADING_RE.finditer(markdown)
         ]
 

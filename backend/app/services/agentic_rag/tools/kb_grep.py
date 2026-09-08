@@ -85,7 +85,7 @@ class KbGrepTool(BaseAgentTool):
     prompt_snippet: str = "Search raw document text (regex/keyword fallback)"
     prompt_guidelines: list[str] = [
         "kb_grep: Use as a fallback for literal text, rare strings, regex patterns, or when indexed retrieval misses expected content. Not a default retrieval method.",
-        "kb_grep: Returns lines, not chunks. Use kb_read to get full context around matches.",
+        "kb_grep: Returns lines, not chunks. Use file_read to get full context around matches.",
     ]
     args_schema: type[BaseModel] = KbGrepInput
 

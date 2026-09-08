@@ -1,10 +1,9 @@
-"""Tests for kb_grep, kb_outline, and kb_read agent tools.
+"""Tests for kb_grep, kb_outline, and file_read agent tools.
 
 Covers:
 - Basic functionality (grep finds lines, outline extracts headings, read returns content)
 - RBAC enforcement (unauthorized KBs/documents are denied)
-- Section extraction by heading name
-- Character range slicing
+- Line-range slicing via offset/limit
 - Token truncation
 - Max results cap for grep
 - Datastore document access
@@ -242,85 +241,57 @@ def test_kb_outline_document_not_found():
     assert "not found" in result["error"]
 
 
-# ── kb_read tests ──────────────────────────────────────────────────────────────
+# ── file_read tests (KB document source) ──────────────────────────────────────
 
-def test_kb_read_full_document():
-    from app.services.agentic_rag.tools.kb_read import KbReadTool, KbReadInput
+def test_file_read_full_document():
+    from app.services.agentic_rag.tools.file_read import FileReadTool, FileReadInput
     markdown = "# Title\n\nSome content here.\n"
     doc = _StubDoc(converted_markdown=markdown)
     ctx = _StubToolContext([doc])
 
     with patch("app.services.agentic_rag.tools.kb_outline.enforce_rbac", side_effect=_mock_rbac()), \
          patch("app.services.retrieval.retrieval.get_effective_datastore_ids", side_effect=_mock_datastore_ids()):
-        result = _run_tool(KbReadTool, ctx, KbReadInput(document_id=1))
+        result = _run_tool(FileReadTool, ctx, FileReadInput(document_id=1))
 
     assert result["ok"] is True
     assert "Some content" in result["result"]["content"]
-    assert result["result"]["section"] is None
+    assert result["result"]["source_type"] == "kb"
+    assert result["result"]["document_id"] == 1
 
 
-def test_kb_read_by_section():
-    from app.services.agentic_rag.tools.kb_read import KbReadTool, KbReadInput
+def test_file_read_by_line_range():
+    from app.services.agentic_rag.tools.file_read import FileReadTool, FileReadInput
+    # Line 5 = "## Integrity", line 9 = "## Vision"
     markdown = "# Title\n\nIntro.\n\n## Integrity\n\nIntegrity is key.\n\n## Vision\n\nVision matters.\n"
     doc = _StubDoc(converted_markdown=markdown)
     ctx = _StubToolContext([doc])
 
     with patch("app.services.agentic_rag.tools.kb_outline.enforce_rbac", side_effect=_mock_rbac()), \
          patch("app.services.retrieval.retrieval.get_effective_datastore_ids", side_effect=_mock_datastore_ids()):
-        result = _run_tool(KbReadTool, ctx, KbReadInput(document_id=1, section="Integrity"))
+        result = _run_tool(FileReadTool, ctx, FileReadInput(document_id=1, offset=5, limit=4))
 
     assert result["ok"] is True
-    assert result["result"]["section"] == "Integrity"
     assert "Integrity is key" in result["result"]["content"]
     # Should NOT include the next section
     assert "Vision matters" not in result["result"]["content"]
+    assert result["result"]["start_line"] == 5
+    assert result["result"]["end_line"] == 8
 
 
-def test_kb_read_by_char_range():
-    from app.services.agentic_rag.tools.kb_read import KbReadTool, KbReadInput
-    markdown = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    doc = _StubDoc(converted_markdown=markdown)
-    ctx = _StubToolContext([doc])
-
-    with patch("app.services.agentic_rag.tools.kb_outline.enforce_rbac", side_effect=_mock_rbac()), \
-         patch("app.services.retrieval.retrieval.get_effective_datastore_ids", side_effect=_mock_datastore_ids()):
-        result = _run_tool(KbReadTool, ctx, KbReadInput(document_id=1, start_char=10, end_char=20))
-
-    assert result["ok"] is True
-    assert result["result"]["content"] == "ABCDEFGHIJ"
-    assert result["result"]["char_range"] == [10, 20]
-
-
-def test_kb_read_respects_rbac():
-    from app.services.agentic_rag.tools.kb_read import KbReadTool, KbReadInput
+def test_file_read_respects_rbac():
+    from app.services.agentic_rag.tools.file_read import FileReadTool, FileReadInput
     doc = _StubDoc(converted_markdown="secret content")
     ctx = _StubToolContext([doc])
 
     with patch("app.services.agentic_rag.tools.kb_outline.enforce_rbac", side_effect=_mock_rbac_empty()):
-        result = _run_tool(KbReadTool, ctx, KbReadInput(document_id=1))
+        result = _run_tool(FileReadTool, ctx, FileReadInput(document_id=1))
 
     assert result["ok"] is False
     assert "No authorized" in result["error"]
 
 
-def test_kb_read_section_not_found_returns_full():
-    from app.services.agentic_rag.tools.kb_read import KbReadTool, KbReadInput
-    markdown = "# Title\n\nContent.\n"
-    doc = _StubDoc(converted_markdown=markdown)
-    ctx = _StubToolContext([doc])
-
-    with patch("app.services.agentic_rag.tools.kb_outline.enforce_rbac", side_effect=_mock_rbac()), \
-         patch("app.services.retrieval.retrieval.get_effective_datastore_ids", side_effect=_mock_datastore_ids()):
-        result = _run_tool(KbReadTool, ctx, KbReadInput(document_id=1, section="Nonexistent"))
-
-    assert result["ok"] is True
-    # Falls back to full document
-    assert "Content" in result["result"]["content"]
-    assert result["result"]["section"] is None
-
-
-def test_kb_read_truncates_to_max_tokens():
-    from app.services.agentic_rag.tools.kb_read import KbReadTool, KbReadInput
+def test_file_read_truncates_to_max_tokens():
+    from app.services.agentic_rag.tools.file_read import FileReadTool, FileReadInput
     from app.services.agentic_rag import token_budget
     # Reset calibration to default so the test is order-independent.
     token_budget._calibration_ratio = token_budget.CHARS_PER_TOKEN
@@ -332,7 +303,7 @@ def test_kb_read_truncates_to_max_tokens():
 
     with patch("app.services.agentic_rag.tools.kb_outline.enforce_rbac", side_effect=_mock_rbac()), \
          patch("app.services.retrieval.retrieval.get_effective_datastore_ids", side_effect=_mock_datastore_ids()):
-        result = _run_tool(KbReadTool, ctx, KbReadInput(document_id=1, max_tokens=500))
+        result = _run_tool(FileReadTool, ctx, FileReadInput(document_id=1, max_tokens=500))
 
     assert result["ok"] is True
     assert result["result"]["truncated"] is True
@@ -340,30 +311,47 @@ def test_kb_read_truncates_to_max_tokens():
     assert len(result["result"]["content"]) <= 2000
 
 
-def test_kb_read_document_not_found():
-    from app.services.agentic_rag.tools.kb_read import KbReadTool, KbReadInput
+def test_file_read_document_not_found():
+    from app.services.agentic_rag.tools.file_read import FileReadTool, FileReadInput
     ctx = _StubToolContext([])
 
     with patch("app.services.agentic_rag.tools.kb_outline.enforce_rbac", side_effect=_mock_rbac()), \
          patch("app.services.retrieval.retrieval.get_effective_datastore_ids", side_effect=_mock_datastore_ids()):
-        result = _run_tool(KbReadTool, ctx, KbReadInput(document_id=999))
+        result = _run_tool(FileReadTool, ctx, FileReadInput(document_id=999))
 
     assert result["ok"] is False
     assert "not found" in result["error"]
 
 
+def test_file_read_continuation_hint():
+    from app.services.agentic_rag.tools.file_read import FileReadTool, FileReadInput
+    markdown = "\n".join(f"line {i}" for i in range(1, 21))  # 20 lines
+    doc = _StubDoc(converted_markdown=markdown)
+    ctx = _StubToolContext([doc])
+
+    with patch("app.services.agentic_rag.tools.kb_outline.enforce_rbac", side_effect=_mock_rbac()), \
+         patch("app.services.retrieval.retrieval.get_effective_datastore_ids", side_effect=_mock_datastore_ids()):
+        result = _run_tool(FileReadTool, ctx, FileReadInput(document_id=1, offset=1, limit=5))
+
+    assert result["ok"] is True
+    assert result["result"]["start_line"] == 1
+    assert result["result"]["end_line"] == 5
+    assert result["result"]["total_lines"] == 20
+    assert "offset=6" in result["result"]["continuation_hint"]
+
+
 # ── RBAC: unauthorized document ────────────────────────────────────────────────
 
-def test_kb_read_unauthorized_document():
+def test_file_read_unauthorized_document():
     """Document exists but belongs to a KB not linked to this chat."""
-    from app.services.agentic_rag.tools.kb_read import KbReadTool, KbReadInput
+    from app.services.agentic_rag.tools.file_read import FileReadTool, FileReadInput
     doc = _StubDoc(knowledge_base_id=999, converted_markdown="secret")
     ctx = _StubToolContext([doc])
 
     # enforce_rbac returns kb_ids=[1] (authorized), but doc is in KB 999
     with patch("app.services.agentic_rag.tools.kb_outline.enforce_rbac", side_effect=_mock_rbac(kb_ids=[1])), \
          patch("app.services.retrieval.retrieval.get_effective_datastore_ids", side_effect=_mock_datastore_ids()):
-        result = _run_tool(KbReadTool, ctx, KbReadInput(document_id=1))
+        result = _run_tool(FileReadTool, ctx, FileReadInput(document_id=1))
 
     assert result["ok"] is False
     assert "Access denied" in result["error"]
@@ -384,15 +372,15 @@ def test_kb_outline_unauthorized_document():
 
 # ── Datastore document access ──────────────────────────────────────────────────
 
-def test_kb_read_datastore_document():
+def test_file_read_datastore_document():
     """Document from a datastore linked to an authorized KB should be accessible."""
-    from app.services.agentic_rag.tools.kb_read import KbReadTool, KbReadInput
+    from app.services.agentic_rag.tools.file_read import FileReadTool, FileReadInput
     doc = _StubDoc(knowledge_base_id=None, data_store_id=5, converted_markdown="# DS Doc\n\nContent.\n")
     ctx = _StubToolContext([doc])
 
     with patch("app.services.agentic_rag.tools.kb_outline.enforce_rbac", side_effect=_mock_rbac(kb_ids=[1])), \
          patch("app.services.retrieval.retrieval.get_effective_datastore_ids", side_effect=_mock_datastore_ids(ds_ids=[5])):
-        result = _run_tool(KbReadTool, ctx, KbReadInput(document_id=1))
+        result = _run_tool(FileReadTool, ctx, FileReadInput(document_id=1))
 
     assert result["ok"] is True
     assert "Content" in result["result"]["content"]
@@ -425,13 +413,14 @@ def test_tools_registered():
         except Exception:
             pass
     assert "kb_grep" in names
-    assert "kb_read" in names
+    assert "file_read" in names
     assert "kb_outline" in names
 
 
 def test_applicable_tools_filters_without_kb():
     """KB tools are always available — they handle empty kb_ids gracefully via enforce_rbac.
-    File tools should be filtered out when no file is attached."""
+    file_read is always available (handles KB docs via document_id).
+    file_extract_table should be filtered out when no file is attached."""
     from app.services.agentic_rag.tools import applicable_tools
     from app.services.agentic_rag.tool_context import ToolContext
 
@@ -440,11 +429,10 @@ def test_applicable_tools_filters_without_kb():
     names = {t.name for t in tools}
     # KB tools are always available (enforce_rbac handles empty kb_ids)
     assert "kb_grep" in names
-    assert "kb_read" in names
+    assert "file_read" in names
     assert "kb_outline" in names
-    # File tools should be filtered out without a file
-    assert "file_read" not in names
-    assert "file_summarize" not in names
+    # file_extract_table should be filtered out without a file
+    assert "file_extract_table" not in names
     # Search tools should be available
     assert "search_exact" in names
     assert "search_sparse" in names
@@ -463,7 +451,7 @@ def test_applicable_tools_includes_with_kb():
     tools = applicable_tools(ctx)
     names = {t.name for t in tools}
     assert "kb_grep" in names
-    assert "kb_read" in names
+    assert "file_read" in names
     assert "kb_outline" in names
 
 
@@ -477,10 +465,10 @@ def test_tool_call_budget_includes_kb_tools():
     }.get(key, 0)):
         budget = _tool_call_budget(None, None)
     assert "kb_grep" in budget
-    assert "kb_read" in budget
+    assert "file_read" in budget
     assert "kb_outline" in budget
     assert budget["kb_grep"] == 5
-    assert budget["kb_read"] == 10
+    assert budget["file_read"] == 10
     assert budget["kb_outline"] == 10
 
 

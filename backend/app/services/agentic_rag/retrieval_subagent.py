@@ -37,16 +37,14 @@ You are a retrieval specialist. Your job: find the best evidence for a single\
 
 # Available Tools
 
-- search_exact: Exact phrase match. Best for named documents, specific terms.\
+- keyword_search: Keyword match (strict + expanded). Best for code, identifiers,\
+ error messages, distinctive terms, jargon. Args: {{"query": "...", "top_k": 5}}
+- semantic_search: Semantic search. Best for conceptual questions.\
  Args: {{"query": "...", "top_k": 5}}
-- search_dense: Semantic search. Best for conceptual questions.\
- Args: {{"query": "...", "top_k": 5}}
-- search_sparse: Keyword/BM25 search. Best for broad term matching.\
- Args: {{"query": "...", "top_k": 5}}
-- kb_search_documents: Find documents by title or metadata.\
+- title_search: Find documents by title or metadata.\
  Args: {{"title_contains": "...", "metadata_only": false}}
-- kb_read: Read a specific document by ID.\
- Args: {{"document_id": N, "max_chars": 2000}}
+- file_read: Read a specific document or file by ID.\
+ Args: {{"document_id": N, "offset": 1, "limit": 200}}
 - kb_outline: Get document outline/structure.\
  Args: {{"document_id": N}}
 - kb_grep: Regex search within documents.\
@@ -56,14 +54,13 @@ You are a retrieval specialist. Your job: find the best evidence for a single\
 
 # Strategy
 
-1. For NAMED documents or specific terms: start with search_exact or\
- kb_search_documents.
-2. For CONCEPTUAL questions: start with search_dense.
-3. For BROAD keyword matching: start with search_sparse.
-4. If first search returns irrelevant results: try a different search type\
+1. For NAMED documents or specific terms: start with keyword_search or\
+ title_search.
+2. For CONCEPTUAL questions: start with semantic_search.
+3. If first search returns irrelevant results: try a different search type\
  or rerank_results.
-5. If you find the right document but need more context: call kb_read.
-6. Do NOT repeat the same search with the same query.
+4. If you find the right document but need more context: call file_read.
+5. Do NOT repeat the same search with the same query.
 
 # Rules
 
@@ -178,8 +175,8 @@ def _extract_evidence_from_observations(observations: list[Observation]) -> list
                     "source_tool": obs.tool,
                 })
 
-        # kb_read returns "content" or "sections"
-        if obs.tool == "kb_read":
+        # file_read returns "content"
+        if obs.tool == "file_read":
             content = result.get("content", "")
             if content:
                 doc_id = obs.arguments.get("document_id")
@@ -195,10 +192,10 @@ def _extract_evidence_from_observations(observations: list[Observation]) -> list
                         "document_id": doc_id,
                         "citation_kind": "document",
                         "quoted_text": content[:200],
-                        "source_tool": "kb_read",
+                        "source_tool": "file_read",
                         "citation_id": "",
                     },
-                    "source_tool": "kb_read",
+                    "source_tool": "file_read",
                 })
 
     return evidence
@@ -231,8 +228,8 @@ async def run_retrieval_subagent(
     # Build search/read tools only
     all_tools = build_tools(ctx)
     retrieval_tool_names = {
-        "search_exact", "search_dense", "search_sparse",
-        "kb_search_documents", "kb_read", "kb_outline", "kb_grep",
+        "keyword_search", "semantic_search",
+        "title_search", "file_read", "kb_outline", "kb_grep",
         "rerank_results",
     }
     tools = {t.name: t for t in all_tools if t.name in retrieval_tool_names}
@@ -328,11 +325,10 @@ async def run_retrieval_subagent(
 def _retrieval_tool_cap(tool_name: str) -> int:
     """Per-tool cap for retrieval sub-agent."""
     caps = {
-        "search_exact": 2,
-        "search_dense": 2,
-        "search_sparse": 2,
-        "kb_search_documents": 3,
-        "kb_read": 3,
+        "keyword_search": 2,
+        "semantic_search": 2,
+        "title_search": 3,
+        "file_read": 3,
         "kb_outline": 2,
         "kb_grep": 2,
         "rerank_results": 1,

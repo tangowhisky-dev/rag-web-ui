@@ -51,7 +51,7 @@ describe("CitationRef kind metadata", () => {
       document_id: 1,
       start_line: 10,
       end_line: 20,
-      source_tool: "kb_read",
+      source_tool: "file_read",
     };
     expect(ref.start_line).toBe(10);
     expect(ref.end_line).toBe(20);

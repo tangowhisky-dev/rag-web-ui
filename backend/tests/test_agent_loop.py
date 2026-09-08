@@ -49,14 +49,12 @@ class TestToolRegistry:
             "kb_search_documents",
             "current_datetime",
             "file_read",
-            "file_summarize",
             "file_extract_table",
             "code_execute",
             "chart_generate",
-            "summarize_answer",
+            "summarize",
             "extract_data",
             "kb_grep",
-            "kb_read",
             "kb_outline",
             "kb_metadata",
             "create_office_document",
@@ -73,8 +71,9 @@ class TestToolRegistry:
         ctx = _make_ctx(has_file=False)
         tools = applicable_tools(ctx)
         names = {t.name for t in tools}
-        assert "file_read" not in names
-        assert "file_summarize" not in names
+        # file_read is always available (handles KB docs via document_id)
+        assert "file_read" in names
+        # file_extract_table is filtered out without a file
         assert "file_extract_table" not in names
         assert "search_dense" in names
 

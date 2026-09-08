@@ -266,9 +266,9 @@ _ORG_OVERRIDABLE = [
     SettingDef("AGENT_MAX_KB_GREP", "Agentic", "Max KB grep calls",
                "int", 5, scope="org", reload="next_request", min_value=0,
                description="Cap on kb_grep tool calls per turn. Prevents excessive grep loops."),
-    SettingDef("AGENT_MAX_KB_READ", "Agentic", "Max KB read/outline calls",
+    SettingDef("AGENT_MAX_KB_READ", "Agentic", "Max file read/outline calls",
                "int", 10, scope="org", reload="next_request", min_value=0,
-               description="Combined cap on kb_read + kb_outline tool calls per turn."),
+               description="Combined cap on file_read + kb_outline tool calls per turn."),
     # Atomic search tool budgets (replace AGENT_MAX_RETRIEVALS for per-tool caps)
     SettingDef("AGENT_TOTAL_TOOL_BUDGET", "Agentic", "Total tool-call budget",
                "int", 25, scope="org", reload="next_request", min_value=1,

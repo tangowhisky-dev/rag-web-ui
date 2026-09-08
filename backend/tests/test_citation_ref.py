@@ -92,7 +92,7 @@ class TestFormatContextString:
                         "document_id": 2,
                         "citation_kind": "section",
                         "section": "Overview",
-                        "source_tool": "kb_read",
+                        "source_tool": "file_read",
                     },
                 },
             },

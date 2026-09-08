@@ -79,7 +79,7 @@ interface CitationRef {
   citation_kind?: string;  // chunk, file, section, range, grep, outline, table
   chunk_index?: number;
   section?: string;
-  source_tool?: string;  // search_exact, search_sparse, search_dense, kb_read, etc.
+  source_tool?: string;  // search_exact, search_sparse, search_dense, file_read, etc.
   citation_id?: string;  // E1, E2, etc.
 }
 
