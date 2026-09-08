@@ -24,10 +24,11 @@ The system uses a unified agent loop with composable atomic tools that the LLM c
 - The LLM reasons, calls tools, decides when evidence is sufficient, and writes the answer — no separate planner, sufficiency checker, or finalizer
 - Atomic search tools: `keyword_search` (MySQL FTS + SPLADE), `semantic_search` (Qdrant dense vector), `title_search` (document-level) — the LLM selects the right tool based on query nature
 - Cross-encoder `rerank_results` with provenance validation: rejects LLM-fabricated hits, auto-falls back to `state.retrieved_docs`
-- `graph_expand` for Neo4j knowledge graph traversal after search
-- Document-level tools: `title_search`, `kb_outline`, `file_read`, `kb_grep`, `kb_metadata` for named-document queries and section-level reading
-- Processing tools: `code_execute`, `chart_generate`, `extract_data`, `file_extract_table` for computation, visualization, and spreadsheet extraction
-- `retrieve_parallel` sub-agent: parallel retrieval for complex multi-part queries with independent sub-questions (2-4 sub-queries)
+- `graph_expand` for Neo4j knowledge graph traversal with fulltext-pruned, APOC-scored entity matching
+- Document-level tools: `title_search` (metadata-only by default), `kb_outline`, `file_read`, `kb_grep`, `kb_metadata` for named-document queries and section-level reading
+- Authority-aware retrieval: documents carry `document_status`, `effective_from`, `effective_to`, `version`, and `owner`; `title_search` can filter by `active` status and effective date
+- Processing tools: `current_datetime`, `code_execute`, `chart_generate`, `extract_data`, `file_extract_table` for computation, visualization, and spreadsheet extraction
+- `retrieve_parallel` sub-agent: parallel retrieval for 2-4 independent sub-questions with structured output (`evidence`, `gaps`, `conflicts`, `complete`, `failure_mode`, `strategy`)
 - `create_office_document` sub-agent: generates PPTX/DOCX/XLSX files via OfficeCLI (load skill → generate → inspect → edit)
 - Total tool-call budget per query and wall-clock timeout (600s default); only `clarify` has a per-query cap
 - Citation provenance: every evidence item carries `citation_ref` metadata (source tool, document_id, chunk_index, content_hash)

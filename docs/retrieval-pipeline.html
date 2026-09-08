@@ -247,7 +247,7 @@
           <div class="sub-agent-label">SUB-AGENT: retrieve_parallel (complex queries only)</div>
           <div class="node-desc" style="margin-bottom: 8px;">
             The LLM decides when to parallelize. For simple queries, it calls keyword_search/semantic_search directly. For complex multi-part queries with independent sub-questions, it calls retrieve_parallel. Each sub-agent runs a mini think→tool loop with retrieval tools, returns concise evidence with citations.<br><br>
-            <strong>Retrieval sub-agent prompt composition:</strong> system prompt (retrieval specialist) + user message built from sub-query, available retrieval tools, prior tool calls (args + hit counts/errors), and remaining tool budget. Output: JSON summary with evidence_found, summary, and query.
+            <strong>Retrieval sub-agent prompt composition:</strong> system prompt (retrieval specialist) + user message built from sub-query, available retrieval tools, prior tool calls (args + hit counts/errors), and remaining tool budget. Output: structured JSON with query, evidence (citations only), gaps, conflicts, complete, failure_mode, and strategy.
           </div>
           <div class="tools-grid">
             <div class="tool-item-sub"><strong>keyword_search</strong><small>MySQL FTS + SPLADE</small></div>

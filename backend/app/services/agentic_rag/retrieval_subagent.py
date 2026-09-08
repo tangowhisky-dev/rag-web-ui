@@ -33,45 +33,104 @@ logger = logging.getLogger(__name__)
 
 RETRIEVAL_SUBAGENT_PROMPT = """\
 You are a retrieval specialist. Your job: find the best evidence for a single\
- sub-query and return concise results with citation info.
+ sub-query, diagnose retrieval failures, and return a structured result the\
+ parent agent can use. Do not write prose answers.
 
 # Available Tools
 
-- keyword_search: Keyword match (strict + expanded). Best for code, identifiers,\
- error messages, distinctive terms, jargon. Args: {{"query": "...", "top_k": 5}}
-- semantic_search: Semantic search. Best for conceptual questions.\
- Args: {{"query": "...", "top_k": 5}}
-- title_search: Find documents by title or metadata.\
- Args: {{"title_contains": "...", "metadata_only": false}}
+- keyword_search: Lexical keyword match. Best for identifiers, code, error\
+ messages, jargon, exact terms. Args: {{"query": "...", "top_k": 5}}
+- semantic_search: Dense vector search. Best for conceptual or paraphrased\
+ questions. Args: {{"query": "...", "top_k": 5}}
+- title_search: Document-level metadata search by title, status, date.\
+ Args: {{"title_contains": "...", "document_status": "active", "metadata_only": true}}
+- graph_expand: Find related entities/chunks through Neo4j graph relationships.\
+ Args: {{"seed_entity_names": [...], "rel_type": "...", "hops": 1}}
 - file_read: Read a specific document or file by ID.\
  Args: {{"document_id": N, "offset": 1, "limit": 200}}
-- kb_outline: Get document outline/structure.\
- Args: {{"document_id": N}}
-- kb_grep: Regex search within documents.\
+- kb_grep: Regex or literal search within one document.\
  Args: {{"pattern": "...", "document_id": N}}
-- rerank_results: Rerank already-retrieved results by relevance.\
- Call after a search if results seem mixed.
+- kb_outline: Get document outline/structure. Args: {{"document_id": N}}
+- rerank_results: Rerank a mixed result set. Args: {{"top_k": 5}}
 
 # Strategy
 
-1. For NAMED documents or specific terms: start with keyword_search or\
- title_search.
-2. For CONCEPTUAL questions: start with semantic_search.
-3. If first search returns irrelevant results: try a different search type\
- or rerank_results.
-4. If you find the right document but need more context: call file_read.
-5. Do NOT repeat the same search with the same query.
+1. Pick the tool that matches the sub-query type: named/ID → keyword_search or\
+ title_search; conceptual → semantic_search; multi-hop/relationship → graph_expand;\
+ in-document lookup → kb_grep.
+2. When a search fails, do NOT repeat it with a reworded query. Change exactly\
+ one dimension:
+   - lexical ↔ semantic
+   - broader ↔ narrower
+   - document-level ↔ section-level (file_read/kb_grep)
+   - current ↔ historical (title_search with date filters)
+   - direct ↔ relationship (graph_expand)
+   - content ↔ metadata (title_search)
+3. If you find the right document but need more context: call file_read or\
+ kb_grep. If results are mixed, call rerank_results.
+
+# Failure Modes and Recovery
+
+After a weak or failed search, classify the problem and use the matching recovery:
+
+- NO_HITS: nothing returned. Switch modality (lexical ↔ semantic) or try\
+ title_search / graph_expand.
+- LOW_RELEVANCE: hits are off-topic. Make the query broader or narrower; switch\
+ to keyword_search if semantic is too fuzzy, or semantic if keyword is too strict.
+- LOW_SPECIFICITY: results are too vague. Add a distinctive term or switch to\
+ kb_grep / file_read for a specific document.
+- MISSING_ENTITY: the entity is not found by direct search. Use graph_expand from\
+ a known, related seed entity.
+- MISSING_RELATIONSHIP: a connection between two entities is needed. Use graph_expand.
+- MISSING_VERSION: you need the active/current version. Use title_search with\
+ document_status="active" and effective_as_of.
+- MISSING_DATE: a date is needed. Call current_datetime, then use title_search with\
+ modified_after / modified_before / effective_as_of.
+- CONFLICTING_SOURCES: different sources disagree. Use title_search for the latest/\
+ authoritative version, or file_read the specific documents.
+- INDEX_FAILURE: keyword/semantic did not find a known phrase. Use kb_grep with a\
+ precise pattern.
+
+# Output Format
+
+When you have enough evidence, or have exhausted the budget, return a single JSON\
+ object (no markdown, no tool call):
+
+{{
+  "query": "the original sub-query",
+  "evidence": [
+    {{
+      "citation_ref": {{
+        "document_id": 42,
+        "citation_kind": "chunk",
+        "chunk_index": 3,
+        "page": 7,
+        "quoted_text": "...",
+        "source_tool": "semantic_search"
+      }},
+      "document_id": 42,
+      "score": 0.91
+    }}
+  ],
+  "gaps": ["list missing facts needed to fully answer the sub-query"],
+  "conflicts": ["list any contradictions found in the evidence"],
+  "complete": true_or_false,
+  "failure_mode": "NO_HITS | LOW_RELEVANCE | ... or null if complete",
+  "strategy": "the recovery or next-step strategy, or null if complete"
+}}
+
+- `evidence` should cite the top 5-10 most useful chunks or documents you found.\
+ Do not include full text — only citation refs, document_id, and score.
+- `gaps` and `conflicts` are arrays of strings. Use [] if none.
+- `complete` is true only if the sub-query is fully answered by the evidence.
+- `failure_mode` and `strategy` are required when `complete` is false.
 
 # Rules
 
 - You have a limited tool-call budget. The prompt shows how many calls remain.
-- Return evidence, NOT an answer. Do not write prose explanations.
-- When you have enough evidence, write a JSON summary (no tool calls):
-  {{"evidence_found": true, "summary": "brief description of what was found",\
- "query": "the sub-query"}}
-- If no relevant evidence found:
-  {{"evidence_found": false, "summary": "no relevant results", "query": "..."}}
-- Keep your output concise — the orchestrator will synthesize.
+- Do not answer the question in prose; only return the JSON above.
+- Do not repeat the same tool with a reworded query.
+- Keep `evidence` concise — the parent will read the actual chunks.
 """
 
 
@@ -115,7 +174,7 @@ def _build_retrieval_user_prompt(
     if remaining <= 0:
         parts.append("\nYou have exhausted your tool-call budget. Write your JSON summary now.")
     else:
-        parts.append("\nCall the next tool, or write your JSON summary if you have enough evidence.")
+        parts.append("\nCall the next tool, or write your final JSON in the required output format if you have enough evidence.")
     return "".join(parts)
 
 
@@ -241,7 +300,7 @@ async def run_retrieval_subagent(
     system = RETRIEVAL_SUBAGENT_PROMPT
     observations: list[Observation] = []
     counts: dict[str, int] = {}
-    summary = ""
+    final_state = {}
     total_budget = get_setting(ctx.db, "AGENT_TOTAL_TOOL_BUDGET", ctx.org_id)
 
     iteration = 0
@@ -270,9 +329,16 @@ async def run_retrieval_subagent(
         tool_calls = parsed.tool_calls
 
         if not tool_calls:
-            # Sub-agent wrote a summary
+            # Sub-agent wrote the final JSON output.
             if isinstance(parsed.final_answer, str):
-                summary = parsed.final_answer.strip()
+                try:
+                    final_state = json.loads(parsed.final_answer.strip())
+                except json.JSONDecodeError:
+                    logger.warning(
+                        "[retrieval_subagent] final answer is not valid JSON: %s",
+                        parsed.final_answer[:200],
+                    )
+                    final_state = {"complete": False, "gaps": ["Sub-agent did not return valid JSON"]}
             break
 
         # Execute tool calls
@@ -285,7 +351,7 @@ async def run_retrieval_subagent(
             if sum(counts.values()) >= total_budget:
                 observations.append(Observation(
                     tool=name, arguments=args, result={},
-                    error=f"Total tool-call budget ({total_budget}) reached. Write your summary now.",
+                    error=f"Total tool-call budget ({total_budget}) reached. Write your final JSON now.",
                     tokens=0,
                 ))
                 break
@@ -300,7 +366,7 @@ async def run_retrieval_subagent(
             if calls_used >= tool_budget:
                 observations.append(Observation(
                     tool=name, arguments=args, result={},
-                    error=f"Tool-call budget ({tool_budget}) exhausted. Write your summary.",
+                    error=f"Tool-call budget ({tool_budget}) exhausted. Write your final JSON.",
                     tokens=0,
                 ))
                 continue
@@ -315,14 +381,41 @@ async def run_retrieval_subagent(
             counts[name] = counts.get(name, 0) + 1
             calls_used += 1
 
-    # Extract evidence from all observations
-    evidence = _extract_evidence_from_observations(observations)
+    # Extract evidence from all observations and merge with any citations
+    # the sub-agent explicitly included in its final JSON.
+    extracted = _extract_evidence_from_observations(observations)
+    explicit_citations = {c.get("document_id") for c in final_state.get("evidence", []) if c.get("document_id")}
+    if explicit_citations and final_state.get("evidence"):
+        # Re-order extracted evidence so explicitly cited documents appear first,
+        # while still keeping the full content for the parent agent.
+        ordered = sorted(
+            extracted,
+            key=lambda e: (e.get("document_id") not in explicit_citations),
+        )
+    else:
+        ordered = extracted
+
+    evidence = ordered[:15]  # Cap at 15 chunks to keep main agent context clean
+    if final_state:
+        complete = bool(final_state.get("complete", False))
+    else:
+        complete = len(evidence) > 0
+    gaps = list(final_state.get("gaps", []))
+    conflicts = list(final_state.get("conflicts", []))
+    failure_mode = final_state.get("failure_mode") or None
+    strategy = final_state.get("strategy") or None
+    summary = "; ".join(gaps + conflicts) if (gaps or conflicts) else ("complete" if complete else "no evidence")
 
     return {
         "ok": len(evidence) > 0,
-        "evidence": evidence[:15],  # Cap at 15 chunks to keep main agent context clean
-        "summary": summary,
+        "evidence": evidence,
         "query": sub_query,
+        "complete": complete,
+        "gaps": gaps,
+        "conflicts": conflicts,
+        "failure_mode": failure_mode,
+        "strategy": strategy,
+        "summary": summary,
     }
 
 
@@ -356,8 +449,13 @@ async def run_retrieval_subagents_parallel(
             normalized.append({
                 "ok": False,
                 "evidence": [],
-                "summary": f"Sub-agent failed: {result}",
                 "query": sub_queries[i],
+                "complete": False,
+                "gaps": [f"Sub-agent failed: {result}"],
+                "conflicts": [],
+                "failure_mode": "INDEX_FAILURE",
+                "strategy": "Retry with kb_grep or direct search",
+                "summary": f"Sub-agent failed: {result}",
             })
         else:
             normalized.append(result)

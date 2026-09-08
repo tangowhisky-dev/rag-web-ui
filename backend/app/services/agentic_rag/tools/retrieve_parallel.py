@@ -123,14 +123,26 @@ class RetrieveParallelTool(BaseTool):
         all_evidence: list[dict] = []
         seen_hashes: set[str] = set()
         summaries: list[str] = []
+        all_gaps: list[str] = []
+        all_conflicts: list[str] = []
+        all_failure_modes: list[str] = []
 
         for result in results:
             query = result.get("query", "")
             summary = result.get("summary", "")
             evidence = result.get("evidence", [])
             ok = result.get("ok", False)
+            complete = result.get("complete", ok)
+            gaps = result.get("gaps", []) or []
+            conflicts = result.get("conflicts", []) or []
+            failure_mode = result.get("failure_mode")
 
-            summaries.append(f"[{query}] {'Found' if ok else 'No evidence'}: {summary[:100]}")
+            status = "complete" if complete else ("found" if ok else "no evidence")
+            summaries.append(f"[{query}] {status}: {summary[:120]}")
+            all_gaps.extend(gaps)
+            all_conflicts.extend(conflicts)
+            if failure_mode:
+                all_failure_modes.append(failure_mode)
 
             for chunk in evidence:
                 # Deduplicate by content hash or content prefix
@@ -154,6 +166,9 @@ class RetrieveParallelTool(BaseTool):
                 "hits": all_evidence,
                 "count": len(all_evidence),
                 "sub_query_summaries": summaries,
+                "gaps": all_gaps,
+                "conflicts": all_conflicts,
+                "failure_modes": all_failure_modes,
             },
             "error": None,
             "tokens": sum(len(e.get("content", "")) for e in all_evidence) // 4,
