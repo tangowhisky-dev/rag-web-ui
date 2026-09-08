@@ -11,7 +11,10 @@ from langchain_core.messages import HumanMessage, AIMessage
 from openai import AsyncOpenAI
 from app.core.config import settings
 from app.models.chat import Chat, Message, MessageCitation, ChatFile
-from app.services.infrastructure import get_cancel_token, clear_cancel_token
+from app.services.infrastructure import (
+    get_cancel_token, clear_cancel_token, is_cancelled,
+    heartbeat_cancel_check,
+)
 # ── SSE flush helpers ─────────────────────────────────────────────────────────
 # Uvicorn buffers SSE responses by default. These helpers force the HTTP
 # server to flush buffered data to the client so events arrive progressively.
@@ -426,31 +429,47 @@ def _persist_citations(db: Session, chat_id: int, buffered_citations: list) -> N
 async def _process_stream_events(
     stream_iter: AsyncGenerator, ctx: "_StreamContext", chat_id: int,
 ) -> AsyncGenerator[str, None]:
-    async for event in stream_iter:
-        if get_cancel_token(chat_id).is_set():
-            logger.debug("[CHAT] cancelled | chat_id=%d | response_length=%d chars", chat_id, len(ctx.full_response))
-            break
-        event_type = event.get("event")
-        handler = EVENT_HANDLERS.get(event_type)
-        if handler:
-            async for chunk in handler(event, ctx):
-                yield chunk
-            if ctx.interrupt:
+    # Heartbeat: poll Redis for cancellation every 1s as a safety net
+    # alongside the in-memory event check.  If cancelled via Redis
+    # (e.g. cross-process or after restart), this propagates to the
+    # in-memory event so the per-chunk check triggers.
+    heartbeat_task = asyncio.create_task(
+        heartbeat_cancel_check("chat", chat_id, interval=1.0)
+    )
+    try:
+        async for event in stream_iter:
+            if is_cancelled(chat_id):
+                logger.debug("[CHAT] cancelled | chat_id=%d | response_length=%d chars", chat_id, len(ctx.full_response))
                 break
+            event_type = event.get("event")
+            handler = EVENT_HANDLERS.get(event_type)
+            if handler:
+                async for chunk in handler(event, ctx):
+                    yield chunk
+                if ctx.interrupt:
+                    break
+    finally:
+        heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except asyncio.CancelledError:
+            pass
 
 
 def _finalize_stream(
     bot_message: Message, db: Session, chat_id: int, ctx: "_StreamContext",
-) -> None:
-    if get_cancel_token(chat_id).is_set():
+) -> bool:
+    """Finalize the stream. Returns True if cancelled, False otherwise."""
+    if is_cancelled(chat_id):
         bot_message.content = ctx.full_response or "(generation stopped)"
         db.commit()
         logger.debug("[CHAT] partial response saved | chat_id=%d | chars=%d", chat_id, len(bot_message.content))
         clear_cancel_token(chat_id)
-        return
+        return True
     _persist_response_metadata(bot_message, db, chat_id, ctx)
     clear_cancel_token(chat_id)
     _persist_citations(db, chat_id, ctx.buffered_citations)
+    return False
 
 
 async def _emit_response_error(
@@ -583,7 +602,17 @@ async def generate_response(
 
         logger.debug("[CHAT] stream complete | response_length=%d chars", len(ctx.full_response))
 
-        _finalize_stream(bot_message, db, chat_id, ctx)
+        was_cancelled = _finalize_stream(bot_message, db, chat_id, ctx)
+
+        if was_cancelled:
+            # Emit a cancellation terminal event so the frontend can
+            # distinguish cancellation from normal completion.
+            cancel_frame = json.dumps({
+                "finishReason": "cancelled",
+                "messageId": _bot_message_id,
+                "userMessageId": _user_message_id,
+            })
+            yield f'd:{cancel_frame}\n'
 
         # ── Post-turn: schedule summary update (fire-and-forget) ──────────
     except Exception as e:
