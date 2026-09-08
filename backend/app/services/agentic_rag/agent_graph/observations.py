@@ -284,6 +284,9 @@ def _observations_metadata_text(observations: list[Observation]) -> str:
                 parts.append(f"  document_id={result.get('document_id')} section={result.get('section')}")
                 parts.append(f"  content_preview: {content_preview}…")
                 continue
+            if obs.tool == "office_load_skill":
+                parts.append(f"  format={result.get('format')} skill={result.get('skill')} loaded=true (guidelines applied to future office_generate calls)")
+                continue
             if obs.tool == "kb_grep" and "matches" in result:
                 match_count = len(result.get("matches", []))
                 first_matches = result.get("matches", [])[:5]

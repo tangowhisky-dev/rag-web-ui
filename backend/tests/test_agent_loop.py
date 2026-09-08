@@ -59,6 +59,9 @@ class TestToolRegistry:
             "kb_read",
             "kb_outline",
             "kb_metadata",
+            "create_office_document",
+            "retrieve_parallel",
+            "clarify",
             "office_load_skill",
             "office_generate",
             "office_inspect",
@@ -76,14 +79,16 @@ class TestToolRegistry:
         assert "search_dense" in names
 
     def test_office_generate_always_available(self):
-        """office_generate should be available even without data —
+        """create_office_document should be available even without data —
         text-only documents (slides from bullets, Word from paragraphs)
-        don't need numeric data."""
+        don't need numeric data. The 4 individual office tools are filtered
+        out of applicable_tools — only the wrapper is exposed."""
         ctx = _make_ctx(has_file=False, has_data=False)
         tools = applicable_tools(ctx)
         names = {t.name for t in tools}
-        assert "office_generate" in names
-        assert "office_load_skill" in names
+        assert "create_office_document" in names
+        assert "office_generate" not in names
+        assert "office_load_skill" not in names
 
     def test_applicable_tools_includes_chart_when_data_present(self):
         ctx = _make_ctx(has_file=True, has_data=True)
@@ -432,6 +437,7 @@ class TestConvergence:
             "messages": [],
         }
 
+    @pytest.mark.skip(reason="v1-only: _build_execution_summary/_verify_execution commented out")
     def test_verify_execution_ready_when_plan_satisfied(self):
         from app.services.agentic_rag.agent_graph import _build_execution_summary, _verify_execution
 
@@ -439,6 +445,7 @@ class TestConvergence:
         ready, _reasoning = _verify_execution(summary)
         assert ready is True
 
+    @pytest.mark.skip(reason="v1-only: route_sufficiency commented out")
     def test_route_sufficiency_finalizes_when_sufficient(self):
         from app.services.agentic_rag.agent_graph import route_sufficiency
 
@@ -448,6 +455,7 @@ class TestConvergence:
         assert route_sufficiency({"sufficient": False}) == "think"
         assert route_sufficiency({"force_finalize": True}) == "finalize"
 
+    @pytest.mark.skip(reason="v1-only: think_node commented out")
     def test_think_node_short_circuits_without_llm_call(self):
         # If this ever calls the LLM again despite an already-satisfied plan,
         # build_chat_llm would be invoked and fail against the mocked ctx.db —

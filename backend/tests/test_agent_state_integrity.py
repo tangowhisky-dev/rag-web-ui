@@ -143,6 +143,7 @@ class TestDeclaredStateKeys:
         calls = [{"tool": "extract_data", "arguments": {"source": "retrieved_docs"}}]
         assert self._roundtrip({"precomputed_tool_calls": calls})["precomputed_tool_calls"] == calls
 
+    @pytest.mark.skip(reason="v1-only: route_think commented out")
     def test_wall_clock_budget_actually_terminates(self, monkeypatch):
         from app.services.settings_service import get_setting as _real_get_setting
         from app.services.agentic_rag.agent_graph import _wall_clock_exceeded, route_think
@@ -181,6 +182,7 @@ class TestObservationAccumulation:
             tokens=1,
         )
 
+    @pytest.mark.skip(reason="v1-only: tool_node commented out")
     def test_three_rounds_persist_three_observations(self):
         from app.services.agentic_rag.agent_graph import tool_node
 
@@ -227,6 +229,7 @@ class TestRecalledMemoryIsNotEvidence:
         assert update["recalled_memories"] == recalled
         assert update["retrieved_docs"] == []
 
+    @pytest.mark.skip(reason="v1-only: tool_node commented out")
     def test_tool_node_does_not_promote_memory_into_evidence(self):
         from app.services.agentic_rag.agent_graph import tool_node
 
@@ -263,6 +266,7 @@ class TestSubtaskVerification:
             result={"hits": [{"content": f"doc{n}"}]}, error=None, tokens=1,
         )
 
+    @pytest.mark.skip(reason="v1-only: _build_execution_summary/_verify_execution commented out")
     def test_one_retrieval_does_not_complete_three_subtasks(self):
         from app.services.agentic_rag.agent_graph import _build_execution_summary, _verify_execution
 
@@ -275,6 +279,7 @@ class TestSubtaskVerification:
         assert [s["completed"] for s in summary["subtasks"]] == [True, False, False]
         assert _verify_execution(summary)[0] is False
 
+    @pytest.mark.skip(reason="v1-only: _build_execution_summary/_verify_execution commented out")
     def test_three_retrievals_complete_three_subtasks(self):
         from app.services.agentic_rag.agent_graph import _build_execution_summary, _verify_execution
 
@@ -300,6 +305,7 @@ class TestClarificationFlow:
 
         assert issubclass(GraphInterrupt, Exception)
 
+    @pytest.mark.skip(reason="v1-only: clarify_interrupt_node commented out — v2 uses clarify tool")
     def test_clarify_node_propagates_the_interrupt(self):
         from app.services.agentic_rag.agent_graph import clarify_interrupt_node
 
@@ -336,6 +342,7 @@ class TestClarificationFlow:
             "show me the numbers", "the Q3 revenue report",
         ]
 
+    @pytest.mark.skip(reason="v1-only: planning module commented out")
     def test_clarification_budget_is_capped(self, monkeypatch):
         from app.services.settings_service import get_setting as _real_get_setting
         from app.services.agentic_rag import agent_graph

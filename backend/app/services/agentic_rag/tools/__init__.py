@@ -8,6 +8,7 @@ if TYPE_CHECKING:
     from app.services.agentic_rag.tool_context import ToolContext
 
 from .chart_generate import ChartGenerateTool
+from .clarify import ClarifyTool
 from .code_execute import CodeExecuteTool
 from .current_datetime import CurrentDatetimeTool
 from .extract_data import ExtractDataTool
@@ -24,6 +25,8 @@ from .office_edit import OfficeEditTool
 from .office_generate import OfficeGenerateTool
 from .office_inspect import OfficeInspectTool
 from .office_load_skill import OfficeLoadSkillTool
+from .create_office_document import CreateOfficeDocumentTool
+from .retrieve_parallel import RetrieveParallelTool
 from .rerank_results import RerankResultsTool
 from .search_dense import SearchDenseTool
 from .search_exact import SearchExactTool
@@ -32,6 +35,8 @@ from .summarize_answer import SummarizeAnswerTool
 
 
 _TOOL_CLASSES = [
+    # Human-in-the-loop clarification (always available)
+    ClarifyTool,
     # Atomic search tools
     SearchExactTool,
     SearchSparseTool,
@@ -54,7 +59,11 @@ _TOOL_CLASSES = [
     SummarizeAnswerTool,
     ExtractDataTool,
     KbGrepTool,
-    # Office document generation
+    # Office document generation — sub-agent wrapper (replaces 4 individual tools)
+    CreateOfficeDocumentTool,
+    # Parallel retrieval sub-agent wrapper (used for complex multi-part queries)
+    RetrieveParallelTool,
+    # Individual office tools kept for sub-agent internal use
     OfficeLoadSkillTool,
     OfficeGenerateTool,
     OfficeInspectTool,
@@ -111,11 +120,12 @@ def applicable_tools(ctx: "ToolContext") -> list:
     - rerank_results and graph_expand only after at least one search tool
       has been called (deferred tool gating).
     - extract_data only after a read or search tool has been called.
-    - office_generate always available — the LLM decides when to call it.
-      It can produce text-only documents (no data needed) or data-driven
-      documents (reading from accumulated_data).
-    - office_inspect and office_edit only when generated_files exist in state.
-    - office_load_skill always available.
+    - create_office_document always available — delegates to a sub-agent
+      that handles office_load_skill, office_generate, office_inspect,
+      and office_edit internally. The main agent never sees those 4 tools.
+    - retrieve_parallel always available — the LLM decides when to use it
+      (only for complex multi-part queries with independent sub-questions).
+      Simple queries use search_dense/search_exact directly.
     """
     tools = build_tools(ctx)
     state = ctx.state
@@ -131,10 +141,6 @@ def applicable_tools(ctx: "ToolContext") -> list:
     # OR after a search/read tool has been called.
     has_read = has_search or any(counts.get(t, 0) > 0 for t in ("kb_read", "kb_search_documents"))
 
-    # Office tools: office_generate is always available (text-only docs
-    # don't need data); office_inspect/office_edit need generated_files.
-    has_generated = bool(state.get("generated_files")) if state is not None else False
-
     if not has_file:
         tools = _filter_tools_by_name(tools, ("file_read", "file_summarize", "file_extract_table"))
     if not has_data and not has_read:
@@ -143,8 +149,13 @@ def applicable_tools(ctx: "ToolContext") -> list:
         tools = _filter_tools_by_name(tools, ("chart_generate",))
     if not has_search:
         tools = _filter_tools_by_name(tools, ("rerank_results", "graph_expand"))
-    if not has_generated:
-        tools = _filter_tools_by_name(tools, ("office_inspect", "office_edit"))
+
+    # Replace 4 individual office tools with the sub-agent wrapper.
+    # The sub-agent uses the individual tools internally via build_tools().
+    tools = _filter_tools_by_name(tools, (
+        "office_load_skill", "office_generate",
+        "office_inspect", "office_edit",
+    ))
 
     # office_load_skill is always available — the planner or think node
     # calls it when office_generate is in the plan.

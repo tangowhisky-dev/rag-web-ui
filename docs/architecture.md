@@ -117,26 +117,20 @@ graph TB
 ```mermaid
 graph LR
     A[User Query] --> B[load_context]
-    B --> C[plan]
-    C --> D{route_plan}
-    D -->|needs_clarification| E[clarify_interrupt]
+    B --> C[think]
+    C --> D{route_think}
+    D -->|tool_calls| E[tool]
     E --> C
-    D -->|proceed| F[think]
-    F --> G{route_think}
-    G -->|tool_calls| H[tool_node]
-    H --> I[sufficiency_check]
-    I --> J{route_sufficiency}
-    J -->|sufficient| K[finalize]
-    J -->|not_sufficient| F
-    G -->|finalize| K
-    K --> L[answer_scoring]
-    L --> M[save_memory]
-    M --> N[Streaming Response]
+    D -->|no tool_calls / max iter / wall-clock| F[post_process]
+    F --> G[answer_scoring - optional]
+    G --> H[END]
 ```
 
-The plan node produces a structured plan with subtasks and pre-populates tool calls for independent subtasks. The think node decides which atomic tool to call next (or emits `final_answer`). The tool node executes it and returns an observation. The sufficiency check uses deterministic shortcuts (3+ searches with few docs, rerank with 10+ docs) plus LLM judgment. The loop continues until the plan is satisfied, the iteration cap is reached, or the wall-clock budget (600s) expires.
+The think node is a single unified LLM call — one prompt, one loop. The LLM reasons over the query, retrieved evidence, observations, and available tools, then either calls a tool or writes the final answer. No separate planner, sufficiency checker, or finalizer. The tool node dispatches calls in parallel with per-tool budgets. The loop continues until the LLM writes the answer, the iteration cap (AGENT_MAX_ITERATIONS), or the wall-clock budget (AGENT_MAX_WALL_SECONDS) expires. post_process handles citation normalization, chart/office marker substitution, LastAnswerObject construction, and DB persistence — no LLM call needed when think already wrote the answer.
 
-**Atomic tool registry:** `search_dense`, `search_sparse`, `search_exact`, `rerank_results` (with provenance validation + auto-fallback), `graph_expand`, `kb_search_documents`, `kb_outline`, `kb_read`, `kb_grep`, `kb_metadata`, `current_datetime`, `file_read`, `file_summarize`, `file_extract_table`, `code_execute`, `chart_generate`, `summarize_answer`, `extract_data`. See `docs/atomic-tools-redesign.md` for the full design.
+**Sub-agents:** `retrieve_parallel` spawns 2-4 parallel retrieval sub-agents for complex multi-part queries. `create_office_document` delegates to an Office sub-agent (load skill → generate → inspect → edit) for PPTX/DOCX/XLSX generation.
+
+**Atomic tool registry:** `search_dense`, `search_sparse`, `search_exact`, `rerank_results`, `graph_expand`, `kb_search_documents`, `kb_outline`, `kb_read`, `kb_grep`, `kb_metadata`, `current_datetime`, `code_execute`, `chart_generate`, `summarize_answer`, `extract_data`, `retrieve_parallel`, `create_office_document`. See `docs/atomic-tools-redesign.md` for the full design.
 
 ## Document Ingestion Pipeline
 
@@ -359,7 +353,7 @@ Cross-Encoder Reranking
 ## Key Architectural Patterns
 
 1. **Multi-Tenancy**: Hierarchical organization structure with path-based tree traversal
-2. **Agentic RAG**: LangGraph-based agent graph with 18 atomic tools, LLM-based sufficiency checking, rerank provenance validation, confidence scoring, and KB exploration (grep/outline/read)
+2. **Agentic RAG**: Unified agent loop (think ⇄ tool → post_process) with 15 main-agent tools, parallel retrieval sub-agents, Office document generation sub-agent, citation normalization, and KB exploration (grep/outline/read)
 3. **Hybrid Retrieval**: 3-leg search (dense + sparse + exact) with native Qdrant MMR diversity and recency-aware dedup (exact + semantic)
 4. **GraphRAG**: Entity/relationship extraction with graph-enhanced retrieval
 5. **Streaming**: Server-Sent Events for real-time agent progress updates

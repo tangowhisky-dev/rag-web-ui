@@ -1,4 +1,10 @@
-"""Enterprise agent pipeline — always uses the autonomous agent loop."""
+"""Enterprise agent pipeline — uses the v2 agent loop.
+
+v1 pipeline (plan → clarify → think → tool → sufficiency_check → finalize →
+answer_scoring → save_memory) has been superseded by the v2 unified loop
+(load_context → think ⇄ tool → post_process → END). The v1 code is retained
+but commented out in agent_runner.py and agent_graph/build.py for reference.
+"""
 
 from __future__ import annotations
 
@@ -19,9 +25,9 @@ async def run_agentic_rag(
     user_id: Optional[int] = None,
     message_id: Optional[int] = None,
 ) -> AsyncGenerator[dict, None]:
-    """Run the enterprise agent loop and stream SSE events."""
-    from .agent_runner import run_agent_loop
-    async for event in run_agent_loop(
+    """Run the v2 agent loop and stream SSE events."""
+    from .agent_runner_v2 import run_agent_loop_v2
+    async for event in run_agent_loop_v2(
         query=query,
         kb_ids=knowledge_base_ids,
         db=db,

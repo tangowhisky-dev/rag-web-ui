@@ -216,7 +216,7 @@ def normalize_evidence_citations(answer: str, evidence: list[dict]) -> tuple[str
         answer = pat.sub(_extract_reasoning, answer)
 
     # Collect unique E-numbers in first-appearance order.
-    # Match both [E1] and [1](1) formats (N refers to the E-N label).
+    # Match [E1], [1](1), and bare [1] formats (N refers to the E-N label).
     valid_cited: list[int] = []
     seen: set[int] = set()
     # First pass: [E1] format
@@ -231,25 +231,49 @@ def normalize_evidence_citations(answer: str, evidence: list[dict]) -> tuple[str
         if 1 <= n <= max_e and n not in seen:
             valid_cited.append(n)
             seen.add(n)
+    # Third pass: bare [N] format (shorthand used by smaller models)
+    for match in re.finditer(r"\[(\d{1,3})\](?!\()", answer):
+        n = int(match.group(1))
+        if 1 <= n <= max_e and n not in seen:
+            valid_cited.append(n)
+            seen.add(n)
 
     # Renumber: first cited → [1], second → [2], etc.
     index_map = {orig: new for new, orig in enumerate(valid_cited, start=1)}
 
+    # Use sentinel placeholders to avoid double-processing when multiple
+    # citation formats appear in the same answer. Without this, [E3] → [2]
+    # would be re-matched by the bare [N] replacement and stripped.
+    _sentinel_idx = 0
+    _sentinel_map: dict[str, str] = {}
+
+    def _make_sentinel(replacement: str) -> str:
+        nonlocal _sentinel_idx
+        key = f"\x00CITE{_sentinel_idx}\x00"
+        _sentinel_map[key] = replacement
+        _sentinel_idx += 1
+        return key
+
     def _replace_marker(match: re.Match) -> str:
         n = int(match.group(1))
         if n in index_map:
-            return f"[{index_map[n]}]"
+            return _make_sentinel(f"[{index_map[n]}]")
         return ""
-    # Replace [E1] format
+    # Replace [E1] format → sentinel
     normalized = re.sub(r"\[E(\d+)\]", _replace_marker, answer, flags=re.IGNORECASE)
-    # Replace [N](N) format → [M](M) with renumbered M
+    # Replace [N](N) format → sentinel
     def _replace_link(match: re.Match) -> str:
         n = int(match.group(1))
         if n in index_map:
             new_n = index_map[n]
-            return f"[{new_n}]({new_n})"
+            return _make_sentinel(f"[{new_n}]({new_n})")
         return ""
     normalized = re.sub(r"\[(\d+)\]\(\d+\)", _replace_link, normalized)
+    # Replace bare [N] format → sentinel (only matches [N] not followed by "(")
+    normalized = re.sub(r"\[(\d{1,3})\](?!\()", _replace_marker, normalized)
+    # Restore sentinels to final citation text
+    for key, replacement in _sentinel_map.items():
+        normalized = normalized.replace(key, replacement)
 
     # Restore code blocks
     normalized = re.sub(r"\x00CODE(\d+)\x00", lambda m: _code_segments[int(m.group(1))], normalized)
