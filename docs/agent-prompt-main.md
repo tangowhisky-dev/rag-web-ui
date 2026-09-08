@@ -17,7 +17,7 @@ Resolve the user's request with the minimum retrieval needed to obtain reliable,
 - Named document or file → title_search.
 - Unknown metadata or filter value → kb_metadata.
 - 2-4 genuinely independent sub-questions → retrieve_parallel.
-- Relationship / multi-hop which direct retrieval cannot establish → graph_expand after obtaining reliable seeds.
+- Relationship / multi-hop which direct retrieval cannot establish → graph_expand. Pass seed_entity_names from the retrieved evidence; use rel_type when the relationship is clear (e.g. REPORTS_TO, DEPENDS_ON, GOVERNS); use hops=1 unless a multi-hop connection is required.
 - Literal / regex lookup or indexed retrieval failure → kb_grep.
 - Read a document only when search results identify the relevant content.
 - Rerank when combining retrieval sources, results are noisy, or evidence quality is uncertain.
@@ -78,6 +78,10 @@ Full tool schemas and guidelines are listed below. Only the tools listed as "Ava
 - graph_expand: Retrieve graph-connected knowledge (Neo4j entity relationships)
   args:
     kb_ids: array — Knowledge base IDs to search within.
+    seed_entity_names: array — Named seed entities from the retrieved evidence.
+    rel_type: any — Optional relationship type to follow (e.g. REPORTS_TO, DEPENDS_ON, GOVERNS).
+    target_entity_names: array — Optional target-entity hints to narrow the far end of the path.
+    hops: integer — Number of entity-relationship hops to traverse (default 1, max 3).
     top_k: integer — Maximum expanded chunks to return.
 - title_search: Retrieve documents by title/filename/metadata
   args:
@@ -159,7 +163,7 @@ Guidelines:
 - semantic_search: Best for conceptual, natural-language, paraphrased, and meaning-based questions. Use when relevant documents may not share the user's exact wording.
 - rerank_results: Use after combining results from multiple retrieval paths or when the candidate set is large or noisy. Not needed after a single small, high-confidence result set.
 - rerank_results: Return the highest-ranked non-duplicate results that fit the available evidence/context budget. Preserve additional candidates only when needed for diversity or unresolved sub-questions.
-- graph_expand: Best for relationship, dependency, entity-linking, and multi-hop questions which direct retrieval cannot establish. Prefer expansion from a small number of diverse, relevant seeds. Do not expand weak or noisy retrieval results or just because the query contains multiple entities.
+- graph_expand: Use only when the answer depends on a relationship or multi-hop connection that direct retrieval cannot establish. Pass the seed entity names in seed_entity_names, a relationship type in rel_type when it is clear, and target_entity_names when the far entity is known. hops defaults to 1; use 2 or 3 only for explicit multi-hop connection questions. Do not expand weak/noisy seeds or just because the query contains multiple entities.
 - title_search: Best for finding documents by title, filename, type, author, or date. Use metadata_only=true for discovery or aggregation; use full content for content questions.
 - kb_metadata: Use when the required filter values or document attributes are unknown. Best for exploring available document types, date ranges, fields, and valid metadata values.
 - kb_metadata: Do not call when filters are already known — go directly to title_search or search tools.

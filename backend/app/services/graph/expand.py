@@ -186,6 +186,175 @@ def _fetch_expanded_docs_from_qdrant(
     return expanded_docs
 
 
+def _resolve_rel_type(rel_type: Optional[str], driver: neo4j.Driver) -> Optional[list[str]]:
+    """Resolve a user-supplied relationship type to an exact Neo4j type.
+
+    Uses APOC fuzzy matching on the stored relationship types. If no close
+    match is found, returns None so the caller can decide whether to broaden.
+    """
+    if not rel_type:
+        return None
+    threshold = 0.75
+    try:
+        with driver.session() as session:
+            result = session.run(
+                """
+                CALL apoc.meta.relTypeProperties() YIELD relType
+                WITH collect(DISTINCT relType) AS stored
+                UNWIND stored AS candidate
+                WITH candidate,
+                     apoc.text.compareCleaned(candidate, $input) AS exact,
+                     apoc.text.sorensenDiceSimilarity(
+                         apoc.text.clean(candidate), apoc.text.clean($input)
+                     ) AS sim
+                WHERE candidate <> 'FROM_CHUNK'
+                RETURN candidate, exact, sim
+                ORDER BY exact DESC, sim DESC
+                LIMIT 1
+                """,
+                input=rel_type,
+            )
+            rec = result.single()
+            if rec and (rec["exact"] or rec["sim"] >= threshold):
+                return [rec["candidate"]]
+    except Exception as exc:
+        logger.warning("[_resolve_rel_type] failed: %s", exc)
+    return None
+
+
+def _derive_seed_entities_from_docs(
+    driver: neo4j.Driver,
+    seen_point_ids: set[str],
+    scope_filter: str,
+    fanout_val: int,
+) -> list[str]:
+    """Extract the most-mentioned entities from the seed chunks."""
+    if not seen_point_ids:
+        return []
+    try:
+        with driver.session() as session:
+            result = session.run(
+                f"""
+                MATCH (c:Chunk)<-[:FROM_CHUNK]-(e)
+                WHERE c.qdrant_point_id IN $seen_ids
+                  AND {scope_filter}
+                WITH e, count(*) AS mentions
+                ORDER BY mentions DESC
+                LIMIT $entity_cap
+                RETURN e.name AS name
+                """,
+                seen_ids=list(seen_point_ids),
+                entity_cap=max(1, fanout_val),
+            )
+            return [rec["name"] for rec in result if rec["name"]]
+    except Exception as exc:
+        logger.warning("[_derive_seed_entities_from_docs] failed: %s", exc)
+        return []
+
+
+def _traverse_graph_for_targeted_expansion(
+    driver: neo4j.Driver,
+    seed_entity_names: list[str],
+    rel_types: Optional[list[str]],
+    target_entity_names: list[str],
+    hops: int,
+    seen_point_ids: set[str],
+    collections: list[str],
+    scope_filter: str,
+    fanout_val: int,
+    limit_val: int,
+) -> tuple[list[tuple[str, str]], dict[str, dict]]:
+    """Traverse from named seed entities to related chunks.
+
+    Returns (point_id, collection) tuples for fetching from Qdrant, plus a
+    map of point_id → the graph path that reached it for provenance.
+    """
+    fuzzy_threshold = 0.75
+    target_clause = ""
+    if target_entity_names:
+        target_clause = """
+          AND (
+            any(t IN $target_entity_names WHERE apoc.text.compareCleaned(eN.name, t))
+            OR any(t IN $target_entity_names WHERE
+              apoc.text.sorensenDiceSimilarity(
+                apoc.text.clean(eN.name), apoc.text.clean(t)
+              ) >= $fuzzy_threshold
+            )
+          )
+        """
+
+    query = f"""
+        MATCH (e:__Entity__)
+        WHERE {scope_filter}
+          AND (
+            any(raw IN $seed_entity_names WHERE apoc.text.compareCleaned(e.name, raw))
+            OR any(raw IN $seed_entity_names WHERE
+              apoc.text.sorensenDiceSimilarity(
+                apoc.text.clean(e.name), apoc.text.clean(raw)
+              ) >= $fuzzy_threshold
+            )
+          )
+        WITH e,
+             coll.max([
+               raw IN $seed_entity_names |
+               apoc.text.sorensenDiceSimilarity(
+                 apoc.text.clean(e.name), apoc.text.clean(raw)
+               )
+             ]) AS score
+        ORDER BY score DESC
+        LIMIT $entity_cap
+        WITH e AS seed_entity
+        MATCH path = (seed_entity)-[r*1..{hops}]-(eN)
+        WHERE ($rel_types IS NULL OR all(rel IN r WHERE type(rel) IN $rel_types))
+          {target_clause}
+        WITH seed_entity, eN, r AS rels, size(r) AS path_len
+        ORDER BY path_len ASC
+        LIMIT $path_limit
+        MATCH (eN)-[:FROM_CHUNK]->(c2)
+        WHERE c2.qdrant_collection IN $collections
+          AND c2.qdrant_point_id IS NOT NULL
+          AND NOT c2.qdrant_point_id IN $seen_ids
+        RETURN DISTINCT
+            c2.qdrant_point_id AS point_id,
+            c2.qdrant_collection AS collection,
+            seed_entity.name AS seed,
+            eN.name AS target,
+            [x IN rels | type(x)] AS rels
+        LIMIT $limit
+    """
+
+    try:
+        with driver.session() as session:
+            result = session.run(
+                query,
+                seed_entity_names=seed_entity_names,
+                rel_types=rel_types,
+                target_entity_names=target_entity_names,
+                fuzzy_threshold=fuzzy_threshold,
+                entity_cap=max(1, fanout_val),
+                path_limit=max(1, limit_val * 4),
+                collections=collections,
+                seen_ids=list(seen_point_ids),
+                hops=max(1, min(hops, 3)),
+                limit=max(1, limit_val),
+            )
+            targets = []
+            paths: dict[str, dict] = {}
+            for rec in result:
+                pid = rec["point_id"]
+                coll = rec["collection"]
+                targets.append((pid, coll))
+                paths[pid] = {
+                    "seed": rec["seed"],
+                    "target": rec["target"],
+                    "rels": rec["rels"],
+                }
+            return targets, paths
+    except Exception as exc:
+        logger.warning("[_traverse_graph_for_targeted_expansion] failed: %s", exc)
+        return [], {}
+
+
 @with_retry_sync(max_attempts=3)
 def expand_docs_via_graph(
     docs: list[LangchainDocument],
@@ -193,47 +362,35 @@ def expand_docs_via_graph(
     db: Optional[Session] = None,
     org_id: Optional[int] = None,
     datastore_ids: Optional[list[int]] = None,
+    seed_entity_names: Optional[list[str]] = None,
+    rel_type: Optional[str] = None,
+    target_entity_names: Optional[list[str]] = None,
+    hops: Optional[int] = None,
 ) -> list[LangchainDocument]:
     """
-    Graph-expanded retrieval: find additional chunks via Neo4j graph traversal
-    and fetch their text from Qdrant.
+    Targeted graph expansion: find chunks connected to seed entities via
+    typed, N-hop entity relationships.
 
-    Flow:
-      1. Extract Qdrant point UUIDs from the already-retrieved docs.
-      2. Query Neo4j: traverse chunk → entity → entity → chunk to find
-         entity-connected chunks whose qdrant_point_id is NOT already in
-         the current result set.
-      3. Fetch those new points from Qdrant by UUID (text/payload only,
-         no vector computation needed).
-      4. Return them as LangchainDocument objects with metadata flag
-         `_graph_expanded=True` so the caller can annotate them.
-
-    This surfaces chunks that are SEMANTICALLY linked via entity relationships
-    but would not have been returned by vector similarity alone.
-
-    When db and org_id are provided, org-overridable settings (hops, limit,
-    fanout) are resolved via the settings service.
+    Accepts either seed document chunks (legacy) or explicit seed entity
+    names supplied by the LLM. Fuzzy APOC matching is used on entity and
+    relationship names so the LLM does not need to know exact extracted
+    spellings.
 
     Non-fatal — returns [] on any failure so the caller's pipeline continues
-    with only the original vector search results.
+    with only the original retrieval results.
     """
-    if not get_setting(db, "GRAPHRAG_ENABLED", None) or not docs:
+    if not get_setting(db, "GRAPHRAG_ENABLED", None):
+        return []
+    if not docs and not seed_entity_names:
         return []
 
-    from qdrant_client import QdrantClient
-
-    # Resolve org-overridable settings
-    hops_val = get_setting(db, "GRAPHRAG_RETRIEVAL_HOPS", org_id)
     fanout_val = get_setting(db, "GRAPHRAG_ENTITY_FANOUT_CAP", org_id)
     limit_val = get_setting(db, "GRAPHRAG_RETRIEVAL_LIMIT", org_id)
+    # If hops is not supplied by the LLM, fall back to the configured default.
+    hops_val = hops if hops is not None else get_setting(db, "GRAPHRAG_RETRIEVAL_HOPS", org_id)
+    hops_val = max(1, min(int(hops_val or 1), 3))
 
     seen_point_ids = _extract_seen_point_ids(docs)
-
-    if not seen_point_ids:
-        # Docs came from before the qdrant_point_id payload field was added —
-        # fall back gracefully rather than blowing up.
-        logger.debug("GraphService.expand: no qdrant_point_id in doc metadata, skipping expansion")
-        return []
 
     try:
         driver = _get_driver()
@@ -242,12 +399,26 @@ def expand_docs_via_graph(
             collections += [f"ds_{ds_id}" for ds_id in datastore_ids]
 
         kb_scope, ds_scope, scope_filter = _build_graph_scope_filter(kb_ids, datastore_ids)
-        rest_pattern, interm_filter = _build_traversal_patterns(hops_val)
+        rel_types = _resolve_rel_type(rel_type, driver)
 
-        expansion_targets = _traverse_graph_for_expansion(
-            driver, seen_point_ids, collections, scope_filter,
-            rest_pattern, interm_filter, fanout_val, limit_val,
-            kb_scope, ds_scope,
+        if seed_entity_names:
+            names = [str(n).strip() for n in seed_entity_names if str(n).strip()]
+        else:
+            if not seen_point_ids:
+                logger.debug("GraphService.expand: no seed entity names or seed chunks")
+                return []
+            names = _derive_seed_entities_from_docs(
+                driver, seen_point_ids, scope_filter, fanout_val
+            )
+
+        if not names:
+            logger.debug("GraphService.expand: no seed entities resolved")
+            return []
+
+        expansion_targets, paths = _traverse_graph_for_targeted_expansion(
+            driver, names, rel_types, target_entity_names or [],
+            hops_val, seen_point_ids, collections, scope_filter,
+            fanout_val, limit_val,
         )
         if not expansion_targets:
             logger.debug("GraphService.expand: no graph-connected chunks found beyond current result set")
@@ -259,6 +430,10 @@ def expand_docs_via_graph(
         )
 
         expanded_docs = _fetch_expanded_docs_from_qdrant(expansion_targets)
+        for doc in expanded_docs:
+            pid = (doc.metadata or {}).get("qdrant_point_id")
+            if pid and pid in paths:
+                doc.metadata["_graph_path"] = paths[pid]
 
         logger.debug(
             "GraphService.expand: fetched %d graph-expanded docs from Qdrant",
