@@ -11,7 +11,21 @@ Tests cover:
 """
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
+
+
+class _FakeTask:
+    """Substitute for asyncio.Task in tests. Closes the coroutine to avoid
+    'never awaited' warnings and is awaitable for the finally block."""
+    def __init__(self, coro, **kwargs):
+        self.coro = coro
+        self.cancel = MagicMock()
+
+    def __await__(self):
+        # Close the coroutine so Python doesn't warn about it never being
+        # awaited. The real heartbeat loop is not wanted in these tests.
+        self.coro.close()
+        return iter([None])
 
 import pytest
 
@@ -23,7 +37,16 @@ import pytest
 def _fresh_registry():
     """Reset the cancel registry before each test."""
     from app.services.infrastructure import cancel_registry as reg
-    reg._cancel_tokens.clear()
+    reg._async_tokens.clear()
+    reg._thread_tokens.clear()
+    # Also clear Redis so tests don't see stale cancel keys from prior runs.
+    try:
+        r = reg._get_redis()
+        if r is not None:
+            for key in r.scan_iter(match="cancel:*"):
+                r.delete(key)
+    except Exception:
+        pass
 
 
 @pytest.fixture(autouse=True)
@@ -139,7 +162,7 @@ async def test_cancel_during_streaming():
             yield {"event": "token", "content": " world"}
 
         with patch("app.services.agentic_rag.run_agentic_rag", side_effect=lambda *a, **k: mock_stream_iter()):
-            with patch("asyncio.create_task"):
+            with patch("asyncio.create_task", _FakeTask):
                 frames = []
                 async for frame in generate_response(
                     query="test question",
@@ -190,7 +213,7 @@ async def test_cancel_before_streaming():
         set_cancel_token(chat_id)
 
         with patch("app.services.agentic_rag.run_agentic_rag", side_effect=lambda *a, **k: mock_stream_iter()):
-            with patch("asyncio.create_task"):
+            with patch("asyncio.create_task", _FakeTask):
                 frames = []
                 async for frame in generate_response(
                     query="test question",
@@ -240,7 +263,7 @@ async def test_no_cancel_normal_flow():
             yield {"event": "done", "usage": {"promptTokens": 5, "completionTokens": 2}}
 
         with patch("app.services.agentic_rag.run_agentic_rag", side_effect=lambda *a, **k: mock_stream_iter()):
-            with patch("asyncio.create_task"):
+            with patch("asyncio.create_task", _FakeTask):
                 frames = []
                 async for frame in generate_response(
                     query="test question",
@@ -297,7 +320,7 @@ async def test_partial_response_saved():
                     set_cancel_token(chat_id)
 
         with patch("app.services.agentic_rag.run_agentic_rag", side_effect=lambda *a, **k: mock_stream_iter()):
-            with patch("asyncio.create_task"):
+            with patch("asyncio.create_task", _FakeTask):
                 frames = []
                 async for frame in generate_response(
                     query="test question",
@@ -353,7 +376,7 @@ async def test_cancel_token_cleaned_on_normal_completion():
             yield {"event": "done", "usage": {"promptTokens": 1, "completionTokens": 1}}
 
         with patch("app.services.agentic_rag.run_agentic_rag", side_effect=lambda *a, **k: mock_stream_iter()):
-            with patch("asyncio.create_task"):
+            with patch("asyncio.create_task", _FakeTask):
                 frames = []
                 async for frame in generate_response(
                     query="test question",
@@ -366,7 +389,8 @@ async def test_cancel_token_cleaned_on_normal_completion():
 
     # After normal completion, the token should be cleared
     from app.services.infrastructure import cancel_registry as reg
-    assert chat_id not in reg._cancel_tokens
+    assert f"chat:{chat_id}" not in reg._async_tokens
+    assert f"chat:{chat_id}" not in reg._thread_tokens
 
 
 # ---------------------------------------------------------------------------
@@ -403,7 +427,7 @@ async def test_cancel_token_cleaned_on_error():
             raise RuntimeError("LLM connection failed")
 
         with patch("app.services.agentic_rag.run_agentic_rag", side_effect=lambda *a, **k: mock_stream_iter()):
-            with patch("asyncio.create_task"):
+            with patch("asyncio.create_task", _FakeTask):
                 frames = []
                 async for frame in generate_response(
                     query="test question",
@@ -465,7 +489,7 @@ async def test_cancel_mid_agent_step():
             yield {"event": "agent_step", "node": "draft_answer", "status": "done", "latency_ms": 100}
 
         with patch("app.services.agentic_rag.run_agentic_rag", side_effect=lambda *a, **k: mock_stream_iter()):
-            with patch("asyncio.create_task"):
+            with patch("asyncio.create_task", _FakeTask):
                 frames = []
                 async for frame in generate_response(
                     query="test question",
@@ -500,7 +524,8 @@ async def test_cancel_mid_agent_step():
 
     # Token should be cleaned up
     from app.services.infrastructure import cancel_registry as reg
-    assert chat_id not in reg._cancel_tokens
+    assert f"chat:{chat_id}" not in reg._async_tokens
+    assert f"chat:{chat_id}" not in reg._thread_tokens
 
     # Tokens after cancel should NOT appear
     assert "should not appear" not in bot_msg.content
@@ -541,7 +566,7 @@ async def test_cancel_then_chat_reusable():
             yield {"event": "token", "content": "should not appear"}
 
         with patch("app.services.agentic_rag.run_agentic_rag", side_effect=lambda *a, **k: mock_stream_iter()):
-            with patch("asyncio.create_task"):
+            with patch("asyncio.create_task", _FakeTask):
                 frames = []
                 async for frame in generate_response(
                     query="first question",
@@ -576,7 +601,7 @@ async def test_cancel_then_chat_reusable():
             yield {"event": "done", "usage": {"promptTokens": 5, "completionTokens": 2}}
 
         with patch("app.services.agentic_rag.run_agentic_rag", side_effect=lambda *a, **k: mock_stream_iter2()):
-            with patch("asyncio.create_task"):
+            with patch("asyncio.create_task", _FakeTask):
                 frames2 = []
                 async for frame in generate_response(
                     query="second question",
@@ -630,7 +655,7 @@ async def test_cancel_preserves_agent_steps_in_db():
             yield {"event": "token", "content": "should not appear"}
 
         with patch("app.services.agentic_rag.run_agentic_rag", side_effect=lambda *a, **k: mock_stream_iter()):
-            with patch("asyncio.create_task"):
+            with patch("asyncio.create_task", _FakeTask):
                 frames = []
                 async for frame in generate_response(
                     query="test question",
@@ -656,4 +681,5 @@ async def test_cancel_preserves_agent_steps_in_db():
 
     # Token cleanup
     from app.services.infrastructure import cancel_registry as reg
-    assert chat_id not in reg._cancel_tokens
+    assert f"chat:{chat_id}" not in reg._async_tokens
+    assert f"chat:{chat_id}" not in reg._thread_tokens

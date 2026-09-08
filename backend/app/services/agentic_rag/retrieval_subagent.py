@@ -232,7 +232,7 @@ async def run_retrieval_subagent(
     retrieval_tool_names = {
         "keyword_search", "semantic_search",
         "title_search", "file_read", "kb_outline", "kb_grep",
-        "rerank_results",
+        "rerank_results", "graph_expand",
     }
     tools = {t.name: t for t in all_tools if t.name in retrieval_tool_names}
     tools_list = list(tools.values())

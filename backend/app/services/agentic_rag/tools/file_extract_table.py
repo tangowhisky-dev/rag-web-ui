@@ -1,4 +1,4 @@
-"""file_extract_table tool — extract tables from CSV/Excel/HTML files."""
+"""file_extract_table tool — extract tables from CSV/Excel files."""
 
 from __future__ import annotations
 
@@ -53,18 +53,18 @@ def _parse_table(cf: Any, table_index: int) -> tuple:
     except Exception as exc:
         return None, {"ok": False, "result": {}, "error": f"pandas not available: {exc}", "tokens": 0}
 
-    df = None
+    is_spreadsheet = (
+        cf.content_type.endswith("csv") or cf.file_name.lower().endswith(".csv") or
+        cf.content_type.endswith(("xlsx", "xls")) or cf.file_name.lower().endswith((".xlsx", ".xls"))
+    )
+    if not is_spreadsheet:
+        return None, {"ok": False, "result": {}, "error": "file_extract_table only supports CSV, XLSX, and XLS files.", "tokens": 0}
+
     try:
         if cf.content_type.endswith("csv") or cf.file_name.lower().endswith(".csv"):
             df = pd.read_csv(cf.stored_path)
-        elif cf.content_type.endswith(("xlsx", "xls")) or cf.file_name.lower().endswith((".xlsx", ".xls")):
-            df = pd.read_excel(cf.stored_path)
-        elif "html" in cf.content_type or cf.file_name.lower().endswith(".html"):
-            tables = pd.read_html(cf.markdown_content or "")
-            df = tables[table_index] if 0 <= table_index < len(tables) else None
         else:
-            tables = pd.read_html(cf.markdown_content or "")
-            df = tables[table_index] if 0 <= table_index < len(tables) else None
+            df = pd.read_excel(cf.stored_path)
     except Exception as exc:
         logger.warning("[file_extract_table] parse failed: %s", exc)
         return None, {"ok": False, "result": {}, "error": f"Could not extract table: {exc}", "tokens": 0}
@@ -87,10 +87,10 @@ def _apply_filter(df: Any, filter_expr: Optional[str]) -> Any:
 class FileExtractTableTool(BaseAgentTool):
     name: str = "file_extract_table"
     ui_label: str = "Extracting table from file"
-    description: str = "Extract a structured table from a CSV, Excel, or HTML table in an attached file. Returns JSON columns and rows."
-    prompt_snippet: str = "Extract tabular data from CSV/Excel/HTML in an attached file"
+    description: str = "Extract a structured table from a CSV or Excel file. Returns JSON columns and rows."
+    prompt_snippet: str = "Extract tabular data from CSV/Excel in an attached file"
     prompt_guidelines: list[str] = [
-        "file_extract_table: Best for CSV, Excel, HTML, and structured tables that need analysis, transformation, charting, or reuse. Preserve source structure where possible.",
+        "file_extract_table: Best for CSV, Excel, and structured spreadsheets that need analysis, transformation, charting, or reuse. Preserve source structure where possible.",
         "file_extract_table: Set accumulate=true to feed 2-column (label, value) tables into accumulated_data for chart_generate.",
     ]
     args_schema: type[BaseModel] = FileExtractTableInput

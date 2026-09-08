@@ -464,10 +464,11 @@ def test_tool_call_budget_only_has_clarify():
         budget = _tool_call_budget(None, None)
     assert "clarify" in budget
     assert budget["clarify"] == 2
-    # Per-tool caps removed — only total budget + same-tool repeat guard remain
+    # No other per-tool caps — the agent is free to call any other tool
+    # within the total budget and same-tool repeat guard.
     assert "kb_grep" not in budget
-    assert "kb_read" not in budget
-    assert "search_dense" not in budget
+    assert "file_read" not in budget
+    assert "keyword_search" not in budget
 
 
 if __name__ == "__main__":
