@@ -37,6 +37,8 @@ logger = logging.getLogger(__name__)
 
 # Doc preview length when compacting (shorter than the 800 used in full mode).
 _COMPACT_DOC_PREVIEW_CHARS = 200
+# Minimum number of observations to keep when dropping old ones.
+_MIN_OBSERVATIONS = 3
 # Stable id for the conversation-summary message so repeated compactions
 # replace the previous summary instead of stacking summaries.
 _COMPACTION_SUMMARY_ID = "agentic-compaction-summary"
@@ -105,33 +107,50 @@ def _build_compaction_llm(ctx: Optional["ToolContext"]):
 
 
 def _trim_docs_to_budget(docs: list[dict], overflow_tokens: int) -> list[dict]:
-    """Drop the lowest-scoring chunks until roughly *overflow_tokens* are freed.
+    """Shorten, then if necessary drop, the lowest-scoring chunks until
+    roughly *overflow_tokens* are freed.
 
     ``finalize_node``'s prompt is dominated by ``retrieved_docs``; summarising
     conversation history cannot fix an evidence-payload overflow. Chunks are
-    removed lowest ``_reranker_score`` first so the strongest evidence — and
-    therefore the citation set — survives.
+    first trimmed to a short preview so their metadata/citation_ref stays
+    intact. If more space is needed, the trimmed chunks with the lowest
+    ``_reranker_score`` are removed entirely, keeping at least one.
     """
     if not docs or overflow_tokens <= 0:
         return docs
 
+    # First pass: trim every chunk to a short preview, preserving metadata.
+    trimmed: list[dict] = []
+    freed = 0
+    for doc in docs:
+        content = doc.get("page_content", "") or ""
+        trimmed_doc = dict(doc)
+        trimmed_doc["page_content"] = content[:_COMPACT_DOC_PREVIEW_CHARS]
+        trimmed.append(trimmed_doc)
+        freed += count_tokens(content) - count_tokens(trimmed_doc["page_content"])
+
+    if freed >= overflow_tokens:
+        return trimmed
+
+    # Second pass: drop the lowest-scoring trimmed chunks if still over budget.
+    remaining = overflow_tokens - freed
     scored = sorted(
-        enumerate(docs),
+        enumerate(trimmed),
         key=lambda pair: pair[1].get("_reranker_score", pair[1].get("score", 0.0) or 0.0),
     )
     drop: set[int] = set()
-    freed = 0
+    dropped_tokens = 0
     # Always keep at least one chunk — an empty context guarantees a refusal.
     for idx, doc in scored[:-1]:
-        if freed >= overflow_tokens:
+        if dropped_tokens >= remaining:
             break
-        freed += count_tokens(str(doc.get("page_content", "")))
+        dropped_tokens += count_tokens(str(doc))
         drop.add(idx)
 
     if not drop:
-        return docs
-    logger.debug("[_trim_docs_to_budget] dropped %d/%d chunks (~%d tokens)", len(drop), len(docs), freed)
-    return [d for i, d in enumerate(docs) if i not in drop]
+        return trimmed
+    logger.debug("[_trim_docs_to_budget] trimmed all %d chunks and dropped %d (saved ~%d tokens)", len(docs), len(drop), freed + dropped_tokens)
+    return [d for i, d in enumerate(trimmed) if i not in drop]
 
 
 def _compact_stage1_observations(state, budget):
@@ -147,6 +166,23 @@ def _compact_stage1_observations(state, budget):
         local["observations"] = compacted_obs
         budget.used -= savings
         logger.debug("[_compact_if_needed] stage 1 (observations) saved %d tokens", savings)
+
+    if budget.needs_compaction() and len(compacted_obs) > _MIN_OBSERVATIONS:
+        per_obs_tokens = [count_tokens(json.dumps(o.result, default=str)) for o in compacted_obs]
+        droppable = [i for i, o in enumerate(compacted_obs) if not o.error]
+        max_to_drop = max(0, len(compacted_obs) - _MIN_OBSERVATIONS)
+        dropped = set()
+        for idx in droppable[:max_to_drop]:
+            if not budget.needs_compaction():
+                break
+            dropped.add(idx)
+            budget.used -= per_obs_tokens[idx]
+        if dropped:
+            compacted_obs = [o for i, o in enumerate(compacted_obs) if i not in dropped]
+            updates["observations"] = [{"__reset__": True}, *compacted_obs]
+            local["observations"] = compacted_obs
+            logger.debug("[_compact_if_needed] stage 1 (observations) dropped %d old observations", len(dropped))
+
     return updates, local
 
 
