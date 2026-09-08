@@ -136,7 +136,7 @@ class AgentState(MessagesState):
 
     # ── Clarification state ─────────────────────────────────────────────
     # Number of clarification rounds already spent this turn; capped by
-    # AGENT_MAX_CLARIFICATIONS so plan → clarify → plan cannot loop.
+    # AGENT_MAX_CLARIFY (per-tool cap) so clarify cannot loop.
     clarification_count: Annotated[int, _last_value] = 0
     # The user's answer to the clarification question, merged into query
     # resolution on resume.

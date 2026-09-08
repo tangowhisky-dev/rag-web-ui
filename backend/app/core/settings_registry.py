@@ -238,15 +238,6 @@ _ORG_OVERRIDABLE = [
                            "cutoff: finds the largest consecutive score drop and cuts there, while "
                            "still applying the threshold as an absolute floor. Adapts to per-query "
                            "score distributions."),
-    SettingDef("RERANKER_CONFIDENCE_THRESHOLD", "Reranker", "Confidence short-circuit threshold",
-               "float", 0.8, scope="org", reload="next_request",
-               description="Reranker top-1 score above which the confidence short-circuit fires. "
-                           "When top-1 >= this AND gap to tail >= RERANKER_CONFIDENCE_GAP, "
-                           "reflection is skipped and the agent goes straight to finalize."),
-    SettingDef("RERANKER_CONFIDENCE_GAP", "Reranker", "Confidence short-circuit gap",
-               "float", 0.3, scope="org", reload="next_request", min_value=0.0,
-               description="Minimum gap between top-1 and tail reranker scores for the confidence "
-                           "short-circuit. A wide gap means the top result is clearly best."),
 
     # GraphRAG query-time
     SettingDef("GRAPHRAG_RETRIEVAL_HOPS", "GraphRAG", "Graph query hops",
@@ -280,7 +271,7 @@ _ORG_OVERRIDABLE = [
                description="Combined cap on kb_read + kb_outline tool calls per turn."),
     # Atomic search tool budgets (replace AGENT_MAX_RETRIEVALS for per-tool caps)
     SettingDef("AGENT_TOTAL_TOOL_BUDGET", "Agentic", "Total tool-call budget",
-               "int", 20, scope="org", reload="next_request", min_value=1,
+               "int", 25, scope="org", reload="next_request", min_value=1,
                description="Total tool calls across all tools per turn. When reached, the agent is forced to finalize. Must be higher than the sum of per-tool budgets to allow multi-step strategies."),
     SettingDef("AGENT_MAX_CLARIFY", "Agentic", "Max clarify calls",
                "int", 2, scope="org", reload="next_request", min_value=0,
@@ -334,18 +325,12 @@ _ORG_OVERRIDABLE = [
     SettingDef("AGENT_MAX_SAME_TOOL_REPEAT", "Agentic", "Max same-tool repeat",
                "int", 3, scope="org", reload="next_request", min_value=1,
                description="Max consecutive calls to the same tool with similar arguments before the agent is forced to change strategy or finalize. Prevents infinite loops with local models."),
-    SettingDef("AGENT_REFLECT_EVERY", "Agentic", "Reflect every N iterations",
-               "int", 2, scope="org", reload="next_request", min_value=1,
-               description="Runs the reflect node every N iterations for mid-loop recovery and replanning checks."),
     SettingDef("AGENT_MAX_TOOL_RETRIES", "Agentic", "Max tool retries",
                "int", 3, scope="org", reload="next_request", min_value=0,
                description="Maximum retry attempts for failed tool calls. Uses exponential backoff for transient errors."),
     SettingDef("AGENT_RETRY_BACKOFF_BASE", "Agentic", "Retry backoff base (s)",
                "float", 0.5, scope="org", reload="next_request", min_value=0.0,
                description="Base delay in seconds for exponential backoff. Retry delay = base × 2^attempt."),
-    SettingDef("AGENT_MAX_CLARIFICATIONS", "Agentic", "Max clarifications",
-               "int", 1, scope="org", reload="next_request", min_value=0,
-               description="Maximum clarification rounds before the agent proceeds without asking further."),
     SettingDef("AGENT_HISTORY_PAIRS", "Agentic", "Agent history pairs",
                "int", 3, scope="org", reload="next_request", min_value=0,
                description="Conversation pairs (user+assistant) included in agent context. Higher = more multi-turn context, more tokens."),
@@ -353,7 +338,7 @@ _ORG_OVERRIDABLE = [
                "float", 600, scope="org", reload="next_request", min_value=1.0,
                description="Wall-clock time limit for the agent loop. When exceeded, the agent is forced to finalize."),
     SettingDef("GENERATION_TEMPERATURE", "Agentic", "Answer generation temperature",
-               "float", 0.7, scope="org", reload="next_request", min_value=0.0, max_value=2.0,
+               "float", 1.0, scope="org", reload="next_request", min_value=0.0, max_value=2.0,
                description="Temperature for final answer generation. Higher = more creative; lower = more deterministic."),
 
     # Context, compaction & quality
