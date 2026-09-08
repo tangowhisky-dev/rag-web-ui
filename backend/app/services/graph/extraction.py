@@ -20,7 +20,9 @@ all graph sub-modules.
 """
 
 import asyncio
+import json
 import logging
+from datetime import date, datetime, time
 from typing import Optional
 
 from app.core.config import settings
@@ -62,49 +64,105 @@ def _get_extractor_and_writer():
         LexicalGraphConfig,
         Neo4jWriter,
     )
-    from neo4j_graphrag.experimental.components.types import Neo4jNode, Neo4jGraph
+    from neo4j_graphrag.experimental.components.types import (
+        GeoPoint,
+        Neo4jGraph,
+        Neo4jNode,
+        Neo4jRelationship,
+    )
 
     class _SafeNeo4jWriter(Neo4jWriter):
-        """Strips empty/non-finite embedding_properties before writing to Neo4j.
+        """Sanitizes node/relationship properties before writing to Neo4j.
 
-        The LLM occasionally returns malformed entity nodes that end up with
-        embedding_properties={"embedding": []} — an empty list that Neo4j's
-        db.create.setNodeVectorProperty() rejects with
-        'Vector must only contain finite values. Provided: List{}'.
+        The LLM occasionally returns property values that Neo4j rejects:
+        - empty/non-finite embedding_properties
+        - nested dicts / maps (e.g. {latitude, longitude, height})
+        - lists containing non-primitives
 
         We don't store vectors in Neo4j (Qdrant is the vector store), so the
-        safest fix is to clear all embedding_properties before each write.
+        safest fix is to clear embedding_properties and to JSON-serialize any
+        non-primitive property values.
         """
+
+        @staticmethod
+        def _clean_value(v):
+            if v is None:
+                return None
+            if isinstance(v, bool):
+                return v
+            if isinstance(v, (int, str)):
+                return v
+            if isinstance(v, float):
+                if v != v or v == float("inf") or v == float("-inf"):
+                    return None
+                return v
+            if isinstance(v, (date, time, datetime, GeoPoint)):
+                return v
+            if isinstance(v, (list, tuple)):
+                if all(isinstance(x, (str, int, float, bool, type(None))) for x in v):
+                    return [
+                        x if not (isinstance(x, float) and (x != x or x == float("inf") or x == float("-inf"))) else None
+                        for x in v
+                    ]
+                return json.dumps([_SafeNeo4jWriter._clean_value(x) for x in v], default=str)
+            if isinstance(v, dict):
+                return json.dumps({k: _SafeNeo4jWriter._clean_value(v) for k, v in v.items()}, default=str)
+            return json.dumps(v, default=str)
 
         @staticmethod
         def _clean_nodes(nodes: list[Neo4jNode]) -> list[Neo4jNode]:
             cleaned = []
             for node in nodes:
+                props = {k: _SafeNeo4jWriter._clean_value(v) for k, v in (node.properties or {}).items()}
                 if node.embedding_properties:
                     # Keep only entries that are non-empty lists of finite floats
                     valid = {
                         k: v for k, v in node.embedding_properties.items()
                         if v and all(isinstance(x, (int, float)) and not (x != x or x == float("inf") or x == float("-inf")) for x in v)
                     }
-                    if valid != node.embedding_properties:
-                        node = Neo4jNode(
-                            id=node.id,
-                            label=node.label,
-                            properties=node.properties,
-                            embedding_properties=valid,
-                        )
-                cleaned.append(node)
+                else:
+                    valid = {}
+                cleaned.append(Neo4jNode(
+                    id=node.id,
+                    label=node.label,
+                    properties=props,
+                    embedding_properties=valid,
+                ))
+            return cleaned
+
+        @staticmethod
+        def _clean_relationships(rels: list[Neo4jRelationship]) -> list[Neo4jRelationship]:
+            cleaned = []
+            for rel in rels:
+                props = {k: _SafeNeo4jWriter._clean_value(v) for k, v in (rel.properties or {}).items()}
+                if rel.embedding_properties:
+                    valid = {
+                        k: v for k, v in rel.embedding_properties.items()
+                        if v and all(isinstance(x, (int, float)) and not (x != x or x == float("inf") or x == float("-inf")) for x in v)
+                    }
+                else:
+                    valid = {}
+                cleaned.append(Neo4jRelationship(
+                    start_node_id=rel.start_node_id,
+                    end_node_id=rel.end_node_id,
+                    type=rel.type,
+                    properties=props,
+                    embedding_properties=valid,
+                ))
             return cleaned
 
         def _upsert_nodes(self, nodes, lexical_graph_config):  # type: ignore[override]
             super()._upsert_nodes(self._clean_nodes(nodes), lexical_graph_config)
+
+        def _upsert_relationships(self, rels):  # type: ignore[override]
+            super()._upsert_relationships(self._clean_relationships(rels))
 
         async def run(
             self,
             graph: Neo4jGraph,
             lexical_graph_config: LexicalGraphConfig = LexicalGraphConfig(),
         ) -> KGWriterModel:
-            # Delegate to parent — _upsert_nodes override cleans nodes
+            # Delegate to parent — overrides clean nodes/relationships
             # before writing via the parent's run() method.
             return await super().run(graph, lexical_graph_config)
 
