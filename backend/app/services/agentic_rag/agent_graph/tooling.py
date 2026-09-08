@@ -21,7 +21,6 @@ from app.services.agentic_rag.schemas import Observation
 from app.services.agentic_rag.tools import applicable_tools
 from app.services.settings_service import get_setting
 
-from .execution_check import _build_execution_summary, _verify_execution
 from .helpers import (
     _coerce_observation,
     _is_transient_error,
@@ -437,135 +436,15 @@ def _merge_retrieved_docs(
     return merged_docs, best_confidence
 
 
-async def tool_node(state, ctx) -> dict:
-    """Dispatch tool calls, run them (in parallel when independent), record observations."""
-    with _agent_step("tool"):
-        tool_calls = state.get("tool_calls", [])
-        if not tool_calls:
-            return {}
+# v1 tool_node and _reranker_confident removed (commented out).
+# v2 uses tool_node_v2 in agent_graph_v2/tooling.py instead.
+# These used _verify_execution/_build_execution_summary from execution_check.py
+# (v1-only plan satisfaction check) which is now commented out.
 
-        # Expose current state to tools so they can read last_answer_object,
-        # retrieved_docs, kb_ids, file_markdown, message_id, iteration, etc.
-        ctx.state = state
-        tools = {t.name: t for t in applicable_tools(ctx)}
-        prior_observations = [_coerce_observation(o) for o in state.get("observations", [])]
-        counts = dict(state.get("tool_call_counts", {}))
-
-        new_observations, counts, should_terminate = await _dispatch_tool_calls(
-            tool_calls, tools, prior_observations, counts, ctx,
-        )
-
-        max_retries = get_setting(ctx.db, "AGENT_MAX_TOOL_RETRIES", ctx.org_id)
-        retry_terminate = await _retry_failed_calls(new_observations, tool_calls, tools, max_retries, ctx)
-        if retry_terminate:
-            should_terminate = True
-
-        state_update: dict = {
-            "tool_calls": [],
-            "observations": new_observations,
-            "tool_call_counts": counts,
-        }
-
-        # If any tool returned terminate=True, force finalize immediately.
-        if should_terminate:
-            state_update["force_finalize"] = True
-            logger.debug("[tool_node] tool requested termination, forcing finalize")
-
-        all_observations = prior_observations + new_observations
-        merged_docs, best_confidence = _merge_retrieved_docs(
-            all_observations, state.get("retrieved_docs", []),
-        )
-        if merged_docs:
-            state_update["retrieved_docs"] = merged_docs
-            state_update["best_retrieval_confidence"] = best_confidence
-
-        # Propagate accumulated_data changes from extract_data back into
-        # graph state. extract_data writes to ctx.state["accumulated_data"]
-        # directly (append semantics); tool_node must surface it so the
-        # _last_value reducer picks it up.
-        if "accumulated_data" in ctx.state:
-            state_update["accumulated_data"] = ctx.state["accumulated_data"]
-
-        # Propagate generated_files from office_generate back into graph state.
-        # office_generate writes to ctx.state["generated_files"] directly;
-        # tool_node must surface it so office_inspect/office_edit can see it.
-        if "generated_files" in ctx.state:
-            state_update["generated_files"] = ctx.state["generated_files"]
-
-        # Root cause: the acting LLM alone decides when to stop calling tools,
-        # and small/local models don\u2019t reliably follow "stop once sufficient"
-        # / "don\u2019t repeat calls" prompt rules \u2014 they keep re-emitting tool_calls
-        # (often exact duplicates) past the point the plan is already
-        # deterministically satisfied. reflect_final already verifies this
-        # deterministically, but only once the LLM itself stops requesting
-        # tools. Run the same check here after every tool round so a
-        # completed plan short-circuits immediately instead of waiting on
-        # the LLM to notice.
-        probe_state = {**state, **state_update, "observations": all_observations}
-        ready, reasoning = _verify_execution(_build_execution_summary(probe_state))
-        if ready:
-            logger.debug("[tool_node] plan deterministically satisfied after this tool round, forcing finalize: %s", reasoning[:200])
-            state_update["force_finalize"] = True
-        else:
-            # Confidence short-circuit: if the reranker is highly confident
-            # (top-1 score >= threshold AND gap to tail >= gap_threshold),
-            # skip reflection and go straight to finalize. Saves ~2-5s of
-            # reflect+think LLM latency for confident retrievals.
-            # BUT: skip for office/chart intent — those require post-retrieval
-            # tool calls (extract_data, office_generate, chart_generate) that
-            # haven't happened yet.
-            plan = state.get("plan")
-            plan_intent = ""
-            if hasattr(plan, "intent"):
-                plan_intent = plan.intent
-            elif isinstance(plan, dict):
-                plan_intent = plan.get("intent", "")
-            counts = state.get("tool_call_counts", {})
-            has_office_generate = counts.get("office_generate", 0) > 0
-            has_chart_generate = counts.get("chart_generate", 0) > 0
-            needs_post_retrieval = plan_intent in ("office", "chart")
-            if needs_post_retrieval and not (has_office_generate or has_chart_generate):
-                logger.debug("[tool_node] skipping reranker confidence short-circuit — %s intent requires post-retrieval tools", plan_intent)
-            elif _reranker_confident(merged_docs, ctx):
-                logger.debug("[tool_node] reranker confidence short-circuit, forcing finalize")
-                state_update["force_finalize"] = True
-
-        return state_update
-
-def _reranker_confident(merged_docs: list[dict], ctx) -> bool:
-    """Check if the reranker is confident enough to skip reflection.
-
-    Returns True when:
-    - There are at least 2 docs with reranker scores
-    - Top-1 score >= RERANKER_CONFIDENCE_THRESHOLD (default 0.8)
-    - Gap between top-1 and the tail (last doc) >= RERANKER_CONFIDENCE_GAP (default 0.3)
-
-    This mirrors the Cohere confidence short-circuit from retrievalagent.
-    """
-    if not merged_docs or len(merged_docs) < 2:
-        return False
-
-    scores = [
-        d.get("metadata", {}).get("_reranker_score", -float("inf"))
-        for d in merged_docs
-        if d.get("metadata", {}).get("_reranker_score") is not None
-    ]
-    if len(scores) < 2:
-        return False
-
-    scores.sort(reverse=True)
-    top1 = scores[0]
-    tail = scores[-1]
-    gap = top1 - tail
-
-    top_threshold = get_setting(ctx.db, "RERANKER_CONFIDENCE_THRESHOLD", ctx.org_id)
-    gap_threshold = get_setting(ctx.db, "RERANKER_CONFIDENCE_GAP", ctx.org_id)
-
-    confident = top1 >= top_threshold and gap >= gap_threshold
-    if confident:
-        logger.debug("[reranker_confident] top1=%.3f >= %.2f, gap=%.3f >= %.2f — confident",
-                     top1, top_threshold, gap, gap_threshold)
-    return confident
+# async def tool_node(state, ctx) -> dict:
+#     ... (v1-only, commented out)
+# def _reranker_confident(merged_docs: list[dict], ctx) -> bool:
+#     ... (v1-only, commented out)
 
 
 async def _run_tool(tool, name: str, args: dict) -> dict:
@@ -589,5 +468,10 @@ async def _run_tool(tool, name: str, args: dict) -> dict:
             }
         return {"tool": name, "arguments": args, "result": raw, "error": None, "tokens": 0, "terminate": False}
     except Exception as exc:
+        # GraphInterrupt must propagate to LangGraph so it can checkpoint
+        # and pause the graph. Do not turn it into an error observation.
+        from langgraph.errors import GraphInterrupt
+        if isinstance(exc, GraphInterrupt):
+            raise
         logger.warning("[_run_tool] %s failed: %s", name, exc)
         return {"tool": name, "arguments": args, "result": {}, "error": str(exc), "tokens": 0, "terminate": False}

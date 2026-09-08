@@ -46,6 +46,8 @@ def _writer():
 # Resolved per-request via the settings service (org-overridable).
 def _tool_call_budget(db, org_id) -> dict:
     return {
+        # Clarification (human-in-the-loop)
+        "clarify": get_setting(db, "AGENT_MAX_CLARIFY", org_id),
         # Atomic search tools
         "search_exact": get_setting(db, "AGENT_MAX_SEARCH_EXACT", org_id),
         "search_sparse": get_setting(db, "AGENT_MAX_SEARCH_SPARSE", org_id),

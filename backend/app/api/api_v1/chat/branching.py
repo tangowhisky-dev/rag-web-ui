@@ -216,143 +216,22 @@ async def submit_clarification(
     db.commit()
     db.refresh(clarification)
 
-    # Resume the paused LangGraph execution and stream it as SSE.
-    from langgraph.types import Command
-    from app.services.agentic_rag.agent_graph import build_agent_graph
-    from app.services.agentic_rag.llm_factory import get_org_llm
-    from app.services.agentic_rag.redis_memory import get_redis_memory
-    from app.services.agentic_rag.streaming import AgenticRAGTransformer
-    from app.services.agentic_rag.tool_context import ToolContext
+    # Resume the paused v2 LangGraph execution and stream it as SSE.
+    from app.services.chat.chat_service import generate_response_resume
 
-    memory = await get_redis_memory()
-    thread_id = f"chat-{body.chat_id}"
-    config = {"configurable": {"thread_id": thread_id}}
-    org_cfg = get_org_llm(current_user.org_id, db, role="chat")
-    ctx = ToolContext(
-        db=db,
-        user_id=current_user.id,
-        org_id=current_user.org_id,
-        chat_id=body.chat_id,
-        message_id=clarification.assistant_message_id,
-        qdrant_client=None,
-        redis_memory=memory,
-        org_llm_config=org_cfg,
-        state=None,
-    )
-    graph = build_agent_graph(ctx)
-
-    logger.debug(
-        "[CLARIFICATION] chat_id=%d clarification_id=%d resuming | user=%d",
-        body.chat_id, clarification.id, current_user.id,
-    )
-
-    async def response_stream():
-        resumed_stream = await graph.astream_events(
-            Command(resume=body.response),
-            config=config,
-            version="v3",
-            transformers=[AgenticRAGTransformer],
-        )
-
-        transformer = resumed_stream.extensions["events"]
-
-        async def _drain_raw() -> None:
-            async for _ in resumed_stream:
-                pass
-
-        raw_task = asyncio.create_task(_drain_raw())
-
-        def _prefix(event: dict) -> str:
-            """Map transformer event names to the SSE prefixes processStreamLine expects."""
-            name = event.get("event", "")
-            mapping = {
-                "token": "0",
-                "context": "2",
-                "error": "3",
-                "agent_step": "4",
-                "progress": "p",
-                "task_list": "t",
-                "thinking": "th",
-                "answer_rewrite": "r",
-                "plan": "pl",
-                "tool_call": "tc",
-                "tool_observation": "to",
-                "last_answer": "la",
-                "interrupt": "c",
-                "done": "d",
-            }
-            return mapping.get(name) or name
-
-        try:
-            async for event in transformer:
-                if event:
-                    yield f"{_prefix(event)}:{json.dumps(event)}\n"
-        finally:
-            if not raw_task.done():
-                raw_task.cancel()
-                try:
-                    await raw_task
-                except asyncio.CancelledError:
-                    pass
-
-        # Check if interrupted again (re-interrupt during clarification round-trip)
-        # NOTE: `interrupted` and `interrupts` are async methods on
-        # AsyncGraphRunStream (not properties) — they must be awaited.
-        if await resumed_stream.interrupted():
-            pending_interrupts = await resumed_stream.interrupts()
-            interrupt_value = (
-                str(pending_interrupts[0].value) if pending_interrupts else ""
-            )
-
-            # Create a new pending request for this re-interrupt.
-            # Reuse the assistant_message_id from the original clarification
-            # (already fetched above, no need for a second DB query).
-            clar_req = ClarificationRequestModel(
-                chat_id=body.chat_id,
-                assistant_message_id=clarification.assistant_message_id,
-                question=interrupt_value,
-                rationale="Re-interrupt during clarification round-trip",
-                status="pending",
-                attempt=clarification.attempt + 1,
-            )
-            db.add(clar_req)
-            db.commit()
-            db.refresh(clar_req)
-
-            interrupt_payload = {
-                'question': interrupt_value,
-                'clarification_id': clar_req.id,
-                'attempt': clar_req.attempt,
-                'max_attempts': 2,
-            }
-            yield f"c:{json.dumps(interrupt_payload)}\n"
-            return
-
-        # Emit done event with final state
-        final_output = await resumed_stream.output()
-        final_state = final_output if isinstance(final_output, dict) else getattr(final_output, "values", {}) or {}
-
-        final_answer = _extract_final_answer(final_state)
-
-        # Collect usage from transformer
-        input_tokens, completion_tokens = _extract_token_usage(transformer, final_state)
-
-        done_payload = {
-            "finishReason": "stop",
-            "usage": {
-                "promptTokens": input_tokens,
-                "completionTokens": completion_tokens,
-                "final_confidence": final_state.get("final_confidence", 0.0),
-                "confidence_level": final_state.get("confidence_level", "none"),
-                "faithfulness": final_state.get("faithfulness", 0),
-                "completeness": final_state.get("completeness", 0),
-            },
-            "full_response": final_answer,
-        }
-        yield f"d:{json.dumps(done_payload)}\n"
+    async def v2_response_stream():
+        async for chunk in generate_response_resume(
+            chat_id=body.chat_id,
+            resume_value=body.response,
+            assistant_message_id=clarification.assistant_message_id,
+            db=db,
+            org_id=current_user.org_id,
+            user_id=current_user.id,
+        ):
+            yield chunk
 
     return StreamingResponse(
-        response_stream(),
+        v2_response_stream(),
         media_type="text/event-stream",
         headers={
             "x-vercel-ai-data-stream": "v1",

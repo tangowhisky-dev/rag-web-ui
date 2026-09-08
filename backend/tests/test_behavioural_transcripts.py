@@ -38,6 +38,10 @@ from langgraph.types import Command
 
 from app.services.agentic_rag import agent_graph, nodes
 from app.services.agentic_rag.schemas import Observation, Plan, Subtask
+
+# v1-only: these tests run the full v1 graph (build_agent_graph) with mocked
+# LLMs. v2 has its own E2E tests (test_v2_e2e.py). Skip until rewritten for v2.
+pytestmark = pytest.mark.skip(reason="v1-only: uses build_agent_graph (commented out)")
 from app.services.agentic_rag.tool_context import ToolContext
 
 

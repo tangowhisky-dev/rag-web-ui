@@ -1,20 +1,21 @@
-"""Agent loop graph for the enterprise agent.
+"""Agent graph package — shared modules for v1 and v2 pipelines.
 
-Atomic tools topology:
-  load_context → plan → think → [tool → sufficiency_check → think ...] → finalize → save_memory
+v1 graph (build.py, planning.py, thinking.py, sufficiency.py,
+execution_check.py, reflection.py) is commented out. v2 pipeline
+(agent_graph_v2/) is the active pipeline.
 
-This package splits the original monolithic agent_graph.py into focused
-sub-modules. All public names are re-exported here so existing imports
-(`from app.services.agentic_rag.agent_graph import build_agent_graph`)
-continue to work.
+Shared modules still used by v2:
+  - helpers.py: budgets, writer, wall-clock, chart/office marker substitution
+  - tooling.py: _run_tool, _merge_retrieved_docs, _summarize_result, _tool_label
+  - observations.py: observation formatting, tool descriptions, search history
+  - compaction.py: context compaction for prompt budget management
+  - finalization.py: _build_finalize_prompt, _stream_final_answer
+  - load_context.py: load_context_node (used by both v1 and v2)
 """
 
 from __future__ import annotations
 
-# Build
-from .build import build_agent_graph
-
-# Helpers
+# Shared helpers (used by v2)
 from .helpers import (
     _coerce_observation,
     _extract_balanced,
@@ -27,7 +28,7 @@ from .helpers import (
     _writer,
 )
 
-# Observations
+# Shared observations (used by v2)
 from .observations import (
     _compact_observations,
     _format_retrieval_obs_compact,
@@ -41,7 +42,7 @@ from .observations import (
     _tried_search_queries,
 )
 
-# Compaction
+# Shared compaction (used by v2)
 from .compaction import (
     _build_compaction_llm,
     _compact_if_needed,
@@ -52,30 +53,10 @@ from .compaction import (
     _trim_docs_to_budget,
 )
 
-# Load context
+# Shared load context (used by v2)
 from .load_context import load_context_node
 
-# Planning
-from .planning import (
-    _build_plan_user_prompt,
-    _check_clarification_budget,
-    _invoke_plan_llm,
-    plan_node,
-    route_plan,
-)
-
-# Thinking
-from .thinking import (
-    _build_think_prompt,
-    _invoke_think_llm,
-    _parse_tool_calls,
-    _rebuild_think_after_compaction,
-    _think_early_exit,
-    route_think,
-    think_node,
-)
-
-# Tooling
+# Shared tooling (used by v2)
 from .tooling import (
     _dispatch_tool_calls,
     _merge_observation_docs,
@@ -83,26 +64,11 @@ from .tooling import (
     _retry_failed_calls,
     _run_tool,
     _seed_existing_docs,
-    tool_node,
+    _summarize_result,
+    _tool_label,
 )
 
-# Execution check (moved from reflection.py)
-from .execution_check import (
-    _build_execution_summary,
-    _build_subtask_status,
-    _collect_tool_failures,
-    _count_successful_by_tool,
-    _retrieval_hit_count,
-    _verify_execution,
-)
-
-# Sufficiency check (replaces reflect_final)
-from .sufficiency import (
-    route_sufficiency,
-    sufficiency_check_node,
-)
-
-# Finalization
+# Shared finalization (used by v2)
 from .finalization import (
     _build_finalize_prompt,
     _build_last_answer_object_deterministic,
@@ -111,15 +77,7 @@ from .finalization import (
     save_memory_node,
 )
 
-# Reflection (active nodes only; reflect_node/reflect_final_node removed)
-from .reflection import (
-    answer_scoring_node,
-    clarify_interrupt_node,
-)
-
-# Re-export external names that tests and app code patch on this module.
-# Each sub-module imports these directly; patching must target the
-# specific sub-module (e.g. agent_graph.thinking.get_setting).
+# Re-exports used by shared modules and external code
 from app.core.config import settings
 from app.core.settings_registry import get_def
 from app.services.agentic_rag.llm_factory import build_chat_llm
@@ -128,13 +86,6 @@ from app.services.agentic_rag.nodes import (
     answer_evaluation_node,
     history_to_text,
     select_recent_history,
-)
-from app.services.agentic_rag.prompts import (
-    AGENT_SYSTEM_PROMPT,
-    FINALIZE_ANSWER_PROMPT,
-    FINALIZE_GUARDRAIL_PROMPT,
-    PLAN_SYSTEM_PROMPT,
-    THINK_SYSTEM_PROMPT,
 )
 from app.services.agentic_rag.schemas import LastAnswerObject, Observation, Plan, Subtask
 from app.services.agentic_rag.token_budget import count_tokens
@@ -157,7 +108,7 @@ import time
 from functools import partial
 from typing import Any, Optional
 
-# Module-level logger (some sub-modules reference agent_graph.logger)
+# Module-level logger
 import logging
 
 logger = logging.getLogger(__name__)
@@ -166,8 +117,6 @@ logger = logging.getLogger(__name__)
 from app.services.agentic_rag.graph_state import AgentState
 
 __all__ = [
-    # Build
-    "build_agent_graph",
     # Helpers
     "_coerce_observation",
     "_extract_balanced",
@@ -199,20 +148,6 @@ __all__ = [
     "_trim_docs_to_budget",
     # Load context
     "load_context_node",
-    # Planning
-    "_build_plan_user_prompt",
-    "_check_clarification_budget",
-    "_invoke_plan_llm",
-    "plan_node",
-    "route_plan",
-    # Thinking
-    "_build_think_prompt",
-    "_invoke_think_llm",
-    "_parse_tool_calls",
-    "_rebuild_think_after_compaction",
-    "_think_early_exit",
-    "route_think",
-    "think_node",
     # Tooling
     "_dispatch_tool_calls",
     "_merge_observation_docs",
@@ -220,26 +155,14 @@ __all__ = [
     "_retry_failed_calls",
     "_run_tool",
     "_seed_existing_docs",
-    "tool_node",
-    # Execution check
-    "_build_execution_summary",
-    "_build_subtask_status",
-    "_collect_tool_failures",
-    "_count_successful_by_tool",
-    "_retrieval_hit_count",
-    "_verify_execution",
-    # Sufficiency check
-    "route_sufficiency",
-    "sufficiency_check_node",
+    "_summarize_result",
+    "_tool_label",
     # Finalization
     "_build_finalize_prompt",
     "_build_last_answer_object_deterministic",
     "_stream_final_answer",
     "finalize_node",
     "save_memory_node",
-    # Reflection (active)
-    "answer_scoring_node",
-    "clarify_interrupt_node",
     # External names
     "settings",
     "get_def",
@@ -267,11 +190,6 @@ __all__ = [
     "history_to_text",
     "select_recent_history",
     "_agent_step",
-    "AGENT_SYSTEM_PROMPT",
-    "FINALIZE_ANSWER_PROMPT",
-    "FINALIZE_GUARDRAIL_PROMPT",
-    "PLAN_SYSTEM_PROMPT",
-    "THINK_SYSTEM_PROMPT",
     # Stdlib
     "asyncio",
     "json",

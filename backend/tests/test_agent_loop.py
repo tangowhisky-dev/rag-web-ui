@@ -61,6 +61,7 @@ class TestToolRegistry:
             "kb_metadata",
             "create_office_document",
             "retrieve_parallel",
+            "clarify",
             "office_load_skill",
             "office_generate",
             "office_inspect",
@@ -436,6 +437,7 @@ class TestConvergence:
             "messages": [],
         }
 
+    @pytest.mark.skip(reason="v1-only: _build_execution_summary/_verify_execution commented out")
     def test_verify_execution_ready_when_plan_satisfied(self):
         from app.services.agentic_rag.agent_graph import _build_execution_summary, _verify_execution
 
@@ -443,6 +445,7 @@ class TestConvergence:
         ready, _reasoning = _verify_execution(summary)
         assert ready is True
 
+    @pytest.mark.skip(reason="v1-only: route_sufficiency commented out")
     def test_route_sufficiency_finalizes_when_sufficient(self):
         from app.services.agentic_rag.agent_graph import route_sufficiency
 
@@ -452,6 +455,7 @@ class TestConvergence:
         assert route_sufficiency({"sufficient": False}) == "think"
         assert route_sufficiency({"force_finalize": True}) == "finalize"
 
+    @pytest.mark.skip(reason="v1-only: think_node commented out")
     def test_think_node_short_circuits_without_llm_call(self):
         # If this ever calls the LLM again despite an already-satisfied plan,
         # build_chat_llm would be invoked and fail against the mocked ctx.db —

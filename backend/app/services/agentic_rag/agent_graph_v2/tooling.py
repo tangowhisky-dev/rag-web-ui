@@ -102,6 +102,13 @@ async def _dispatch_v2(
     results = await asyncio.gather(*coros, return_exceptions=True)
     should_terminate = False
 
+    # GraphInterrupt from a tool (e.g. clarify) must propagate to LangGraph
+    # so it can checkpoint and pause. Do not turn it into an error observation.
+    from langgraph.errors import GraphInterrupt
+    for res in results:
+        if isinstance(res, GraphInterrupt):
+            raise res
+
     for i, tc in enumerate(tool_calls):
         res = results[i]
         if isinstance(res, Exception):

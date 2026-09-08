@@ -233,10 +233,113 @@ async def run_agent_loop_v2(
         if kind != "updates" or not isinstance(payload, dict):
             continue
 
+        # Detect LangGraph interrupt (from the clarify tool) and emit
+        # an interrupt event. The graph is checkpointed and paused —
+        # the /clarification endpoint resumes it with Command(resume=...).
+        if "__interrupt__" in payload:
+            interrupts = payload["__interrupt__"]
+            value = interrupts[0].value if interrupts else None
+            question = value.get("question", "") if isinstance(value, dict) else str(value or "")
+            yield {"event": "interrupt", "question": question, "thread_id": thread_id}
+            return
+
         for event in _process_node_updates(payload, state):
             yield event
 
     for event in _estimate_token_usage(state, query, file_markdown):
+        yield event
+
+    # Background structured extraction (fire-and-forget).
+    if message_id and state.full_answer:
+        try:
+            eval_kwargs: dict = {}
+            try:
+                query_cfg = get_org_llm(org_id, db, role="query")
+                eval_kwargs = {
+                    "api_base": query_cfg["api_base"],
+                    "api_key": query_cfg["api_key"],
+                    "query_model": query_cfg["model_name"],
+                }
+            except Exception:
+                pass
+            import asyncio
+            asyncio.create_task(
+                _background_extract_and_persist(
+                    message_id=message_id,
+                    answer=state.full_answer,
+                    org_id=org_id,
+                    eval_kwargs=eval_kwargs,
+                )
+            )
+        except Exception as exc:
+            logger.debug("[agent_runner_v2] failed to spawn background extraction: %s", exc)
+
+
+async def resume_agent_loop_v2(
+    resume_value: str,
+    chat_id: int,
+    db: Any,
+    org_id: Optional[int] = None,
+    user_id: Optional[int] = None,
+    message_id: Optional[int] = None,
+) -> AsyncGenerator[dict, None]:
+    """Resume a paused v2 graph after user clarification.
+
+    Takes the user's clarification response and resumes the paused graph
+    via Command(resume=...). Yields the same SSE-style events as
+    run_agent_loop_v2.
+    """
+    from langgraph.types import Command
+
+    memory = await get_redis_memory()
+    thread_id = f"chat-{chat_id}"
+    config = {"configurable": {"thread_id": thread_id}}
+
+    org_cfg = get_org_llm(org_id, db, role="chat")
+    ctx = ToolContext(
+        db=db,
+        user_id=user_id,
+        org_id=org_id,
+        chat_id=chat_id,
+        message_id=message_id,
+        qdrant_client=None,
+        redis_memory=memory,
+        org_llm_config=org_cfg,
+        state=None,
+    )
+
+    graph = build_agent_graph_v2(ctx)
+    state = _V2LoopState(message_id)
+
+    async for chunk in graph.astream(
+        Command(resume=resume_value), config, stream_mode=["updates", "custom"],
+    ):
+        if chat_id is not None and is_cancelled(chat_id):
+            logger.debug("[agent_runner_v2] cancel detected during resume | chat_id=%d", chat_id)
+            break
+        kind, payload = chunk if isinstance(chunk, tuple) else ("updates", chunk)
+
+        if kind == "custom":
+            state.full_answer, event = _handle_custom_event(payload, state.full_answer)
+            if event is not None:
+                yield event
+            continue
+
+        if kind != "updates" or not isinstance(payload, dict):
+            continue
+
+        # Detect re-interrupt (clarify called again after resume).
+        if "__interrupt__" in payload:
+            interrupts = payload["__interrupt__"]
+            value = interrupts[0].value if interrupts else None
+            question = value.get("question", "") if isinstance(value, dict) else str(value or "")
+            yield {"event": "interrupt", "question": question, "thread_id": thread_id}
+            return
+
+        for event in _process_node_updates(payload, state):
+            yield event
+
+    for event in _estimate_token_usage(state, "", None):
         yield event
 
     # Background structured extraction (fire-and-forget).

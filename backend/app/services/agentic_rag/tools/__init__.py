@@ -8,6 +8,7 @@ if TYPE_CHECKING:
     from app.services.agentic_rag.tool_context import ToolContext
 
 from .chart_generate import ChartGenerateTool
+from .clarify import ClarifyTool
 from .code_execute import CodeExecuteTool
 from .current_datetime import CurrentDatetimeTool
 from .extract_data import ExtractDataTool
@@ -34,6 +35,8 @@ from .summarize_answer import SummarizeAnswerTool
 
 
 _TOOL_CLASSES = [
+    # Human-in-the-loop clarification (always available)
+    ClarifyTool,
     # Atomic search tools
     SearchExactTool,
     SearchSparseTool,

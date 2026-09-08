@@ -589,6 +589,51 @@ async def generate_response(
     except Exception as e:
         async for chunk in _emit_response_error(e, db, chat_id, _bot_message_id, _user_message_id, bot_message):
             yield chunk
+
+
+async def generate_response_resume(
+    chat_id: int,
+    resume_value: str,
+    assistant_message_id: int,
+    db: Session,
+    org_id: Optional[int] = None,
+    user_id: Optional[int] = None,
+) -> AsyncGenerator[str, None]:
+    """Resume a paused v2 graph after user clarification.
+
+    Wraps resume_agent_loop_v2 and processes events the same way as
+    generate_response. Used by the /clarification endpoint.
+    """
+    from app.services.agentic_rag.agent_runner_v2 import resume_agent_loop_v2
+
+    bot_message = db.query(Message).filter(Message.id == assistant_message_id).first()
+    if not bot_message:
+        yield f'3:{json.dumps("Assistant message not found")}\n'
+        return
+
+    ctx = _StreamContext(
+        query=resume_value,
+        bot_message=bot_message,
+        user_message=None,
+        db=db,
+        chat_id=chat_id,
+        bot_message_id=assistant_message_id,
+        user_message_id=0,
+    )
+
+    stream_iter = resume_agent_loop_v2(
+        resume_value=resume_value,
+        chat_id=chat_id,
+        db=db,
+        org_id=org_id,
+        user_id=user_id,
+        message_id=assistant_message_id,
+    )
+
+    async for chunk in _process_stream_events(stream_iter, ctx, chat_id):
+        yield chunk
+
+    _finalize_stream(bot_message, db, chat_id, ctx)
 # ── SSE flush helpers ─────────────────────────────────────────────────────────
 # Uvicorn buffers SSE responses by default. These helpers force the HTTP
 # server to flush buffered data to the client so events arrive progressively.

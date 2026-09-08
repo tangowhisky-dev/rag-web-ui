@@ -260,9 +260,6 @@ _ORG_OVERRIDABLE = [
                description="Bounds hub-entity fan-out."),
 
     # Agentic features
-    SettingDef("USE_AGENTIC_V1", "Agentic", "Use v1 pipeline (legacy)",
-               "bool", False, scope="org", reload="next_request",
-               description="Fall back to the old multi-node pipeline (planner/sufficiency/finalizer). Default: v2 unified loop."),
     SettingDef("OFFICE_SUBAGENT_MAX_ITERATIONS", "Agentic", "Office sub-agent max iterations",
                "int", 6, scope="org", reload="next_request", min_value=1, max_value=15,
                description="Max think→tool rounds for the office document generation sub-agent."),
@@ -285,6 +282,9 @@ _ORG_OVERRIDABLE = [
     SettingDef("AGENT_TOTAL_TOOL_BUDGET", "Agentic", "Total tool-call budget",
                "int", 20, scope="org", reload="next_request", min_value=1,
                description="Total tool calls across all tools per turn. When reached, the agent is forced to finalize. Must be higher than the sum of per-tool budgets to allow multi-step strategies."),
+    SettingDef("AGENT_MAX_CLARIFY", "Agentic", "Max clarify calls",
+               "int", 2, scope="org", reload="next_request", min_value=0,
+               description="Cap on clarify (human-in-the-loop) tool calls per turn. Prevents infinite clarification loops."),
     SettingDef("AGENT_MAX_SEARCH_EXACT", "Agentic", "Max search_exact calls",
                "int", 5, scope="org", reload="next_request", min_value=0,
                description="Cap on search_exact (MySQL FTS) tool calls per turn."),

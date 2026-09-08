@@ -234,19 +234,6 @@ async def post_process_node_v2(state, ctx) -> dict:
         if answer_usage:
             updates["answer_usage"] = answer_usage
 
-        # ── Save to DB ──────────────────────────────────────────────────
-        if message_id:
-            try:
-                msg = ctx.db.query(Message).filter(Message.id == message_id).first()
-                if msg:
-                    msg.content = final
-                    msg.last_answer_object = lao.model_dump()
-                    msg.tool_calls = [_coerce_observation(obs).model_dump() for obs in observations]
-                    ctx.db.commit()
-            except Exception as exc:
-                logger.warning("[post_process_v2] DB save failed: %s", exc)
-                ctx.db.rollback()
-
         # ── Answer scoring (optional, metadata only) ────────────────────
         try:
             scoring_updates = await answer_evaluation_node(state, ctx=ctx)
@@ -256,5 +243,31 @@ async def post_process_node_v2(state, ctx) -> dict:
                 writer({"event": "last_answer", "last_answer_object": scoring_updates["last_answer_object"].model_dump()})
         except Exception as exc:
             logger.warning("[post_process_v2] answer scoring failed: %s", exc)
+
+        # ── Save to DB ──────────────────────────────────────────────────
+        if message_id:
+            try:
+                msg = ctx.db.query(Message).filter(Message.id == message_id).first()
+                if msg:
+                    msg.content = final
+                    msg.last_answer_object = lao.model_dump()
+                    msg.tool_calls = [_coerce_observation(obs).model_dump() for obs in observations]
+                    # Persist answer scoring fields if scoring produced them.
+                    if "final_confidence" in updates:
+                        msg.final_confidence = updates.get("final_confidence")
+                    if "final_confidence_level" in updates:
+                        msg.final_confidence_level = updates.get("final_confidence_level")
+                    if "confidence_level" in updates:
+                        msg.confidence_level = updates.get("confidence_level")
+                    if "faithfulness" in updates:
+                        msg.faithfulness = updates.get("faithfulness")
+                    if "completeness" in updates:
+                        msg.completeness = updates.get("completeness")
+                    if "retrieval_score" in updates:
+                        msg.retrieval_score = updates.get("retrieval_score")
+                    ctx.db.commit()
+            except Exception as exc:
+                logger.warning("[post_process_v2] DB save failed: %s", exc)
+                ctx.db.rollback()
 
         return updates
