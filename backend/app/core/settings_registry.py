@@ -282,8 +282,8 @@ _ORG_OVERRIDABLE = [
                description="Combined cap on kb_read + kb_outline tool calls per turn."),
     # Atomic search tool budgets (replace AGENT_MAX_RETRIEVALS for per-tool caps)
     SettingDef("AGENT_TOTAL_TOOL_BUDGET", "Agentic", "Total tool-call budget",
-               "int", 20, scope="org", reload="next_request", min_value=1,
-               description="Total tool calls across all tools per turn. When reached, the agent is forced to finalize. Must be higher than the sum of per-tool budgets to allow multi-step strategies."),
+               "int", 25, scope="org", reload="next_request", min_value=1,
+               description="Total tool calls across all tools per turn (main agent and sub-agents). When reached, the agent is forced to finalize. Must be higher than the sum of per-tool budgets to allow multi-step strategies."),
     SettingDef("AGENT_MAX_CLARIFY", "Agentic", "Max clarify calls",
                "int", 2, scope="org", reload="next_request", min_value=0,
                description="Cap on clarify (human-in-the-loop) tool calls per turn. Prevents infinite clarification loops."),

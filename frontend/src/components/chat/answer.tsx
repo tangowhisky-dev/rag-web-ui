@@ -686,7 +686,12 @@ export const Answer: FC<{
     chart_count?: number;
   }>;
   onFollowUp?: (query: string) => void;
-}> = React.memo(({ messageId, chatId, markdown, citations = [], confidence, confidenceScore, suggestion, failedLegs, agentSteps, taskList, progressMessages, isStreaming = false, onDelete, finalConfidence, finalConfidenceLevel, faithfulness, completeness, retrievalScore, toolCalls, toolObservations, chartOptions, officeFiles, lastAnswerObject, onFollowUp }) => {
+  thinkingContent?: {
+    content: string;
+    done: boolean;
+    elapsed?: number;
+  } | null;
+}> = React.memo(({ messageId, chatId, markdown, citations = [], confidence, confidenceScore, suggestion, failedLegs, agentSteps, taskList, progressMessages, isStreaming = false, onDelete, finalConfidence, finalConfidenceLevel, faithfulness, completeness, retrievalScore, toolCalls, toolObservations, chartOptions, officeFiles, lastAnswerObject, onFollowUp, thinkingContent }) => {
   const [citationInfoMap, setCitationInfoMap] = useState<
     Record<string, CitationInfo>
   >({});
@@ -899,7 +904,14 @@ export const Answer: FC<{
           <span>{suggestion}</span>
         </div>
       )}
-      {parsedContent.thinkContent !== null && (
+      {/* Reasoning / thinking display.
+          Two sources, two phases:
+          1. Final answer streaming (post_process): parseThinkContent() extracts
+             reasoning tags from the streamed markdown — shown live in grey text.
+          2. Think node (tool-calling phase): thinkingContent prop from th: events
+             — shown as "thinking..." → "thought for N seconds" (collapsed).
+          Priority: streaming final answer reasoning > think-node reasoning. */}
+      {parsedContent.thinkContent !== null ? (
         <Reasoning
           isStreaming={!parsedContent.isThinkingComplete}
           defaultOpen={!parsedContent.isThinkingComplete}
@@ -909,7 +921,18 @@ export const Answer: FC<{
             {parsedContent.thinkContent}
           </ReasoningContent>
         </Reasoning>
-      )}
+      ) : thinkingContent && thinkingContent.content ? (
+        <Reasoning
+          isStreaming={!thinkingContent.done}
+          defaultOpen={!thinkingContent.done}
+          duration={thinkingContent.done ? Math.round(thinkingContent.elapsed ?? 0) : undefined}
+        >
+          <ReasoningTrigger />
+          <ReasoningContent>
+            {thinkingContent.content}
+          </ReasoningContent>
+        </Reasoning>
+      ) : null}
       
       {parsedContent.answerText && (
         <CitationLinkContext.Provider value={citationCtxValue}>

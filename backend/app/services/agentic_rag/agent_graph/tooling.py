@@ -68,7 +68,7 @@ def _summarize_result(obs: Observation) -> str:
         return f"{n} {'data point' if n == 1 else 'data points'} extracted"
     if "chart_option" in r:
         return "Chart generated"
-    if "file_id" in r and "format" in r:
+    if "file_id" in r and r.get("file_id") and "format" in r and r.get("format"):
         fmt = r["format"].upper()
         name = r.get("file_name", "")
         charts = r.get("chart_count", 0)

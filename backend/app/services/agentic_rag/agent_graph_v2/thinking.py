@@ -12,6 +12,7 @@ the answer as its final message.
 from __future__ import annotations
 
 import logging
+import time
 
 from langchain_core.messages import AIMessage
 
@@ -204,6 +205,11 @@ async def think_node_v2(state, ctx) -> dict:
             logger.debug("[think_v2] cancelled before LLM call | chat_id=%s", chat_id)
             return {"iteration": iteration, "tool_calls": [], "precomputed_answer": ""}
 
+        # Emit "thinking..." event so the frontend shows the thinking indicator.
+        writer = _writer()
+        writer({"event": "thinking", "content": "", "done": False})
+        think_start = time.monotonic()
+
         try:
             if mode == "json_text":
                 llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=0.0)
@@ -221,7 +227,26 @@ async def think_node_v2(state, ctx) -> dict:
             logger.warning("[think_v2] LLM call failed: %s", exc)
             return {"iteration": iteration, "tool_calls": [], "force_finalize": True}
 
+        # Emit "thought for N seconds" with reasoning content (if any).
+        think_elapsed = time.monotonic() - think_start
         parsed = parse_think_response(resp, mode=mode)
+        if parsed.reasoning:
+            writer({
+                "event": "thinking",
+                "content": parsed.reasoning,
+                "done": True,
+                "elapsed": round(think_elapsed, 1),
+            })
+        else:
+            # No reasoning content — close the thinking indicator with
+            # elapsed time but empty content (non-thinking model).
+            writer({
+                "event": "thinking",
+                "content": "",
+                "done": True,
+                "elapsed": round(think_elapsed, 1),
+            })
+
         tool_calls = parsed.tool_calls
         final_answer_text = parsed.final_answer
 

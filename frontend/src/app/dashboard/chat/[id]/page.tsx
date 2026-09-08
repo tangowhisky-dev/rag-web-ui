@@ -178,6 +178,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
   const [thinkingContent, setThinkingContent] = useState<{
     content: string;
     done: boolean;
+    elapsed?: number;
   } | null>(null);
 
   // ── Pagination state ────────────────────────────────────────────────────────
@@ -611,6 +612,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
         const payload = JSON.parse(trimmedLine.slice(3)) as {
           content: string;
           done: boolean;
+          elapsed?: number;
         };
         setThinkingContent(payload);
       } catch (e) {
@@ -1301,6 +1303,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                           agentSteps={message.id === lastAssistantId ? message.agentSteps : undefined}
                           taskList={message.id === lastAssistantId ? taskList : undefined}
                           progressMessages={message.id === lastAssistantId && isLoading ? progressMessages : undefined}
+                          thinkingContent={message.id === lastAssistantId && isLoading ? thinkingContent : undefined}
                           synthesisMode={message.synthesisMode}
                           isStreaming={isLoading && message.id === lastAssistantId}
                           onDelete={handleDeleteMessage}

@@ -1,12 +1,13 @@
 """Tool node for agentic-v2.
 
 Dispatches tool calls in parallel, records observations, and loops back
-to think. No duplicate detection, no consecutive same-tool limits, no
-reranker confidence short-circuits, no plan satisfaction checks.
+to think. Includes idempotency guard (reuse prior observation for duplicate
+tool+args), consecutive same-tool repeat guard, per-tool call caps, and
+total tool-call budget.
 
 The LLM sees its own prior observations in the think prompt, so it won't
-repeat calls unless it has a reason. If it does repeat, the tool just
-runs again — simpler and more honest than trying to outsmart the LLM.
+repeat calls unless it has a reason. If it does repeat, the idempotency
+guard reuses the prior result instead of re-running.
 
 Kept from the current system:
 - Parallel dispatch of independent tool calls
@@ -21,6 +22,7 @@ Kept from the current system:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 
 from app.services.agentic_rag.nodes import _agent_step
@@ -50,6 +52,7 @@ async def _dispatch_v2(
     tools: dict,
     counts: dict,
     ctx,
+    prior_observations: list | None = None,
 ) -> tuple[list[Observation], dict, bool]:
     """Dispatch tool calls in parallel. Returns (observations, updated_counts, should_terminate)."""
     writer = _writer()
@@ -57,6 +60,37 @@ async def _dispatch_v2(
     total_budget = _total_tool_budget(ctx.db, ctx.org_id)
     total_calls = sum(counts.values())
     caps = _tool_call_budget(ctx.db, ctx.org_id)
+    prior_observations = prior_observations or []
+
+    # Idempotency guard: reuse prior observation for duplicate tool+args.
+    def _call_signature(name: str, args: dict) -> tuple[str, str]:
+        return (name, json.dumps(args, sort_keys=True, default=str))
+
+    prior_signatures: dict[tuple[str, str], Observation] = {}
+    for obs in prior_observations:
+        prior_signatures.setdefault(_call_signature(obs.tool, obs.arguments), obs)
+
+    # Consecutive same-tool repeat guard.
+    max_same_repeat = get_setting(ctx.db, "AGENT_MAX_SAME_TOOL_REPEAT", ctx.org_id)
+    _dup_attempt_counts: dict[str, int] = {}
+
+    def _consecutive_same_tool_count(tool_name: str) -> int:
+        count = 0
+        for obs in reversed(prior_observations):
+            if obs.tool == tool_name:
+                count += 1
+            else:
+                break
+        return count
+
+    async def _reuse_prior(prior: Observation):
+        return {
+            "tool": prior.tool,
+            "arguments": prior.arguments,
+            "result": prior.result,
+            "error": prior.error,
+            "tokens": 0,
+        }
 
     coros = []
     executed_flags: list[bool] = []
@@ -69,6 +103,37 @@ async def _dispatch_v2(
             args = tool_obj.prepare_arguments(args)
         label = getattr(tool_obj, "ui_label", None) if tool_obj else None
         writer({"event": "tool_call", "tool": name, "arguments": args, "label": label or name})
+
+        # Idempotency: reuse prior observation for exact duplicate calls.
+        prior = prior_signatures.get(_call_signature(name, args))
+        if prior is not None:
+            logger.debug("[tool_node_v2] duplicate call skipped, reusing prior observation: tool=%s args=%s", name, args)
+            _dup_attempt_counts[name] = _dup_attempt_counts.get(name, 0) + 1
+            total_consecutive = _consecutive_same_tool_count(name) + _dup_attempt_counts[name]
+            if total_consecutive >= max_same_repeat:
+                logger.debug("[tool_node_v2] same-tool repeat limit (%d) reached for %s via duplicates — forcing strategy change", max_same_repeat, name)
+                async def _dup_repeat_exceeded(name=name, args=args, limit=max_same_repeat):
+                    return {"tool": name, "arguments": args, "result": {},
+                            "error": f"Tool '{name}' called {limit} times consecutively (including duplicates). "
+                                     f"You already have the result — use it and proceed to the next step. "
+                                     f"Change strategy: use a different tool, finalize, or ask for clarification.",
+                            "tokens": 0}
+                coros.append(_dup_repeat_exceeded())
+            else:
+                coros.append(_reuse_prior(prior))
+            executed_flags.append(False)
+            continue
+
+        # Consecutive same-tool repeat guard (different args, same tool).
+        if _consecutive_same_tool_count(name) >= max_same_repeat:
+            async def _repeat_exceeded(name=name, args=args, limit=max_same_repeat):
+                return {"tool": name, "arguments": args, "result": {},
+                        "error": f"Tool '{name}' called {limit} times consecutively with different arguments. "
+                                 f"Change strategy: use a different tool, finalize, or ask for clarification.",
+                        "tokens": 0}
+            coros.append(_repeat_exceeded())
+            executed_flags.append(False)
+            continue
 
         # Budget checks
         if total_calls >= total_budget:
@@ -195,6 +260,7 @@ async def tool_node_v2(state, ctx) -> dict:
 
         new_observations, counts, should_terminate = await _dispatch_v2(
             tool_calls, tools, counts, ctx,
+            prior_observations=prior_observations,
         )
 
         retry_terminate = await _retry_transient_v2(new_observations, tool_calls, tools, ctx)

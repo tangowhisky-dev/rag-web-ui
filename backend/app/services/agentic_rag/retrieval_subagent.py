@@ -224,6 +224,7 @@ async def run_retrieval_subagent(
     from app.services.agentic_rag.agent_graph.tooling import _run_tool
     from app.services.agentic_rag.agent_graph.observations import _tool_descriptions_text
     from app.services.agentic_rag.tools import build_tools
+    from app.services.settings_service import get_setting
 
     writer = _get_writer()
 
@@ -242,6 +243,7 @@ async def run_retrieval_subagent(
     observations: list[Observation] = []
     counts: dict[str, int] = {}
     summary = ""
+    total_budget = get_setting(ctx.db, "AGENT_TOTAL_TOOL_BUDGET", ctx.org_id)
 
     for iteration in range(1, max_iterations + 1):
         user = _build_retrieval_user_prompt(
@@ -275,6 +277,16 @@ async def run_retrieval_subagent(
             name = tc.get("tool")
             args = tc.get("arguments", {})
             tool = tools.get(name)
+
+            # Total tool-call budget (shared with main agent)
+            if sum(counts.values()) >= total_budget:
+                observations.append(Observation(
+                    tool=name, arguments=args, result={},
+                    error=f"Total tool-call budget ({total_budget}) reached. Write your summary now.",
+                    tokens=0,
+                ))
+                break
+
             if tool is None:
                 observations.append(Observation(
                     tool=name, arguments=args, result={},
