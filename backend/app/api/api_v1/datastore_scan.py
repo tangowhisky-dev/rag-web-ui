@@ -63,12 +63,11 @@ class ScanProgressResponse(BaseModel):
     datastore_id: int
     datastore_name: str
     scan_id: int | None
-    total_files: int
-    processed_files: int
-    new_files: int
-    modified_files: int
-    skipped_files: int
-    error_files: int
+    total: int          # selected documents
+    ingested: int       # selected documents with chunks
+    pending: int        # selected documents without chunks
+    failed: int         # selected documents with failed tasks
+    skipped: int        # unselected documents
     status: str  # running, completed, error, idle, cancelled, paused
     last_scan_at: Optional[str] = None
     error_message: Optional[str] = None
@@ -132,37 +131,43 @@ def _find_active_scan(active_scans, datastore_id):
     return None
 
 
-def _scan_progress_from_db(ds):
+def _compute_progress_response(db: Session, ds: DataStore, scan_info: dict | None = None) -> ScanProgressResponse:
+    """Build ScanProgressResponse from live DB state.
+
+    Progress counts are always computed from Document/Chunk/Task state —
+    no running counter.  Status comes from the active scan (if running)
+    or the DB (if idle/completed/error).
+    """
+    from app.services.datastore_watcher.watcher.scan import ScanMixin
+    counts = ScanMixin._compute_scan_progress(db, ds.id)
+
+    if scan_info:
+        status = scan_info.get("status", "running")
+        error_message = scan_info.get("error_message")
+        # Find scan_id from the active scans list
+        active_scans = list(_get_watcher()._active_scans.values()) if not isinstance(scan_info, dict) else []
+        scan_id = None
+        for sid, info in _get_watcher()._active_scans.items():
+            if info is scan_info:
+                scan_id = sid
+                break
+    else:
+        status = ds.last_scan_status if ds.last_scan_status != "running" else "idle"
+        error_message = ds.last_scan_error
+        scan_id = None
+
     return ScanProgressResponse(
         datastore_id=ds.id,
         datastore_name=ds.name,
-        scan_id=None,
-        total_files=ds.last_scan_total_files or 0,
-        processed_files=ds.last_scan_processed or 0,
-        new_files=ds.last_scan_new or 0,
-        modified_files=ds.last_scan_modified or 0,
-        skipped_files=ds.last_scan_skipped or 0,
-        error_files=ds.last_scan_errors or 0,
-        status=ds.last_scan_status if ds.last_scan_status != "running" else "idle",
+        scan_id=scan_id,
+        total=counts["total"],
+        ingested=counts["ingested"],
+        pending=counts["pending"],
+        failed=counts["failed"],
+        skipped=counts["skipped"],
+        status=status,
         last_scan_at=ds.last_scan_at.strftime("%Y-%m-%dT%H:%M:%SZ") if ds.last_scan_at else None,
-        error_message=ds.last_scan_error,
-    )
-
-
-def _scan_progress_from_active(ds, scan_info, active_scans):
-    return ScanProgressResponse(
-        datastore_id=ds.id,
-        datastore_name=ds.name,
-        scan_id=active_scans.index(scan_info) + 1 if scan_info in active_scans else None,
-        total_files=scan_info.get("total", 0),
-        processed_files=scan_info.get("processed", 0),
-        new_files=scan_info.get("new", 0),
-        modified_files=scan_info.get("modified", 0),
-        skipped_files=scan_info.get("skipped", 0),
-        error_files=scan_info.get("error_count", 0),
-        status=scan_info.get("status", "idle"),
-        last_scan_at=ds.last_scan_at.strftime("%Y-%m-%dT%H:%M:%SZ") if ds.last_scan_at else None,
-        error_message=scan_info.get("error_message"),
+        error_message=error_message,
     )
 
 
@@ -178,16 +183,16 @@ def get_datastore_scan_progress(
         raise HTTPException(status_code=404, detail="DataStore not found")
     _check_datastore_scope(db, datastore_id, current_user)
 
+    scan_info = None
     try:
         watcher = _get_watcher()
         status = watcher.get_status()
         active_scans = status.get("active_scans", [])
         scan_info = _find_active_scan(active_scans, datastore_id)
-        if not scan_info:
-            return _scan_progress_from_db(ds)
-        return _scan_progress_from_active(ds, scan_info, active_scans)
     except HTTPException:
-        return _scan_progress_from_db(ds)
+        pass
+
+    return _compute_progress_response(db, ds, scan_info)
 
 
 def _find_scan_for_datastore(watcher, datastore_id):
@@ -200,20 +205,32 @@ def _find_scan_for_datastore(watcher, datastore_id):
     return scan_id, scan
 
 
-def _build_scan_event(scan, default_status="running"):
+def _build_scan_event_from_db(db: Session, datastore_id: int, scan_info: dict | None) -> dict:
+    """Build SSE event from live DB state + active scan status."""
+    from app.services.datastore_watcher.watcher.scan import ScanMixin
+    ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
+    if not ds:
+        return {"status": "error", "message": "DataStore not found"}
+
+    counts = ScanMixin._compute_scan_progress(db, datastore_id)
+
+    if scan_info:
+        status = scan_info.get("status", "running")
+        error_message = scan_info.get("error_message")
+    else:
+        status = ds.last_scan_status if ds.last_scan_status != "running" else "idle"
+        error_message = ds.last_scan_error
+
     event = {
-        "total_files": scan.get("total", 0),
-        "total_files_on_disk": scan.get("total_files_on_disk", 0),
-        "processed_files": scan.get("processed", 0),
-        "scanned": scan.get("processed", 0),
-        "status": scan.get("status", default_status),
-        "new_files": scan.get("new", 0),
-        "modified_files": scan.get("modified", 0),
-        "skipped_files": scan.get("skipped", 0),
-        "error_files": scan.get("error_count", 0),
+        "total": counts["total"],
+        "ingested": counts["ingested"],
+        "pending": counts["pending"],
+        "failed": counts["failed"],
+        "skipped": counts["skipped"],
+        "status": status,
     }
-    if scan.get("error_message"):
-        event["error_message"] = scan["error_message"]
+    if error_message:
+        event["error_message"] = error_message
     return event
 
 
@@ -247,90 +264,53 @@ def scan_progress_stream(
             return
 
         # Wait for scan to appear in active_scans (up to 5 seconds).
-        # Iterate in reverse insertion order (Python 3.7+) so that the
-        # SSE endpoint always finds the most recently started scan for
-        # the datastore — not a stale completed scan from a previous run.
         start_time = time.monotonic()
         while time.monotonic() - start_time < 5:
             if await request.is_disconnected():
                 logger.debug("[SSE] client disconnected (wait phase) datastore_id=%d", datastore_id)
                 return
-            scan_id, scan = _find_scan_for_datastore(watcher, datastore_id)
+            _, scan = _find_scan_for_datastore(watcher, datastore_id)
             if scan is not None:
-                logger.debug(
-                    "[SSE] found scan for datastore_id=%d scan_id=%d status=%s",
-                    datastore_id, scan_id, scan.get("status"),
-                )
                 break
-            logger.debug(
-                "[SSE] waiting for scan datastore_id=%d active_scans=%s",
-                datastore_id, list(watcher._active_scans.keys()),
-            )
             yield 'data: {"status": "waiting", "message": "Scan starting..."}\n\n'
             await asyncio.sleep(0.5)
         else:
-            logger.debug(
-                "[SSE] scan_not_found_for_datastore datastore_id=%d",
-                datastore_id,
-            )
             yield 'data: {"status": "error", "message": "Scan not found"}\n\n'
             return
 
-        # Stream progress updates.
-        # Always emit at least one event on entry (even if nothing changed
-        # yet) so the client gets a valid initial state.  Then only emit
-        # subsequent events when something actually changes — this avoids
-        # flooding the SSE connection with redundant events for scans that
-        # complete quickly.
-
-        # First emission — always emit the current state so the client
-        # never sees undefined values, even for scans that finish before
-        # any progress events fire.
-        _, scan = _find_scan_for_datastore(watcher, datastore_id)
-        if scan:
-            initial_event = _build_scan_event(scan)
-            logger.debug(
-                "[SSE] emitting_initial_event datastore_id=%d event=%s",
-                datastore_id, json.dumps(initial_event),
-            )
-            yield f"data: {json.dumps(initial_event)}\n\n"
-
-        # Subsequent emissions — only when values change
-        last_state = (-1, -1, None, -1, None, -1, -1, -1)
+        # Stream progress — query DB on each tick for live counts.
+        # Only emit when state changes to avoid flooding the connection.
+        last_state = None
 
         while True:
             if await request.is_disconnected():
-                logger.debug("[SSE] client disconnected datastore_id=%d", datastore_id)
                 break
 
             _, scan = _find_scan_for_datastore(watcher, datastore_id)
             if scan is None:
-                break  # Scan gone, close connection silently
+                break
 
-            current_status = scan.get("status")
+            # Fresh DB session each tick — see committed chunks from
+            # ingestion threads that use their own sessions.
+            sse_db = _SessionLocal()
+            try:
+                event = _build_scan_event_from_db(sse_db, datastore_id, scan)
+            finally:
+                sse_db.close()
+
             current_state = (
-                scan.get("processed", 0),
-                scan.get("total", 0),
-                current_status,
-                scan.get("error_count", 0),
-                scan.get("error_message"),
-                scan.get("skipped", 0),
-                scan.get("modified", 0),
-                scan.get("new", 0),
+                event.get("ingested", 0),
+                event.get("total", 0),
+                event.get("status"),
+                event.get("failed", 0),
+                event.get("error_message"),
             )
 
-            # Only emit if something changed since last event
             if current_state != last_state:
-                event = _build_scan_event(scan, default_status=None)
-                logger.debug(
-                    "[SSE] emitting_event datastore_id=%d event=%s",
-                    datastore_id, json.dumps(event),
-                )
                 yield f"data: {json.dumps(event)}\n\n"
                 last_state = current_state
 
-            # If scan is done, stop streaming
-            if current_status in ("completed", "error", "cancelled", "paused", "idle"):
+            if event.get("status") in ("completed", "error", "cancelled", "paused", "idle"):
                 break
 
             await asyncio.sleep(0.5)

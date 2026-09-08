@@ -5,15 +5,19 @@ of a manual datastore scan: initializing scan state, tracking progress,
 cancelling/pausing, running the discovery engine, processing new/modified
 files, handling deletions, and waiting for ingestion completion.
 
-Scan progress is tracked both in-memory (``_active_scans`` dict for SSE)
-and in the database (``last_scan_processed``, ``last_scan_total_files``).
-A shared ``_progress_lock`` prevents races between event-driven ingestion
-and manual scans.
+Scan progress is computed on-the-fly from Document/Chunk/Task state — no
+running counter.  The SSE/polling endpoints query the DB for live counts:
+  - total     = selected Documents
+  - ingested  = selected Documents with chunks
+  - pending   = selected Documents without chunks
+  - failed    = selected Documents with failed tasks
+  - skipped   = unselected Documents
+Progress = ingested / total (naturally goes from 7/22 to 22/22).
 
 Methods:
 - _next_scan_id: thread-safe scan ID counter
 - _init_scan: initialize scan state in DB and memory
-- _update_scan_progress: atomically increment last_scan_processed
+- _compute_scan_progress: query DB for live progress counts
 - _complete_scan: mark scan as completed/paused/cancelled
 - _cancel_scan: stop a running scan (pause or full cancel)
 - _is_scan_cancelled: check if scan should stop processing
@@ -36,7 +40,7 @@ from concurrent.futures import Future
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import update, func
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal
@@ -53,6 +57,45 @@ class ScanMixin:
     # ------------------------------------------------------------------
     # Scan ID management (thread-safe)
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _compute_scan_progress(db: Session, datastore_id: int) -> dict:
+        """Query DB for live progress counts — the single source of truth.
+
+        Returns dict with: total, ingested, pending, failed, skipped.
+        Progress = ingested / total (always accurate, no running counter).
+        """
+        total = db.query(func.count(Document.id)).filter(
+            Document.data_store_id == datastore_id,
+            Document.is_selected == True,  # noqa: E712
+        ).scalar() or 0
+
+        ingested = db.query(func.count(Document.id)).filter(
+            Document.data_store_id == datastore_id,
+            Document.is_selected == True,  # noqa: E712
+            Document.chunks.any(),
+        ).scalar() or 0
+
+        skipped = db.query(func.count(Document.id)).filter(
+            Document.data_store_id == datastore_id,
+            Document.is_selected == False,  # noqa: E712
+        ).scalar() or 0
+
+        failed = db.query(func.count(ProcessingTask.id)).join(
+            Document, ProcessingTask.document_id == Document.id
+        ).filter(
+            Document.data_store_id == datastore_id,
+            Document.is_selected == True,  # noqa: E712
+            ProcessingTask.status == "failed",
+        ).scalar() or 0
+
+        return {
+            "total": total,
+            "ingested": ingested,
+            "pending": total - ingested,
+            "failed": failed,
+            "skipped": skipped,
+        }
 
     def _next_scan_id(self) -> int:
         with self._scan_id_lock:
@@ -137,66 +180,34 @@ class ScanMixin:
                     datastore_id,
                 )
 
-            # Count selected files — the scan only processes selected files,
-            # so the progress denominator is the number of selected documents
-            # that need work (new, modified, or needs_reprocess).
-            # We also count files on disk for the total_files display.
+            # Clear any stale Redis cancel flag from a previous pause/cancel
+            from app.services.infrastructure import clear_cancel
+            clear_cancel("ds", datastore_id)
+
+            # Count files on disk for display.  Progress is computed
+            # on-the-fly from Document/Chunk state — no running counter.
             total_files_on_disk = self._count_files_in_folder(ds.folder_path, ds.scan_pattern)
-            selected_count = (
-                db.query(func.count(Document.id))
-                .filter(
-                    Document.data_store_id == datastore_id,
-                    Document.is_selected == True,
-                )
-                .scalar()
-            ) or 0
             ds.last_scan_total_files = total_files_on_disk
 
-            # Always start the progress counter at the number of already-
-            # completed selected documents (those with chunks).  Without
-            # this, a second manual scan after selecting more files shows
-            # 0/22 even though 16 were already ingested — the actual
-            # ingestion correctly skips them (discovery manifest
-            # comparison), but the counter makes it look like a restart
-            # from scratch.  This also covers the pause/resume case.
-            completed_count = (
-                db.query(func.count(Document.id))
-                .filter(
-                    Document.data_store_id == datastore_id,
-                    Document.is_selected == True,  # noqa: E712
-                    Document.chunks.any(),
-                )
-                .scalar()
-            ) or 0
-            ds.last_scan_processed = completed_count
             logger.debug(
-                "[WATCHER] scan_init_progress scan_id=%d datastore_id=%d completed_before=%d total=%d previous_status=%s",
-                scan_id, datastore_id, completed_count, selected_count, previous_status,
+                "[WATCHER] scan_init scan_id=%d datastore_id=%d total_on_disk=%d previous_status=%s",
+                scan_id, datastore_id, total_files_on_disk, previous_status,
             )
 
             db.commit()
 
-            # Track in memory — the SSE endpoint always finds the most
-            # recently added scan for a given datastore by iterating
-            # _active_scans in reverse insertion order (Python 3.7+).
-            # "total" is the number of selected files (progress denominator).
-            # "total_files_on_disk" is the total files in the folder (for display).
+            # Track in memory — the SSE endpoint uses this to know the
+            # scan is running and its status.  Progress counts are
+            # computed from the DB on each tick, not stored here.
             with self._active_scans_lock:
                 self._active_scans[scan_id] = {
                     "datastore_id": datastore_id,
-                    "total": selected_count,
-                    "total_files_on_disk": total_files_on_disk,
-                    "processed": completed_count,
                     "status": "running",
-                    "error_count": 0,
-                    "new": 0,
-                    "modified": 0,
-                    "skipped": 0,
-                    "error_message": None,  # string error message from _complete_scan
+                    "error_message": None,
                 }
             logger.debug(
-                "[WATCHER] scan_init scan_id=%d datastore_id=%d selected_files=%d total_on_disk=%d status=running",
-                scan_id, datastore_id, selected_count, total_files_on_disk,
+                "[WATCHER] scan_init scan_id=%d datastore_id=%d total_on_disk=%d status=running",
+                scan_id, datastore_id, total_files_on_disk,
             )
             # Initialize futures list for this scan
             with self._scan_futures_lock:
@@ -330,6 +341,11 @@ class ScanMixin:
             from app.services.ingestion.ingestion_dispatcher import cancel_graph_builds_for_datastore
             cancelled_graphs = cancel_graph_builds_for_datastore(datastore_id)
 
+            # Signal cancellation via Redis so in-flight OCR/conversion/embedding
+            # threads can detect it without polling DB status.
+            from app.services.infrastructure import set_cancel
+            set_cancel("ds", datastore_id, reason="scan_paused" if pause else "scan_cancelled")
+
             logger.debug(
                 "[WATCHER] scan_%s datastore_id=%d futures=%d graph_builds=%d",
                 "paused" if pause else "cancelled",
@@ -343,13 +359,21 @@ class ScanMixin:
         # _cleanup_stale_scans is now called from the health-check loop.
 
     def _is_scan_cancelled(self, datastore_id: int) -> bool:
-        """Check if a scan is cancelled (should stop processing)."""
+        """Check if a scan is cancelled (should stop processing).
+
+        Checks DB status first (fast path), then Redis cancel flag
+        (durable fallback for cross-thread/cross-process detection).
+        """
         db: Session = SessionLocal()
         try:
             ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
             if not ds:
                 return True
-            return ds.last_scan_status != "running"
+            if ds.last_scan_status != "running":
+                return True
+            # Redis fallback — catches cancellation from other threads/processes
+            from app.services.infrastructure import is_cancelled
+            return is_cancelled("ds", datastore_id)
         finally:
             db.close()
 
@@ -413,16 +437,6 @@ class ScanMixin:
         summary["new"] = len(result.new_files)
         summary["modified"] = len(result.modified_files)
         summary["deleted"] = len(result.deleted_files)
-
-        with self._active_scans_lock:
-            for sid, scan_info in self._active_scans.items():
-                if scan_info["datastore_id"] == datastore_id:
-                    scan_info["new"] = summary["new"]
-                    scan_info["modified"] = summary["modified"]
-                    scan_info["skipped"] = summary["skipped"]
-                    scan_info["deleted"] = summary["deleted"]
-                    scan_info["error_count"] = summary["errors"]
-                    break
 
         return result
 
@@ -697,32 +711,14 @@ class ScanMixin:
                 )
                 if future is not None:
                     ingestion_futures.append(future)
-                    # Progress is incremented when the ingestion future
-                    # completes (via _on_scan_ingestion_done callback),
-                    # not when it's submitted. This gives the UI real-time
-                    # progress that reflects actual completion.
-                else:
-                    # File was skipped (unsupported extension, duplicate,
-                    # or already ingested) — count it as processed now.
-                    self._update_scan_progress(datastore_id, 1)
-
-                with self._active_scans_lock:
-                    for sid, scan_info in self._active_scans.items():
-                        if scan_info["datastore_id"] == datastore_id:
-                            scan_info["new"] = summary["new"]
-                            scan_info["modified"] = summary["modified"]
-                            scan_info["skipped"] = summary["skipped"]
-                            scan_info["error_count"] = summary["errors"]
-                            break
+                    # Progress is computed from DB state by the SSE/polling
+                    # endpoints — no counter to increment.
+                # If future is None (skipped/already ingested), nothing to
+                # do — the DB already reflects the correct state.
 
             except Exception as e:
                 logger.error("[WATCHER] scan error for %s: %s", fpath, e)
                 summary["errors"] += 1
-                with self._active_scans_lock:
-                    for sid, scan_info in self._active_scans.items():
-                        if scan_info["datastore_id"] == datastore_id:
-                            scan_info["error_count"] = summary["errors"]
-                            break
 
         return False
 
@@ -741,11 +737,6 @@ class ScanMixin:
             except Exception as e:
                 logger.error("[WATCHER] deletion error for %s: %s", fpath, e)
                 summary["errors"] += 1
-                with self._active_scans_lock:
-                    for sid, scan_info in self._active_scans.items():
-                        if scan_info["datastore_id"] == datastore_id:
-                            scan_info["error_count"] = summary["errors"]
-                            break
 
     def _wait_for_ingestion(
         self,
@@ -780,8 +771,7 @@ class ScanMixin:
         for future in ingestion_futures:
             try:
                 future.result(timeout=per_future_timeout)
-                # Success — progress was already incremented by the
-                # _on_scan_ingestion_done callback.
+                # Success — DB state already reflects the new chunks.
             except TimeoutError:
                 logger.error(
                     "[WATCHER] ingestion_task_timeout scan_id=%d — cancelling future",
@@ -790,7 +780,6 @@ class ScanMixin:
                 future.cancel()
                 self._mark_task_failed_for_future(future, datastore_id)
                 summary["errors"] += 1
-                self._update_scan_progress(datastore_id, 1)
             except Exception as e:
                 logger.error(
                     "[WATCHER] ingestion_task_failed scan_id=%d: %s",
@@ -798,7 +787,6 @@ class ScanMixin:
                 )
                 self._mark_task_failed_for_future(future, datastore_id)
                 summary["errors"] += 1
-                self._update_scan_progress(datastore_id, 1)
 
     def _mark_task_failed_for_future(self, future: Future, datastore_id: int) -> None:
         """Best-effort: mark the ProcessingTask for a failed/timed-out future as 'failed'.
@@ -837,34 +825,3 @@ class ScanMixin:
         """Check if a filepath matches the scan pattern. Delegates to shared utility."""
         from app.services.datastore_watcher.utils import matches_pattern
         return matches_pattern(filepath, pattern)
-
-    def _update_scan_progress(self, datastore_id: int, processed: int) -> None:
-        """Increment last_scan_processed by the given delta.
-
-        Called during a scan after each file is processed. Uses SQL-level
-        atomic increment (UPDATE ... SET col = col + :val) so concurrent
-        event-driven ingestion cannot lose a counter increment.
-
-        Also updates the in-memory active scan so the polling endpoint sees
-        progress immediately.
-        """
-        db: Session = SessionLocal()
-        try:
-            with self._progress_lock:
-                db.execute(
-                    update(DataStore)
-                    .where(DataStore.id == datastore_id)
-                    .values(last_scan_processed=DataStore.last_scan_processed + processed)
-                )
-
-                with self._active_scans_lock:
-                    for sid, info in self._active_scans.items():
-                        if info["datastore_id"] == datastore_id:
-                            info["processed"] = info.get("processed", 0) + processed
-                            break
-
-                db.commit()
-
-            db.commit()
-        finally:
-            db.close()

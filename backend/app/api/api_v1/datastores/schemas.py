@@ -64,7 +64,7 @@ class DataStoreCreate(BaseModel):
     folder_path: str = Field(..., min_length=1, max_length=768)
     scan_pattern: str = Field(default="*")
     auto_process_enabled: bool = False
-    auto_process_interval_minutes: int = Field(default=60, ge=1, le=1440)
+    auto_process_interval_minutes: int = Field(default=5, ge=1, le=1440)
     select_all_files: bool = Field(default=False, description="Select all files for immediate processing on creation")
 
 

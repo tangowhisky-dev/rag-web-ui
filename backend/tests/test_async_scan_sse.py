@@ -293,8 +293,7 @@ def test_sse_progress_stream_scan_not_found(client, db):
 
 
 def test_sse_progress_stream_includes_all_fields(client, db):
-    """SSE event must include total_files, processed_files, new_files, modified_files,
-    skipped_files, error_files, and status fields."""
+    """SSE event must include total, ingested, pending, failed, skipped, and status fields."""
     with tempfile.TemporaryDirectory() as tmp_str:
         tmp_dir = Path(tmp_str)
         folder = create_test_files(tmp_dir, 3)
@@ -310,13 +309,7 @@ def test_sse_progress_stream_includes_all_fields(client, db):
         mock_w._active_scans = {
             1: {
                 "datastore_id": datastore_id,
-                "total": 3,
-                "processed": 3,
                 "status": "completed",
-                "new": 2,
-                "modified": 0,
-                "skipped": 1,
-                "error_count": 0,
                 "error_message": None,
             }
         }
@@ -340,24 +333,19 @@ def test_sse_progress_stream_includes_all_fields(client, db):
                 # Should have at least one event with all expected fields
                 assert len(events) >= 1, f"Expected events, got: {events}"
 
-                # Check required fields
+                # Check required fields (new simplified model)
                 evt = events[0]
-                assert "total_files" in evt, f"Missing total_files in event: {evt}"
-                assert "processed_files" in evt, f"Missing processed_files in event: {evt}"
+                assert "total" in evt, f"Missing total in event: {evt}"
+                assert "ingested" in evt, f"Missing ingested in event: {evt}"
+                assert "pending" in evt, f"Missing pending in event: {evt}"
+                assert "failed" in evt, f"Missing failed in event: {evt}"
+                assert "skipped" in evt, f"Missing skipped in event: {evt}"
                 assert "status" in evt, f"Missing status in event: {evt}"
-                assert "new_files" in evt, f"Missing new_files in event: {evt}"
-                assert "modified_files" in evt, f"Missing modified_files in event: {evt}"
-                assert "skipped_files" in evt, f"Missing skipped_files in event: {evt}"
-                assert "error_files" in evt, f"Missing error_files in event: {evt}"
 
-                # Check values
-                assert evt["total_files"] == 3
-                assert evt["processed_files"] == 3
+                # Values come from DB (no documents in test DB → all 0)
+                assert evt["total"] == 0
+                assert evt["ingested"] == 0
                 assert evt["status"] == "completed"
-                assert evt["new_files"] == 2
-                assert evt["modified_files"] == 0
-                assert evt["skipped_files"] == 1
-                assert evt["error_files"] == 0
 
 
 def test_sse_progress_stream_error_with_message(client, db):
@@ -374,13 +362,7 @@ def test_sse_progress_stream_error_with_message(client, db):
         mock_w._active_scans = {
             1: {
                 "datastore_id": datastore_id,
-                "total": 3,
-                "processed": 2,
                 "status": "error",
-                "new": 2,
-                "modified": 0,
-                "skipped": 0,
-                "error_count": 1,
                 "error_message": "2 file(s) failed ingestion",
             }
         }
@@ -407,7 +389,6 @@ def test_sse_progress_stream_error_with_message(client, db):
                 # Check error fields
                 evt = events[0]
                 assert evt["status"] == "error"
-                assert evt["error_files"] == 1
                 assert "error_message" in evt, f"Missing error_message in event: {evt}"
                 assert evt["error_message"] == "2 file(s) failed ingestion"
 
@@ -434,24 +415,12 @@ def test_sse_progress_stream_ignores_old_completed_scan(client, db):
         mock_w._active_scans = {
             1: {
                 "datastore_id": datastore_id,
-                "total": 3,
-                "processed": 3,
                 "status": "completed",
-                "new": 2,
-                "modified": 0,
-                "skipped": 1,
-                "error_count": 0,
                 "error_message": None,
             },
             2: {
                 "datastore_id": datastore_id,
-                "total": 3,
-                "processed": 3,
                 "status": "completed",
-                "new": 3,
-                "modified": 0,
-                "skipped": 0,
-                "error_count": 0,
                 "error_message": None,
             },
         }
@@ -473,20 +442,16 @@ def test_sse_progress_stream_ignores_old_completed_scan(client, db):
                     events.append(data)
 
                 # Should have at least one event from the NEW scan
-                # (not the old completed scan)
                 assert len(events) >= 1, f"Expected events, got: {events}"
 
-                # The SSE endpoint should find the newest scan (scan_id=2),
-                # not the old completed one (scan_id=1). Verify this by
-                # checking that new_files=3 (new scan) not new_files=2 (old).
+                # The SSE endpoint should find the newest scan (scan_id=2).
+                # Progress counts come from DB (empty in test → all 0).
+                # We verify the SSE found a scan and returned completed status.
                 evt = events[0]
-                assert evt["new_files"] == 3, \
-                    f"Expected new_files=3 (new scan), got {evt['new_files']}. " \
-                    f"SSE found stale scan. Event: {evt}"
-                assert evt["processed_files"] == 3, \
-                    f"Expected 3 processed (new scan), got {evt['processed_files']}"
                 assert evt["status"] == "completed", \
                     f"Expected completed, got {evt['status']}"
+                assert "total" in evt, f"Missing total field: {evt}"
+                assert "ingested" in evt, f"Missing ingested field: {evt}"
 
 
 def test_active_scan_cleanup_after_completion(client, db):
@@ -651,24 +616,12 @@ def test_trigger_scan_cleanup_old_bug_would_leave_stale_scan(client, db):
         mock_w._active_scans = {
             1: {
                 "datastore_id": datastore_id,
-                "total": 3,
-                "processed": 3,
                 "status": "completed",
-                "error_count": 0,
-                "new": 2,
-                "modified": 0,
-                "skipped": 1,
                 "error_message": None,
             },
             3: {
                 "datastore_id": 999,  # different datastore
-                "total": 5,
-                "processed": 5,
                 "status": "completed",
-                "error_count": 0,
-                "new": 5,
-                "modified": 0,
-                "skipped": 0,
                 "error_message": None,
             },
         }
@@ -695,13 +648,7 @@ def test_trigger_scan_cleanup_old_bug_would_leave_stale_scan(client, db):
         mock_w._active_scans = {
             1: {
                 "datastore_id": datastore_id,
-                "total": 3,
-                "processed": 3,
                 "status": "completed",  # completed before SSE connects
-                "error_count": 0,
-                "new": 2,
-                "modified": 0,
-                "skipped": 1,
                 "error_message": None,
             }
         }
@@ -722,11 +669,10 @@ def test_trigger_scan_cleanup_old_bug_would_leave_stale_scan(client, db):
                 assert not any(
                     "Scan not found" in line for line in lines
                 ), f"Should not get 'Scan not found': {lines}"
-                # Should have correct data fields
+                # Should have correct data fields (new simplified model)
                 evt_line = [l for l in lines if '"status"' in l and '"completed"' in l][0]
                 evt_data = json.loads(evt_line[6:])
                 assert evt_data["status"] == "completed"
-                assert evt_data["scanned"] == 3
-                assert evt_data["new_files"] == 2
-                assert evt_data["modified_files"] == 0
-                assert evt_data["skipped_files"] == 1
+                assert "total" in evt_data
+                assert "ingested" in evt_data
+                assert "pending" in evt_data

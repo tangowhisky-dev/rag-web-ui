@@ -307,8 +307,14 @@ def run_ingestion_in_thread(
 
         graph_request = loop.run_until_complete(_do())
 
-        _mark_task_status(task_id, "completed", progress=100,
-                          message="Ingestion completed")
+        # Only mark completed if the task isn't already failed (e.g.
+        # cancelled by admin — process_document_full sets "failed" and
+        # returns None).  Overwriting "failed" → "completed" would make
+        # a cancelled task look done and trigger graph builds.
+        current_status = _get_task_status_raw(task_id)
+        if current_status != "failed":
+            _mark_task_status(task_id, "completed", progress=100,
+                              message="Ingestion completed")
 
         _clear_needs_reprocess(document_id)
 
@@ -345,7 +351,7 @@ def _acquire_graph_thread_slot(
                 "graph_build_skipped task_id=%s — cancelled while waiting for thread slot",
                 req.task_id,
             )
-            _set_graph_status(req.task_id, "pending")
+            _set_graph_status(req.task_id, "failed", error="Cancelled while waiting for thread slot")
             return False
         if _global_graph_thread_sem.acquire(blocking=False):
             return True
@@ -413,7 +419,16 @@ def _execute_graph_build(req: GraphBuildRequest, cancel_event: threading.Event) 
 
         skipped_batches = loop.run_until_complete(_do())
 
-        if skipped_batches is not None and skipped_batches > 0:
+        # Check cancellation BEFORE setting status — if cancelled, the
+        # cancel handler already set "failed".  We must not overwrite it
+        # back to "pending" or "completed".
+        if cancel_event.is_set():
+            _set_graph_status(req.task_id, "failed", error="Cancelled by admin")
+            logger.debug(
+                "graph_build_cancelled task_id=%s document_id=%s skipped_batches=%s",
+                req.task_id, req.document_id, skipped_batches,
+            )
+        elif skipped_batches is not None and skipped_batches > 0:
             _set_graph_status(req.task_id, "pending", error=None)
             logger.debug(
                 "graph_build_partial task_id=%s document_id=%s skipped_batches=%d — marked pending for retry",
@@ -556,6 +571,21 @@ def _set_graph_status(
             db.close()
     except Exception:
         pass
+
+
+def _get_task_status_raw(task_id: int) -> Optional[str]:
+    """Read the current ProcessingTask.status (best-effort, fresh session)."""
+    try:
+        db: Session = SessionLocal()
+        try:
+            task = db.query(ProcessingTask).filter(
+                ProcessingTask.id == task_id
+            ).first()
+            return task.status if task else None
+        finally:
+            db.close()
+    except Exception:
+        return None
 
 
 def _mark_task_status(

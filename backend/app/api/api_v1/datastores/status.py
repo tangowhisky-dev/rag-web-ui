@@ -52,16 +52,11 @@ def get_datastore_status(
                 resp["processing"] = ds_status.get("processing", False)
                 break
 
-        # Include real-time scan progress
+        # Include real-time scan status (progress counts come from DB)
         for scan in status.get("active_scans", []):
             if scan.get("datastore_id") == datastore_id:
                 resp["scan_progress"] = {
-                    "total_files": scan.get("total", 0),
-                    "processed_files": scan.get("processed", 0),
                     "status": scan.get("status", "idle"),
-                    "new_files": scan.get("new", 0),
-                    "skipped_files": scan.get("skipped", 0),
-                    "error_files": scan.get("error_count", 0),
                 }
                 break
     except HTTPException:
