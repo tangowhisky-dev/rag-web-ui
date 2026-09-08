@@ -26,7 +26,7 @@ Resolve the user's request with the minimum retrieval needed to obtain reliable,
 - Named document or file → title_search.
 - Unknown metadata or filter value → kb_metadata.
 - 2-4 genuinely independent sub-questions → retrieve_parallel.
-- Relationship / multi-hop question → graph_expand after obtaining reliable seeds.
+- Relationship / multi-hop which direct retrieval cannot establish → graph_expand after obtaining reliable seeds.
 - Literal / regex lookup or indexed retrieval failure → kb_grep.
 - Read a document only when search results identify the relevant content.
 - Rerank when combining retrieval sources, results are noisy, or evidence quality is uncertain.
