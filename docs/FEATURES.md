@@ -79,13 +79,12 @@ The system uses a LangGraph-based agent loop where the LLM autonomously selects 
 
 | Tool | Purpose |
 |------|---------|
-| `search_dense` | Vector search via Qdrant — semantic/conceptual matching |
-| `search_sparse` | SPLADE sparse embeddings — keyword matching with term expansion |
-| `search_exact` | MySQL fulltext search — exact terms, code, identifiers |
+| `semantic_search` | Vector search via Qdrant — semantic/conceptual matching |
+| `keyword_search` | Keyword search — SPLADE sparse + MySQL fulltext (exact/identifier) matching |
 | `rerank_results` | Cross-encoder reranker — deduplicates and re-scores hits from state |
 | `graph_expand` | Neo4j graph expansion — finds related chunks via entity relationships |
-| `kb_read` | Read a specific section or character range of a KB document |
-| `kb_search_documents` | Document-level retrieval by title, filename, content type, date range |
+| `file_read` | Read a specific section or character range of a KB document |
+| `title_search` | Document-level retrieval by title, filename, content type, date range |
 | `kb_grep` | Regex/term search across KB document text — returns matching lines |
 | `kb_outline` | Heading structure (table of contents) of a KB document |
 | `kb_metadata` | Inspect KB document metadata (fields, values, date ranges, counts) |
@@ -95,24 +94,23 @@ The system uses a LangGraph-based agent loop where the LLM autonomously selects 
 | `file_read` | Read content from an attached chat file |
 | `file_summarize` | Summarize an attached chat file |
 | `file_extract_table` | Extract tables from an attached chat file |
-| `summarize_answer` | Summarize the current answer or file |
+| `summarize` | Summarize the current answer or file |
 | `current_datetime` | Returns current UTC date/time — for "latest" / "most recent" queries |
 
 **Key features:**
-- **Composable atomic tools**: the LLM selects search_dense, search_sparse, search_exact, or kb_search_documents based on query type, then rerank_results to prioritize, then kb_read/grep/outline for deep reading
+- **Composable atomic tools**: the LLM selects semantic_search, keyword_search, or title_search based on query type, then rerank_results to prioritize, then file_read/grep/outline for deep reading
 - **State-based pass-through**: rerank_results, graph_expand, and chart_generate read inputs from graph state — the LLM never passes large data arrays as arguments
 - **LLM sufficiency check**: evaluates whether retrieved docs collectively answer the query after each tool round
 - **Citation provenance**: every hit carries a citation_ref with source_tool, citation_kind, and metadata; finalize normalizes [E1] labels to [N](N) links
-- **KB exploration tools**: `kb_grep`/`kb_outline`/`kb_read` give the agent fine-grained access to document content when chunk-level retrieval is insufficient
-- **Per-tool budgets**: configurable caps on retrieval, code execution, grep, and read calls per turn
+- **KB exploration tools**: `kb_grep`/`kb_outline`/`file_read` give the agent fine-grained access to document content when chunk-level retrieval is insufficient
+- **total tool-call budget**: one shared pool of `AGENT_TOTAL_TOOL_BUDGET` (default 25) tool calls per user query; `AGENT_MAX_CLARIFY` (default 2) is the only per-tool cap
 - **RBAC**: all tools enforce `enforce_rbac()` — KB access scoped to KBs linked to the current chat
 - **Tool call audit**: every tool call writes a `tool_call_audit` row with arguments, result summary, tokens, and latency
 - **Compact SSE**: tool observations stream only a one-line summary (~96 bytes) instead of the full result
 
 **Configuration:**
-- `AGENT_MAX_ITERATIONS` (default 8) — hard cap on think-act-observe cycles
 - `AGENT_MAX_WALL_SECONDS` — wall-clock budget for the agent loop
-- Per-tool call budgets configurable via settings registry
+- `AGENT_TOTAL_TOOL_BUDGET` (default 25), `AGENT_MAX_CLARIFY` (default 2), and `AGENT_MAX_SAME_TOOL_REPEAT` (default 3) are configurable via settings registry
 
 ### Conversation Compaction
 **Automatically summarize long conversations**

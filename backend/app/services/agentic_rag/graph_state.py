@@ -135,8 +135,8 @@ class AgentState(MessagesState):
     precomputed_tool_calls: Annotated[List[dict], _last_value] = []
 
     # ── Clarification state ─────────────────────────────────────────────
-    # Number of clarification rounds already spent this turn; capped by
-    # AGENT_MAX_CLARIFY (per-tool cap) so clarify cannot loop.
+    # Number of clarification rounds already spent this user query; capped by
+    # AGENT_MAX_CLARIFY (per-query cap) so clarify cannot loop.
     clarification_count: Annotated[int, _last_value] = 0
     # The user's answer to the clarification question, merged into query
     # resolution on resume.

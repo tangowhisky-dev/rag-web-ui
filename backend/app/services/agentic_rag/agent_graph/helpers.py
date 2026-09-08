@@ -56,7 +56,7 @@ def _tool_call_budget(db, org_id) -> dict:
 
 
 def _total_tool_budget(db, org_id) -> int:
-    """Total tool-call budget across all tools per turn."""
+    """Total tool-call budget across all tools per user query."""
     return get_setting(db, "AGENT_TOTAL_TOOL_BUDGET", org_id)
 
 # Error patterns that indicate a transient infrastructure failure rather

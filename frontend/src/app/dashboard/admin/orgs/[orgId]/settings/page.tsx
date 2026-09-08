@@ -183,7 +183,6 @@ export default function OrgSettingsPage() {
     { tab: 'GraphRAG', cats: ['GraphRAG'] },
     { tab: 'Agent', cats: ['Agentic'] },
     { tab: 'Memory & Context', cats: ['Memory', 'Context'] },
-    { tab: 'Quality', cats: ['Quality', 'Query Classification'] },
   ];
 
   const overrideCount = settings.filter(s => s.overridden).length;

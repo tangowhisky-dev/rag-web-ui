@@ -16,8 +16,8 @@ work with current shared modules which have been updated for v2.
 # """Sufficiency check node — replaces reflect_final_node.
 #
 # Three-tier check:
-# 1. Budget: if total tool calls >= AGENT_TOTAL_TOOL_BUDGET or iterations >=
-#    AGENT_MAX_ITERATIONS or wall clock exceeded → finalize.
+# 1. Budget: if total tool calls >= AGENT_TOTAL_TOOL_BUDGET or wall clock
+#    exceeded → finalize.
 # 2. force_finalize: if any tool returned terminate=True or the deterministic
 #    execution check passed → finalize.
 # 3. LLM sufficiency: ask the LLM whether the current evidence is sufficient

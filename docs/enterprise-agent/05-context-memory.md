@@ -39,7 +39,7 @@ class DataPoint(BaseModel):
 
 **Storage**: `messages.last_answer_object` (JSON column, new migration).
 
-**Use in next turn**: `load_context_node` loads the most recent `last_answer_object` into `AgentState.last_answer_object`. The planner sees it. The tools `summarize_answer` and `extract_data` (source=`last_answer`) operate on it directly — no truncation, no reconstruction from raw text.
+**Use in next turn**: `load_context_node` loads the most recent `last_answer_object` into `AgentState.last_answer_object`. The planner sees it. The tools `summarize` and `extract_data` (source=`last_answer`) operate on it directly — no truncation, no reconstruction from raw text.
 
 **Why this fixes "summarise it" / "give me the stats" / "make it a chart"**: the referent is a compact structured object, not a truncated blob. `extract_data` pulls `data` (already structured) or, if `data` is empty, re-extracts from the answer text. `chart_generate` consumes the extracted data deterministically. The chain is: previous answer → `last_answer_object.data` → `chart_generate` → ECharts JSON. No LLM guessing at chart JSON from prose.
 
@@ -193,4 +193,4 @@ This is logged (debug) and surfaced in the `d:` done event as `usage.context_tok
 | `load_subtask_memory_node` no-op (`nodes.py:1080-1087`) | `load_context_node` proactive recall |
 | Character-heuristic token estimation (`utils.py`) | `token_budget.count_tokens` |
 | `COMPACTION_ASSISTANT_MAX_CHARS` truncation of prior answer | `last_answer_object` structured referent |
-| Implicit "previous answer in context window" | Explicit `last_answer_object` + `summarize_answer`/`extract_data` tools |
+| Implicit "previous answer in context window" | Explicit `last_answer_object` + `summarize`/`extract_data` tools |

@@ -50,7 +50,6 @@ class RagRetrieveInput(BaseModel):
 5. If still insufficient and `graph_expand`, run Neo4j expansion and re-check sufficiency.
 6. Return metadata including `sufficient`, `missing`, `query_rewritten`, `query_used`.
 
-**Cap**: `AGENT_MAX_RETRIEVALS` (default 3) per turn.
 
 **Source**: `tools/rag_retrieve.py`. Reuses `services/retrieval/retrieval.py`, `services/retrieval/reranker.py`, `services/graph/graph_service.py`.
 
@@ -86,8 +85,6 @@ class KbGrepInput(BaseModel):
 3. For each document, search `converted_markdown` line-by-line with `re.search()`.
 4. Collect matches (line text truncated to 200 chars), up to `max_results`.
 
-**Cap**: `AGENT_MAX_KB_GREP` (default 5) per turn.
-
 **Source**: `tools/kb_grep.py`.
 
 ---
@@ -114,17 +111,15 @@ class KbOutlineInput(BaseModel):
 ```
 
 **Behavior**
-1. Load document and verify RBAC via `_load_authorized_document()` (shared with `kb_read`).
+1. Load document and verify RBAC via `_load_authorized_document()` (shared with `file_read`).
 2. Parse `converted_markdown` with `re.finditer(r"^(#{1,6})\s+(.+)$", markdown, re.MULTILINE)`.
 3. Return heading level, text, and character offset for each heading.
-
-**Cap**: `AGENT_MAX_KB_READ` (default 10, shared with `kb_read`) per turn.
 
 **Source**: `tools/kb_outline.py`.
 
 ---
 
-## 4. `kb_read`
+## 4. `file_read` (KB document)
 
 Reads a specific section (by heading name) or character range of a KB document's converted markdown. Last-resort tool for reading content that chunk retrieval missed.
 
@@ -160,13 +155,11 @@ class KbReadInput(BaseModel):
 5. Token-truncate to `max_tokens` using `count_tokens()`.
 6. If section not found, fall back to full document.
 
-**Cap**: `AGENT_MAX_KB_READ` (default 10, shared with `kb_outline`) per turn.
-
-**Source**: `tools/kb_read.py`.
+**Source**: `tools/file_read.py`.
 
 ---
 
-## 5. `file_read`
+## 5. `file_read` (attached chat file)
 
 Reads an attached chat file's markdown. Supports section-level retrieval.
 
@@ -207,7 +200,7 @@ class FileSummarizeInput(BaseModel):
 
 ## 7. `file_extract_table`
 
-Extracts structured tables from CSV/Excel/HTML-in-markdown attached files.
+Extracts structured tables from CSV/XLSX/XLS (HTML handled as markdown) attached files.
 
 **Input**
 ```python
@@ -237,7 +230,6 @@ class CodeExecuteInput(BaseModel):
 
 **Output `result`**: `{"stdout","stderr","result","plots":[...],"error"}`.
 
-**Cap**: `AGENT_MAX_CODE_EXEC` (default 3) per turn.
 
 **Source**: `tools/code_execute.py`.
 
@@ -265,7 +257,7 @@ class ChartGenerateInput(BaseModel):
 
 ---
 
-## 10. `summarize_answer`
+## 10. `summarize`
 
 Summarizes the `last_answer_object` or a cited prior turn.
 
@@ -281,7 +273,7 @@ class SummarizeAnswerInput(BaseModel):
 
 **Output `result`**: `{"summary","key_points":[...],"format"}`.
 
-**Source**: `tools/summarize_answer.py`.
+**Source**: `tools/summarize.py`.
 
 ---
 
@@ -310,7 +302,7 @@ class ExtractDataInput(BaseModel):
 
 - File tools (`file_read`, `file_summarize`, `file_extract_table`) only if a file is attached.
 - Data tools (`chart_generate`, `extract_data`) only if there is data to chart.
-- KB tools (`kb_grep`, `kb_read`, `kb_outline`) only if the chat has KBs linked (`state["kb_ids"]` non-empty).
+- KB tools (`kb_grep`, `file_read`, `kb_outline`) only if the chat has KBs linked (`state["kb_ids"]` non-empty).
 
 `think_node` binds the applicable subset via `ChatOpenAI(...).bind_tools()` (native mode) or includes them in the `THINK_SYSTEM_PROMPT` tool list (JSON-text fallback mode). Tool descriptions (LangChain `description` field) are the LLM's selection signal.
 

@@ -126,11 +126,10 @@ graph LR
     G --> H[END]
 ```
 
-The think node is a single unified LLM call — one prompt, one loop. The LLM reasons over the query, retrieved evidence, observations, and available tools, then either calls a tool or writes the final answer. No separate planner, sufficiency checker, or finalizer. The tool node dispatches calls in parallel with per-tool budgets. The loop continues until the LLM writes the answer, the iteration cap (AGENT_MAX_ITERATIONS), or the wall-clock budget (AGENT_MAX_WALL_SECONDS) expires. post_process handles citation normalization, chart/office marker substitution, LastAnswerObject construction, and DB persistence — no LLM call needed when think already wrote the answer.
 
 **Sub-agents:** `retrieve_parallel` spawns 2-4 parallel retrieval sub-agents for complex multi-part queries. `create_office_document` delegates to an Office sub-agent (load skill → generate → inspect → edit) for PPTX/DOCX/XLSX generation.
 
-**Atomic tool registry:** `search_dense`, `search_sparse`, `search_exact`, `rerank_results`, `graph_expand`, `kb_search_documents`, `kb_outline`, `kb_read`, `kb_grep`, `kb_metadata`, `current_datetime`, `code_execute`, `chart_generate`, `summarize_answer`, `extract_data`, `retrieve_parallel`, `create_office_document`. See `docs/atomic-tools-redesign.md` for the full design.
+**Atomic tool registry:** `semantic_search`, `keyword_search`, `rerank_results`, `graph_expand`, `title_search`, `kb_outline`, `file_read`, `kb_grep`, `kb_metadata`, `current_datetime`, `code_execute`, `chart_generate`, `summarize`, `extract_data`, `retrieve_parallel`, `create_office_document`. See `docs/atomic-tools-redesign.md` for the full design.
 
 ## Document Ingestion Pipeline
 

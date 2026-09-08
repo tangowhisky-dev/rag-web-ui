@@ -101,7 +101,7 @@ it doesn't need the user to pre-filter.
 
 **Register in:** `backend/app/services/agentic_rag/tools/__init__.py`
 - Add `KbMetadataTool` to `_TOOL_CLASSES`
-- Gate on `has_kb` (same as kb_grep/kb_read/kb_outline)
+- Gate on `has_kb` (same as kb_grep/file_read/kb_outline)
 
 **Verification:**
 - Unit test: each action returns correct shape.

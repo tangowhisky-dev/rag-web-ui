@@ -89,7 +89,7 @@ they were "removed and propagated through" was slightly overstated.
    (3 sub-tests: unit, no-docs, end-to-end)
 8. `TestObservationNonDuplicationAcrossTurns` — observations reset between
    turns
-9. `TestPreviousAnswerAction` — summarize_answer uses last_answer_object
+9. `TestPreviousAnswerAction` — summarize uses last_answer_object
 
 **Key infrastructure:**
 - `_ScriptedLLM` — mocks LLM with per-role script queues (plan, think,
@@ -181,7 +181,7 @@ produces data — a separate issue to address.
 7. **Observation reset:** `load_context_node` correctly resets observations
    between turns — no leakage from prior turns
 8. **Previous answer action:** `last_answer_object` from Turn 1 is available
-   to Turn 2, and `summarize_answer` uses it
+   to Turn 2, and `summarize` uses it
 
 ### Follow-ups Identified
 - **`applicable_tools` doesn't check code_execute results** — after

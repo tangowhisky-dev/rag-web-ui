@@ -49,11 +49,9 @@ agent_loop:
 ```
 
 **Budgets** (configurable, env-driven):
-- `AGENT_MAX_ITERATIONS` (default 8) — hard cap on think-act-observe cycles.
-- `AGENT_MAX_RETRIEVALS` (default 3) — cap on `rag_retrieve` calls per turn (prevents retrieval loops).
-- `AGENT_MAX_CODE_EXEC` (default 3) — cap on `code_execute` calls.
-- `AGENT_MAX_REFLECTIONS` (default 2) — cap on explicit reflect steps.
-- Per-tool token budget on observations (see `05-context-memory.md`).
+- `AGENT_TOTAL_TOOL_BUDGET` (default 25) — shared pool of tool calls per user query.
+- `AGENT_MAX_CLARIFY` (default 2) — clarification rounds per user query.
+- `AGENT_MAX_SAME_TOOL_REPEAT` (default 3) — max consecutive identical-argument calls for any tool.
 
 **Why a loop, not a bigger DAG:** the whole point of agency is that the next action depends on the last observation. A DAG encodes that as ever-more-conditional edges until the graph is unreadable. A loop with a tool-calling LLM is the standard pattern (ReAct, OpenAI function-calling, LangGraph `ToolNode`).
 
@@ -65,7 +63,6 @@ Use LangGraph's native tool-calling pattern, not a hand-rolled loop:
 - `think_node` — calls `ChatOpenAI.bind_tools(tool_registry).astream(...)`, parses the tool-call or final-answer signal.
 - `tool_node` — a `ToolNode`-style dispatcher that runs the called tool and writes the result to `observations`.
 - `reflect_node` — runs every K iterations (conditional edge on `iteration % K == 0`).
-- Conditional edge after `think_node`: if tool call → `tool_node`; if final answer → `finalize`; if `iteration >= AGENT_MAX_ITERATIONS` → `finalize` (force).
 - `interrupt()` preserved for clarification (now callable from any tool, not just the classifier).
 
 The existing retrieval nodes (`dense_retrieval_node`, `sparse_retrieval_node`, `exact_retrieval_node`, `merge_node`, `reranking_node`, `filter_node`, `neo4j_expansion_node`) become the *internals* of the `rag_retrieve` tool, not top-level graph nodes. The `agent_subgraph` and `sequential_subtask_loop` are deleted; subtask decomposition becomes a planning step inside `plan_node`, and subtasks are executed as sequential tool calls within the loop.
@@ -89,7 +86,7 @@ class Subtask(BaseModel):
     description: str
     tool_hint: Literal["rag_retrieve", "file_read", "file_summarize",
                        "file_extract_table", "code_execute", "chart_generate",
-                       "summarize_answer", "extract_data", "any"]
+                       "summarize", "extract_data", "any"]
     depends_on: list[str]          # subtask ids whose results this needs
     expected_output: str           # what the agent expects to get back
 ```
@@ -125,10 +122,10 @@ All tools are offline. Each is a LangChain `BaseTool` subclass with `arun` (asyn
 | `rag_retrieve` | Existing 3-leg retrieval + reranking + confidence + Neo4j expansion (graph_expand flag) | Needs facts/evidence from KB; entity/relationship questions |
 | `file_read` | New: read attached file markdown, optionally a section | "Summarise this file", "show me section 3" |
 | `file_summarize` | New: map-reduce chunked summarization | Large file summarization (overflows 25% budget) |
-| `file_extract_table` | New: extract tables from CSV/Excel/HTML in attached file | "Give me the data in the table" |
+| `file_extract_table` | New: extract tables from CSV/XLSX/XLS in attached file | "Give me the data in the table" |
 | `code_execute` | New: RestrictedPython sandbox | Computation, data transform, stats |
 | `chart_generate` | New: data → ECharts option builder (deterministic) | "Make it a pie chart" with data in hand |
-| `summarize_answer` | New: summarize the `last_answer_object` or a cited prior turn | "Summarise it in 10 points" |
+| `summarize` | New: summarize the `last_answer_object` or a cited prior turn | "Summarise it in 10 points" |
 | `extract_data` | New: pull numbers/stats from `last_answer_object`, fresh retrieved docs, or file content | "Give me key statistics" → feed into `chart_generate` |
 | `clarify` | Existing `interrupt()` mechanism | Genuinely ambiguous mid-execution |
 
@@ -206,7 +203,7 @@ Every tool receives a `ToolContext` containing the authenticated `user_id`, `org
 - `rag_retrieve`: confirm every `kb_id` belongs to the user (or the user's org hierarchy, for admin/super_admin) via the existing `rbac.py` filters. Drop any ids the user cannot access; log dropped ids.
 - `file_read` / `file_summarize` / `file_extract_table`: confirm `file_id` belongs to a `ChatFile` in a chat owned by `user_id`. No cross-user file access.
 - `code_execute`: no resource check, but the sandbox denylist (no network, no filesystem writes outside the scratch dir) is enforced regardless of arguments.
-- `summarize_answer` / `extract_data`: if `message_id` is specified, confirm it belongs to a chat owned by `user_id`.
+- `summarize` / `extract_data`: if `message_id` is specified, confirm it belongs to a chat owned by `user_id`.
 
 The planner LLM is **not trusted** to scope resources correctly — a prompt-injected query could ask the planner to pass another org's `kb_id`. The tool is the enforcement boundary. If entitlements fail, the tool returns `{"ok": false, "error": "not entitled to kb_id ..."}` as an observation; the agent sees this and proceeds without that data (or asks for clarification).
 
@@ -251,11 +248,9 @@ The reflect node runs every `AGENT_REFLECT_EVERY` iterations (default 2) and as 
 
 | Last observation | Reflect action |
 |---|---|
-| `rag_retrieve` returned 0 docs or `sufficient=False` | Rewrite the query (synonyms, broader terms, remove over-specific qualifiers) and re-retrieve. Counts against `AGENT_MAX_RETRIEVALS`. If cap reached, proceed to finalize with a "KB does not contain this" answer. |
 | `rag_retrieve` returned docs but they don't answer the question (reflect LLM judges) | Reformulate and re-retrieve, OR call `extract_data` on the retrieved docs to see if the answer is in there in structured form. |
 | `file_read` returned `truncated=True` and the user wanted the whole file | Switch to `file_summarize` for the rest. |
 | `file_summarize` returned a summary but user wanted specific stats | Call `extract_data` on the file content with a focused `what` parameter. |
-| `code_execute` returned stderr | The agent sees the error in the observation and can retry with fixed code (counts against `AGENT_MAX_CODE_EXEC`). Reflect prompts: "the code failed with X; fix it." |
 | `chart_generate` returned `valid=False` | The builder already attempted a fix internally. If still invalid, reflect instructs the agent to re-extract the data (`extract_data`) and re-call `chart_generate`. No LLM-generated JSON retry — the deterministic builder is the path. |
 | `extract_data` returned empty | The source text has no extractable numbers. Reflect instructs the agent to tell the user "no statistics found in the source." |
 | All subtasks complete and instruction satisfied | Emit final-answer signal. |
@@ -321,8 +316,6 @@ To keep the diff reviewable and avoid two parallel pipelines, the rigid-path nod
 | Failure | Loop behavior |
 |---|---|
 | Tool throws | Observation = `{"ok": false, "error": str(e)}`. Reflect node applies recovery rules (§7). |
-| Retrieval returns nothing | Observation = empty results. Reflect rewrites query and re-retrieves (counts against `AGENT_MAX_RETRIEVALS`); if cap reached, finalize with "KB does not contain this." |
-| Code execution errors | Sandbox returns stderr. Agent can retry with fixed code (counts against `AGENT_MAX_CODE_EXEC`). |
 | Chart JSON invalid | `chart_generate` validates internally and returns `valid=False`; reflect instructs re-extract data + re-call builder. No LLM-JSON retry. |
 | Iteration budget exhausted | `finalize` is forced. Agent emits best-effort answer with a note that it hit the budget. |
 | LLM emits no tool call and no final answer | Treated as final answer (the LLM's text becomes the answer). |
@@ -338,9 +331,9 @@ To keep the diff reviewable and avoid two parallel pipelines, the rigid-path nod
 | Req | How the architecture meets it |
 |---|---|
 | 1. KB Q&A | `rag_retrieve` (with `graph_expand`) wraps the existing strong retrieval. Iterative retrieval (loop + reflect replanning) fixes the one-shot gap. `code_execute` + `file_extract_table` handle structured KB data. `extract_data` works on fresh retrieved docs, not just previous answers. |
-| 2. Multi-turn intent | `plan_node` runs each turn with `last_answer_object`, file metadata, and recalled memory as inputs. Intent is a planner output, not a regex. `summarize_answer` / `extract_data` / `chart_generate` are explicit act-on-previous-answer tools. |
+| 2. Multi-turn intent | `plan_node` runs each turn with `last_answer_object`, file metadata, and recalled memory as inputs. Intent is a planner output, not a regex. `summarize` / `extract_data` / `chart_generate` are explicit act-on-previous-answer tools. |
 | 3. Complex multi-subtask | `plan_node` emits subtasks with `depends_on` and `tool_hint`. Independent subtasks dispatch in parallel (§6); dependent ones run sequentially with outputs as later inputs. Re-planning via `reflect_node` (§7). |
-| 4. Summarize files/answers | `file_summarize` (map-reduce, chunked) handles large files. `summarize_answer` handles previous answers. Instruction-following is checked in `reflect_node`'s final pass ("did we deliver the 10 points requested?"). |
+| 4. Summarize files/answers | `file_summarize` (map-reduce, chunked) handles large files. `summarize` handles previous answers. Instruction-following is checked in `reflect_node`'s final pass ("did we deliver the 10 points requested?"). |
 | 5. Context management | Token-based compaction, sliding window with importance, `last_answer_object` as a compact referent, proactive long-term recall. See `05-context-memory.md`. |
 | 6. Charts | `chart_generate` builds ECharts JSON deterministically from data (from `code_execute` or `extract_data`), not from LLM free-form JSON. |
 | Enterprise constraints | Per-tool RBAC re-checks (§5.1), tool-call audit log (§5.2), unified guardrail prompt (§3.3), offline tool-calling fallback (§3.2). |

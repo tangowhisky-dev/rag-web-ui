@@ -186,7 +186,6 @@ START
 - `messages` (recent 3 turns for multi-turn context)
 - `last_answer_object` (for "summarize it" / "chart it" follow-ups)
 - `reflection_final` (if reflect_final sent us back — includes reasoning about what's missing)
-- `iteration` (current loop count), `max_iter` (AGENT_MAX_ITERATIONS, default 8)
 - Available tools (filtered by context — no file tools if no file attached)
 
 **What it does:**
@@ -210,7 +209,6 @@ START
 **SSE events:** `4: agent_step`
 
 **Routing after think (`route_think`):**
-- `iteration >= AGENT_MAX_ITERATIONS` → `reflect_final` (forced)
 - `tool_calls` non-empty → `tool`
 - `tool_calls` empty (final_answer signal) → `reflect_final`
 
@@ -224,7 +222,6 @@ START
 
 **What it does:**
 1. For each tool call:
-   - Check per-tool budget (`AGENT_MAX_RETRIEVALS=3`, `AGENT_MAX_CODE_EXEC=3`) — if exceeded, return error observation
    - Stream `tc:` event (tool name + args)
    - Execute the tool asynchronously (tools run in parallel via `asyncio.gather`)
    - Each tool internally: enforce RBAC → execute → write audit row → return structured result
@@ -235,10 +232,10 @@ START
 - `rag_retrieve` — 3-leg hybrid retrieval (dense/sparse/exact) + reranking + filter + Neo4j graph expansion + adaptive reranking. Returns `{docs, confidence, confidence_level, sufficient}`. Internally calls embedding API, Qdrant, MySQL FTS, reranker model, Neo4j.
 - `file_read` — Read attached file markdown, optionally a section
 - `file_summarize` — Map-reduce chunked summarization (LLM call)
-- `file_extract_table` — Extract tables from CSV/Excel/HTML
+- `file_extract_table` — Extract tables from CSV/XLSX/XLS
 - `code_execute` — RestrictedPython sandbox
 - `chart_generate` — ECharts option builder (deterministic)
-- `summarize_answer` — Summarize last_answer_object or cited prior turn (LLM call)
+- `summarize` — Summarize last_answer_object or cited prior turn (LLM call)
 - `extract_data` — Extract numbers/stats from last_answer/retrieved_docs/file (LLM call)
 
 **Outputs:** `observations` (accumulated list), `tool_calls` (cleared), `tool_call_count` (updated), `retrieved_docs` (if rag_retrieve ran)
@@ -299,7 +296,6 @@ START
    - **Check 4:** Tool failures (non-budget-exceeded) → not ready
    - All checks pass → ready=True, "All planned steps have supporting tool results."
 
-3. **Force finalize:** if `not ready AND iteration >= AGENT_MAX_ITERATIONS` → ready=True (can't retry, ship what we have)
 
 **Outputs:** `reflection_final: {ready: bool, reasoning: str}`
 
@@ -387,9 +383,6 @@ This is the core agent loop. Each iteration:
 3. reflect runs every K iterations (default 2) and may inject deterministic recovery rules
 4. think sees the new observation and decides the next action
 
-The loop is bounded by `AGENT_MAX_ITERATIONS=8`. Per-tool budgets also apply:
-- `AGENT_MAX_RETRIEVALS=3` — max rag_retrieve calls
-- `AGENT_MAX_CODE_EXEC=3` — max code_execute calls
 
 When a budget is exceeded, the tool_node returns an error observation ("Budget exceeded") instead of executing. The think LLM sees this and should stop calling that tool.
 
@@ -399,13 +392,11 @@ think → (final_answer=true) → reflect_final → (ready=false) → think → 
 ```
 When think emits `final_answer=true`, it's not done yet — reflect_final checks structural completeness. If a subtask has no tool result, or a tool failed, or retrieval returned nothing, reflect_final sends the agent back to think. The reasoning is injected into think's prompt so the LLM knows what's missing.
 
-This loop is bounded by the same `AGENT_MAX_ITERATIONS` counter. When the cap is hit, reflect_final forces `ready=true` and the agent ships the best answer it has.
 
 ### Branch 4: Forced finalize at iteration cap
 ```
 think → (iteration >= MAX) → reflect_final → (forced ready=true) → finalize
 ```
-Regardless of what think emits (tool calls or final answer), if `iteration >= AGENT_MAX_ITERATIONS`, `route_think` routes to `reflect_final`. reflect_final sees the cap and forces `ready=true`. The answer is generated from whatever observations exist.
 
 ### Branch 5: Precomputed tool calls (from reflect_node)
 ```

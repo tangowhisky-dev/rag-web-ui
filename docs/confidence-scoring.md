@@ -36,10 +36,10 @@ score in `state.retrieved_docs`:
 
 - **Cross-encoder reranker score** (`_reranker_score`): sigmoid-normalized to 0–1
   (cross-encoder scores can be negative; sigmoid maps them to 0–1)
-- **Dense cosine similarity** (`score` from `search_dense`): already 0–1, used directly
-- **SPLADE sparse score** (`score` from `search_sparse`): clamped to 0–1 (can be 0–10+)
-- **MySQL FTS score** (`score` from `search_exact`): clamped to 0–1 (can be 0–10+)
-- **Document-level match** (`kb_search_documents`, `kb_read`): set to 0.9 (high confidence by definition)
+- **Dense cosine similarity** (`score` from `semantic_search`): already 0–1, used directly
+- **SPLADE sparse score** (`score` from `keyword_search`): clamped to 0–1 (can be 0–10+)
+- **MySQL FTS score** (`score` from `keyword_search`): clamped to 0–1 (can be 0–10+)
+- **Document-level match** (`title_search`, `file_read`): set to 0.9 (high confidence by definition)
 
 The best score across all observations is stored in `state.best_retrieval_confidence`
 and read by `answer_evaluation_node`.

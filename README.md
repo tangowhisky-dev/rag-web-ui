@@ -22,19 +22,19 @@ The system uses a unified agent loop with composable atomic tools that the LLM c
 
 - Pipeline: `load_context → think ⇄ tool → post_process → END` — one prompt, one loop
 - The LLM reasons, calls tools, decides when evidence is sufficient, and writes the answer — no separate planner, sufficiency checker, or finalizer
-- Atomic search tools: `search_dense` (Qdrant vector), `search_sparse` (SPLADE), `search_exact` (MySQL FULLTEXT) — the LLM selects the right tool based on query nature
+- Atomic search tools: `keyword_search` (MySQL FTS + SPLADE), `semantic_search` (Qdrant dense vector), `title_search` (document-level) — the LLM selects the right tool based on query nature
 - Cross-encoder `rerank_results` with provenance validation: rejects LLM-fabricated hits, auto-falls back to `state.retrieved_docs`
 - `graph_expand` for Neo4j knowledge graph traversal after search
-- Document-level tools: `kb_search_documents`, `kb_outline`, `kb_read`, `kb_grep`, `kb_metadata` for named-document queries and section-level reading
-- Processing tools: `code_execute`, `chart_generate`, `extract_data` for computation and visualization
+- Document-level tools: `title_search`, `kb_outline`, `file_read`, `kb_grep`, `kb_metadata` for named-document queries and section-level reading
+- Processing tools: `code_execute`, `chart_generate`, `extract_data`, `file_extract_table` for computation, visualization, and spreadsheet extraction
 - `retrieve_parallel` sub-agent: parallel retrieval for complex multi-part queries with independent sub-questions (2-4 sub-queries)
 - `create_office_document` sub-agent: generates PPTX/DOCX/XLSX files via OfficeCLI (load skill → generate → inspect → edit)
-- Per-turn tool-call budgets and wall-clock timeout (600s default)
+- Total tool-call budget per query and wall-clock timeout (600s default); only `clarify` has a per-query cap
 - Citation provenance: every evidence item carries `citation_ref` metadata (source tool, document_id, chunk_index, content_hash)
 - Citation normalization: `[E1]`, `[N](N)`, and bare `[N]` formats all normalized to `[N]` links with provenance
 - Office creation guard: if the query asks for a file but `create_office_document` was never called, the think node forces the tool call
 
-**Retrieval:** 3-leg hybrid search (dense vector via Qdrant, sparse via SPLADE, exact via MySQL FULLTEXT) with native Qdrant MMR diversity and recency-aware dedup (exact + semantic). Optional **GraphRAG** adds entity/relationship extraction into Neo4j for graph-traversal expansion.
+**Retrieval:** hybrid search (keyword via MySQL FULLTEXT + SPLADE, semantic via Qdrant dense vector) with native Qdrant MMR diversity and recency-aware dedup. Optional **GraphRAG** adds entity/relationship extraction into Neo4j for graph-traversal expansion.
 
 **Multi-tenancy:** Admins create organisations, assign users and data sources to orgs, and configure org-specific LLM settings.
 
@@ -126,8 +126,7 @@ Copy `.env.example` to `.env` and set these values:
 | `OPENAI_API_KEY` | yes | API key for your LLM provider | `sk-...` or `lmstudio` |
 | `OPENAI_API_BASE` | yes | Base URL of OpenAI-compatible API | `https://api.openai.com/v1` |
 | `OPENAI_MODEL` | yes | Main response-generation model | `gpt-4o` |
-| `QUERY_MODEL` | no | Model for query rewriting and rolling summarisation. Falls back to `OPENAI_MODEL`. | `gpt-4o-mini` |
-| `REASONING_MODEL` | no | Reserved for reasoning/CoT support; currently unused by the active pipeline. | `o3-mini` |
+| `UTILITY_MODEL` | no | Utility model for query rewriting, rolling summarisation, and reasoning/CoT. Falls back to `OPENAI_MODEL`. | `gpt-4o-mini` |
 | `VISION_MODEL` | no | Multimodal model for OCR of scanned PDFs and embedded images. | `gpt-4o-mini` |
 | `OPENAI_VISION_API_BASE` | no | Base URL for vision model if on a different server. Falls back to `OPENAI_API_BASE`. | `http://host.docker.internal:11434/v1` |
 | `DENSE_EMBEDDINGS_MODEL` | yes | Embedding model name | `text-embedding-3-small` |
@@ -139,9 +138,7 @@ Copy `.env.example` to `.env` and set these values:
 OPENAI_API_KEY=lmstudio
 OPENAI_API_BASE=http://host.docker.internal:1234/v1
 OPENAI_MODEL=your-chat-model
-QUERY_MODEL=your-fast-model
-# REASONING_MODEL is currently unused by the active pipeline — leave empty or remove.
-# REASONING_MODEL=your-reasoning-model
+UTILITY_MODEL=your-fast-model
 VISION_MODEL=your-vision-model         # optional
 DENSE_EMBEDDINGS_MODEL=your-embedding-model
 DENSE_EMBEDDING_DIM=1024
@@ -155,7 +152,7 @@ The unified agent loop gives the LLM autonomous control over composable atomic t
 load_context → think ⇄ tool → post_process → END
 ```
 
-One prompt, one loop. The think node is a single LLM call that reasons over the query, retrieved evidence, and observations, then either calls a tool or writes the final answer. No separate planner, sufficiency checker, or finalizer. The tool node dispatches calls in parallel, emits `tc:`/`to:` SSE events, and returns observations. The loop continues until the LLM writes the answer, the iteration cap is reached, or the wall-clock budget expires. post_process handles citation normalization, chart/office marker substitution, and DB persistence — no LLM call needed when the think node already wrote the answer.
+One prompt, one loop. The think node is a single LLM call that reasons over the query, retrieved evidence, and observations, then either calls a tool or writes the final answer. No separate planner, sufficiency checker, or finalizer. The tool node dispatches calls in parallel, emits `tc:`/`to:` SSE events, and returns observations. The loop continues until the LLM writes the answer, the total tool-call budget is exhausted, or the wall-clock budget expires. post_process handles citation normalization, chart/office marker substitution, and DB persistence — no LLM call needed when the think node already wrote the answer.
 
 **Sub-agents for complex flows:**
 - `retrieve_parallel` — for complex multi-part queries with independent sub-questions, the LLM calls this to spawn 2-4 parallel retrieval sub-agents. Each runs a mini think→tool loop with 8 retrieval tools and returns concise evidence with citations. The main agent synthesizes the merged evidence into one answer.
@@ -165,20 +162,19 @@ One prompt, one loop. The think node is a single LLM call that reasons over the 
 
 | Tool | Purpose |
 |------|---------|
-| `search_dense` | Vector search via Qdrant — semantic/conceptual matching |
-| `search_sparse` | SPLADE sparse embeddings — keyword matching with term expansion |
-| `search_exact` | MySQL fulltext search — exact terms, code, identifiers |
+| `semantic_search` | Vector search via Qdrant — semantic/conceptual matching |
+| `keyword_search` | Keyword search — SPLADE sparse + MySQL fulltext (exact/identifier) matching |
 | `rerank_results` | Cross-encoder reranker — deduplicates and re-scores hits from state |
 | `graph_expand` | Neo4j graph expansion — finds related chunks via entity relationships |
-| `kb_read` | Read a specific section or character range of a KB document |
-| `kb_search_documents` | Document-level retrieval by title, filename, content type, date range |
+| `file_read` | Read a specific section or character range of a KB document |
+| `title_search` | Document-level retrieval by title, filename, content type, date range |
 | `kb_grep` | Regex/term search across KB document text — returns matching lines |
 | `kb_outline` | Heading structure (table of contents) of a KB document |
 | `kb_metadata` | Inspect KB document metadata (fields, values, date ranges, counts) |
 | `extract_data` | Extract structured {label, value} data from docs/answer — accumulates in state |
 | `chart_generate` | Generate ECharts JSON from accumulated data in state |
 | `code_execute` | Execute Python code in a RestrictedPython sandbox |
-| `summarize_answer` | Summarize the current answer or file |
+| `summarize` | Summarize the current answer or file |
 | `current_datetime` | Returns current UTC date/time — for "latest" / "most recent" queries |
 | `retrieve_parallel` | Parallel retrieval sub-agent — 2-4 independent sub-queries (complex queries only) |
 | `create_office_document` | Office sub-agent wrapper — creates PPTX/DOCX/XLSX files |
@@ -190,13 +186,13 @@ All steps are streamed to the UI as a chain-of-thought timeline in real time. To
 Beyond the basic retrieval, the pipeline includes:
 
 - **Native Qdrant MMR** — both dense and sparse legs use Qdrant's Maximal Marginal Relevance to diversify candidates and reduce near-duplicate clustering
-- **Parallel retrieval sub-agents** — for complex multi-part queries, the LLM spawns 2-4 independent retrieval sub-agents via `retrieve_parallel`, each with its own think→tool loop and per-tool caps
+- **Parallel retrieval sub-agents** — for complex multi-part queries, the LLM spawns 2-4 independent retrieval sub-agents via `retrieve_parallel`, each with its own think→tool loop and per-query caps
 - **Office document generation** — `create_office_document` delegates to a sub-agent that handles skill loading, generation, inspection, and editing of PPTX/DOCX/XLSX files via OfficeCLI
 - **Office creation guard** — if the query asks for a file but `create_office_document` was never called, the think node forces the tool call
 - **Citation normalization** — `[E1]`, `[N](N)`, and bare `[N]` formats all normalized to `[N]` links with provenance metadata
-- **KB exploration tools** — `kb_grep`/`kb_outline`/`kb_read` give the agent fine-grained access to document content when chunk-level retrieval is insufficient
+- **KB exploration tools** — `kb_grep`/`kb_outline`/`file_read` give the agent fine-grained access to document content when chunk-level retrieval is insufficient
 - **Tool trace** — collapsible timeline of tool calls during the pipeline (search, graph traversal, file read, code execution, etc.)
-- **Per-tool budgets** — configurable caps on retrieval, code execution, grep, and read calls per turn
+- **Total tool-call budget** — one shared pool of tool calls per user query (default 25 via `AGENT_TOTAL_TOOL_BUDGET`); `AGENT_MAX_CLARIFY` (default 2) is the only per-tool cap
 
 ### Chunking
 
@@ -531,7 +527,7 @@ Login: System=MySQL, Server=`db`, User=`ragwebui`, Password=`ragwebui`, Database
 - **Cross-encoder reranking**: retrieved candidates re-ranked by a local cross-encoder before context assembly
 - **Parallel retrieval sub-agents**: for complex multi-part queries, the LLM spawns 2-4 independent retrieval sub-agents via `retrieve_parallel`
 - **Office document generation**: `create_office_document` sub-agent creates PPTX/DOCX/XLSX files via OfficeCLI with automatic skill loading, generation, inspection, and editing
-- **KB exploration tools**: `kb_grep` (regex search across documents), `kb_outline` (heading structure), `kb_read` (section-level reading) — last resort when chunk retrieval is insufficient
+- **KB exploration tools**: `kb_grep` (regex search across documents), `kb_outline` (heading structure), `file_read` (section-level reading) — last resort when chunk retrieval is insufficient
 - **Chat file upload**: attach any supported document; content injected directly into pipeline (not indexed); 10 MB size limit + 25% context-window token budget; smart section extraction
 - **Chat features**: branching (multiple answer variants), folder organisation, message search, chat export (Markdown), message export (PDF/Word/image), pagination (infinite scroll), collapsible sidebar with localStorage persistence
 - **Streaming responses** with real-time AgentTimeline showing each pipeline step (active → done with detail on click)

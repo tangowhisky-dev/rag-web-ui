@@ -64,7 +64,7 @@ async def _dispatch_v2(
 
     Guards:
     1. Total tool-call budget (AGENT_TOTAL_TOOL_BUDGET) — forces answer when exhausted.
-    2. Clarify per-tool cap (AGENT_MAX_CLARIFY) — limits human-in-the-loop rounds.
+    2. Clarify cap (AGENT_MAX_CLARIFY) — limits human-in-the-loop rounds per user query.
     3. Same-argument repeat limit (AGENT_MAX_SAME_TOOL_REPEAT) — blocks the
        (limit + 1)th consecutive call with the exact same arguments; earlier
        duplicates are idempotently reused. Same tool with different arguments
@@ -151,7 +151,7 @@ async def _dispatch_v2(
             executed_flags.append(False)
             continue
 
-        # Clarify per-tool cap (human-in-the-loop safety).
+        # Clarify cap (AGENT_MAX_CLARIFY) — per-query human-in-the-loop safety.
         cap = caps.get(name)
         if cap is not None and counts.get(name, 0) >= cap:
             async def _cap_exceeded(name=name, args=args, cap=cap):

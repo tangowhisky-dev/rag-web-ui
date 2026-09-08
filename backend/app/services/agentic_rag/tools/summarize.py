@@ -1,6 +1,6 @@
 """summarize tool — summarize arbitrary text via single-call or map-reduce.
 
-Replaces the former summarize_answer and file_summarize tools. Takes raw
+Consolidates answer and file summarization under a single `summarize` tool. Takes raw
 text as input (the model retrieves it via file_read or uses conversation
 context). Auto-selects single-call for small text or map-reduce for large
 text. Errors if input exceeds the token cap instead of silently truncating.

@@ -166,7 +166,7 @@
 
   <!-- AGENT LOOP -->
   <div class="loop">
-    <div class="loop-label">AGENT LOOP (max AGENT_MAX_ITERATIONS, max AGENT_MAX_WALL_SECONDS)</div>
+    <div class="loop-label">AGENT LOOP (max AGENT_TOTAL_TOOL_BUDGET, max AGENT_MAX_WALL_SECONDS)</div>
 
     <!-- THINK -->
     <div class="node node-llm">
@@ -190,23 +190,24 @@
 
         <!-- Available tools -->
         <div class="sub-pipeline" style="margin-top: 12px;">
-          <div class="sub-pipeline-label">MAIN-AGENT TOOLS (13 — filtered by context)</div>
+          <div class="sub-pipeline-label">MAIN-AGENT TOOLS (filtered by context)</div>
           <div class="tools-grid">
-            <div class="tool-item"><strong>search_dense</strong><small>Vector search via Qdrant. Semantic/conceptual matching.</small></div>
-            <div class="tool-item"><strong>search_sparse</strong><small>SPLADE sparse embeddings. Keyword matching with term expansion.</small></div>
-            <div class="tool-item"><strong>search_exact</strong><small>MySQL fulltext search. Exact terms, code, identifiers.</small></div>
+            <div class="tool-item"><strong>keyword_search</strong><small>MySQL FTS + SPLADE. Code, identifiers, jargon, exact terms.</small></div>
+            <div class="tool-item"><strong>semantic_search</strong><small>Dense vector search via Qdrant. Conceptual/paraphrase matching.</small></div>
             <div class="tool-item"><strong>rerank_results</strong><small>Cross-encoder reranker. Reads hits from state. Deduplicates and re-scores.</small></div>
             <div class="tool-item"><strong>graph_expand</strong><small>Neo4j graph expansion. Seeds from state automatically.</small></div>
-            <div class="tool-item"><strong>kb_read</strong><small>Read specific section/char range of a KB document.</small></div>
-            <div class="tool-item"><strong>kb_search_documents</strong><small>Document-level retrieval by title, filename, type, date. Returns full markdown.</small></div>
+            <div class="tool-item"><strong>title_search</strong><small>Document-level retrieval by title, filename, type, date. Returns full markdown.</small></div>
             <div class="tool-item"><strong>kb_grep</strong><small>Regex/term search across KB document text.</small></div>
+            <div class="tool-item"><strong>file_read</strong><small>Read specific section/char range of a KB document or attached chat file.</small></div>
             <div class="tool-item"><strong>kb_outline</strong><small>Heading structure (TOC) of a KB document.</small></div>
             <div class="tool-item"><strong>kb_metadata</strong><small>Inspect KB document metadata (fields, values, date ranges, counts).</small></div>
             <div class="tool-item"><strong>extract_data</strong><small>Extract structured {label, value} data from docs/answer. Accumulates in state.</small></div>
             <div class="tool-item"><strong>chart_generate</strong><small>Generate ECharts JSON. Reads from state.accumulated_data automatically.</small></div>
             <div class="tool-item"><strong>code_execute</strong><small>RestrictedPython sandbox. For computation on extracted data.</small></div>
-            <div class="tool-item"><strong>summarize_answer</strong><small>Summarize previous answer or file.</small></div>
+            <div class="tool-item"><strong>summarize</strong><small>Summarize previous answer or file.</small></div>
             <div class="tool-item"><strong>current_datetime</strong><small>Returns current UTC date/time. For "latest" / "most recent" queries.</small></div>
+            <div class="tool-item"><strong>file_extract_table</strong><small>Extract tables from CSV/XLSX/XLS attached files.</small></div>
+            <div class="tool-item"><strong>clarify</strong><small>Human-in-the-loop. Asks a focused question when evidence is insufficient.</small></div>
             <div class="tool-item"><strong>retrieve_parallel</strong><small>Parallel retrieval sub-agent. 2-4 independent sub-queries. Complex queries only.</small></div>
             <div class="tool-item"><strong>create_office_document</strong><small>Office sub-agent wrapper. Creates pptx/docx/xlsx. Handles skill load, generate, inspect, edit internally.</small></div>
           </div>
@@ -216,20 +217,20 @@
         <div class="sub-agent-box" style="margin-top: 12px;">
           <div class="sub-agent-label">SUB-AGENT: retrieve_parallel (complex queries only)</div>
           <div class="node-desc" style="margin-bottom: 8px;">
-            The LLM decides when to parallelize. For simple queries, it calls search_dense/search_exact directly. For complex multi-part queries with independent sub-questions, it calls retrieve_parallel. Each sub-agent runs a mini think→tool loop with 8 retrieval tools, returns concise evidence with citations.
+            The LLM decides when to parallelize. For simple queries, it calls keyword_search/semantic_search directly. For complex multi-part queries with independent sub-questions, it calls retrieve_parallel. Each sub-agent runs a mini think→tool loop with retrieval tools, returns concise evidence with citations.
           </div>
           <div class="tools-grid">
-            <div class="tool-item-sub"><strong>search_dense</strong><small>Semantic search</small></div>
-            <div class="tool-item-sub"><strong>search_sparse</strong><small>SPLADE search</small></div>
-            <div class="tool-item-sub"><strong>search_exact</strong><small>MySQL FTS</small></div>
-            <div class="tool-item-sub"><strong>kb_search_documents</strong><small>Document retrieval</small></div>
-            <div class="tool-item-sub"><strong>kb_read</strong><small>Read document</small></div>
+            <div class="tool-item-sub"><strong>keyword_search</strong><small>MySQL FTS + SPLADE</small></div>
+            <div class="tool-item-sub"><strong>semantic_search</strong><small>Vector search</small></div>
+            <div class="tool-item-sub"><strong>title_search</strong><small>Document retrieval</small></div>
+            <div class="tool-item-sub"><strong>file_read</strong><small>Read document</small></div>
             <div class="tool-item-sub"><strong>kb_outline</strong><small>Document TOC</small></div>
             <div class="tool-item-sub"><strong>kb_grep</strong><small>Regex search</small></div>
+            <div class="tool-item-sub"><strong>graph_expand</strong><small>Graph expansion</small></div>
             <div class="tool-item-sub"><strong>rerank_results</strong><small>Cross-encoder rerank</small></div>
           </div>
           <div style="font-size: 10px; color: var(--text-dim); margin-top: 8px;">
-            Each sub-agent: max RETRIEVAL_SUBAGENT_MAX_ITERATIONS rounds, per-tool caps, returns top 15 evidence chunks with citation_ref. Results merged and deduplicated, capped at 25 chunks for main agent context.
+            Each sub-agent: uses the inherited total tool-call budget, no per-tool caps. Returns top 15 evidence chunks with citation_ref. Results merged and deduplicated, capped at 25 chunks for main agent context.
           </div>
         </div>
 
@@ -246,7 +247,7 @@
             <div class="tool-item-sub"><strong>office_edit</strong><small>Fix issues (file_id auto-injected)</small></div>
           </div>
           <div style="font-size: 10px; color: var(--text-dim); margin-top: 8px;">
-            Max OFFICE_SUBAGENT_MAX_ITERATIONS rounds. file_id auto-injected from office_generate result via prepare_arguments. Evidence and accumulated_data read from shared state.
+            Uses the inherited total tool-call budget; no per-tool caps. file_id auto-injected from office_generate result via prepare_arguments. Evidence and accumulated_data read from shared state.
           </div>
         </div>
 
@@ -332,13 +333,13 @@
   <p><strong>Key design decisions (v2):</strong></p>
   <ul style="margin: 8px 0 0 20px; line-height: 1.8;">
     <li><strong>One prompt, one loop</strong> — the v1 multi-stage pipeline (plan → clarify → think → tool → sufficiency_check → finalize → answer_scoring → save_memory) is replaced by a single think ⇄ tool loop. The LLM reasons, calls tools, decides when evidence is sufficient, and writes the answer. No separate LLM calls for planning or sufficiency checking.</li>
-    <li><strong>LLM-driven tool selection</strong> — the LLM decides which tools to call based on query type. Simple queries use search_dense directly. Complex multi-part queries use retrieve_parallel. The prompt provides explicit guidance with examples.</li>
-    <li><strong>Sub-agents for complex flows</strong> — retrieve_parallel spawns parallel retrieval sub-agents for independent sub-queries. create_office_document delegates to an Office sub-agent with 4 focused tools. Sub-agents have their own iteration budgets, per-tool caps, and compact result contracts.</li>
+    <li><strong>LLM-driven tool selection</strong> — the LLM decides which tools to call based on query type. Simple queries use keyword_search/semantic_search directly. Complex multi-part queries use retrieve_parallel. The prompt provides explicit guidance with examples.</li>
+    <li><strong>Sub-agents for complex flows</strong> — retrieve_parallel spawns parallel retrieval sub-agents for independent sub-queries. create_office_document delegates to an Office sub-agent with 4 focused tools. Sub-agents share the main agent's total tool-call budget; no separate per-tool caps.</li>
     <li><strong>State-based pass-through</strong> — rerank_results, graph_expand, chart_generate, and create_office_document read inputs from graph state instead of requiring the LLM to pass large data arrays. office_inspect and office_edit auto-inject file_id from the last office_generate result via prepare_arguments.</li>
     <li><strong>Citation provenance</strong> — every hit carries a citation_ref with source_tool, citation_kind (chunk, file, section, range, grep, outline, table), and metadata. post_process normalizes [E1], [N](N), and bare [N] formats to [N] links with provenance.</li>
     <li><strong>Office creation guard</strong> — if the query asks for a file creation (create/generate/make + powerpoint/excel/word/spreadsheet) but create_office_document was never called, the think node forces the tool call. Prevents smaller models from writing "I have created..." without actually calling the tool.</li>
     <li><strong>Deterministic post-processing</strong> — post_process handles citation normalization, chart/office marker substitution, LastAnswerObject construction, and DB persistence. No LLM call needed when the think node already wrote the answer (precomputed_answer path).</li>
-    <li><strong>Per-tool budgets</strong> — configurable caps per tool per turn (e.g. search_dense: 5, extract_data: 5, chart_generate: 3, office_generate: 3). Total tool-call budget across all tools per turn (default 20).</li>
+    <li><strong>Budgets</strong> — one total tool-call budget per user query (default 25). Clarify has a per-query cap (default 2). Same-argument repeat guard (default 3) blocks exact-duplicate loops. No other per-tool caps.</li>
     <li><strong>Compact SSE payload</strong> — tool observations stream only a one-line summary (~96 bytes) instead of the full result. Sub-agent events stream progress, not raw evidence.</li>
     <li><strong>Deduplication by content_hash</strong> — prevents duplicate chunks across search legs, rerank results, graph expansion, and parallel retrieval sub-agents from reaching the final generation call.</li>
     <li><strong>GPU acceleration</strong> — SPLADE sparse embeddings and cross-encoder reranking use CUDAExecutionProvider when FASTEMBED_USE_GPU=true and GPU runtime is configured.</li>

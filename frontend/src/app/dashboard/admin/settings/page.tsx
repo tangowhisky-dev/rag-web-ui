@@ -161,7 +161,6 @@ export default function SuperAdminSettingsPage() {
     { tab: 'Ingestion', cats: ['Ingestion'] },
     { tab: 'Agent', cats: ['Agentic'] },
     { tab: 'Memory & Context', cats: ['Memory', 'Context'] },
-    { tab: 'Quality', cats: ['Quality', 'Query Classification'] },
     { tab: 'System', cats: ['System'] },
   ];
 

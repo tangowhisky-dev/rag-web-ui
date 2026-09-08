@@ -42,14 +42,14 @@ The agent decides WHAT to search and HOW MUCH to read. The search tools decide H
 │                                                               │
 │  Tools available to the LLM (think node):                     │
 │  ┌──────────────────────────────────────────────────────┐    │
-│  │ Discovery: kb_metadata, kb_search_documents,          │    │
+│  │ Discovery: kb_metadata, title_search,          │    │
 │  │            kb_outline, current_datetime               │    │
-│  │ Search:    search_exact, search_sparse, search_dense  │    │
+│  │ Search:    keyword_search, semantic_search  │    │
 │  │            kb_grep                                    │    │
 │  │ Post-search: rerank_results, graph_expand             │    │
-│  │ Read:      kb_read, file_read                         │    │
+│  │ Read:      file_read                         │    │
 │  │ Processing: extract_data, chart_generate,             │    │
-│  │             code_execute, summarize_answer            │    │
+│  │             code_execute, summarize            │    │
 │  └──────────────────────────────────────────────────────┘    │
 │                                                               │
 │  Internal (not LLM-callable, inside search tools):            │
@@ -91,7 +91,7 @@ Each search tool returns hits as a list of dicts:
                     "chunk_index": 5,
                     "page": 3,
                     "quoted_text": "The weekly update covers 4 topics...",
-                    "source_tool": "search_dense",
+                    "source_tool": "semantic_search",
                     "citation_id": "E1"
                 }
             },
@@ -112,14 +112,14 @@ The agent inspects hits, decides whether to rerank, search again with a differen
 
 | Removed | Replaced by |
 |---|---|
-| `rag_retrieve` tool | `search_exact` + `search_sparse` + `search_dense` + `rerank_results` + `graph_expand` |
+| `rag_retrieve` tool | `keyword_search` + `semantic_search` + `rerank_results` + `graph_expand` |
 | `rag_retrieve`'s `legs` parameter | LLM chooses which search tool(s) to call |
 | `rag_retrieve`'s `graph_expand` parameter | `graph_expand` is a separate tool |
 | `rag_retrieve`'s `min_confidence` parameter | LLM decides sufficiency in think loop |
 | `rag_retrieve`'s internal relaxation ladder | LLM adjusts query/strategy on retry |
 | `rag_retrieve`'s internal query rewrite | LLM does this naturally in think loop |
 | `rag_retrieve`'s internal sufficiency check | `sufficiency_check` graph node |
-| `rag_retrieve`'s conditional dense fast-accept | LLM decides whether to call `search_dense` |
+| `rag_retrieve`'s conditional dense fast-accept | LLM decides whether to call `semantic_search` |
 | `expand_query` graph node | Query expansion moves inside search tools |
 | `rewrite_query` graph node | LLM does this in think loop |
 | `reflect` graph node | Replaced by `sufficiency_check` |
@@ -140,7 +140,7 @@ The agent inspects hits, decides whether to rerank, search again with a differen
 | `route_tool` function | Removed (tool node has fixed edge to `sufficiency_check`) |
 | `route_reflect_final` function | Removed (no `reflect_final` node to route from) |
 | `merge_node` in `nodes.py` | Dead (only called from `rag_retrieve.py`); RRF/dedup moves into `rerank_results` |
-| `collapse_same_title_versions` in `nodes.py` | Dead (only called from `merge_node`); `kb_search_documents` has its own independent same-title dedup |
+| `collapse_same_title_versions` in `nodes.py` | Dead (only called from `merge_node`); `title_search` has its own independent same-title dedup |
 | `_elbow_cut`, `filter_node` in `nodes.py` | Dead (only called from `rag_retrieve.py` pipeline); threshold/elbow cut moves into `rerank_results` |
 | `dense_retrieval_node`, `sparse_retrieval_node`, `exact_retrieval_node` in `nodes.py` | Dead (only called from `rag_retrieve.py`); logic moves into atomic search tools |
 | `reranking_node` in `nodes.py` | Dead (only called from `rag_retrieve.py`); logic moves into `rerank_results` tool |
@@ -169,9 +169,9 @@ The agent inspects hits, decides whether to rerank, search again with a differen
 | Post-generation answer scoring and suggestions | Unchanged |
 | Memory/save behavior | Unchanged |
 | `accumulated_data` for extract_data → chart_generate | Unchanged |
-| `kb_metadata`, `kb_search_documents`, `kb_outline`, `kb_read`, `kb_grep` tools | Existing, enhanced with `CitationRef` |
+| `kb_metadata`, `title_search`, `kb_outline`, `file_read`, `kb_grep` tools | Existing, enhanced with `CitationRef` |
 | `file_read`, `file_summarize`, `file_extract_table` tools | Existing, enhanced with `CitationRef` |
-| `code_execute`, `chart_generate`, `extract_data`, `summarize_answer` tools | Existing |
+| `code_execute`, `chart_generate`, `extract_data`, `summarize` tools | Existing |
 | `current_datetime` tool | Existing |
 | Compaction logic | Existing, enhanced to preserve `CitationRef` metadata |
 | `_verify_execution`, `_build_execution_summary` | Moved to `execution_check.py`, rewritten for atomic tools, but the verification concept is retained |
@@ -187,11 +187,11 @@ The agent inspects hits, decides whether to rerank, search again with a differen
 
 ### 3.1 New search tools
 
-#### `search_exact`
+#### `keyword_search`
 
 MySQL FULLTEXT search across `document_chunks.chunk_text` and `documents.title`. Title matches weighted 2×. Fast, good for exact terms, code identifiers, title lookups.
 
-**File**: `backend/app/services/agentic_rag/tools/search_exact.py`
+**File**: `backend/app/services/agentic_rag/tools/keyword_search.py`
 
 **Schema** (`SearchExactInput`):
 
@@ -209,7 +209,7 @@ class SearchExactInput(BaseModel):
 2. Call `exact_search_docs()` from `retrieval.py`.
 3. Internally run synonym expansion (Redis-cached, same as current `_expand_synonyms`).
 4. Apply `EXACT_MIN_SCORE` threshold.
-5. Return hits with `CitationRef(citation_kind="chunk", source_tool="search_exact")`.
+5. Return hits with `CitationRef(citation_kind="chunk", source_tool="keyword_search")`.
 
 **Returns**:
 ```python
@@ -221,11 +221,11 @@ class SearchExactInput(BaseModel):
 }
 ```
 
-#### `search_sparse`
+#### `keyword_search`
 
 Qdrant SPLADE sparse vector search. Good for keyword matching across long documents.
 
-**File**: `backend/app/services/agentic_rag/tools/search_sparse.py`
+**File**: `backend/app/services/agentic_rag/tools/keyword_search.py`
 
 **Schema** (`SearchSparseInput`): same fields as `SearchExactInput`.
 
@@ -233,13 +233,13 @@ Qdrant SPLADE sparse vector search. Good for keyword matching across long docume
 1. Resolve `filters` to `document_ids`.
 2. Call `sparse_search_docs()` from `retrieval.py` (includes synonym RRF fusion).
 3. Apply `SPARSE_MIN_SCORE` threshold.
-4. Return hits with `CitationRef(citation_kind="chunk", source_tool="search_sparse")`.
+4. Return hits with `CitationRef(citation_kind="chunk", source_tool="keyword_search")`.
 
-#### `search_dense`
+#### `semantic_search`
 
 Qdrant dense vector search. Good for semantic/conceptual matching.
 
-**File**: `backend/app/services/agentic_rag/tools/search_dense.py`
+**File**: `backend/app/services/agentic_rag/tools/semantic_search.py`
 
 **Schema** (`SearchDenseInput`): same fields as `SearchExactInput`.
 
@@ -247,7 +247,7 @@ Qdrant dense vector search. Good for semantic/conceptual matching.
 1. Resolve `filters` to `document_ids`.
 2. Call `dense_search_docs()` from `retrieval.py`.
 3. Apply `DENSE_MIN_SCORE` threshold.
-4. Return hits with `CitationRef(citation_kind="chunk", source_tool="search_dense")`.
+4. Return hits with `CitationRef(citation_kind="chunk", source_tool="semantic_search")`.
 
 #### `rerank_results`
 
@@ -315,11 +315,11 @@ class GraphExpandInput(BaseModel):
 
 ### 3.2 Existing tools — enhancements only
 
-#### `kb_search_documents`
+#### `title_search`
 
 **Enhancement**: Attach `CitationRef(citation_kind="file")` to each returned document.
 
-#### `kb_read`
+#### `file_read`
 
 **Enhancement**: Attach `CitationRef` with kind based on read mode:
 - Full file read → `citation_kind="file"`
@@ -340,7 +340,7 @@ class GraphExpandInput(BaseModel):
 
 **Enhancement**: Attach `CitationRef(citation_kind="table")` with `section` or `start_char`/`end_char` from source documents.
 
-#### `kb_metadata`, `current_datetime`, `file_read`, `file_summarize`, `file_extract_table`, `code_execute`, `chart_generate`, `summarize_answer`
+#### `kb_metadata`, `current_datetime`, `file_read`, `file_summarize`, `file_extract_table`, `code_execute`, `chart_generate`, `summarize`
 
 No changes to schemas. These tools don't produce citable evidence (or already produce non-chunk evidence that doesn't need `CitationRef`).
 
@@ -383,10 +383,10 @@ Tools become available only after prior tool use, using Pi's `addedToolNames` pa
 
 | Tool | Available after |
 |---|---|
-| `rerank_results` | At least one search tool (`search_exact`, `search_sparse`, `search_dense`) has been called |
+| `rerank_results` | At least one search tool (`keyword_search`, `semantic_search`) has been called |
 | `graph_expand` | At least one search tool has been called |
 | `chart_generate` | `extract_data` or `code_execute` has been called (existing behavior) |
-| `extract_data` | `kb_read`, `kb_search_documents`, or a search tool has been called |
+| `extract_data` | `file_read`, `title_search`, or a search tool has been called |
 
 **Implementation**: Track which tools have been called in `state["tool_call_counts"]`. In `applicable_tools()`, check the counts before including deferred tools.
 
@@ -397,8 +397,8 @@ def applicable_tools(ctx: "ToolContext") -> list:
     counts = state.get("tool_call_counts", {}) if state else {}
     has_file = bool(state.get("file_markdown")) if state else False
     has_data = _has_chart_data(state)
-    has_search = any(counts.get(t, 0) > 0 for t in ("search_exact", "search_sparse", "search_dense"))
-    has_read = any(counts.get(t, 0) > 0 for t in ("kb_read", "kb_search_documents")) or has_search
+    has_search = any(counts.get(t, 0) > 0 for t in ("keyword_search", "semantic_search"))
+    has_read = any(counts.get(t, 0) > 0 for t in ("file_read", "title_search")) or has_search
 
     if not has_file:
         tools = _filter_tools_by_name(tools, ("file_read", "file_summarize", "file_extract_table"))
@@ -456,15 +456,15 @@ class CitationRef(BaseModel):
 
 | Tool | `citation_kind` | Populated fields |
 |---|---|---|
-| `search_exact` | `chunk` | `document_id`, `chunk_index`, `page`, `quoted_text`, `source_tool` |
-| `search_sparse` | `chunk` | `document_id`, `chunk_index`, `page`, `quoted_text`, `source_tool` |
-| `search_dense` | `chunk` | `document_id`, `chunk_index`, `page`, `quoted_text`, `source_tool` |
+| `keyword_search` | `chunk` | `document_id`, `chunk_index`, `page`, `quoted_text`, `source_tool` |
+| `keyword_search` | `chunk` | `document_id`, `chunk_index`, `page`, `quoted_text`, `source_tool` |
+| `semantic_search` | `chunk` | `document_id`, `chunk_index`, `page`, `quoted_text`, `source_tool` |
 | `rerank_results` | `chunk` (passes through from source hits) | Same as source + `source_tool="rerank_results"` |
 | `graph_expand` | `chunk` | `document_id`, `chunk_index`, `page`, `source_tool="graph_expand"` |
-| `kb_search_documents` | `file` | `document_id`, `quoted_text` (first 200 chars), `source_tool="kb_search_documents"` |
-| `kb_read` (full file) | `file` | `document_id`, `quoted_text`, `source_tool="kb_read"` |
-| `kb_read` (section) | `section` | `document_id`, `section`, `start_char`, `end_char`, `source_tool="kb_read"` |
-| `kb_read` (range) | `range` | `document_id`, `start_char`, `end_char`, `start_line`, `end_line`, `source_tool="kb_read"` |
+| `title_search` | `file` | `document_id`, `quoted_text` (first 200 chars), `source_tool="title_search"` |
+| `file_read` (full file) | `file` | `document_id`, `quoted_text`, `source_tool="file_read"` |
+| `file_read` (section) | `section` | `document_id`, `section`, `start_char`, `end_char`, `source_tool="file_read"` |
+| `file_read` (range) | `range` | `document_id`, `start_char`, `end_char`, `start_line`, `end_line`, `source_tool="file_read"` |
 | `kb_grep` | `grep` | `document_id`, `match_line`, `quoted_text`, `source_tool="kb_grep"` |
 | `kb_outline` | `outline` | `document_id`, `source_tool="kb_outline"` |
 | `extract_data` | `table` | `document_id`, `section` or `start_char`/`end_char`, `source_tool="extract_data"` |
@@ -478,13 +478,13 @@ Replace the current `[KB-N]` labeling with `[E1]`, `[E2]`, ... evidence IDs. Eac
 New `format_context_string` output:
 
 ```
-[E1] document="Weekly Update 21-28 Aug 2026.pdf", kind=chunk, chunk=5, page=3, source=search_dense
+[E1] document="Weekly Update 21-28 Aug 2026.pdf", kind=chunk, chunk=5, page=3, source=semantic_search
      "The weekly update covers 4 topics: ..."
 
-[E2] document="Weekly Update 21-28 Aug 2026.pdf", kind=section, section="Topics Covered", source=kb_read
+[E2] document="Weekly Update 21-28 Aug 2026.pdf", kind=section, section="Topics Covered", source=file_read
      "1. API Gateway migration 2. Database sharding ..."
 
-[E3] document="Weekly Update 1-7 Aug 2026.pdf", kind=file, source=kb_search_documents
+[E3] document="Weekly Update 1-7 Aug 2026.pdf", kind=file, source=title_search
      "Weekly Update for Aug 1-7, 2026. Topics: ..."
 ```
 
@@ -755,9 +755,9 @@ async def _retry_failed_calls(
 
 **File**: `backend/app/services/agentic_rag/agent_graph/helpers.py`, `backend/app/core/settings_registry.py`
 
-New setting: `AGENT_TOTAL_TOOL_BUDGET` (default: 20, org-overridable).
+New setting: `AGENT_TOTAL_TOOL_BUDGET` (default 25, org-overridable).
 
-> **Note**: An earlier conversation summary mentioned a default of 15. The canonical value is **20**, consistent across all sections of this document. The total budget must be higher than the sum of per-tool budgets to allow the LLM to compose multiple search strategies (e.g. `search_sparse` + `search_dense` + `rerank_results` + `kb_read`).
+> **Note**: An earlier conversation summary mentioned a default of 15. The canonical value is **25**, consistent across all sections of this document. The total budget must be high enough to allow the LLM to compose multiple search strategies (e.g. `keyword_search` + `semantic_search` + `rerank_results` + `file_read`).
 
 Track total tool calls across all tools in `state["total_tool_calls"]`. When exceeded, force finalize.
 
@@ -771,52 +771,23 @@ if total >= get_setting(ctx.db, "AGENT_TOTAL_TOOL_BUDGET", ctx.org_id):
 state_update["total_tool_calls"] = total
 ```
 
-### 5.3 Per-tool budgets (updated)
+### 5.3 total tool-call budget (updated)
 
 **File**: `backend/app/services/agentic_rag/agent_graph/helpers.py`
 
-New `_tool_call_budget`:
-
-```python
-def _tool_call_budget(db, org_id) -> dict:
-    return {
-        "search_exact": get_setting(db, "AGENT_MAX_SEARCH_EXACT", org_id),
-        "search_sparse": get_setting(db, "AGENT_MAX_SEARCH_SPARSE", org_id),
-        "search_dense": get_setting(db, "AGENT_MAX_SEARCH_DENSE", org_id),
-        "rerank_results": get_setting(db, "AGENT_MAX_RERANK", org_id),
-        "graph_expand": get_setting(db, "AGENT_MAX_GRAPH_EXPAND", org_id),
-        "code_execute": get_setting(db, "AGENT_MAX_CODE_EXEC", org_id),
-        "kb_grep": get_setting(db, "AGENT_MAX_KB_GREP", org_id),
-        "kb_read": get_setting(db, "AGENT_MAX_KB_READ", org_id),
-        "kb_outline": get_setting(db, "AGENT_MAX_KB_READ", org_id),
-        "kb_search_documents": get_setting(db, "AGENT_MAX_KB_SEARCH", org_id),
-        "extract_data": get_setting(db, "AGENT_MAX_EXTRACT_DATA", org_id),
-        "chart_generate": get_setting(db, "AGENT_MAX_CHART_GENERATE", org_id),
-    }
-```
+No per-tool caps are tracked. The only budget-like limits are the shared `AGENT_TOTAL_TOOL_BUDGET` (default 25), `AGENT_MAX_CLARIFY` (default 2), and `AGENT_MAX_SAME_TOOL_REPEAT` (default 3).
 
 New settings in `settings_registry.py`:
 
 ```python
-SettingDef("AGENT_TOTAL_TOOL_BUDGET", "Agentic", "Total tool-call budget", 20, ...),
-SettingDef("AGENT_MAX_SEARCH_EXACT", "Agentic", "Max search_exact calls", 5, ...),
-SettingDef("AGENT_MAX_SEARCH_SPARSE", "Agentic", "Max search_sparse calls", 5, ...),
-SettingDef("AGENT_MAX_SEARCH_DENSE", "Agentic", "Max search_dense calls", 5, ...),
-SettingDef("AGENT_MAX_RERANK", "Agentic", "Max rerank_results calls", 5, ...),
-SettingDef("AGENT_MAX_GRAPH_EXPAND", "Agentic", "Max graph_expand calls", 3, ...),
-SettingDef("AGENT_MAX_KB_SEARCH", "Agentic", "Max kb_search_documents calls", 10, ...),
-SettingDef("AGENT_MAX_EXTRACT_DATA", "Agentic", "Max extract_data calls", 5, ...),
-SettingDef("AGENT_MAX_CHART_GENERATE", "Agentic", "Max chart_generate calls", 3, ...),
+SettingDef("AGENT_TOTAL_TOOL_BUDGET", "Agentic", "Total tool-call budget", 25, ...),
 ```
 
-Remove old settings: `AGENT_MAX_RETRIEVALS` (replaced by per-search-tool caps).
 
-**Critical ordering constraint**: `get_setting()` falls back to `getattr(env_settings, key, None)` for unregistered keys, returning `None`. If new settings (`AGENT_TOTAL_TOOL_BUDGET`, `AGENT_MAX_SEARCH_*`) are used in code before they are added to `settings_registry.py`, arithmetic like `total >= budget` will raise `TypeError: '>=' not supported between int and NoneType`. Similarly, if `AGENT_MAX_RETRIEVALS` is removed from the registry while `_build_execution_summary` or `_tool_call_budget` still call `get_setting(..., "AGENT_MAX_RETRIEVALS", ...)`, the subtraction `max_retrievals - retrieval_queries` will raise `TypeError`.
 
 **Implementation order**:
 1. Add all new settings to `settings_registry.py` first.
 2. Update all code that reads the new settings.
-3. Only then remove `AGENT_MAX_RETRIEVALS` from the registry, after confirming no code reads it.
 
 Also remove these orphaned settings (only used by `rag_retrieve.py`):
 - `ADAPTIVE_RETRIEVAL_ENABLED`, `ADAPTIVE_RETRIEVAL_THRESHOLD`, `ADAPTIVE_RETRIEVAL_RERANKER_THRESHOLD`, `ADAPTIVE_RETRIEVAL_FAST_ACCEPT_SCORE`
@@ -882,7 +853,7 @@ class BaseAgentTool(BaseTool):
 Use cases:
 - `rerank_results`: coerce `hits` from list-of-dicts with varying shapes to a consistent format.
 - `search_*`: normalize `kb_ids` to list of ints, resolve `document_ids` from filters.
-- `kb_read`: normalize `section` to string, `start_char`/`end_char` to ints.
+- `file_read`: normalize `section` to string, `start_char`/`end_char` to ints.
 
 ### 5.6 `_merge_retrieved_docs` update
 
@@ -894,7 +865,7 @@ Update `_merge_observation_docs` to handle hits from the new search tools:
 def _merge_observation_docs(all_observations, seen_hashes, merged_docs):
     from app.services.infrastructure import content_hash as _ch
     best_confidence = 0.0
-    SEARCH_TOOLS = {"search_exact", "search_sparse", "search_dense", "rerank_results", "graph_expand"}
+    SEARCH_TOOLS = {"keyword_search", "semantic_search", "rerank_results", "graph_expand"}
     for obs in all_observations:
         if obs.tool in SEARCH_TOOLS and not obs.error:
             hits = obs.result.get("hits")
@@ -927,7 +898,7 @@ def _merge_observation_docs(all_observations, seen_hashes, merged_docs):
                 scores = [h.get("_reranker_score", 0) for h in hits if h.get("_reranker_score") is not None]
                 if scores and max(scores) > best_confidence:
                     best_confidence = max(scores)
-        elif obs.tool == "kb_search_documents" and not obs.error:
+        elif obs.tool == "title_search" and not obs.error:
             # Same as current: document-level matches
             docs = obs.result.get("docs")
             if isinstance(docs, list):
@@ -940,7 +911,7 @@ def _merge_observation_docs(all_observations, seen_hashes, merged_docs):
                         merged_docs.append(doc)
                 if best_confidence < 0.9:
                     best_confidence = 0.9
-        elif obs.tool == "kb_read" and not obs.error:
+        elif obs.tool == "file_read" and not obs.error:
             # Same as current: single document content
             content = obs.result.get("content", "")
             if content:
@@ -951,7 +922,7 @@ def _merge_observation_docs(all_observations, seen_hashes, merged_docs):
                         "title": obs.result.get("title") or obs.result.get("file_name"),
                         "file_name": obs.result.get("file_name"),
                         "section": obs.result.get("section"),
-                        "source": "kb_read",
+                        "source": "file_read",
                         "_reranker_score": 1.0,
                         "truncated": obs.result.get("truncated", False),
                         "citation_ref": obs.result.get("citation_ref", {}),
@@ -993,7 +964,6 @@ load_context → plan → clarify_interrupt → think → tool → sufficiency_c
 
 **Critical: helpers that must be retained.** `_verify_execution` and `_build_execution_summary` are defined in `reflection.py` (lines 168-255) but are imported and called by `tooling.py` (line 38, 382) and `thinking.py` (line 30, 108) — not just by `reflect_node`/`reflect_final_node`. Deleting them would break the tool and think nodes.
 
-**Action**: Move `_verify_execution`, `_build_execution_summary`, and their sub-helpers (`_count_successful_by_tool`, `_build_subtask_status`, `_retrieval_doc_count`, `_collect_tool_failures`) into a new shared module `backend/app/services/agentic_rag/agent_graph/execution_check.py`. Update imports in `tooling.py`, `thinking.py`, and `agent_graph/__init__.py`. Rewrite `_build_execution_summary` to count atomic search tools instead of `rag_retrieve` and to read `AGENT_TOTAL_TOOL_BUDGET` instead of `AGENT_MAX_RETRIEVALS`.
 
 **Critical: `agent_graph/__init__.py` exports.** The package `__init__.py` re-exports `expand_query_node`, `rewrite_query_node`, `reflect_node`, `reflect_final_node`, `_tried_rag_retrieve_queries`, and includes them in `__all__`. Removing the node functions without updating `__init__.py` will break the entire `agent_graph` package import, which breaks `agent_runner.py`, all API endpoints, and every test that imports from `agent_graph`.
 
@@ -1121,7 +1091,6 @@ def route_think(state) -> str:
     org_id = state.get("org_id")
     _db = SessionLocal()
     try:
-        max_iter = get_setting(_db, "AGENT_MAX_ITERATIONS", org_id)
     finally:
         _db.close()
     if iteration >= max_iter or _wall_clock_exceeded(state):
@@ -1191,7 +1160,7 @@ class AgentState(MessagesState):
 
     # ── NEW: Per-tool call counts (replaces tool_call_count) ──────
     # Used by applicable_tools() for deferred tool gating and by
-    # _tool_call_budget() for per-tool caps.
+    # _tool_call_budget() for per-query caps.
     tool_call_counts: Annotated[dict, _last_value] = {}
 
     # ── NEW: Sufficiency flag ─────────────────────────────────────
@@ -1328,50 +1297,50 @@ You are the planning module for an autonomous knowledge assistant. Given the use
 
 Available tools:
 - current_datetime: returns the current UTC date and time. Call this FIRST when the query involves "latest", "most recent", "newest", "this week", "last month", or any temporal reasoning.
-- search_exact: MySQL fulltext search across chunk text and document titles. Fast. Best for exact terms, code identifiers, title fragments. Supports filters and document_ids.
-- search_sparse: SPLADE sparse vector search. Best for keyword matching across document content. Supports filters and document_ids.
-- search_dense: dense vector search. Best for semantic/conceptual matching. Supports filters and document_ids.
+- keyword_search: MySQL fulltext search across chunk text and document titles. Fast. Best for exact terms, code identifiers, title fragments. Supports filters and document_ids.
+- keyword_search: SPLADE sparse vector search. Best for keyword matching across document content. Supports filters and document_ids.
+- semantic_search: dense vector search. Best for semantic/conceptual matching. Supports filters and document_ids.
 - rerank_results: cross-encoder reranker. Call AFTER one or more search tools when you have multiple hits and need to prioritize. Pass the hits from your search calls. No hard top_n cap — all hits passing the threshold are returned.
 - graph_expand: expand from seed documents/chunks via Neo4j graph. Call when initial search results are insufficient and the KB has graph data.
-- kb_search_documents: document-level retrieval by title, filename, content type, or date range. Returns full converted markdown. Use for named-document queries. Supports metadata_only=true for discovery.
+- title_search: document-level retrieval by title, filename, content type, or date range. Returns full converted markdown. Use for named-document queries. Supports metadata_only=true for discovery.
 - kb_metadata: inspect KB document metadata. Actions: list_fields, unique_values, date_range, list_documents, count_only.
 - kb_outline: get heading structure of a KB document.
-- kb_read: read a specific section or character range of a KB document.
+- file_read: read a specific section or character range of a KB document.
 - kb_grep: regex search across all KB document contents. Returns matching lines with line numbers.
 - file_read: read a section of an attached file.
 - file_summarize: map-reduce summarization of a large attached file.
-- file_extract_table: extract a table from CSV/Excel/HTML in a file.
+- file_extract_table: extract a table from CSV/XLSX/XLS in a file.
 - code_execute: run Python for computation or data transformation.
 - chart_generate: build an ECharts option from structured data. Reads from accumulated_data if no data argument.
-- summarize_answer: summarize the previous answer.
+- summarize: summarize the previous answer.
 - extract_data: pull structured data from retrieved docs, accumulated data, or a file. Results accumulate in state.
 
 Query classification — choose the primary strategy:
 
 1. NAMED-DOCUMENT (user wants a specific document by title/filename):
-   → kb_search_documents with title_contains to find it, then kb_read to read it.
-   → Do NOT use chunk search tools (search_exact/sparse/dense) as the first call.
+   → title_search with title_contains to find it, then file_read to read it.
+   → Do NOT use chunk search tools (keyword_search/sparse/dense) as the first call.
 
 2. CONCEPTUAL (user wants information about a topic):
    → Choose search tool based on query type:
-     - Exact terms/code/identifiers → search_exact
-     - Keyword matching → search_sparse
-     - Semantic/conceptual → search_dense
+     - Exact terms/code/identifiers → keyword_search
+     - Keyword matching → keyword_search
+     - Semantic/conceptual → semantic_search
    → After search, call rerank_results if you got more than 10 hits.
    → Call graph_expand if results are insufficient and KB has graph data.
 
 3. AGGREGATE (user wants summary/count/table/chart across many documents):
    → kb_metadata (count_only or list_documents) first to discover scope.
-   → kb_search_documents (metadata_only=true) to get document list.
-   → Batch: kb_read or extract_data per document → accumulate → chart_generate.
+   → title_search (metadata_only=true) to get document list.
+   → Batch: file_read or extract_data per document → accumulate → chart_generate.
 
 4. EXACT-LOOKUP (user wants an exact term, code, or identifier):
    → kb_grep first (fastest for exact matches).
-   → Fall back to search_exact if grep is insufficient.
+   → Fall back to keyword_search if grep is insufficient.
 
 5. TEMPORAL (user wants latest/oldest/by-date):
    → current_datetime first.
-   → kb_search_documents with date filters and sort by file_modified_at.
+   → title_search with date filters and sort by file_modified_at.
 
 Output a JSON object with this structure:
 {{
@@ -1380,7 +1349,7 @@ Output a JSON object with this structure:
     {{
       "id": "a",
       "description": "...",
-      "tool_hint": "search_dense|search_exact|search_sparse|kb_search_documents|kb_metadata|current_datetime|kb_read|kb_grep|rerank_results|graph_expand|extract_data|chart_generate|...|any",
+      "tool_hint": "semantic_search|keyword_search|title_search|kb_metadata|current_datetime|file_read|kb_grep|rerank_results|graph_expand|extract_data|chart_generate|...|any",
       "depends_on": [],
       "expected_output": "...",
       "suggested_filters": null,
@@ -1398,11 +1367,11 @@ Per-subtask parameters:
 - suggested_filters: {{"title_contains":"..."}} for named documents, {{"content_type":"application/pdf"}} for file types, {{"file_modified_after":"2026-01-01"}} for date ranges.
 - suggested_sort: {{"field":"file_modified_at","direction":"desc"}} for recency.
 - suggested_query: Set when the subtask targets a specific aspect of a multi-part query.
-- suggested_top_n: For kb_search_documents. 3 for "latest", 20-50+ for aggregate queries.
+- suggested_top_n: For title_search. 3 for "latest", 20-50+ for aggregate queries.
 - suggested_metadata_only: true for discovery subtasks.
 - Independent subtasks (no depends_on) dispatch in parallel. Dependent subtasks wait.
 
-Parallel multi-search: for conceptual queries that benefit from both lexical and semantic matching, create two independent subtasks — one with search_sparse, one with search_dense — then a dependent subtask with rerank_results that combines their hits.
+Parallel multi-search: for conceptual queries that benefit from both lexical and semantic matching, create two independent subtasks — one with keyword_search, one with semantic_search — then a dependent subtask with rerank_results that combines their hits.
 
 Rules for needs_clarification:
 - Set true ONLY if the query is genuinely ambiguous or under-specified.
@@ -1427,10 +1396,10 @@ or to finish:
 Do NOT write the answer text. Emit the next tool call needed to advance the plan, or { "final_answer": true } if you have nothing left to do. Only call independent tools in one message; dependent calls must wait for their observations.
 
 Search tool selection:
-- search_exact: use for exact terms, code identifiers, title fragments. Fastest search.
-- search_sparse: use for keyword matching across content. Good when the query has specific terms.
-- search_dense: use for semantic/conceptual matching. Good when the query is about a concept, not specific terms.
-- You can call multiple search tools in parallel (e.g. search_sparse + search_dense) then rerank_results with the combined hits.
+- keyword_search: use for exact terms, code identifiers, title fragments. Fastest search.
+- keyword_search: use for keyword matching across content. Good when the query has specific terms.
+- semantic_search: use for semantic/conceptual matching. Good when the query is about a concept, not specific terms.
+- You can call multiple search tools in parallel (e.g. keyword_search + semantic_search) then rerank_results with the combined hits.
 - After any search, inspect the hits. If you have more than 10 hits, call rerank_results to prioritize.
 - If search returns too few hits, try a different search tool or adjust your query.
 - Never repeat a search call with the same query — it will return identical results.
@@ -1445,13 +1414,13 @@ Graph expansion:
 - Call it when initial search is insufficient and the KB has graph data.
 
 Document-specific queries (named documents like "weekly update", "Q3 report"):
-- FIRST CHOICE: kb_search_documents with title_contains to get the full document.
-- If the document is too large: kb_outline to see structure, then kb_read for specific sections.
-- If kb_search_documents finds nothing: fall back to search_exact with filters={{"title_contains":"..."}}.
+- FIRST CHOICE: title_search with title_contains to get the full document.
+- If the document is too large: kb_outline to see structure, then file_read for specific sections.
+- If title_search finds nothing: fall back to keyword_search with filters={{"title_contains":"..."}}.
 
 Aggregate/analysis queries (counting, summarizing across many documents, trends, tables, charts):
-- Use kb_search_documents with metadata_only=true first to discover all matching documents.
-- Then read specific documents in batches: kb_search_documents with document_ids for 5-10 at a time.
+- Use title_search with metadata_only=true first to discover all matching documents.
+- Then read specific documents in batches: title_search with document_ids for 5-10 at a time.
 - After each batch, call extract_data with source="retrieved_docs" and document_ids=[...].
 - After all batches: chart_generate with no data argument (reads from accumulated_data).
 - Pattern: discover → read batch 1 → extract_data(batch 1) → read batch 2 → extract_data(batch 2) → ... → chart_generate() → final_answer.
@@ -1583,7 +1552,7 @@ The current `plan_node` (lines 187-309) precomputes `rag_retrieve` tool calls ba
 1. Remove the fast-track branch that precomputes `rag_retrieve` calls (lines 287-288, 296-305).
 2. Remove reading of `query_intent`, `suggested_legs`, `rewritten_query`, `abbreviation_glossary`.
 3. The plan node now only produces a plan (subtasks with `tool_hint` and `suggested_filters`/`suggested_sort`/`suggested_query`). The think node dispatches actual tool calls based on the plan.
-4. If precomputed tool calls are still desired for fast-tracking, precompute `search_exact`/`search_sparse`/`search_dense`/`kb_search_documents` calls based on `tool_hint` and `suggested_filters`. But this is optional — the think node can dispatch from the plan alone.
+4. If precomputed tool calls are still desired for fast-tracking, precompute `keyword_search`/`semantic_search`/`title_search` calls based on `tool_hint` and `suggested_filters`. But this is optional — the think node can dispatch from the plan alone.
 
 ### 8.7 `finalization.py` dependencies (update)
 
@@ -1603,7 +1572,7 @@ The current `finalize_node` (lines 237-289) uses:
 
 **File**: `backend/app/services/agentic_rag/kb_profile.py`
 
-The KB profile builder references `rag_retrieve` in its filter field descriptions. Update to reference the new search tools' filter parameters (`search_exact`/`search_sparse`/`search_dense` all accept the same `filters` dict).
+The KB profile builder references `rag_retrieve` in its filter field descriptions. Update to reference the new search tools' filter parameters (`keyword_search`/`semantic_search` all accept the same `filters` dict).
 
 ### 8.9 `streaming.py` update
 
@@ -1655,7 +1624,7 @@ Extract a structured summary from the assistant answer below. Return valid JSON 
   "summary": "2-3 sentences",
   "key_points": ["..."],
   "data": [{{"label": "...", "value": 123, "unit": "...", "context": "..."}}],
-  "citations": [{{"document_id": 1, "citation_kind": "chunk", "chunk_index": 0, "source_tool": "search_dense"}}],
+  "citations": [{{"document_id": 1, "citation_kind": "chunk", "chunk_index": 0, "source_tool": "semantic_search"}}],
   "chart_option": null or {{ ... }},
   "followups": ["..."],
   "suggestion": "one-line assessment of answer completeness, or empty string",
@@ -1678,9 +1647,9 @@ Answer:
 ### Phase 1: Atomic Search Tools (files: 6 new, 1 deleted, 2 modified)
 
 **New files**:
-1. `backend/app/services/agentic_rag/tools/search_exact.py`
-2. `backend/app/services/agentic_rag/tools/search_sparse.py`
-3. `backend/app/services/agentic_rag/tools/search_dense.py`
+1. `backend/app/services/agentic_rag/tools/keyword_search.py`
+2. `backend/app/services/agentic_rag/tools/keyword_search.py`
+3. `backend/app/services/agentic_rag/tools/semantic_search.py`
 4. `backend/app/services/agentic_rag/tools/rerank_results.py`
 5. `backend/app/services/agentic_rag/tools/graph_expand.py`
 6. `backend/app/services/agentic_rag/tools/_search_helpers.py` — shared helpers extracted from `rag_retrieve.py`: `_resolve_filters`, `_expand_synonyms`, `_apply_excluded_terms_filter`, `_pin_filter_matches`
@@ -1696,7 +1665,7 @@ Answer:
 
 **Implementation details for each search tool**:
 
-Each search tool follows this pattern (showing `search_dense.py` as example):
+Each search tool follows this pattern (showing `semantic_search.py` as example):
 
 ```python
 """Dense vector search tool — semantic/conceptual chunk retrieval."""
@@ -1726,7 +1695,7 @@ class SearchDenseInput(BaseModel):
 
 
 class SearchDenseTool(BaseAgentTool):
-    name: str = "search_dense"
+    name: str = "semantic_search"
     description: str = "Dense vector search. Best for semantic/conceptual matching. Returns ranked chunks."
     args_schema: type = SearchDenseInput
     ui_label: str = "Searching (dense)"
@@ -1777,7 +1746,7 @@ class SearchDenseTool(BaseAgentTool):
                 doc_ids=doc_ids,
             )
         except Exception as exc:
-            logger.warning("[search_dense] failed: %s", exc)
+            logger.warning("[semantic_search] failed: %s", exc)
             return {"ok": False, "result": {}, "error": str(exc), "tokens": 0}
 
         # Convert to hit dicts with CitationRef
@@ -1800,7 +1769,7 @@ class SearchDenseTool(BaseAgentTool):
                     "chunk_index": meta.get("chunk_index"),
                     "page": meta.get("page"),
                     "quoted_text": doc.page_content[:200],
-                    "source_tool": "search_dense",
+                    "source_tool": "semantic_search",
                     "citation_id": "",  # Assigned at finalize time
                 },
             }
@@ -1819,7 +1788,7 @@ class SearchDenseTool(BaseAgentTool):
         }
 ```
 
-`search_exact.py` and `search_sparse.py` follow the same pattern, calling `exact_search_docs()` and `sparse_search_docs()` respectively.
+`keyword_search.py` calls both `exact_search_docs()` (MySQL fulltext) and `sparse_search_docs()` (SPLADE).
 
 `rerank_results.py`:
 
@@ -2034,7 +2003,7 @@ class GraphExpandTool(BaseAgentTool):
 **Deleted code** (functions within files, not entire files):
 8. `backend/app/services/agentic_rag/agent_graph/reflection.py` — remove `reflect_node`, `reflect_final_node`, `route_reflect_final` (keep `answer_scoring_node`, `clarify_interrupt_node`; move `_verify_execution`/`_build_execution_summary` and sub-helpers to `execution_check.py`)
 9. `backend/app/services/agentic_rag/nodes.py` — remove `expand_query_node`, `rewrite_query_node`, `reranking_node`, `filter_node`, `_elbow_cut`, `dense_retrieval_node`, `sparse_retrieval_node`, `exact_retrieval_node`, `collapse_same_title_versions`, `_rrf_fuse_legs`, `_bow_jaccard`, `_mmr_diverse`, `merge_node`, `neo4j_expansion_node`, `_enrich_with_modified_at`, `_retrieval_confidence_level`, `_resolve_eval_kwargs`, `_final_confidence_level` (keep `_agent_step`, `history_to_text`, `select_recent_history`, `_messages_to_conversation_text`, `_get_llm`, `_safe_writer`, `_collect_provenance_sources`, `_lookup_cited_titles`, `_extract_negation_terms`, `_content_contains_exclusion`, `answer_evaluation_node`)
-10. `backend/app/services/agentic_rag/agent_graph/observations.py` — rename `_tried_rag_retrieve_queries` to `_tried_search_queries` (generic over all search tools), update `_non_retrieval_observations_text` skip list to include `search_exact`/`search_sparse`/`search_dense`/`rerank_results`/`graph_expand`, update `_compact_observations` to compact docs from any search tool
+10. `backend/app/services/agentic_rag/agent_graph/observations.py` — rename `_tried_rag_retrieve_queries` to `_tried_search_queries` (generic over all search tools), update `_non_retrieval_observations_text` skip list to include `keyword_search`/`semantic_search`/`rerank_results`/`graph_expand`, update `_compact_observations` to compact docs from any search tool
 
 ### Phase 5: State Changes (files: 2 modified)
 
@@ -2081,7 +2050,7 @@ class GraphExpandTool(BaseAgentTool):
 18. `frontend/src/components/chat/__tests__/answer.test.tsx` — update citation tests
 
 **New files**:
-19. `backend/tests/test_atomic_search_tools.py` — tests for search_exact, search_sparse, search_dense, rerank_results, graph_expand
+19. `backend/tests/test_atomic_search_tools.py` — tests for keyword_search, semantic_search, rerank_results, graph_expand
 20. `backend/tests/test_citation_ref.py` — tests for new CitationRef schema and normalize_citations
 
 ### Phase 8: Frontend (files: 5 modified, 1 new)
@@ -2089,7 +2058,7 @@ class GraphExpandTool(BaseAgentTool):
 **Modified files**:
 1. `frontend/src/components/chat/answer.tsx` — citation rendering per `citation_kind`, update `Citation`/`CitationMetadata` interfaces, update `CitationLink` to handle `[N]` bare-bracket format (currently only handles `[N](N)` markdown links), update `buildFetchPairs`/`fetchKbBatch`/`fetchGenericBatch` if citation field names change
 2. `frontend/src/app/dashboard/chat/[id]/page.tsx` — update `Message`/`Citation` interfaces (remove `rewrittenQuery`/`expandedQuery` if desired, add `citation_kind`), update `r:` event handler to map new citation shape, remove `1:`/`eq:` event handlers (or keep for backward compat with historical messages)
-3. `frontend/src/components/chat/agentic-progress.tsx` — update `TOOL_ICONS` map (remove `rag_retrieve`, add `search_exact`/`search_sparse`/`search_dense`/`rerank_results`/`graph_expand`), update `NODE_PHASE` map (remove `rewrite_query`/`reflect`/`reflect_final`, add `sufficiency_check`), update result summary logic for new `hits` shape
+3. `frontend/src/components/chat/agentic-progress.tsx` — update `TOOL_ICONS` map (remove `rag_retrieve`, add `keyword_search`/`semantic_search`/`rerank_results`/`graph_expand`), update `NODE_PHASE` map (remove `rewrite_query`/`reflect`/`reflect_final`, add `sufficiency_check`), update result summary logic for new `hits` shape
 4. `frontend/src/components/chat/__tests__/answer.test.tsx` — update citation test mocks and assertions for new format
 5. `frontend/src/lib/utils.ts` — update `cleanChunkText` if citation text field name changes
 
@@ -2123,14 +2092,14 @@ Each phase has its own verification step. Tests run inside the Docker container 
 **File**: `backend/tests/test_atomic_search_tools.py` (new)
 
 ```python
-"""Tests for atomic search tools (search_exact, search_sparse, search_dense, rerank_results, graph_expand)."""
+"""Tests for atomic search tools (keyword_search, semantic_search, rerank_results, graph_expand)."""
 
 import pytest
 from unittest.mock import MagicMock, patch, AsyncMock
 
-from app.services.agentic_rag.tools.search_exact import SearchExactTool, SearchExactInput
-from app.services.agentic_rag.tools.search_sparse import SearchSparseTool, SearchSparseInput
-from app.services.agentic_rag.tools.search_dense import SearchDenseTool, SearchDenseInput
+from app.services.agentic_rag.tools.keyword_search import SearchExactTool, SearchExactInput
+from app.services.agentic_rag.tools.keyword_search import SearchSparseTool, SearchSparseInput
+from app.services.agentic_rag.tools.semantic_search import SearchDenseTool, SearchDenseInput
 from app.services.agentic_rag.tools.rerank_results import RerankResultsTool, RerankResultsInput
 from app.services.agentic_rag.tools.graph_expand import GraphExpandTool, GraphExpandInput
 
@@ -2155,7 +2124,7 @@ class TestSearchExactTool:
         assert result["result"]["hits"] == []
         assert result["result"]["count"] == 0
 
-    @patch("app.services.agentic_rag.tools.search_exact.exact_search_docs")
+    @patch("app.services.agentic_rag.tools.keyword_search.exact_search_docs")
     def test_returns_hits_with_citation_ref(self, mock_search):
         from langchain_core.documents import Document
         mock_search.return_value = [
@@ -2179,7 +2148,7 @@ class TestSearchExactTool:
         hit = result["result"]["hits"][0]
         assert hit["document_id"] == 1
         assert hit["citation_ref"]["citation_kind"] == "chunk"
-        assert hit["citation_ref"]["source_tool"] == "search_exact"
+        assert hit["citation_ref"]["source_tool"] == "keyword_search"
         assert hit["citation_ref"]["document_id"] == 1
 
 
@@ -2247,9 +2216,9 @@ class TestToolRegistry:
         ctx.state = {}
         tools = build_tools(ctx)
         names = {t.name for t in tools}
-        assert "search_exact" in names
-        assert "search_sparse" in names
-        assert "search_dense" in names
+        assert "keyword_search" in names
+        assert "keyword_search" in names
+        assert "semantic_search" in names
         assert "rerank_results" in names
         assert "graph_expand" in names
         assert "rag_retrieve" not in names
@@ -2266,7 +2235,7 @@ class TestToolRegistry:
     def test_applicable_tools_includes_rerank_after_search(self):
         from app.services.agentic_rag.tools import applicable_tools
         ctx = MagicMock()
-        ctx.state = {"tool_call_counts": {"search_dense": 1}}
+        ctx.state = {"tool_call_counts": {"semantic_search": 1}}
         tools = applicable_tools(ctx)
         names = {t.name for t in tools}
         assert "rerank_results" in names
@@ -2293,7 +2262,7 @@ class TestCitationRefSchema:
             chunk_index=5,
             page=3,
             quoted_text="test",
-            source_tool="search_dense",
+            source_tool="semantic_search",
         )
         assert ref.citation_kind == "chunk"
         assert ref.chunk_index == 5
@@ -2302,7 +2271,7 @@ class TestCitationRefSchema:
         ref = CitationRef(
             document_id=1,
             citation_kind="file",
-            source_tool="kb_read",
+            source_tool="file_read",
         )
         assert ref.citation_kind == "file"
         assert ref.chunk_index is None
@@ -2314,7 +2283,7 @@ class TestCitationRefSchema:
             section="Topics Covered",
             start_char=100,
             end_char=500,
-            source_tool="kb_read",
+            source_tool="file_read",
         )
         assert ref.citation_kind == "section"
         assert ref.section == "Topics Covered"
@@ -2327,7 +2296,7 @@ class TestCitationRefSchema:
             end_char=200,
             start_line=5,
             end_line=10,
-            source_tool="kb_read",
+            source_tool="file_read",
         )
         assert ref.citation_kind == "range"
         assert ref.start_line == 5
@@ -2441,9 +2410,9 @@ class TestToolCallBudget:
         from app.services.agentic_rag.agent_graph.helpers import _tool_call_budget
         db = MagicMock()
         budget = _tool_call_budget(db, org_id=1)
-        assert "search_exact" in budget
-        assert "search_sparse" in budget
-        assert "search_dense" in budget
+        assert "keyword_search" in budget
+        assert "keyword_search" in budget
+        assert "semantic_search" in budget
         assert "rerank_results" in budget
         assert "graph_expand" in budget
         assert "rag_retrieve" not in budget
@@ -2509,12 +2478,12 @@ def test_build_tools_returns_all_tools(self):
     tools = build_tools(ctx)
     names = {t.name for t in tools}
     expected = {
-        "search_exact", "search_sparse", "search_dense",
+        "keyword_search", "semantic_search",
         "rerank_results", "graph_expand",
-        "kb_search_documents", "kb_metadata", "kb_outline",
-        "current_datetime", "kb_read", "kb_grep",
+        "title_search", "kb_metadata", "kb_outline",
+        "current_datetime", "file_read", "kb_grep",
         "file_read", "file_summarize", "file_extract_table",
-        "code_execute", "chart_generate", "summarize_answer", "extract_data",
+        "code_execute", "chart_generate", "summarize", "extract_data",
     }
     assert names == expected
 ```
@@ -2525,9 +2494,9 @@ Update `test_agent_loop.py::TestTriedRagRetrieveQueries` — remove or rename si
 class TestTriedSearchQueries:
     def test_dedups_and_preserves_order(self):
         observations = [
-            Observation(tool="search_dense", arguments={"query": "race condition"}, result={"hits": [], "count": 0}),
-            Observation(tool="search_dense", arguments={"query": "mutual exclusion"}, result={"hits": [], "count": 0}),
-            Observation(tool="search_dense", arguments={"query": "race condition"}, result={"hits": [], "count": 0}),
+            Observation(tool="semantic_search", arguments={"query": "race condition"}, result={"hits": [], "count": 0}),
+            Observation(tool="semantic_search", arguments={"query": "mutual exclusion"}, result={"hits": [], "count": 0}),
+            Observation(tool="semantic_search", arguments={"query": "race condition"}, result={"hits": [], "count": 0}),
         ]
         # ... verify dedup
 ```
@@ -2594,11 +2563,11 @@ After each phase, run the relevant tests:
 After all phases, run end-to-end tests with real queries:
 
 1. **Named-document query**: "What is in the latest weekly update?"
-   - Expected: agent calls `kb_search_documents` → `kb_read` (not `search_dense`)
+   - Expected: agent calls `title_search` → `file_read` (not `semantic_search`)
    - Verify citation shows `citation_kind="file"` or `"section"`
 
 2. **Conceptual query**: "How does the API gateway handle authentication?"
-   - Expected: agent calls `search_dense` → `rerank_results` → finalize
+   - Expected: agent calls `semantic_search` → `rerank_results` → finalize
    - Verify citation shows `citation_kind="chunk"`
 
 3. **Exact-lookup query**: "Find all references to CONFIG_REDIS_URL"
@@ -2606,15 +2575,15 @@ After all phases, run end-to-end tests with real queries:
    - Verify citation shows `citation_kind="grep"`
 
 4. **Aggregate query**: "How many weekly updates were prepared this year? Table by month."
-   - Expected: agent calls `kb_metadata` → `kb_search_documents` (metadata_only) → batch `kb_read`/`extract_data` → `chart_generate`
+   - Expected: agent calls `kb_metadata` → `title_search` (metadata_only) → batch `file_read`/`extract_data` → `chart_generate`
    - Verify chart is produced from accumulated data
 
 5. **Multi-search query**: "Compare encryption methods in satellite and fiber optic communications"
-   - Expected: agent calls `search_dense` (satellite) + `search_dense` (fiber) in parallel → `rerank_results` → finalize
+   - Expected: agent calls `semantic_search` (satellite) + `semantic_search` (fiber) in parallel → `rerank_results` → finalize
    - Verify citations from both sub-queries appear
 
 6. **Temporal query**: "What is the latest weekly update?"
-   - Expected: agent calls `current_datetime` → `kb_search_documents` with date sort → compares title dates → selects latest
+   - Expected: agent calls `current_datetime` → `title_search` with date sort → compares title dates → selects latest
    - Verify the correct (latest by content date, not file mtime) document is cited
 
 ### 11.4 Performance validation
@@ -2689,7 +2658,7 @@ For each benchmark query, record:
     "query_id": "nd1",
     "query": "What is in the latest weekly update?",
     "type": "named_document",
-    "tool_calls": ["kb_search_documents", "kb_read"],
+    "tool_calls": ["title_search", "file_read"],
     "tool_call_count": 2,
     "total_tokens": 1500,
     "latency_ms": 3200,
@@ -2739,12 +2708,11 @@ This is a breaking change. No compatibility layers, no legacy paths. The followi
 - `RETRIEVAL_REWRITE_PROMPT`
 - `_correct_tool_args` function
 - `_correction_hints` function
-- `AGENT_MAX_RETRIEVALS` setting
 - State keys: `dense_docs`, `sparse_docs`, `exact_docs`, `graph_docs`, `leg_results`, `failed_legs`, `leg_doc_counts`, `all_scored_docs`, `retrieval_confidence`, `expanded_query`, `abbreviation_glossary`, `rewritten_query`, `resolution_provenance`, `query_intent`, `excluded_terms`, `adaptive_reran`, `graph_expansion_done`, `reflection_final`, `tool_call_count`, `precomputed_tool_calls`
 
 ### 13.2 Database migration
 
-**`messages` table**: No schema changes to `messages` itself. The `tool_calls` JSON column stores new tool names (`search_exact`, `search_sparse`, etc.) as different JSON values. Old messages with `rag_retrieve` tool calls remain readable but won't be re-executed. The `rewritten_query` and `expanded_query` columns remain (nullable) — no longer written by the agent pipeline, but historical data is preserved.
+**`messages` table**: No schema changes to `messages` itself. The `tool_calls` JSON column stores new tool names (`keyword_search`, etc.) as different JSON values. Old messages with `rag_retrieve` tool calls remain readable but won't be re-executed. The `rewritten_query` and `expanded_query` columns remain (nullable) — no longer written by the agent pipeline, but historical data is preserved.
 
 **`message_citations` table**: Add nullable columns for new `CitationRef` fields:
 - `citation_kind VARCHAR(32)` (default `'chunk'` for old rows)
@@ -2793,15 +2761,13 @@ The `last_answer_object` JSON in stored messages will have the old `CitationRef(
 **Modified SSE events**:
 - `r:` (answer_rewrite) — citation payload shape changes from `{page_content, metadata: {document_id, chunk_index, ...}}` to `{page_content, metadata: {citation_ref: {document_id, citation_kind, chunk_index, section, ...}, ...}}`. Frontend `page.tsx` `r:` handler must map the new shape.
 - `tc:`/`to:`/`tr:` (tool_call/tool_observation/tool_retry) — tool names change. Frontend `agentic-progress.tsx` `TOOL_ICONS` and result summary logic must handle new tool names and `hits` result shape.
-- `p:` (progress) — phase names change (remove `dense_retrieval`/`sparse_retrieval`/`exact_retrieval`/`reflect_final`/`sufficiency_check` from `rag_retrieve`; add `search_exact`/`search_sparse`/`search_dense`/`rerank_results`/`graph_expand`/`sufficiency_check`).
+- `p:` (progress) — phase names change (remove `dense_retrieval`/`sparse_retrieval`/`exact_retrieval`/`reflect_final`/`sufficiency_check` from `rag_retrieve`; add `keyword_search`/`semantic_search`/`rerank_results`/`graph_expand`/`sufficiency_check`).
 
 **Pre-existing bug to fix**: `branching.py:353` emits `done:` prefix but frontend only handles `d:`. Either change backend to emit `d:` or add `done:` handling in frontend.
 
 ### 13.2.2 `.env.example` and docs update
 
 Update `.env.example`:
-- Remove `AGENT_MAX_RETRIEVALS`, `ADAPTIVE_RETRIEVAL_*`, `SYNONYM_VARIANTS`, `SYNONYM_CACHE_TTL`, `PRE_FUSION_MIN_DOCS`, `COLLAPSE_SAME_TITLE_VERSIONS`, `RRF_FUSION_ENABLED`, `MERGE_MMR_LAMBDA`
-- Add `AGENT_TOTAL_TOOL_BUDGET=20`, `AGENT_MAX_SEARCH_EXACT=5`, `AGENT_MAX_SEARCH_SPARSE=5`, `AGENT_MAX_SEARCH_DENSE=5`, `AGENT_MAX_RERANK=5`, `AGENT_MAX_GRAPH_EXPAND=3`, `AGENT_MAX_KB_SEARCH=10`, `AGENT_MAX_EXTRACT_DATA=5`, `AGENT_MAX_CHART_GENERATE=3`
 
 Update docs:
 - `docs/FEATURES.md` — remove `rag_retrieve` references, update settings list
@@ -2814,18 +2780,9 @@ Update docs:
 ### 13.3 Settings migration
 
 Old settings that are removed:
-- `AGENT_MAX_RETRIEVALS` — replaced by `AGENT_MAX_SEARCH_EXACT`, `AGENT_MAX_SEARCH_SPARSE`, `AGENT_MAX_SEARCH_DENSE`
 
 New settings:
-- `AGENT_TOTAL_TOOL_BUDGET` (default: 20)
-- `AGENT_MAX_SEARCH_EXACT` (default: 5)
-- `AGENT_MAX_SEARCH_SPARSE` (default: 5)
-- `AGENT_MAX_SEARCH_DENSE` (default: 5)
-- `AGENT_MAX_RERANK` (default: 5)
-- `AGENT_MAX_GRAPH_EXPAND` (default: 3)
-- `AGENT_MAX_KB_SEARCH` (default: 10)
-- `AGENT_MAX_EXTRACT_DATA` (default: 5)
-- `AGENT_MAX_CHART_GENERATE` (default: 3)
+- `AGENT_TOTAL_TOOL_BUDGET` (default 25)
 
 No Alembic migration needed — settings are stored in the `settings` table with org override. Old settings remain in the table but are unused. New settings get default values on first access.
 
@@ -2841,7 +2798,7 @@ This is defensive parsing, not a compatibility layer. Old messages are read-only
 
 Commit per phase, with tests passing at each commit:
 
-1. `feat: add atomic search tools (search_exact, search_sparse, search_dense, rerank_results, graph_expand)`
+1. `feat: add atomic search tools (keyword_search, semantic_search, rerank_results, graph_expand)`
 2. `feat: add expanded CitationRef schema with chunk/file/section/range/grep/table kinds`
 3. `feat: replace correction-LLM with isError pattern, add total tool-call budget`
 4. `feat: replace reflect/reflect_final with sufficiency_check node, remove expand_query/rewrite_query`
@@ -2878,9 +2835,9 @@ The breaking-change nature of this redesign makes rollback a simple git revert �
 - `accumulated_data` for extract_data → chart_generate flow
 - Compaction logic (enhanced to preserve `citation_ref` metadata, but the algorithm is unchanged)
 - Token budget management (`token_budget.py`)
-- `kb_metadata`, `kb_search_documents`, `kb_outline`, `kb_read`, `kb_grep` tools (enhanced with `CitationRef`, but core logic unchanged)
+- `kb_metadata`, `title_search`, `kb_outline`, `file_read`, `kb_grep` tools (enhanced with `CitationRef`, but core logic unchanged)
 - `file_read`, `file_summarize`, `file_extract_table` tools (unchanged)
-- `code_execute`, `chart_generate`, `extract_data`, `summarize_answer` tools (unchanged)
+- `code_execute`, `chart_generate`, `extract_data`, `summarize` tools (unchanged)
 - `current_datetime` tool (unchanged)
 - Abbreviation service (`app/services/abbreviation_service.py`)
 - Redis caching for synonym expansion
@@ -2913,8 +2870,8 @@ The breaking-change nature of this redesign makes rollback a simple git revert �
 
 These need to be resolved during implementation, not before:
 
-1. **Should `search_exact` search document titles as well as chunk text?**
-   Current `rag_retrieve`'s exact leg searches both `document_chunks.chunk_text` and `documents.title` (title weighted 2×). The new `search_exact` should do the same. But should there be a separate `search_titles` tool for title-only search? Probably not — `kb_search_documents` already handles title search. `search_exact` should search both titles and chunks.
+1. **Should `keyword_search` search document titles as well as chunk text?**
+   Current `rag_retrieve`'s exact leg searches both `document_chunks.chunk_text` and `documents.title` (title weighted 2×). The new `keyword_search` should do the same. But should there be a separate `search_titles` tool for title-only search? Probably not — `title_search` already handles title search. `keyword_search` should search both titles and chunks.
 
 2. **Should `rerank_results` apply the excluded-terms filter?**
    Currently `_apply_excluded_terms_filter` runs inside `rag_retrieve` after reranking. In the new architecture, negation handling is less clear since there's no `rewrite_query` node to extract negated terms. Options:
@@ -2926,7 +2883,7 @@ These need to be resolved during implementation, not before:
 3. **Should the `sufficiency_check` node use an LLM call or be deterministic only?**
    The LLM-based check adds latency (one extra LLM call per tool round). A deterministic-only check (budget + reranker confidence) is faster but less accurate. Recommendation: start with deterministic-only, add LLM check only if the deterministic check proves insufficient.
 
-4. **Should `kb_search_documents` deduplicate same-title versions?**
+4. **Should `title_search` deduplicate same-title versions?**
    Currently it collapses same-title versions (keeps latest by `file_modified_at`). In the new architecture, the LLM may want to see all versions to compare them. Recommendation: add a `dedup_same_title` parameter (default: true) so the LLM can opt out.
 
 ---
@@ -2937,9 +2894,9 @@ These need to be resolved during implementation, not before:
 
 | File | Purpose |
 |---|---|
-| `backend/app/services/agentic_rag/tools/search_exact.py` | MySQL FULLTEXT search tool |
-| `backend/app/services/agentic_rag/tools/search_sparse.py` | SPLADE sparse vector search tool |
-| `backend/app/services/agentic_rag/tools/search_dense.py` | Dense vector search tool |
+| `backend/app/services/agentic_rag/tools/keyword_search.py` | MySQL FULLTEXT search tool |
+| `backend/app/services/agentic_rag/tools/keyword_search.py` | SPLADE sparse vector search tool |
+| `backend/app/services/agentic_rag/tools/semantic_search.py` | Dense vector search tool |
 | `backend/app/services/agentic_rag/tools/rerank_results.py` | Cross-encoder reranker tool |
 | `backend/app/services/agentic_rag/tools/graph_expand.py` | Neo4j graph expansion tool |
 | `backend/app/services/agentic_rag/tools/_search_helpers.py` | Shared helpers (filter resolution, synonym expansion, excluded terms) |
@@ -3001,7 +2958,7 @@ These need to be resolved during implementation, not before:
 
 | File | Purpose |
 |---|---|
-| `backend/tests/test_atomic_search_tools.py` | Tests for search_exact, search_sparse, search_dense, rerank_results, graph_expand |
+| `backend/tests/test_atomic_search_tools.py` | Tests for keyword_search, semantic_search, rerank_results, graph_expand |
 | `backend/tests/test_citation_ref.py` | Tests for CitationRef schema and normalize_citations |
 
 ### Modified test files (16+)
@@ -3051,16 +3008,15 @@ Execute phases sequentially. Each phase must pass its tests before moving to the
 **Critical ordering notes**:
 - Settings must be added to `settings_registry.py` in Phase 3 BEFORE any code reads them.
 - `rag_retrieve.py` is not deleted until Phase 4 (when the graph no longer imports from it).
-- `AGENT_MAX_RETRIEVALS` is not removed from the registry until Phase 5 (after all code stops reading it).
 - The Alembic migration (Phase 2) must run before the frontend can render new citation fields.
 
 ```
 Phase 1: Atomic Search Tools
   ├── Add new settings to settings_registry.py (MUST be first)
   ├── Create _search_helpers.py (extract from rag_retrieve.py)
-  ├── Create search_exact.py
-  ├── Create search_sparse.py
-  ├── Create search_dense.py
+  ├── Create keyword_search.py
+  ├── Create keyword_search.py
+  ├── Create semantic_search.py
   ├── Create rerank_results.py
   ├── Create graph_expand.py
   ├── Update tools/__init__.py (registry — add new tools, keep rag_retrieve for now)
@@ -3102,7 +3058,6 @@ Phase 4: Graph Changes
 Phase 5: State Changes
   ├── Update graph_state.py (add/remove fields)
   ├── Update schemas.py (remove suggested_legs, QueryIntent)
-  ├── Remove AGENT_MAX_RETRIEVALS from settings_registry.py (now safe)
   ├── Remove other orphaned settings from registry
   └── Run: pytest tests/test_agent_loop.py
 
@@ -3138,7 +3093,7 @@ Phase 8: Frontend
 
 | Term | Definition |
 |---|---|
-| Atomic tool | A tool that does one thing (e.g. `search_dense`) rather than orchestrating multiple operations (e.g. `rag_retrieve`) |
+| Atomic tool | A tool that does one thing (e.g. `semantic_search`) rather than orchestrating multiple operations (e.g. `rag_retrieve`) |
 | Composite tool | A tool that internally orchestrates multiple operations (the current `rag_retrieve`) |
 | CitationRef | Structured citation metadata: document_id, citation_kind, chunk_index, section, offsets, etc. |
 | Evidence | Any piece of retrieved content (chunk, file, section, grep match) that can be cited in the answer |
@@ -3211,16 +3166,16 @@ The atomic retrieval plan was cross-validated against the ingestion pipeline. Th
 
 | Ingestion output | Consumed by | Preserved in search results? |
 |---|---|---|
-| Document conversion Markdown | `kb_read`, `kb_search_documents` | Yes — `content` field |
-| OCR metadata | `kb_metadata`, `kb_search_documents` | Yes — `metadata` dict |
+| Document conversion Markdown | `file_read`, `title_search` | Yes — `content` field |
+| OCR metadata | `kb_metadata`, `title_search` | Yes — `metadata` dict |
 | Page/image boundaries | `search_*` tools | Yes — `page` field in hits |
 | Document title and filename | All search and discovery tools | Yes — `title`, `file_name` fields |
-| `file_created_at`, `file_edited_at`, `file_modified_at` | `kb_search_documents` (date filters, sort) | Yes — filter resolution uses these |
-| Content type | `kb_search_documents` (content_type filter) | Yes — filter resolution |
+| `file_created_at`, `file_edited_at`, `file_modified_at` | `title_search` (date filters, sort) | Yes — filter resolution uses these |
+| Content type | `title_search` (content_type filter) | Yes — filter resolution |
 | Document and chunk IDs | All search tools | Yes — `document_id`, `chunk_index` |
 | Content hashes | `search_*` tools, `rerank_results` | Yes — `content_hash` field, used for dedup |
 | Qdrant point IDs | `search_*` tools, `graph_expand` | Yes — `qdrant_point_id` field |
-| Vector and sparse indexing | `search_dense`, `search_sparse` | Yes — via `dense_search_docs`/`sparse_search_docs` |
+| Vector and sparse indexing | `semantic_search`, `keyword_search` | Yes — via `dense_search_docs`/`sparse_search_docs` |
 | Graph indexing (Neo4j) | `graph_expand` | Yes — via `expand_docs_via_graph` |
 | KB/datastore scope | All search tools | Yes — `kb_ids` + `get_effective_datastore_ids` |
 | RBAC filtering | All search tools | Yes — `enforce_rbac(ctx, kb_ids=...)` |

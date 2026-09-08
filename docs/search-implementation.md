@@ -1,6 +1,6 @@
 # Search Implementation
 
-> **STATUS: SUPERSEDED.** This document describes the former monolithic `rag_retrieve` pipeline with the 3-leg relaxation ladder. The current pipeline uses composable atomic tools (`search_dense`, `search_sparse`, `search_exact`, `rerank_results`, `graph_expand`). See `docs/retrieval-pipeline.html` and `docs/atomic-tools-redesign.md` for the current architecture. This document is retained for historical reference.
+> **STATUS: SUPERSEDED.** This document describes the former monolithic `rag_retrieve` pipeline with the 3-leg relaxation ladder. The current pipeline uses composable atomic tools (`semantic_search`, `keyword_search`, `rerank_results`, `graph_expand`). See `docs/retrieval-pipeline.html` and `docs/atomic-tools-redesign.md` for the current architecture. This document is retained for historical reference.
 
 ## Overview
 
@@ -21,7 +21,7 @@ Each leg is called independently by the agentic RAG pipeline via single-leg publ
 The sole production path. The agent calls the `rag_retrieve` tool, which runs a graduated relaxation ladder across the three retrieval legs:
 
 ```
-rewrite_query (standalone question via QUERY_MODEL)
+rewrite_query (standalone question via UTILITY_MODEL)
     │
     ▼
 rag_retrieve tool — _run_retrieval_pass()

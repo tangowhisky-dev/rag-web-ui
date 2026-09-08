@@ -1,9 +1,9 @@
 """file_read tool — read a portion of a KB document or attached chat file.
 
-Replaces the former kb_read and file_read tools. Uses pi-style offset/limit
-for portion selection: the model uses kb_outline (which returns line numbers)
-or kb_grep (which returns line numbers) to locate the relevant section, then
-calls file_read with offset/limit to read only that portion.
+Uses pi-style offset/limit for portion selection: the model uses kb_outline
+(which returns line numbers) or kb_grep (which returns line numbers) to locate
+the relevant section, then calls file_read with offset/limit to read only that
+portion.
 
 Sources:
   - document_id: KB or datastore document (RBAC via authorized KBs/datastores).
