@@ -19,7 +19,7 @@ from langchain_core.messages import AIMessage
 from app.services.agentic_rag.kb_profile import format_profile_summary
 from app.services.agentic_rag.llm_factory import build_chat_llm
 from app.services.agentic_rag.nodes import _agent_step, history_to_text, select_recent_history
-from app.services.agentic_rag.prompts_v2 import AGENT_V2_PROMPT
+from app.services.agentic_rag.prompts_v2 import get_agent_v2_system_prompt
 from app.services.agentic_rag.tool_call_parser import parse_think_response
 from app.services.agentic_rag.tools import applicable_tools
 from app.services.agentic_rag.token_budget import count_tokens
@@ -30,7 +30,6 @@ from ..agent_graph.compaction import _compact_if_needed
 from ..agent_graph.helpers import _coerce_observation, _total_tool_budget, _wall_clock_exceeded, _writer
 from ..agent_graph.observations import (
     _observations_metadata_text,
-    _tool_descriptions_text,
     _tried_search_queries,
 )
 
@@ -58,6 +57,12 @@ def _format_retrieved_docs_for_think(docs: list[dict], max_docs: int = 10, max_c
     return "\n\n".join(parts)
 
 
+def _available_tools_text(tools: list) -> str:
+    """Return a short 'Available this turn' list of tool names."""
+    names = [t.name for t in tools]
+    return "\n".join(f"- {name}" for name in names)
+
+
 def _build_v2_user_prompt(
     iteration: int,
     tool_budget: int,
@@ -68,7 +73,7 @@ def _build_v2_user_prompt(
     lao,
     observations: list,
     retrieved_docs: list,
-    tools_text: str,
+    available_tools_text: str,
     kb_profile_text: str,
     file_markdown: str | None,
 ) -> str:
@@ -99,27 +104,14 @@ def _build_v2_user_prompt(
         parts.append(f"Previous answer context:\n{lao_text}\n\n")
     if file_markdown:
         parts.append(f"Attached file metadata:\n{file_markdown[:2000]}\n\n")
-    parts.append(f"Available tools:\n{tools_text}\n\n")
     if tried_queries_text:
         parts.append(tried_queries_text)
     if obs_text:
         parts.append(f"Tool observations so far:\n{obs_text}\n\n")
     if docs_text:
         parts.append(f"Retrieved evidence (cite these as [N](N) in your answer):\n{docs_text}\n\n")
-    remaining = tool_budget - tool_calls_used
-    parts.append(f"Tool calls remaining: {remaining}/{tool_budget}\n")
+    parts.append(f"Available this turn:\n{available_tools_text}\n\n")
     parts.append(f"User message: {original}\n")
-    if remaining <= 0:
-        parts.append(
-            "\nYou have exhausted your tool-call budget. Write your answer now using the evidence gathered. "
-            "Do not call any more tools."
-        )
-    else:
-        parts.append(
-            "\nCall the next tool(s) to gather evidence, or write your final answer as plain text "
-            "(no tool calls) when you have enough to respond. "
-            "When writing your answer, cite evidence using [N](N) format where N matches the evidence item number."
-        )
 
     # Forceful reminder: if the user asked to create/generate a document and
     # create_office_document hasn't been called yet, remind the LLM to call it.
@@ -138,6 +130,20 @@ def _build_v2_user_prompt(
             "\n⚠ IMPORTANT: The user asked to CREATE a document. You MUST call "
             "create_office_document to actually create the file. Do NOT just describe "
             "what you would create — call the tool."
+        )
+
+    remaining = tool_budget - tool_calls_used
+    parts.append(f"\nTool calls remaining: {remaining}/{tool_budget}\n")
+    if remaining <= 0:
+        parts.append(
+            "You have exhausted your tool-call budget. Write your answer now using the evidence gathered. "
+            "Do not call any more tools."
+        )
+    else:
+        parts.append(
+            "Call the next tool(s) to gather evidence, or write your final answer as plain text "
+            "(no tool calls) when you have enough to respond. "
+            "When writing your answer, cite evidence using [N](N) format where N matches the evidence item number."
         )
 
     return "".join(parts)
@@ -159,7 +165,7 @@ async def think_node_v2(state, ctx) -> dict:
         query = state.get("original_query", "")
         observations = state.get("observations", [])
         tools = applicable_tools(ctx)
-        tools_text = _tool_descriptions_text(tools)
+        available_tools_text = _available_tools_text(tools)
 
         recent = select_recent_history(
             state.get("messages", []),
@@ -169,12 +175,12 @@ async def think_node_v2(state, ctx) -> dict:
         summary_text = state.get("compaction_summary") or ""
         kb_profile_text = format_profile_summary(state.get("kb_profile", {}))
 
-        system = AGENT_V2_PROMPT
+        system = get_agent_v2_system_prompt()
         retrieved_docs = state.get("retrieved_docs", [])
         user = _build_v2_user_prompt(
             iteration, tool_budget, tool_calls_used, query, summary_text, history_text,
             state.get("last_answer_object"), observations, retrieved_docs,
-            tools_text, kb_profile_text, state.get("file_markdown"),
+            available_tools_text, kb_profile_text, state.get("file_markdown"),
         )
 
         # Compaction: if the prompt exceeds context budget, compact before calling LLM.

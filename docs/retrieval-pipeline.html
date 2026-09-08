@@ -183,20 +183,21 @@
     <div class="sub-pipeline" style="margin-top: 12px;">
       <div class="sub-pipeline-label">THINK PROMPT COMPOSITION</div>
       <div class="node-desc" style="text-align: left;">
-        <strong>System:</strong> AGENT_V2_PROMPT — role and sources, objective, retrieval policy, evidence sufficiency, clarification policy, answer and citation policy, tool-call budget.<br><br>
+        <strong>System:</strong> AGENT_V2_PROMPT + full main-agent tool schemas/guidelines (precomputed from tool classes, cached).<br><br>
         <strong>User message (composed in this order):</strong>
         <ol style="margin: 8px 0 0 20px; line-height: 1.8;">
           <li><strong>KB profile summary</strong> — doc counts, fields, content types, date ranges of linked knowledge bases.</li>
           <li><strong>Earlier conversation summary</strong> — compacted rolling summary (if compaction ran).</li>
           <li><strong>Recent conversation history</strong> — last N user/assistant pairs (not citable).</li>
           <li><strong>Previous answer context</strong> — summary + key points from LastAnswerObject, if any.</li>
+          <li><strong>Attached file metadata</strong> — first 2000 chars of markdown if a file is attached.</li>
           <li><strong>Already tried queries</strong> — deduplicated queries from prior observations (do NOT repeat).</li>
           <li><strong>Tool observations so far</strong> — compact metadata for each observation (tool, args, top-line result, hit counts).</li>
           <li><strong>Retrieved evidence</strong> — top 10 docs, first 400 chars each, formatted as [E1] title\n  content, used for [N](N) citations.</li>
-          <li><strong>Attached file metadata</strong> — first 2000 chars of markdown if a file is attached.</li>
-          <li><strong>Available tools</strong> — filtered tool list with schemas and prompt_guidelines.</li>
-          <li><strong>Tool calls remaining</strong> — remaining / AGENT_TOTAL_TOOL_BUDGET.</li>
-          <li><strong>User message</strong> — original query, plus a forced reminder to call create_office_document if the user requested a file and it has not been called.</li>
+          <li><strong>Available this turn</strong> — short list of tool names currently callable (from applicable_tools).</li>
+          <li><strong>User message</strong> — the original query.</li>
+          <li><strong>Office creation reminder</strong> — if the user requested a downloadable Office file and create_office_document has not yet been called.</li>
+          <li><strong>Tool calls remaining + final instruction</strong> — remaining / AGENT_TOTAL_TOOL_BUDGET, plus a call to action to gather evidence or write the answer.</li>
         </ol>
         <br>
         <strong>Context compaction:</strong> If the full prompt exceeds the configured context budget, the retrieved docs and history are compacted in-place (doc previews shortened, old observations summarized) and the user message is rebuilt before the LLM call.
