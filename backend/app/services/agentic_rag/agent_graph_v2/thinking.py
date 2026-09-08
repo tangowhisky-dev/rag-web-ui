@@ -185,7 +185,7 @@ async def think_node_v2(state, ctx) -> dict:
 
         # Compaction: if the prompt exceeds context budget, compact before calling LLM.
         compaction_updates, compaction_local = await _compact_if_needed(
-            state, user, system_overhead=count_tokens(system), ctx=ctx,
+            state, user, system_overhead=count_tokens(system), ctx=ctx, trim_docs=True,
         )
         if compaction_local:
             state = {**state, **compaction_local}
