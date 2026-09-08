@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
-from sqlalchemy import or_
+from sqlalchemy import or_, case
 
 from app.models.knowledge import Document
 from app.services.agentic_rag.tool_context import ToolContext, enforce_rbac, write_audit
@@ -61,9 +61,19 @@ class TitleSearchInput(BaseModel):
         description="ISO date string (e.g. '2026-12-31'). Only return documents with "
         "file_modified_at <= this date.",
     )
+    document_status: Optional[str] = Field(
+        default=None,
+        description="Filter by lifecycle status: 'draft', 'active', or 'superseded'. "
+        "Use 'active' for current policies and authoritative documents.",
+    )
+    effective_as_of: Optional[str] = Field(
+        default=None,
+        description="ISO date. Only returns documents where effective_from <= date and "
+        "(effective_to is null or effective_to >= date). Use with current_datetime for 'current' questions.",
+    )
     sort_field: str = Field(
         default="file_modified_at",
-        description="Metadata field to sort by: 'file_modified_at', 'file_created_at', 'title', 'file_name'.",
+        description="Metadata field to sort by: 'file_modified_at', 'file_created_at', 'effective_from', 'title', 'file_name'.",
     )
     sort_direction: str = Field(default="desc", description="Sort direction: 'desc' (newest first) or 'asc'.")
     top_n: int = Field(
@@ -91,10 +101,11 @@ class TitleSearchInput(BaseModel):
 class TitleSearchTool(BaseAgentTool):
     name: str = "title_search"
     ui_label: str = "Searching documents by title"
-    description: str = "Find documents by title, filename, content type, or date range. Queries the document table directly and returns metadata by default. Use the returned document_id with file_read for full content, or set metadata_only=false for small documents."
+    description: str = "Find documents by title, filename, content type, date range, or authority status. Queries the document table directly and returns metadata by default. Use document_status='active' and effective_as_of for current policies. Use the returned document_id with file_read for full content, or set metadata_only=false for small documents."
     prompt_snippet: str = "Retrieve documents by title/filename/metadata"
     prompt_guidelines: list[str] = [
         "title_search: Best for finding documents by title, filename, type, or date. Default behavior is metadata_only=true (no full markdown). Use the returned document_id with file_read to read content, or set metadata_only=false only for small documents.",
+        "title_search: For 'current', 'latest', 'active' policy questions, set document_status='active' and use effective_as_of with current_datetime. Do not rely on semantic score for freshness; sort by file_modified_at or effective_from desc and prefer active over draft/superseded.",
     ]
     args_schema: type[BaseModel] = TitleSearchInput
 
@@ -139,13 +150,26 @@ class TitleSearchTool(BaseAgentTool):
             before = _parse_date(input_obj.modified_before)
             if before:
                 q = q.filter(Document.file_modified_at <= before)
+        if input_obj.document_status:
+            q = q.filter(Document.document_status == input_obj.document_status)
+        if input_obj.effective_as_of:
+            as_of = _parse_date(input_obj.effective_as_of)
+            if as_of:
+                q = q.filter(Document.effective_from <= as_of)
+                q = q.filter(or_(Document.effective_to.is_(None), Document.effective_to >= as_of))
 
-        # Sort
+        # Sort: authority (active > draft > superseded) first, then requested field.
+        status_priority = case(
+            (Document.document_status == "active", 0),
+            (Document.document_status == "draft", 1),
+            (Document.document_status == "superseded", 2),
+            else_=3,
+        )
         sort_col = getattr(Document, input_obj.sort_field, Document.file_modified_at)
         if input_obj.sort_direction == "asc":
-            q = q.order_by(sort_col.asc())
+            q = q.order_by(status_priority.asc(), sort_col.asc())
         else:
-            q = q.order_by(sort_col.desc())
+            q = q.order_by(status_priority.asc(), sort_col.desc())
 
         rows = q.limit(200).all()
         if not rows:
@@ -175,10 +199,15 @@ class TitleSearchTool(BaseAgentTool):
             if title_key not in latest_per_title:
                 latest_per_title[title_key] = doc
 
-        # Sort deduplicated docs by file_modified_at → file_created_at desc and cap at top_n.
+        # Sort deduplicated docs by authority, then effective_from / file_modified_at.
+        status_order = {"active": 0, "draft": 1, "superseded": 2}
         selected = sorted(
             latest_per_title.values(),
-            key=lambda d: d.file_modified_at or d.file_created_at or d.created_at,
+            key=lambda d: (
+                status_order.get(d.document_status, 3),
+                d.effective_from or d.file_modified_at or d.file_created_at or d.created_at,
+                d.file_modified_at or d.file_created_at or d.created_at,
+            ),
             reverse=True,
         )[:input_obj.top_n]
 
@@ -188,6 +217,8 @@ class TitleSearchTool(BaseAgentTool):
         for doc in selected:
             file_created_iso = (doc.file_created_at or doc.created_at).isoformat() if (doc.file_created_at or doc.created_at) else ""
             file_modified_iso = (doc.file_modified_at or doc.file_created_at or doc.created_at).isoformat() if (doc.file_modified_at or doc.file_created_at or doc.created_at) else ""
+            effective_from_iso = doc.effective_from.isoformat() if doc.effective_from else ""
+            effective_to_iso = doc.effective_to.isoformat() if doc.effective_to else ""
 
             if input_obj.metadata_only:
                 doc_dict = {
@@ -200,6 +231,11 @@ class TitleSearchTool(BaseAgentTool):
                         "file_created_at": file_created_iso,
                         "_file_created_at": file_created_iso,
                         "_file_modified_at": file_modified_iso,
+                        "document_status": doc.document_status,
+                        "effective_from": effective_from_iso,
+                        "effective_to": effective_to_iso,
+                        "version": doc.version,
+                        "owner": doc.owner,
                         "source": "title_search",
                     },
                 }
@@ -229,6 +265,11 @@ class TitleSearchTool(BaseAgentTool):
                     "file_created_at": file_created_iso,
                     "_file_created_at": file_created_iso,
                     "_file_modified_at": file_modified_iso,
+                    "document_status": doc.document_status,
+                    "effective_from": effective_from_iso,
+                    "effective_to": effective_to_iso,
+                    "version": doc.version,
+                    "owner": doc.owner,
                     "source": "title_search",
                     "_reranker_score": 1.0,
                     "truncated": truncated,

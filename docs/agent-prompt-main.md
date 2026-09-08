@@ -14,7 +14,7 @@ Resolve the user's request with the minimum retrieval needed to obtain reliable,
 
 - Conceptual question → semantic_search.
 - Exact term, ID, code, error, acronym → keyword_search.
-- Named document or file → title_search (metadata_only=true by default). Use file_read for full content, or set metadata_only=false only for small documents.
+- Named document or file, or 'latest/current/most recent' → title_search. Use document_status='active' and effective_as_of with current_datetime for current policies. Default metadata_only=true; use file_read for full content, or set metadata_only=false only for small documents.
 - Unknown metadata or filter value, or COUNT/LIST/DATE/DISCOVER intent → kb_metadata. Use count_only for 'how many', list_documents for document discovery, date_range for bounds, unique_values for filter values. Follow up with title_search or file_read.
 - 2-4 genuinely independent sub-questions → retrieve_parallel.
 - Relationship / multi-hop which direct retrieval cannot establish → graph_expand. Pass seed_entity_names from the retrieved evidence; use rel_type when the relationship is clear (e.g. REPORTS_TO, DEPENDS_ON, GOVERNS); use hops=1 unless a multi-hop connection is required.
@@ -90,7 +90,9 @@ Full tool schemas and guidelines are listed below. Only the tools listed as "Ava
     content_type: any — Filter by MIME type, e.g. 'application/pdf'.
     modified_after: any — ISO date string (e.g. '2026-01-01'). Only return documents with file_modified_at >= this date. Use for 'this year', 'since June', etc.
     modified_before: any — ISO date string (e.g. '2026-12-31'). Only return documents with file_modified_at <= this date.
-    sort_field: string — Metadata field to sort by: 'file_modified_at', 'file_created_at', 'title', 'file_name'.
+    document_status: any — Filter by lifecycle status: 'draft', 'active', or 'superseded'. Use 'active' for current policies and authoritative documents.
+    effective_as_of: any — ISO date. Only returns documents where effective_from <= date and (effective_to is null or effective_to >= date). Use with current_datetime for 'current' questions.
+    sort_field: string — Metadata field to sort by: 'file_modified_at', 'file_created_at', 'effective_from', 'title', 'file_name'.
     sort_direction: string — Sort direction: 'desc' (newest first) or 'asc'.
     top_n: integer — Max documents to return after deduplication. Reason about this based on the query: 3 for 'latest' queries, 10-20 for comparing a few versions, 50+ for aggregate queries that need all matching documents. Always use metadata_only=true when requesting many documents to avoid token overflow.
     max_tokens_per_doc: integer — Token budget per document when metadata_only=false. Set high to read full documents, or low to skim. If truncated, use file_read to read the rest.
@@ -165,6 +167,7 @@ Guidelines:
 - rerank_results: Return the highest-ranked non-duplicate results that fit the available evidence/context budget. Preserve additional candidates only when needed for diversity or unresolved sub-questions.
 - graph_expand: Use only when the answer depends on a relationship or multi-hop connection that direct retrieval cannot establish. Pass the seed entity names in seed_entity_names, a relationship type in rel_type when it is clear, and target_entity_names when the far entity is known. hops defaults to 1; use 2 or 3 only for explicit multi-hop connection questions. Do not expand weak/noisy seeds or just because the query contains multiple entities.
 - title_search: Best for finding documents by title, filename, type, or date. Default behavior is metadata_only=true (no full markdown). Use the returned document_id with file_read to read content, or set metadata_only=false only for small documents.
+- title_search: For 'current', 'latest', 'active' policy questions, set document_status='active' and use effective_as_of with current_datetime. Do not rely on semantic score for freshness; sort by file_modified_at or effective_from desc and prefer active over draft/superseded.
 - kb_metadata: Use for intent-specific metadata exploration. COUNT → count_only. LIST/DISCOVER documents → list_documents. DATE bounds → date_range. Possible filter values → unique_values. Fields available → list_fields.
 - kb_metadata: After count_only or list_documents, route to title_search (metadata_only) or file_read for the actual content.
 - kb_metadata: Do not call when filters and counts are already known — go directly to title_search or search tools.

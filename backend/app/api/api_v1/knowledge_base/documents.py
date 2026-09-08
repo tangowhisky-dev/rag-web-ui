@@ -451,6 +451,39 @@ def download_document(
 class UpdateMarkdownRequest(BaseModel):
     markdown: str = Field(..., min_length=1)
     lock_version: int
+    document_status: Optional[str] = Field(default=None, description="draft | active | superseded")
+    effective_from: Optional[str] = Field(default=None, description="ISO 8601 start of validity")
+    effective_to: Optional[str] = Field(default=None, description="ISO 8601 end of validity (null = ongoing)")
+    version: Optional[str] = Field(default=None, description="Document version label")
+    owner: Optional[str] = Field(default=None, description="Owning team, author, or organization")
+
+
+_VALID_STATUSES = {"draft", "active", "superseded"}
+
+
+def _parse_iso_date(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=422, detail=f"Invalid ISO date: {value}")
+
+
+def _apply_document_metadata(doc: Document, body: UpdateMarkdownRequest) -> None:
+    """Apply non-None authority/version fields to a Document."""
+    if body.document_status is not None:
+        if body.document_status not in _VALID_STATUSES:
+            raise HTTPException(status_code=422, detail=f"document_status must be one of {_VALID_STATUSES}")
+        doc.document_status = body.document_status
+    if body.effective_from is not None:
+        doc.effective_from = _parse_iso_date(body.effective_from)
+    if body.effective_to is not None:
+        doc.effective_to = _parse_iso_date(body.effective_to)
+    if body.version is not None:
+        doc.version = body.version
+    if body.owner is not None:
+        doc.owner = body.owner or None
 
 
 def _verify_kb_document(db: Session, kb_id: int, doc_id: int, current_user: User):
@@ -549,6 +582,22 @@ async def update_kb_document_markdown(
             detail="Document has not been converted yet — run re-convert first",
         )
 
+    # Apply metadata always; re-ingest only if the markdown changed.
+    _apply_document_metadata(doc, body)
+    doc.lock_version = doc.lock_version + 1
+
+    markdown_changed = body.markdown != (doc.converted_markdown or "")
+    if not markdown_changed:
+        db.commit()
+        return JSONResponse(
+            status_code=200,
+            content={
+                "document_id": doc_id,
+                "lock_version": doc.lock_version,
+                "message": "Metadata saved. No re-ingestion needed because markdown is unchanged.",
+            },
+        )
+
     # 1. Cancel any in-flight graph build for this document
     from app.services.ingestion.ingestion_dispatcher import cancel_graph_build_for_document
     latest_task = (
@@ -564,10 +613,9 @@ async def update_kb_document_markdown(
     from app.services.ingestion.reingest import reset_document_for_reingest
     reset_document_for_reingest(db, doc_id, data_store_id=None, kb_id=kb_id)
 
-    # 3. Persist new markdown + bump lock version
+    # 3. Persist new markdown + file edit timestamp
     doc.converted_markdown = body.markdown
     doc.conversion_status = "completed"
-    doc.lock_version = doc.lock_version + 1
     doc.file_edited_at = datetime.now(timezone.utc)
 
     # 4. Create a fresh ProcessingTask and re-ingest

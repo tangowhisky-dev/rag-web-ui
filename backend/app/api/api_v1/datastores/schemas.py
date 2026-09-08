@@ -169,6 +169,11 @@ class SelectFolderRequest(BaseModel):
 class UpdateMarkdownRequest(BaseModel):
     markdown: str = Field(..., min_length=1, description="Edited markdown content")
     lock_version: int = Field(..., description="Optimistic lock version from GET")
+    document_status: Optional[str] = Field(default=None, description="draft | active | superseded")
+    effective_from: Optional[str] = Field(default=None, description="ISO 8601 start of validity")
+    effective_to: Optional[str] = Field(default=None, description="ISO 8601 end of validity (null = ongoing)")
+    version: Optional[str] = Field(default=None, description="Document version label")
+    owner: Optional[str] = Field(default=None, description="Owning team, author, or organization")
 
 
 # ---------------------------------------------------------------------------

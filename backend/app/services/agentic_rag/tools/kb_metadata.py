@@ -185,6 +185,11 @@ def _list_documents(db, kb_ids: list[int], input_obj: KbMetadataInput) -> dict:
             "content_type": r.content_type,
             "file_created_at": _iso(r.file_created_at),
             "file_modified_at": _iso(r.file_modified_at),
+            "document_status": r.document_status,
+            "effective_from": _iso(r.effective_from),
+            "effective_to": _iso(r.effective_to),
+            "version": r.version,
+            "owner": r.owner,
         }
         for r in rows
     ]

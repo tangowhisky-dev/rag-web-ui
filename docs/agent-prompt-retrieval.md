@@ -69,7 +69,9 @@ RETRIEVAL SUB-AGENT TOOLS (in prompt order)
     content_type: any — Filter by MIME type, e.g. 'application/pdf'.
     modified_after: any — ISO date string (e.g. '2026-01-01'). Only return documents with file_modified_at >= this date. Use for 'this year', 'since June', etc.
     modified_before: any — ISO date string (e.g. '2026-12-31'). Only return documents with file_modified_at <= this date.
-    sort_field: string — Metadata field to sort by: 'file_modified_at', 'file_created_at', 'title', 'file_name'.
+    document_status: any — Filter by lifecycle status: 'draft', 'active', or 'superseded'. Use 'active' for current policies and authoritative documents.
+    effective_as_of: any — ISO date. Only returns documents where effective_from <= date and (effective_to is null or effective_to >= date). Use with current_datetime for 'current' questions.
+    sort_field: string — Metadata field to sort by: 'file_modified_at', 'file_created_at', 'effective_from', 'title', 'file_name'.
     sort_direction: string — Sort direction: 'desc' (newest first) or 'asc'.
     top_n: integer — Max documents to return after deduplication. Reason about this based on the query: 3 for 'latest' queries, 10-20 for comparing a few versions, 50+ for aggregate queries that need all matching documents. Always use metadata_only=true when requesting many documents to avoid token overflow.
     max_tokens_per_doc: integer — Token budget per document when metadata_only=false. Set high to read full documents, or low to skim. If truncated, use file_read to read the rest.
@@ -99,6 +101,7 @@ Guidelines:
 - rerank_results: Return the highest-ranked non-duplicate results that fit the available evidence/context budget. Preserve additional candidates only when needed for diversity or unresolved sub-questions.
 - graph_expand: Use only when the answer depends on a relationship or multi-hop connection that direct retrieval cannot establish. Pass the seed entity names in seed_entity_names, a relationship type in rel_type when it is clear, and target_entity_names when the far entity is known. hops defaults to 1; use 2 or 3 only for explicit multi-hop connection questions. Do not expand weak/noisy seeds or just because the query contains multiple entities.
 - title_search: Best for finding documents by title, filename, type, or date. Default behavior is metadata_only=true (no full markdown). Use the returned document_id with file_read to read content, or set metadata_only=false only for small documents.
+- title_search: For 'current', 'latest', 'active' policy questions, set document_status='active' and use effective_as_of with current_datetime. Do not rely on semantic score for freshness; sort by file_modified_at or effective_from desc and prefer active over draft/superseded.
 - kb_outline: Best before targeted reading of a large document. Use to locate relevant sections and avoid reading unnecessary content.
 - kb_outline: Use after kb_grep to see the structure around matching lines.
 - file_read: Use for targeted reads after locating content via kb_outline, kb_grep, or search results. Read only the required lines with offset/limit; use larger limits only when full-document context is genuinely needed.

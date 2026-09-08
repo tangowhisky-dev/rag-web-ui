@@ -23,7 +23,7 @@ Resolve the user's request with the minimum retrieval needed to obtain reliable,
 
 - Conceptual question → semantic_search.
 - Exact term, ID, code, error, acronym → keyword_search.
-- Named document or file → title_search (metadata_only=true by default). Use file_read for full content, or set metadata_only=false only for small documents.
+- Named document or file, or 'latest/current/most recent' → title_search. Use document_status='active' and effective_as_of with current_datetime for current policies. Default metadata_only=true; use file_read for full content, or set metadata_only=false only for small documents.
 - Unknown metadata or filter value, or COUNT/LIST/DATE/DISCOVER intent → kb_metadata. Use count_only for 'how many', list_documents for document discovery, date_range for bounds, unique_values for filter values. Follow up with title_search or file_read.
 - 2-4 genuinely independent sub-questions → retrieve_parallel.
 - Relationship / multi-hop which direct retrieval cannot establish → graph_expand. Pass seed_entity_names from the retrieved evidence; use rel_type when the relationship is clear (e.g. REPORTS_TO, DEPENDS_ON, GOVERNS); use hops=1 unless a multi-hop connection is required.

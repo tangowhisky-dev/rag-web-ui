@@ -69,6 +69,18 @@ class Document(Base, TimestampMixin):
     # Set when an admin edits converted_markdown (OCR/extraction correction).
     # NOT a temporal versioning signal — only a content-correction tracking field.
     file_edited_at = Column(DateTime, nullable=True)
+
+    # Authority / version semantics for enterprise RAG.
+    # document_status is the lifecycle state: draft, active, superseded.
+    # effective_from / effective_to are the policy validity window.
+    # version is a human-readable version label (e.g. '1', '2.1', 'final').
+    # owner is the accountable party (org name, team, author, etc.).
+    document_status = Column(String(20), nullable=False, default="active", index=True, server_default=sa.text("'active'"))
+    effective_from = Column(DateTime, nullable=False, default=lambda: datetime(1970, 1, 1, tzinfo=timezone.utc), index=True, server_default=sa.text("'1970-01-01 00:00:00'"))
+    effective_to = Column(DateTime, nullable=True, index=True)
+    version = Column(String(50), nullable=False, default="1", server_default=sa.text("'1'"))
+    owner = Column(String(255), nullable=True)
+
     is_selected = Column(Boolean, nullable=False, default=False, server_default=sa.text('0'))  # Controls ingestion participation; unselect = delete ingested data
     needs_reprocess = Column(Boolean, nullable=False, default=False, server_default=sa.text('0'))  # Set when markdown is edited; cleared after successful re-ingest
 
