@@ -78,6 +78,7 @@ interface Message {
   lastAnswerObject?: Record<string, unknown>;
   chartOptions?: Array<Record<string, unknown>>;
   officeFiles?: OfficeFileRef[];
+  isCancelled?: boolean;
 }
 
 interface OfficeFileRef {
@@ -726,6 +727,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
         const payload = JSON.parse(trimmedLine.slice(2)) as {
           messageId?: number;
           userMessageId?: number;
+          finishReason?: string;
           usage?: {
             final_confidence?: number;
             confidence_level?: string;
@@ -734,6 +736,15 @@ function ChatPageInner({ params }: { params: { id: string } }) {
             retrieval_score?: number;
           };
         };
+        // If the response was cancelled, mark the assistant message
+        // so the UI can show "(stopped)" instead of treating it as
+        // a complete response.
+        if (payload.finishReason === "cancelled") {
+          appendAssistantChunk(assistantId, (msg) => ({
+            ...msg,
+            isCancelled: true,
+          }));
+        }
         const usage = payload.usage;
         setMessages((prev) => {
           // Find the user message preceding this assistant message
@@ -953,9 +964,12 @@ function ChatPageInner({ params }: { params: { id: string } }) {
 
   /** Abort the in-flight stream request and notify the server to cancel. */
   const handleStop = () => {
-    // Best-effort: notify server to cancel, then always abort the client-side stream.
+    // Immediately update UI — the stop button reverts to send, and the
+    // loading state clears so the user sees instant acknowledgment.
+    // The server-side cancellation continues asynchronously.
     cancelStream(params.id).catch(() => {});
     abortControllerRef.current?.abort();
+    setIsLoading(false);
   };
 
   /** Called by BranchPicker when the user saves an edit and a new branch message is created. */
