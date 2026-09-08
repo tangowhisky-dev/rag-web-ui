@@ -37,7 +37,6 @@ class KeywordSearchTool(BaseAgentTool):
     prompt_snippet: str = "Keyword retrieval (strict + expanded, merged)"
     prompt_guidelines: list[str] = [
         "keyword_search: Best for code, identifiers, filenames, people names, error messages, distinctive terminology, jargon, acronyms — when exact wording or keyword overlap matters.",
-        "keyword_search: If results are weak or insufficient, try semantic_search for conceptual matching or title_search to find whole documents by name.",
     ]
     args_schema: type = KeywordSearchInput
     ui_label: str = "Searching (keyword)"

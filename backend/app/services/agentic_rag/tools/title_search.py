@@ -94,7 +94,6 @@ class TitleSearchTool(BaseAgentTool):
     prompt_snippet: str = "Retrieve documents by title/filename/metadata"
     prompt_guidelines: list[str] = [
         "title_search: Best for finding documents by title, filename, type, author, or date. Use metadata_only=true for discovery or aggregation; use full content for content questions.",
-        "title_search: For conceptual queries that don't name a specific document, use semantic_search or keyword_search instead.",
     ]
     args_schema: type[BaseModel] = TitleSearchInput
 

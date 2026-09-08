@@ -90,15 +90,12 @@ RETRIEVAL SUB-AGENT TOOLS (in prompt order)
 
 Guidelines:
 - keyword_search: Best for code, identifiers, filenames, people names, error messages, distinctive terminology, jargon, acronyms — when exact wording or keyword overlap matters.
-- keyword_search: If results are weak or insufficient, try semantic_search for conceptual matching or title_search to find whole documents by name.
 - semantic_search: Best for conceptual, natural-language, paraphrased, and meaning-based questions. Use when relevant documents may not share the user's exact wording.
-- semantic_search: Default first choice for most questions. Switch to keyword_search for code/IDs or title_search to find whole documents by name.
 - rerank_results: Use after combining results from multiple retrieval paths or when the candidate set is large or noisy. Not needed after a single small, high-confidence result set.
 - rerank_results: Return the highest-ranked non-duplicate results that fit the available evidence/context budget. Preserve additional candidates only when needed for diversity or unresolved sub-questions.
 - graph_expand: Best for relationship, dependency, entity-linking, and multi-hop questions. Use when direct retrieval is incomplete, not as a default expansion step.
 - graph_expand: Use only with high-confidence retrieved seed documents/entities. Prefer expansion from a small number of diverse, relevant seeds. Do not expand weak or noisy retrieval results.
 - title_search: Best for finding documents by title, filename, type, author, or date. Use metadata_only=true for discovery or aggregation; use full content for content questions.
-- title_search: For conceptual queries that don't name a specific document, use semantic_search or keyword_search instead.
 - kb_outline: Best before targeted reading of a large document. Use to locate relevant sections and avoid reading unnecessary content.
 - kb_outline: Use after kb_grep to see the structure around matching lines.
 - file_read: Use for targeted reads after locating content via kb_outline, kb_grep, or search results. Read only the required lines with offset/limit; use larger limits only when full-document context is genuinely needed.

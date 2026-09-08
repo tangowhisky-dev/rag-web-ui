@@ -43,7 +43,6 @@ class ClarifyTool(BaseAgentTool):
     description: str = "Ask the user a question to resolve ambiguity in their query."
     prompt_snippet: str = "Ask the user to resolve query ambiguity"
     prompt_guidelines: list[str] = [
-        "clarify: Use only when ambiguity materially changes the retrieval target or answer. If a reasonable interpretation can be searched or answered, do not clarify.",
         "clarify: Ask concise questions. Max 2 calls per user query. The tool pauses the pipeline and resumes on user response.",
     ]
     args_schema: type[BaseModel] = ClarifyInput
