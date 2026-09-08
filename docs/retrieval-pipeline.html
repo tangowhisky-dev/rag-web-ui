@@ -141,7 +141,11 @@
   <tr><td class="removed">answer_scoring (separate LLM call)</td><td class="added">Optional, runs after post_process, non-blocking</td></tr>
   <tr><td class="removed">save_memory (separate node)</td><td class="added">Merged into post_process</td></tr>
   <tr><td class="removed">extract_structured (background)</td><td class="added">Removed</td></tr>
-  <tr><td class="removed">18 atomic tools flat</td><td class="added">13 main-agent tools + 2 sub-agent wrappers</td></tr>
+  <tr><td class="removed">18 atomic tools flat</td><td class="added">Atomic tool set filtered by context + 2 sub-agent wrappers</td></tr>
+  <tr><td class="removed">search_exact / search_sparse / search_dense as 3 tools</td><td class="added">keyword_search (MySQL FTS + SPLADE) + semantic_search (Qdrant dense vector)</td></tr>
+  <tr><td class="removed">kb_read / kb_search_documents</td><td class="added">file_read (KB docs + attached files) / title_search (document-level)</td></tr>
+  <tr><td class="removed">Per-tool call budgets and sub-agent iteration caps</td><td class="added">AGENT_TOTAL_TOOL_BUDGET + AGENT_MAX_CLARIFY + AGENT_MAX_SAME_TOOL_REPEAT; no other per-tool caps</td></tr>
+  <tr><td class="removed">QUERY_MODEL and REASONING_MODEL settings</td><td class="added">UTILITY_MODEL (fallback to primary response model)</td></tr>
 </table>
 
 <div class="diagram">
@@ -158,7 +162,7 @@
   <!-- LOAD CONTEXT -->
   <div class="node node-deterministic">
     <div class="node-title">load_context</div>
-    <div class="node-desc">Loads previous LastAnswerObject from DB, recalls conversational memory from Redis, profiles linked KBs (doc count, fields, content types, date range). Resets all per-turn loop state (observations, iteration, force_finalize, accumulated_data, etc.).</div>
+    <div class="node-desc">Loads previous LastAnswerObject from DB, recalls conversational memory from Redis, profiles linked KBs (doc count, fields, content types, date range). Resets all per-query loop state (observations, tool_call_counts, force_finalize, accumulated_data, etc.).</div>
     <div class="node-tag">DETERMINISTIC · DB + Redis</div>
   </div>
 
@@ -166,7 +170,7 @@
 
   <!-- AGENT LOOP -->
   <div class="loop">
-    <div class="loop-label">AGENT LOOP (max AGENT_TOTAL_TOOL_BUDGET, max AGENT_MAX_WALL_SECONDS)</div>
+    <div class="loop-label">AGENT LOOP (max AGENT_TOTAL_TOOL_BUDGET, max AGENT_MAX_WALL_SECONDS, AGENT_MAX_CLARIFY, AGENT_MAX_SAME_TOOL_REPEAT)</div>
 
     <!-- THINK -->
     <div class="node node-llm">
@@ -176,7 +180,7 @@
     </div>
 
     <!-- route_think branch -->
-    <div class="branch-label" style="margin-top: 12px;">route_think: tool_calls present AND iteration < max?</div>
+    <div class="branch-label" style="margin-top: 12px;">route_think: tool_calls present AND budget/wall-clock not exhausted?</div>
 
     <div class="branch">
       <div class="branch-column">
@@ -184,7 +188,7 @@
         <div class="connector"></div>
         <div class="node node-tool">
           <div class="node-title">tool</div>
-          <div class="node-desc">Dispatches tool calls in parallel. Per-tool call budgets enforced. Transient errors retried with backoff; argument errors returned as observations for LLM to fix. Merges results into state: retrieved_docs (deduplicated by content_hash), accumulated_data, generated_files.</div>
+          <div class="node-desc">Dispatches tool calls in parallel. Enforces total tool-call budget, clarify cap, and same-argument repeat guard. Transient errors retried with backoff; argument errors returned as observations for LLM to fix. Reuses exact-duplicate observations idempotently. Merges results into state: retrieved_docs (deduplicated by content_hash), accumulated_data, generated_files.</div>
           <div class="node-tag">TOOL DISPATCH · parallel</div>
         </div>
 
@@ -204,7 +208,7 @@
             <div class="tool-item"><strong>extract_data</strong><small>Extract structured {label, value} data from docs/answer. Accumulates in state.</small></div>
             <div class="tool-item"><strong>chart_generate</strong><small>Generate ECharts JSON. Reads from state.accumulated_data automatically.</small></div>
             <div class="tool-item"><strong>code_execute</strong><small>RestrictedPython sandbox. For computation on extracted data.</small></div>
-            <div class="tool-item"><strong>summarize</strong><small>Summarize previous answer or file.</small></div>
+            <div class="tool-item"><strong>summarize</strong><small>Summarize arbitrary text via single-call or map-reduce. Pass text directly; retrieve via file_read if needed.</small></div>
             <div class="tool-item"><strong>current_datetime</strong><small>Returns current UTC date/time. For "latest" / "most recent" queries.</small></div>
             <div class="tool-item"><strong>file_extract_table</strong><small>Extract tables from CSV/XLSX/XLS attached files.</small></div>
             <div class="tool-item"><strong>clarify</strong><small>Human-in-the-loop. Asks a focused question when evidence is insufficient.</small></div>
@@ -256,7 +260,7 @@
       </div>
 
       <div class="branch-column">
-        <div class="branch-label" style="color: var(--red); border-color: var(--red);">no tool_calls OR max iter OR wall-clock exceeded</div>
+        <div class="branch-label" style="color: var(--red); border-color: var(--red);">no tool_calls OR total budget exhausted OR wall-clock exceeded</div>
         <div class="connector"></div>
       </div>
     </div>
@@ -269,18 +273,9 @@
   <div class="node node-deterministic">
     <div class="node-title">post_process</div>
     <div class="node-desc">
-      Deterministic post-processing. If LLM wrote the answer in think (precomputed_answer), use it directly. Otherwise, generate from evidence via fallback finalize LLM call. Substitutes chart markers and office file markers. Normalizes citations: [E1], [N](N), and bare [N] all normalized to [N] with provenance. Builds LastAnswerObject (citations, chart_options, office_files). Persists to DB. Optional answer_scoring runs after (non-blocking).
+      Deterministic post-processing. If LLM wrote the answer in think (precomputed_answer), use it directly. Otherwise, generate from evidence via fallback finalize LLM call. Substitutes chart markers and office file markers. Normalizes citations: [E1], [N](N), and bare [N] all normalized to [N] with provenance. Builds LastAnswerObject (citations, chart_options, office_files). Persists to DB. Runs optional answer scoring (non-blocking, inside post_process) for followups and confidence.
     </div>
     <div class="node-tag">DETERMINISTIC · DB</div>
-  </div>
-
-  <div class="connector"></div>
-
-  <!-- ANSWER SCORING (optional) -->
-  <div class="node node-llm" style="border-style: dashed; opacity: 0.7;">
-    <div class="node-title">answer_scoring (optional)</div>
-    <div class="node-desc">Evaluates answer quality: faithfulness, completeness, follow-up suggestions. Non-blocking — runs after post_process, updates LastAnswerObject with followups. Failure is logged but does not affect the completed response.</div>
-    <div class="node-tag">LLM (evaluator) · optional</div>
   </div>
 
   <div class="connector"></div>
@@ -339,7 +334,8 @@
     <li><strong>Citation provenance</strong> — every hit carries a citation_ref with source_tool, citation_kind (chunk, file, section, range, grep, outline, table), and metadata. post_process normalizes [E1], [N](N), and bare [N] formats to [N] links with provenance.</li>
     <li><strong>Office creation guard</strong> — if the query asks for a file creation (create/generate/make + powerpoint/excel/word/spreadsheet) but create_office_document was never called, the think node forces the tool call. Prevents smaller models from writing "I have created..." without actually calling the tool.</li>
     <li><strong>Deterministic post-processing</strong> — post_process handles citation normalization, chart/office marker substitution, LastAnswerObject construction, and DB persistence. No LLM call needed when the think node already wrote the answer (precomputed_answer path).</li>
-    <li><strong>Budgets</strong> — one total tool-call budget per user query (default 25). Clarify has a per-query cap (default 2). Same-argument repeat guard (default 3) blocks exact-duplicate loops. No other per-tool caps.</li>
+    <li><strong>Budgets</strong> — one total tool-call budget per user query (default 25 via AGENT_TOTAL_TOOL_BUDGET). Clarify has a per-query cap (default 2 via AGENT_MAX_CLARIFY). Same-argument repeat guard (default 3 via AGENT_MAX_SAME_TOOL_REPEAT) blocks exact-duplicate loops. No other per-tool caps.</li>
+    <li><strong>Two-model setup</strong> — a primary response model and a utility model (query rewrite, rolling summary, reasoning/CoT, and tool calls like summarize). The utility model falls back to the primary when unset.</li>
     <li><strong>Compact SSE payload</strong> — tool observations stream only a one-line summary (~96 bytes) instead of the full result. Sub-agent events stream progress, not raw evidence.</li>
     <li><strong>Deduplication by content_hash</strong> — prevents duplicate chunks across search legs, rerank results, graph expansion, and parallel retrieval sub-agents from reaching the final generation call.</li>
     <li><strong>GPU acceleration</strong> — SPLADE sparse embeddings and cross-encoder reranking use CUDAExecutionProvider when FASTEMBED_USE_GPU=true and GPU runtime is configured.</li>
