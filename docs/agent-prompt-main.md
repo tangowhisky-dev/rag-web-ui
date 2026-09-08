@@ -14,8 +14,8 @@ Resolve the user's request with the minimum retrieval needed to obtain reliable,
 
 - Conceptual question → semantic_search.
 - Exact term, ID, code, error, acronym → keyword_search.
-- Named document or file → title_search.
-- Unknown metadata or filter value → kb_metadata.
+- Named document or file → title_search (metadata_only=true by default). Use file_read for full content, or set metadata_only=false only for small documents.
+- Unknown metadata or filter value, or COUNT/LIST/DATE/DISCOVER intent → kb_metadata. Use count_only for 'how many', list_documents for document discovery, date_range for bounds, unique_values for filter values. Follow up with title_search or file_read.
 - 2-4 genuinely independent sub-questions → retrieve_parallel.
 - Relationship / multi-hop which direct retrieval cannot establish → graph_expand. Pass seed_entity_names from the retrieved evidence; use rel_type when the relationship is clear (e.g. REPORTS_TO, DEPENDS_ON, GOVERNS); use hops=1 unless a multi-hop connection is required.
 - Literal / regex lookup or indexed retrieval failure → kb_grep.
@@ -92,12 +92,12 @@ Full tool schemas and guidelines are listed below. Only the tools listed as "Ava
     modified_before: any — ISO date string (e.g. '2026-12-31'). Only return documents with file_modified_at <= this date.
     sort_field: string — Metadata field to sort by: 'file_modified_at', 'file_created_at', 'title', 'file_name'.
     sort_direction: string — Sort direction: 'desc' (newest first) or 'asc'.
-    top_n: integer — Max documents to return after deduplication. Reason about this based on the query: 3 for 'latest' queries, 10-20 for comparing a few versions, 50+ for aggregate queries that need all matching documents. Use metadata_only=true when requesting many documents to avoid token overflow.
-    max_tokens_per_doc: integer — Token budget per document. The full markdown is truncated if it exceeds this. Set high to read full documents, or low to skim. If truncated, use file_read to read the rest.
-    metadata_only: boolean — If true, return only title, file_name, file_modified_at, file_created_at, content_type, document_id — no markdown content. Use for discovery queries ('how many documents match X', 'list all weekly updates') to save tokens. Follow up with a second call (metadata_only=false) to read specific documents.
+    top_n: integer — Max documents to return after deduplication. Reason about this based on the query: 3 for 'latest' queries, 10-20 for comparing a few versions, 50+ for aggregate queries that need all matching documents. Always use metadata_only=true when requesting many documents to avoid token overflow.
+    max_tokens_per_doc: integer — Token budget per document when metadata_only=false. Set high to read full documents, or low to skim. If truncated, use file_read to read the rest.
+    metadata_only: boolean — If true (default), return only title, file_name, file_modified_at, file_created_at, content_type, document_id — no markdown content. Use for discovery queries. Set to false only when the matching document is known to be small or when a specific document's full content is needed. For large documents, keep metadata_only=true and follow up with file_read using the returned document_id.
 - kb_metadata: Discover KB schema and metadata values
   args:
-    action: string (required) — One of: list_fields, unique_values, date_range, list_documents, count_only. list_fields: returns available filter fields (no field needed). unique_values: returns distinct values for a field. date_range: returns min/max dates for a field. list_documents: returns recent documents (use value_contains to filter by title). count_only: returns total count of documents matching value_contains. Use count_only for aggregate queries ('how many weekly updates exist').
+    action: string (required) — One of: list_fields, unique_values, date_range, list_documents, count_only. Use list_fields to see available filter fields. Use unique_values to discover possible values for a field (e.g. all content types). Use date_range to find the first/last dates for a field. Use list_documents to get recent documents matching a title substring. Use count_only for 'how many' / COUNT questions. After discovery, route to title_search for list/filter intent, file_read for content.
     field: any — Field name for unique_values or date_range. Required for those actions.
     value_contains: any — Filter results to those containing this substring (applies to title for list_documents and count_only, to the field value for unique_values).
     limit: integer — Max results for unique_values or list_documents.
@@ -164,9 +164,10 @@ Guidelines:
 - rerank_results: Use after combining results from multiple retrieval paths or when the candidate set is large or noisy. Not needed after a single small, high-confidence result set.
 - rerank_results: Return the highest-ranked non-duplicate results that fit the available evidence/context budget. Preserve additional candidates only when needed for diversity or unresolved sub-questions.
 - graph_expand: Use only when the answer depends on a relationship or multi-hop connection that direct retrieval cannot establish. Pass the seed entity names in seed_entity_names, a relationship type in rel_type when it is clear, and target_entity_names when the far entity is known. hops defaults to 1; use 2 or 3 only for explicit multi-hop connection questions. Do not expand weak/noisy seeds or just because the query contains multiple entities.
-- title_search: Best for finding documents by title, filename, type, author, or date. Use metadata_only=true for discovery or aggregation; use full content for content questions.
-- kb_metadata: Use when the required filter values or document attributes are unknown. Best for exploring available document types, date ranges, fields, and valid metadata values.
-- kb_metadata: Do not call when filters are already known — go directly to title_search or search tools.
+- title_search: Best for finding documents by title, filename, type, or date. Default behavior is metadata_only=true (no full markdown). Use the returned document_id with file_read to read content, or set metadata_only=false only for small documents.
+- kb_metadata: Use for intent-specific metadata exploration. COUNT → count_only. LIST/DISCOVER documents → list_documents. DATE bounds → date_range. Possible filter values → unique_values. Fields available → list_fields.
+- kb_metadata: After count_only or list_documents, route to title_search (metadata_only) or file_read for the actual content.
+- kb_metadata: Do not call when filters and counts are already known — go directly to title_search or search tools.
 - kb_outline: Best before targeted reading of a large document. Use to locate relevant sections and avoid reading unnecessary content.
 - kb_outline: Use after kb_grep to see the structure around matching lines.
 - current_datetime: Use when interpreting relative or freshness-sensitive terms such as today, latest, recent, newest, or last quarter. Not needed for absolute dates.

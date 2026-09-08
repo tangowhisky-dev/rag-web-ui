@@ -48,12 +48,12 @@ class KbMetadataInput(BaseModel):
     action: str = Field(
         description=(
             "One of: list_fields, unique_values, date_range, list_documents, count_only. "
-            "list_fields: returns available filter fields (no field needed). "
-            "unique_values: returns distinct values for a field. "
-            "date_range: returns min/max dates for a field. "
-            "list_documents: returns recent documents (use value_contains to filter by title). "
-            "count_only: returns total count of documents matching value_contains. "
-            "Use count_only for aggregate queries ('how many weekly updates exist')."
+            "Use list_fields to see available filter fields. "
+            "Use unique_values to discover possible values for a field (e.g. all content types). "
+            "Use date_range to find the first/last dates for a field. "
+            "Use list_documents to get recent documents matching a title substring. "
+            "Use count_only for 'how many' / COUNT questions. "
+            "After discovery, route to title_search for list/filter intent, file_read for content."
         )
     )
     field: Optional[str] = Field(
@@ -72,11 +72,12 @@ class KbMetadataInput(BaseModel):
 class KbMetadataTool(BaseAgentTool):
     name: str = "kb_metadata"
     ui_label: str = "Inspecting KB metadata"
-    description: str = "Inspect KB metadata: list_fields, unique_values, date_range, list_documents, count_only. Discover what documents exist and what filters are available."
+    description: str = "Inspect KB metadata by intent: list_fields, unique_values, date_range, list_documents, count_only. Use count_only for COUNT questions, list_documents for document discovery, date_range for temporal bounds, and unique_values for filter values. Follow discovery with title_search or file_read."
     prompt_snippet: str = "Discover KB schema and metadata values"
     prompt_guidelines: list[str] = [
-        "kb_metadata: Use when the required filter values or document attributes are unknown. Best for exploring available document types, date ranges, fields, and valid metadata values.",
-        "kb_metadata: Do not call when filters are already known — go directly to title_search or search tools.",
+        "kb_metadata: Use for intent-specific metadata exploration. COUNT → count_only. LIST/DISCOVER documents → list_documents. DATE bounds → date_range. Possible filter values → unique_values. Fields available → list_fields.",
+        "kb_metadata: After count_only or list_documents, route to title_search (metadata_only) or file_read for the actual content.",
+        "kb_metadata: Do not call when filters and counts are already known — go directly to title_search or search tools.",
     ]
     args_schema: type[BaseModel] = KbMetadataInput
 

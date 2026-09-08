@@ -71,29 +71,30 @@ class TitleSearchInput(BaseModel):
         description="Max documents to return after deduplication. Reason about this "
         "based on the query: 3 for 'latest' queries, 10-20 for comparing a few "
         "versions, 50+ for aggregate queries that need all matching documents. "
-        "Use metadata_only=true when requesting many documents to avoid token overflow.",
+        "Always use metadata_only=true when requesting many documents to avoid token overflow.",
     )
     max_tokens_per_doc: int = Field(
         default=50000, ge=500,
-        description="Token budget per document. The full markdown is truncated if it exceeds this. "
+        description="Token budget per document when metadata_only=false. "
         "Set high to read full documents, or low to skim. If truncated, use file_read to read the rest.",
     )
     metadata_only: bool = Field(
-        default=False,
-        description="If true, return only title, file_name, file_modified_at, file_created_at, "
-        "content_type, document_id — no markdown content. Use for discovery queries "
-        "('how many documents match X', 'list all weekly updates') to save tokens. "
-        "Follow up with a second call (metadata_only=false) to read specific documents.",
+        default=True,
+        description="If true (default), return only title, file_name, file_modified_at, file_created_at, "
+        "content_type, document_id — no markdown content. Use for discovery queries. "
+        "Set to false only when the matching document is known to be small or when a specific "
+        "document's full content is needed. For large documents, keep metadata_only=true and "
+        "follow up with file_read using the returned document_id.",
     )
 
 
 class TitleSearchTool(BaseAgentTool):
     name: str = "title_search"
     ui_label: str = "Searching documents by title"
-    description: str = "Find and read full documents by title, filename, content type, or date range. Queries the document table directly — no chunk retrieval, no reranking. Returns complete converted markdown."
+    description: str = "Find documents by title, filename, content type, or date range. Queries the document table directly and returns metadata by default. Use the returned document_id with file_read for full content, or set metadata_only=false for small documents."
     prompt_snippet: str = "Retrieve documents by title/filename/metadata"
     prompt_guidelines: list[str] = [
-        "title_search: Best for finding documents by title, filename, type, author, or date. Use metadata_only=true for discovery or aggregation; use full content for content questions.",
+        "title_search: Best for finding documents by title, filename, type, or date. Default behavior is metadata_only=true (no full markdown). Use the returned document_id with file_read to read content, or set metadata_only=false only for small documents.",
     ]
     args_schema: type[BaseModel] = TitleSearchInput
 

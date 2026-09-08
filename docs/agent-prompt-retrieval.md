@@ -71,9 +71,9 @@ RETRIEVAL SUB-AGENT TOOLS (in prompt order)
     modified_before: any — ISO date string (e.g. '2026-12-31'). Only return documents with file_modified_at <= this date.
     sort_field: string — Metadata field to sort by: 'file_modified_at', 'file_created_at', 'title', 'file_name'.
     sort_direction: string — Sort direction: 'desc' (newest first) or 'asc'.
-    top_n: integer — Max documents to return after deduplication. Reason about this based on the query: 3 for 'latest' queries, 10-20 for comparing a few versions, 50+ for aggregate queries that need all matching documents. Use metadata_only=true when requesting many documents to avoid token overflow.
-    max_tokens_per_doc: integer — Token budget per document. The full markdown is truncated if it exceeds this. Set high to read full documents, or low to skim. If truncated, use file_read to read the rest.
-    metadata_only: boolean — If true, return only title, file_name, file_modified_at, file_created_at, content_type, document_id — no markdown content. Use for discovery queries ('how many documents match X', 'list all weekly updates') to save tokens. Follow up with a second call (metadata_only=false) to read specific documents.
+    top_n: integer — Max documents to return after deduplication. Reason about this based on the query: 3 for 'latest' queries, 10-20 for comparing a few versions, 50+ for aggregate queries that need all matching documents. Always use metadata_only=true when requesting many documents to avoid token overflow.
+    max_tokens_per_doc: integer — Token budget per document when metadata_only=false. Set high to read full documents, or low to skim. If truncated, use file_read to read the rest.
+    metadata_only: boolean — If true (default), return only title, file_name, file_modified_at, file_created_at, content_type, document_id — no markdown content. Use for discovery queries. Set to false only when the matching document is known to be small or when a specific document's full content is needed. For large documents, keep metadata_only=true and follow up with file_read using the returned document_id.
 - kb_outline: Inspect document structure (table of contents)
   args:
     document_id: integer (required) — Document ID from search results, kb_grep matches, or kb_outline.
@@ -98,7 +98,7 @@ Guidelines:
 - rerank_results: Use after combining results from multiple retrieval paths or when the candidate set is large or noisy. Not needed after a single small, high-confidence result set.
 - rerank_results: Return the highest-ranked non-duplicate results that fit the available evidence/context budget. Preserve additional candidates only when needed for diversity or unresolved sub-questions.
 - graph_expand: Use only when the answer depends on a relationship or multi-hop connection that direct retrieval cannot establish. Pass the seed entity names in seed_entity_names, a relationship type in rel_type when it is clear, and target_entity_names when the far entity is known. hops defaults to 1; use 2 or 3 only for explicit multi-hop connection questions. Do not expand weak/noisy seeds or just because the query contains multiple entities.
-- title_search: Best for finding documents by title, filename, type, author, or date. Use metadata_only=true for discovery or aggregation; use full content for content questions.
+- title_search: Best for finding documents by title, filename, type, or date. Default behavior is metadata_only=true (no full markdown). Use the returned document_id with file_read to read content, or set metadata_only=false only for small documents.
 - kb_outline: Best before targeted reading of a large document. Use to locate relevant sections and avoid reading unnecessary content.
 - kb_outline: Use after kb_grep to see the structure around matching lines.
 - file_read: Use for targeted reads after locating content via kb_outline, kb_grep, or search results. Read only the required lines with offset/limit; use larger limits only when full-document context is genuinely needed.
