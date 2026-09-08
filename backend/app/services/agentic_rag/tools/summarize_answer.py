@@ -91,7 +91,9 @@ class SummarizeAnswerTool(BaseAgentTool):
         )
 
         try:
-            llm = build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)
+            from app.services.settings_service import get_setting
+            tool_temp = get_setting(ctx.db, "TOOL_CALL_TEMPERATURE", ctx.org_id)
+            llm = build_chat_llm(ctx.org_id, ctx.db, role="utility", temperature=tool_temp)
             response = await llm.ainvoke([{"role": "user", "content": prompt}])
             summary = str(response.content).strip()
         except Exception as exc:

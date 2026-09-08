@@ -95,7 +95,9 @@ class FileSummarizeTool(BaseAgentTool):
         chunk_chars = input_obj.chunk_size * 4  # rough
         chunks = [text[i:i + chunk_chars] for i in range(0, len(text), chunk_chars)]
 
-        llm = build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)
+        from app.services.settings_service import get_setting
+        tool_temp = get_setting(ctx.db, "TOOL_CALL_TEMPERATURE", ctx.org_id)
+        llm = build_chat_llm(ctx.org_id, ctx.db, role="utility", temperature=tool_temp)
         chunk_summaries = await _summarize_chunks(llm, chunks, input_obj.focus)
 
         combined = "\n\n".join(s for s in chunk_summaries if s)

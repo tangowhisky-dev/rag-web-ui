@@ -211,14 +211,15 @@ async def think_node_v2(state, ctx) -> dict:
         think_start = time.monotonic()
 
         try:
+            tool_temp = get_setting(ctx.db, "TOOL_CALL_TEMPERATURE", ctx.org_id)
             if mode == "json_text":
-                llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=0.0)
+                llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=tool_temp)
                 resp = await llm.ainvoke([
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ])
             else:
-                llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=0.0)
+                llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=tool_temp)
                 resp = await llm.bind_tools(tools).ainvoke([
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},

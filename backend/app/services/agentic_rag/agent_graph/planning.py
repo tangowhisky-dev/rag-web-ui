@@ -59,7 +59,7 @@ work with current shared modules which have been updated for v2.
 # #
 # # async def _invoke_plan_llm(ctx, system, user, original):
 # #     try:
-# #         llm = build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)
+# #         llm = build_chat_llm(ctx.org_id, ctx.db, role="utility", temperature=0.0)
 # #         structured = llm.with_structured_output(Plan, method="json_schema", include_raw=True)
 # #         resp = await structured.ainvoke([
 # #             {"role": "system", "content": system},
@@ -74,7 +74,7 @@ work with current shared modules which have been updated for v2.
 # #             plan = resp.parsed if hasattr(resp, "parsed") else resp
 # #     except Exception as exc:
 # #         logger.warning("[plan_node] structured output failed: %s; using JSON parse fallback", exc)
-# #         llm = build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)
+# #         llm = build_chat_llm(ctx.org_id, ctx.db, role="utility", temperature=0.0)
 # #         resp = await llm.ainvoke([
 # #             {"role": "system", "content": system},
 # #             {"role": "user", "content": user},

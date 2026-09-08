@@ -125,7 +125,7 @@ def _get_llm(
         _db = SessionLocal()
         try:
             if model_name is None:
-                model_name = get_setting(_db, "QUERY_MODEL", None) or get_setting(_db, "OPENAI_MODEL", None)
+                model_name = get_setting(_db, "UTILITY_MODEL", None) or get_setting(_db, "OPENAI_MODEL", None)
             if api_base is None:
                 api_base = get_setting(_db, "OPENAI_API_BASE", None)
             if api_key is None:
@@ -210,11 +210,11 @@ async def answer_evaluation_node(
         if ctx is not None:
             try:
                 from app.services.agentic_rag.llm_factory import get_org_llm
-                query_cfg = get_org_llm(ctx.org_id, ctx.db, role="query")
+                utility_cfg = get_org_llm(ctx.org_id, ctx.db, role="utility")
                 eval_kwargs = {
-                    "api_base": query_cfg["api_base"],
-                    "api_key": query_cfg["api_key"],
-                    "query_model": query_cfg["model_name"],
+                    "api_base": utility_cfg["api_base"],
+                    "api_key": utility_cfg["api_key"],
+                    "utility_model": utility_cfg["model_name"],
                 }
             except Exception:
                 pass

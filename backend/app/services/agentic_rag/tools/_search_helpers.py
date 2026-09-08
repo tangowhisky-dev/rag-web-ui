@@ -144,7 +144,8 @@ async def expand_synonyms(query: str, ctx: ToolContext) -> tuple[str, list[str]]
 
     # Call LLM with query role
     try:
-        llm = build_chat_llm(ctx.org_id, ctx.db, role="query", temperature=0.0)
+        tool_temp = get_setting(ctx.db, "TOOL_CALL_TEMPERATURE", ctx.org_id)
+        llm = build_chat_llm(ctx.org_id, ctx.db, role="utility", temperature=tool_temp)
         prompt = SYNONYM_EXPANSION_PROMPT.format(n=n)
         resp = await llm.ainvoke([
             {"role": "system", "content": prompt},

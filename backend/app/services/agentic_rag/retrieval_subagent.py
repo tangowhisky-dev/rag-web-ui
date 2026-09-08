@@ -251,7 +251,8 @@ async def run_retrieval_subagent(
         )
 
         try:
-            llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=0.0)
+            tool_temp = get_setting(ctx.db, "TOOL_CALL_TEMPERATURE", ctx.org_id)
+            llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=tool_temp)
             resp = await llm.bind_tools(tools_list).ainvoke([
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},

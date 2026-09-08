@@ -7,6 +7,14 @@ its own fallback chain:
 
 All reads go through the settings service (3-tier precedence:
 org override → app value → .env/config.py default).
+
+Two roles for the retrieval/agent pipeline:
+- "chat"     → primary model (think, plan, answer, sub-agents)
+- "utility"  → utility model (synonyms, evaluation, compaction, extraction)
+
+Ingestion roles (not part of the agent loop):
+- "vision"   → vision / OCR model
+- "graph"    → graph extraction model
 """
 
 from __future__ import annotations
@@ -22,8 +30,7 @@ from app.services.settings_service import get_setting
 # Role → (role-specific key setting, role-specific base URL setting)
 _ROLE_KEY_MAP = {
     "chat":      ("OPENAI_API_KEY",    "OPENAI_API_BASE"),
-    "query":     ("QUERY_API_KEY",     "QUERY_API_BASE"),
-    "reasoning": ("REASONING_API_KEY", "REASONING_API_BASE"),
+    "utility":   ("UTILITY_API_KEY",   "UTILITY_API_BASE"),
     "vision":    ("VISION_API_KEY",    "OPENAI_VISION_API_BASE"),
     "graph":     ("GRAPHRAG_API_KEY",  "GRAPHRAG_API_BASE"),
 }
@@ -33,11 +40,10 @@ def get_org_llm(org_id: Optional[int], db: Session, role: str = "chat") -> dict:
     """Resolve OpenAI-compatible LLM config for ``org_id`` and ``role``.
 
     Roles:
-    - "chat"      -> main response model
-    - "query"     -> rewrite / summarisation / extraction model
-    - "reasoning" -> reasoning / thinking model
-    - "vision"    -> vision / OCR model
-    - "graph"     -> graph extraction model
+    - "chat"      -> primary model (think, plan, answer, sub-agents)
+    - "utility"   -> utility model (synonyms, evaluation, compaction, extraction)
+    - "vision"    -> vision / OCR model (ingestion)
+    - "graph"     -> graph extraction model (ingestion)
 
     Key and base URL resolve with per-role fallback to the main OPENAI_* settings.
     Model resolution: role-specific model → OPENAI_MODEL.
@@ -55,10 +61,8 @@ def get_org_llm(org_id: Optional[int], db: Session, role: str = "chat") -> dict:
     api_base = get_setting(db, role_base, org_id) or get_setting(db, "OPENAI_API_BASE", org_id)
 
     # Model: role-specific model → OPENAI_MODEL
-    if role == "query":
-        model_name = get_setting(db, "QUERY_MODEL", org_id) or get_setting(db, "OPENAI_MODEL", org_id)
-    elif role == "reasoning":
-        model_name = get_setting(db, "REASONING_MODEL", org_id) or get_setting(db, "OPENAI_MODEL", org_id)
+    if role == "utility":
+        model_name = get_setting(db, "UTILITY_MODEL", org_id) or get_setting(db, "OPENAI_MODEL", org_id)
     elif role == "vision":
         model_name = get_setting(db, "VISION_MODEL", org_id) or get_setting(db, "OPENAI_MODEL", org_id)
     elif role == "graph":

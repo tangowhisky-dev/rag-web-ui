@@ -226,7 +226,8 @@ async def run_office_subagent(
         writer({"event": "office_subagent_step", "iteration": iteration, "phase": "think"})
 
         try:
-            llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=0.0)
+            tool_temp = get_setting(ctx.db, "TOOL_CALL_TEMPERATURE", ctx.org_id)
+            llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=tool_temp)
             resp = await llm.bind_tools(tools_list).ainvoke([
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -303,10 +304,11 @@ async def run_office_subagent(
             observations.append(obs)
             counts[name] = counts.get(name, 0) + 1
 
-            # Sync observations to ctx.state so prepare_arguments on
-            # office_inspect/office_edit can find file_id from office_generate.
+            # Sync observations to ctx.state under a sub-agent-specific key so
+            # office_inspect/office_edit can find file_id from office_generate
+            # without polluting the main agent's observations.
             if ctx.state is not None:
-                ctx.state["observations"] = observations
+                ctx.state["_office_subagent_observations"] = observations
 
             # Emit observation
             summary_text = ""

@@ -51,7 +51,14 @@ class OfficeInspectTool(BaseAgentTool):
         if not args.get("file_id") and self.ctx is not None:
             state = self.ctx.state
             if state is not None:
-                for obs in reversed(state.get("observations") or []):
+                # Check sub-agent observations first (when running inside office sub-agent),
+                # then fall back to main agent observations.
+                obs_list = (
+                    state.get("_office_subagent_observations")
+                    or state.get("observations")
+                    or []
+                )
+                for obs in reversed(obs_list):
                     tool = obs.get("tool") if isinstance(obs, dict) else getattr(obs, "tool", "")
                     result = obs.get("result") if isinstance(obs, dict) else getattr(obs, "result", {})
                     error = obs.get("error") if isinstance(obs, dict) else getattr(obs, "error", None)

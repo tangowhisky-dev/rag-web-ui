@@ -5,8 +5,8 @@ Tests:
   1. get_org_llm falls back to env defaults when no DB rows.
   2. get_org_llm uses app-level settings when set.
   3. get_org_llm uses org-level overrides when set.
-  4. get_org_llm role="query" uses query_model.
-  5. get_org_llm role="reasoning" uses reasoning_model.
+  4. get_org_llm role="utility" uses utility_model.
+  5. get_org_llm role="utility" falls back to OPENAI_MODEL when unset.
   6. get_effective_llm_config falls back to env defaults.
   7. get_effective_llm_config uses org overrides.
   8. API key always comes from .env (never from DB).
@@ -103,37 +103,25 @@ def test_get_org_llm_uses_org_override(db_session):
     assert cfg["model_name"] == "org-model"
 
 
-def test_get_org_llm_query_role(db_session):
-    """role='query' uses QUERY_MODEL."""
+def test_get_org_llm_utility_role(db_session):
+    """role='utility' uses UTILITY_MODEL."""
     org = _create_org(db_session)
     upsert_org_setting(db_session, org.id, "OPENAI_MODEL", "chat-model")
-    upsert_org_setting(db_session, org.id, "QUERY_MODEL", "query-model")
+    upsert_org_setting(db_session, org.id, "UTILITY_MODEL", "utility-model")
     clear_cache()
 
-    cfg = get_org_llm(org.id, db_session, role="query")
-    assert cfg["model_name"] == "query-model"
+    cfg = get_org_llm(org.id, db_session, role="utility")
+    assert cfg["model_name"] == "utility-model"
 
 
-def test_get_org_llm_reasoning_role(db_session):
-    """role='reasoning' uses REASONING_MODEL, falling back to OPENAI_MODEL."""
+def test_get_org_llm_utility_falls_back_to_chat(db_session):
+    """When UTILITY_MODEL is unset/None, utility role falls back to OPENAI_MODEL."""
     org = _create_org(db_session)
-    upsert_org_setting(db_session, org.id, "OPENAI_MODEL", "chat-model")
-    upsert_org_setting(db_session, org.id, "REASONING_MODEL", "reasoning-model")
-    clear_cache()
-
-    cfg = get_org_llm(org.id, db_session, role="reasoning")
-    assert cfg["model_name"] == "reasoning-model"
-
-
-def test_get_org_llm_reasoning_falls_back_to_chat(db_session):
-    """When REASONING_MODEL is unset/None, reasoning role falls back to OPENAI_MODEL."""
-    org = _create_org(db_session)
-    # Set REASONING_MODEL to None at app level to override any .env value
-    upsert_app_setting(db_session, "REASONING_MODEL", None)
+    upsert_app_setting(db_session, "UTILITY_MODEL", None)
     upsert_org_setting(db_session, org.id, "OPENAI_MODEL", "chat-model")
     clear_cache()
 
-    cfg = get_org_llm(org.id, db_session, role="reasoning")
+    cfg = get_org_llm(org.id, db_session, role="utility")
     assert cfg["model_name"] == "chat-model"
 
 
@@ -158,7 +146,7 @@ def test_get_effective_llm_config_fallback(db_session):
     assert cfg["api_base"] == get_setting(db_session, "OPENAI_API_BASE", None)
     assert cfg["model_name"] == get_setting(db_session, "OPENAI_MODEL", None)
     # query_model falls back to model_name when unset
-    assert cfg["query_model"] == (get_setting(db_session, "QUERY_MODEL", None) or get_setting(db_session, "OPENAI_MODEL", None))
+    assert cfg["utility_model"] == (get_setting(db_session, "UTILITY_MODEL", None) or get_setting(db_session, "OPENAI_MODEL", None))
 
 
 def test_get_effective_llm_config_org_override(db_session):
@@ -166,22 +154,22 @@ def test_get_effective_llm_config_org_override(db_session):
     org = _create_org(db_session)
     upsert_org_setting(db_session, org.id, "OPENAI_API_BASE", "https://org.example.com")
     upsert_org_setting(db_session, org.id, "OPENAI_MODEL", "org-model")
-    upsert_org_setting(db_session, org.id, "QUERY_MODEL", "org-query-model")
+    upsert_org_setting(db_session, org.id, "UTILITY_MODEL", "org-query-model")
     clear_cache()
 
     cfg = get_effective_llm_config(org.id, db_session)
     assert cfg["api_base"] == "https://org.example.com"
     assert cfg["model_name"] == "org-model"
-    assert cfg["query_model"] == "org-query-model"
+    assert cfg["utility_model"] == "org-query-model"
 
 
-def test_get_effective_llm_config_query_model_falls_back(db_session):
-    """When QUERY_MODEL is unset/None, query_model falls back to model_name."""
+def test_get_effective_llm_config_utility_model_falls_back(db_session):
+    """When UTILITY_MODEL is unset/None, utility_model falls back to model_name."""
     org = _create_org(db_session)
-    # Set QUERY_MODEL to None at app level to override any .env value
-    upsert_app_setting(db_session, "QUERY_MODEL", None)
+    # Set UTILITY_MODEL to None at app level to override any .env value
+    upsert_app_setting(db_session, "UTILITY_MODEL", None)
     upsert_org_setting(db_session, org.id, "OPENAI_MODEL", "org-model")
     clear_cache()
 
     cfg = get_effective_llm_config(org.id, db_session)
-    assert cfg["query_model"] == "org-model"
+    assert cfg["utility_model"] == "org-model"

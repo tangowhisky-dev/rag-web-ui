@@ -38,20 +38,20 @@ async def stream_flush():
 def get_effective_llm_config(org_id: Optional[int], db: Session) -> dict:
     """Return LLM config dict for the given org, falling back to .env settings.
 
-    Keys: api_base, api_key, model_name, query_model.
+    Keys: api_base, api_key, model_name, utility_model.
     Reads from the unified settings service (3-tier precedence:
     org override → app value → .env/config.py default).
     """
     from app.services.agentic_rag.llm_factory import get_org_llm
 
     chat_cfg = get_org_llm(org_id, db, role="chat")
-    query_cfg = get_org_llm(org_id, db, role="query")
+    utility_cfg = get_org_llm(org_id, db, role="utility")
 
     return {
         "api_base": chat_cfg["api_base"],
         "api_key": chat_cfg["api_key"],
         "model_name": chat_cfg["model_name"],
-        "query_model": query_cfg["model_name"],
+        "utility_model": utility_cfg["model_name"],
     }
 
 # ── Constants ─────────────────────────────────────────────────────────────────

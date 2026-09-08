@@ -152,22 +152,22 @@ def _default_evaluation(error: str = "") -> AnswerEvaluation:
 
 
 def _resolve_llm_kwargs(api_base: Optional[str], api_key: Optional[str],
-                        query_model: Optional[str]) -> tuple[str, str, str]:
+                        utility_model: Optional[str]) -> tuple[str, str, str]:
     """Resolve LLM kwargs, falling back to app-level settings."""
-    if api_key is None or api_base is None or query_model is None:
+    if api_key is None or api_base is None or utility_model is None:
         from app.services.settings_service import get_setting
         from app.db.session import SessionLocal
         _db = SessionLocal()
         try:
             if api_key is None:
-                api_key = get_setting(_db, "QUERY_API_KEY", None) or get_setting(_db, "OPENAI_API_KEY", None)
+                api_key = get_setting(_db, "UTILITY_API_KEY", None) or get_setting(_db, "OPENAI_API_KEY", None)
             if api_base is None:
-                api_base = get_setting(_db, "QUERY_API_BASE", None) or get_setting(_db, "OPENAI_API_BASE", None)
-            if query_model is None:
-                query_model = get_setting(_db, "QUERY_MODEL", None) or get_setting(_db, "OPENAI_MODEL", None)
+                api_base = get_setting(_db, "UTILITY_API_BASE", None) or get_setting(_db, "OPENAI_API_BASE", None)
+            if utility_model is None:
+                utility_model = get_setting(_db, "UTILITY_MODEL", None) or get_setting(_db, "OPENAI_MODEL", None)
         finally:
             _db.close()
-    return api_base, api_key, query_model
+    return api_base, api_key, utility_model
 
 
 async def evaluate_answer(
@@ -177,7 +177,7 @@ async def evaluate_answer(
     confidence_level: str = "medium",
     api_base: Optional[str] = None,
     api_key: Optional[str] = None,
-    query_model: Optional[str] = None,
+    utility_model: Optional[str] = None,
 ) -> AnswerEvaluation:
     """Evaluate answer quality and generate follow-ups in one LLM call.
 
@@ -188,7 +188,7 @@ async def evaluate_answer(
         confidence_level: Retrieval confidence level (very_high/high/medium/low/none).
         api_base: Optional OpenAI-compatible base URL override.
         api_key: Optional API key override.
-        query_model: Optional model name override.
+        utility_model: Optional model name override.
 
     Returns:
         AnswerEvaluation with faithfulness, completeness, and followups.
@@ -206,17 +206,19 @@ Evaluate the quality of this answer and generate follow-up questions.
 
     try:
         from openai import AsyncOpenAI as _OAI
-        api_base, api_key, query_model = _resolve_llm_kwargs(api_base, api_key, query_model)
+        from app.core.settings_registry import get_def
+        api_base, api_key, utility_model = _resolve_llm_kwargs(api_base, api_key, utility_model)
         client = _OAI(api_key=api_key, base_url=api_base)
 
+        tool_temp = get_def("TOOL_CALL_TEMPERATURE").default
         resp = await client.chat.completions.create(
-            model=query_model,
+            model=utility_model,
             messages=[
                 {"role": "system", "content": EVALUATION_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
             max_tokens=1000,
-            temperature=0,
+            temperature=tool_temp,
             stream=False,
             extra_body={"thinking": {"type": "disabled"}},
         )
@@ -233,7 +235,7 @@ async def extract_structured(
     answer: str,
     api_base: Optional[str] = None,
     api_key: Optional[str] = None,
-    query_model: Optional[str] = None,
+    utility_model: Optional[str] = None,
 ) -> StructuredExtraction:
     """Extract summary, key_points, and data from the answer text.
 
@@ -244,23 +246,25 @@ async def extract_structured(
         answer: The generated answer text (full, not truncated).
         api_base: Optional OpenAI-compatible base URL override.
         api_key: Optional API key override.
-        query_model: Optional model name override.
+        utility_model: Optional model name override.
 
     Returns:
         StructuredExtraction with summary, key_points, and data.
     """
     try:
         from openai import AsyncOpenAI as _OAI
-        api_base, api_key, query_model = _resolve_llm_kwargs(api_base, api_key, query_model)
+        from app.core.settings_registry import get_def
+        api_base, api_key, utility_model = _resolve_llm_kwargs(api_base, api_key, utility_model)
         client = _OAI(api_key=api_key, base_url=api_base)
 
+        tool_temp = get_def("TOOL_CALL_TEMPERATURE").default
         resp = await client.chat.completions.create(
-            model=query_model,
+            model=utility_model,
             messages=[
                 {"role": "user", "content": EXTRACTION_PROMPT.format(answer=answer)},
             ],
             max_tokens=2000,
-            temperature=0,
+            temperature=tool_temp,
             stream=False,
             extra_body={"thinking": {"type": "disabled"}},
         )
