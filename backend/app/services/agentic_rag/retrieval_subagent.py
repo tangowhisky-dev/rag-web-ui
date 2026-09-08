@@ -39,19 +39,19 @@ You are a retrieval specialist. Your job: find the best evidence for a single\
 # Available Tools
 
 - keyword_search: Lexical keyword match. Best for identifiers, code, error\
- messages, jargon, exact terms. Args: {{"query": "...", "top_k": 5}}
+ messages, jargon, exact terms. Args: {"query": "...", "top_k": 5}
 - semantic_search: Dense vector search. Best for conceptual or paraphrased\
- questions. Args: {{"query": "...", "top_k": 5}}
+ questions. Args: {"query": "...", "top_k": 5}
 - title_search: Document-level metadata search by title, status, date.\
- Args: {{"title_contains": "...", "document_status": "active", "metadata_only": true}}
+ Args: {"title_contains": "...", "document_status": "active", "metadata_only": true}
 - graph_expand: Find related entities/chunks through Neo4j graph relationships.\
- Args: {{"seed_entity_names": [...], "rel_type": "...", "hops": 1}}
+ Args: {"seed_entity_names": [...], "rel_type": "...", "hops": 1}
 - file_read: Read a specific document or file by ID.\
- Args: {{"document_id": N, "offset": 1, "limit": 200}}
+ Args: {"document_id": N, "offset": 1, "limit": 200}
 - kb_grep: Regex or literal search within one document.\
- Args: {{"pattern": "...", "document_id": N}}
-- kb_outline: Get document outline/structure. Args: {{"document_id": N}}
-- rerank_results: Rerank a mixed result set. Args: {{"top_k": 5}}
+ Args: {"pattern": "...", "document_id": N}
+- kb_outline: Get document outline/structure. Args: {"document_id": N}
+- rerank_results: Rerank a mixed result set. Args: {"top_k": 5}
 
 # Strategy
 
@@ -96,28 +96,28 @@ After a weak or failed search, classify the problem and use the matching recover
 When you have enough evidence, or have exhausted the budget, return a single JSON\
  object (no markdown, no tool call):
 
-{{
+{
   "query": "the original sub-query",
   "evidence": [
-    {{
-      "citation_ref": {{
+    {
+      "citation_ref": {
         "document_id": 42,
         "citation_kind": "chunk",
         "chunk_index": 3,
         "page": 7,
         "quoted_text": "...",
         "source_tool": "semantic_search"
-      }},
+      },
       "document_id": 42,
       "score": 0.91
-    }}
+    }
   ],
   "gaps": ["list missing facts needed to fully answer the sub-query"],
   "conflicts": ["list any contradictions found in the evidence"],
   "complete": true_or_false,
   "failure_mode": "NO_HITS | LOW_RELEVANCE | ... or null if complete",
   "strategy": "the recovery or next-step strategy, or null if complete"
-}}
+}
 
 - `evidence` should cite the top 5-10 most useful chunks or documents you found.\
  Do not include full text — only citation refs, document_id, and score.
@@ -178,6 +178,19 @@ def _build_retrieval_user_prompt(
     return "".join(parts)
 
 
+def _extract_json_from_text(text: str) -> str:
+    """Strip markdown fences and return the inner JSON body."""
+    text = text.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    return text
+
+
 def _extract_evidence_from_observations(observations: list[Observation]) -> list[dict]:
     """Extract evidence chunks from search/read observations."""
     evidence: list[dict] = []
@@ -209,7 +222,7 @@ def _extract_evidence_from_observations(observations: list[Observation]) -> list
             })
 
         # title_search returns "docs" with structure:
-        # {"page_content": "...", "metadata": {"document_id": N, "title": "...", ...}}
+        # {"page_content": "...", "metadata": {"document_id": N, "title": "...", ...}
         docs = result.get("docs", [])
         for doc in docs:
             meta = doc.get("metadata", {}) if isinstance(doc, dict) else {}
@@ -278,13 +291,10 @@ async def run_retrieval_subagent(
         dict with keys: ok, evidence (list of dicts), summary, query
     """
     # Lazy imports
-    from app.services.agentic_rag.agent_graph.helpers import _writer as _get_writer
     from app.services.agentic_rag.agent_graph.tooling import _run_tool
     from app.services.agentic_rag.agent_graph.observations import _tool_descriptions_text
     from app.services.agentic_rag.tools import build_tools
     from app.services.settings_service import get_setting
-
-    writer = _get_writer()
 
     # Build search/read tools only
     all_tools = build_tools(ctx)
@@ -332,7 +342,8 @@ async def run_retrieval_subagent(
             # Sub-agent wrote the final JSON output.
             if isinstance(parsed.final_answer, str):
                 try:
-                    final_state = json.loads(parsed.final_answer.strip())
+                    json_text = _extract_json_from_text(parsed.final_answer)
+                    final_state = json.loads(json_text)
                 except json.JSONDecodeError:
                     logger.warning(
                         "[retrieval_subagent] final answer is not valid JSON: %s",
@@ -390,7 +401,8 @@ async def run_retrieval_subagent(
         # while still keeping the full content for the parent agent.
         ordered = sorted(
             extracted,
-            key=lambda e: (e.get("document_id") not in explicit_citations),
+            key=lambda e: (e.get("document_id") in explicit_citations),
+            reverse=True,
         )
     else:
         ordered = extracted
@@ -434,8 +446,6 @@ async def run_retrieval_subagents_parallel(
     Returns:
         list of dicts (one per sub-query): ok, evidence, summary, query
     """
-    writer = _get_writer() if False else None  # writer not needed here
-
     tasks = [
         run_retrieval_subagent(ctx, q, tool_budget=tool_budget)
         for q in sub_queries

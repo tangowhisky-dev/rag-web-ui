@@ -465,7 +465,9 @@ def _parse_iso_date(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value)
+        v = value.strip().replace("Z", "+00:00")
+        dt = datetime.fromisoformat(v)
+        return dt.astimezone(timezone.utc).replace(tzinfo=None) if dt.tzinfo else dt
     except (ValueError, TypeError):
         raise HTTPException(status_code=422, detail=f"Invalid ISO date: {value}")
 
