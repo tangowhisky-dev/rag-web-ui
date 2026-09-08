@@ -26,8 +26,7 @@ class GraphExpandTool(BaseAgentTool):
     description: str = "Graph expansion via Neo4j. Finds related chunks through entity relationships. Seeds are read automatically from state.retrieved_docs."
     prompt_snippet: str = "Retrieve graph-connected knowledge (Neo4j entity relationships)"
     prompt_guidelines: list[str] = [
-        "graph_expand: Use only when the answer depends on a relationship that direct retrieval cannot establish, such as reporting, dependency, or connection. Never use it just because the query contains multiple entities.",
-        "graph_expand: Use only with high-confidence retrieved seed documents/entities. Prefer expansion from a small number of diverse, relevant seeds. Do not expand weak or noisy retrieval results.",
+        "graph_expand: Best for relationship, dependency, entity-linking, and multi-hop questions which direct retrieval cannot establish. Prefer expansion from a small number of diverse, relevant seeds. Do not expand weak or noisy retrieval results or just because the query contains multiple entities.",
     ]
     args_schema: type = GraphExpandInput
     ui_label: str = "Expanding via graph"
