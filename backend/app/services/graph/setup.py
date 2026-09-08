@@ -92,6 +92,10 @@ def _ensure_schema(driver: neo4j.Driver) -> None:
                 "CREATE INDEX idx_entity_name IF NOT EXISTS "
                 "FOR (e:__Entity__) ON (e.name)"
             )
+            session.run(
+                "CREATE FULLTEXT INDEX idx_entity_name_fulltext IF NOT EXISTS "
+                "FOR (n:__Entity__) ON EACH [n.name]"
+            )
     except Exception as exc:
         logger.warning("GraphService: failed to ensure Neo4j schema indexes: %s", exc)
 

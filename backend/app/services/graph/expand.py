@@ -24,6 +24,7 @@ Supporting helpers:
 """
 
 import logging
+import re
 from typing import Optional
 
 import neo4j
@@ -34,7 +35,7 @@ from app.core.config import settings
 from app.services.agentic_rag.retry import with_retry_sync
 from app.services.settings_service import get_setting
 
-from .setup import _get_driver
+from .setup import _get_driver, _ensure_schema
 from .build import _extract_seen_point_ids
 
 logger = logging.getLogger(__name__)
@@ -252,6 +253,22 @@ def _derive_seed_entities_from_docs(
         return []
 
 
+def _lucene_query_for_name(name: str) -> str:
+    """Build a broad Lucene fulltext query from a raw entity name.
+
+    Tokens are cleaned (lowercased, stripped of non-alphanumerics), joined
+    with OR so the index returns any entity containing at least one token.
+    A trailing `*` gives prefix matching for partial input.
+    """
+    cleaned = re.sub(r"[^a-zA-Z0-9]+", " ", str(name).strip()).lower().strip()
+    tokens = [t for t in cleaned.split() if t]
+    if not tokens:
+        return ""
+    # Lucene special characters are removed by cleaning, so escaping is
+    # not strictly necessary; keep a small guard for '*' etc.
+    return " OR ".join(f"{t}*" for t in tokens)
+
+
 def _traverse_graph_for_targeted_expansion(
     driver: neo4j.Driver,
     seed_entity_names: list[str],
@@ -266,8 +283,9 @@ def _traverse_graph_for_targeted_expansion(
 ) -> tuple[list[tuple[str, str]], dict[str, dict]]:
     """Traverse from named seed entities to related chunks.
 
-    Returns (point_id, collection) tuples for fetching from Qdrant, plus a
-    map of point_id → the graph path that reached it for provenance.
+    First prunes candidates with a fulltext index, then re-ranks with
+    APOC Sorensen-Dice. Falls back to a label scan if the fulltext index
+    is unavailable.
     """
     fuzzy_threshold = 0.75
     target_clause = ""
@@ -283,7 +301,90 @@ def _traverse_graph_for_targeted_expansion(
           )
         """
 
-    query = f"""
+    # Common tail of the query: from seed entity to related chunks.
+    traversal_tail = f"""
+        MATCH path = (seed_entity)-[r*1..{hops}]-(eN)
+        WHERE ($rel_types IS NULL OR all(rel IN r WHERE type(rel) IN $rel_types))
+          {target_clause}
+        WITH seed_entity, eN, r AS rels, size(r) AS path_len
+        ORDER BY path_len ASC
+        LIMIT $path_limit
+        MATCH (eN)-[:FROM_CHUNK]->(c2)
+        WHERE c2.qdrant_collection IN $collections
+          AND c2.qdrant_point_id IS NOT NULL
+          AND NOT c2.qdrant_point_id IN $seen_ids
+        RETURN DISTINCT
+            c2.qdrant_point_id AS point_id,
+            c2.qdrant_collection AS collection,
+            seed_entity.name AS seed,
+            eN.name AS target,
+            [x IN rels | type(x)] AS rels
+        LIMIT $limit
+    """
+
+    def _run_query(query: str, params: dict) -> tuple[list[tuple[str, str]], dict[str, dict]]:
+        with driver.session() as session:
+            result = session.run(query, **params)
+            targets = []
+            paths: dict[str, dict] = {}
+            for rec in result:
+                pid = rec["point_id"]
+                coll = rec["collection"]
+                targets.append((pid, coll))
+                paths[pid] = {
+                    "seed": rec["seed"],
+                    "target": rec["target"],
+                    "rels": rec["rels"],
+                }
+            return targets, paths
+
+    # Primary path: fulltext index for fast pruning, APOC for fuzzy scoring.
+    lucene_queries = [q for q in (_lucene_query_for_name(n) for n in seed_entity_names) if q]
+    if lucene_queries:
+        fulltext_query = f"""
+            UNWIND $lucene_queries AS q
+            CALL db.index.fulltext.queryNodes('idx_entity_name_fulltext', q) YIELD node, score
+            WITH node, max(score) AS score
+            ORDER BY score DESC
+            LIMIT $candidate_limit
+            WITH node,
+                 coll.max([
+                   raw IN $seed_entity_names |
+                   apoc.text.sorensenDiceSimilarity(
+                     apoc.text.clean(node.name), apoc.text.clean(raw)
+                   )
+                 ]) AS dice
+            WHERE dice >= $fuzzy_threshold
+            WITH node, dice
+            ORDER BY dice DESC
+            LIMIT $entity_cap
+            WITH node AS seed_entity
+            {traversal_tail}
+        """
+        params = {
+            "lucene_queries": lucene_queries,
+            "seed_entity_names": seed_entity_names,
+            "rel_types": rel_types,
+            "target_entity_names": target_entity_names,
+            "fuzzy_threshold": fuzzy_threshold,
+            "candidate_limit": max(1, fanout_val * 10),
+            "entity_cap": max(1, fanout_val),
+            "path_limit": max(1, limit_val * 4),
+            "collections": collections,
+            "seen_ids": list(seen_point_ids),
+            "hops": max(1, min(hops, 3)),
+            "limit": max(1, limit_val),
+        }
+        try:
+            return _run_query(fulltext_query, params)
+        except Exception as exc:
+            logger.warning(
+                "[_traverse_graph_for_targeted_expansion] fulltext path failed, "
+                "falling back to label scan: %s", exc
+            )
+
+    # Fallback: full label scan + APOC fuzzy matching (no fulltext index needed).
+    scan_query = f"""
         MATCH (e:__Entity__)
         WHERE {scope_filter}
           AND (
@@ -304,54 +405,24 @@ def _traverse_graph_for_targeted_expansion(
         ORDER BY score DESC
         LIMIT $entity_cap
         WITH e AS seed_entity
-        MATCH path = (seed_entity)-[r*1..{hops}]-(eN)
-        WHERE ($rel_types IS NULL OR all(rel IN r WHERE type(rel) IN $rel_types))
-          {target_clause}
-        WITH seed_entity, eN, r AS rels, size(r) AS path_len
-        ORDER BY path_len ASC
-        LIMIT $path_limit
-        MATCH (eN)-[:FROM_CHUNK]->(c2)
-        WHERE c2.qdrant_collection IN $collections
-          AND c2.qdrant_point_id IS NOT NULL
-          AND NOT c2.qdrant_point_id IN $seen_ids
-        RETURN DISTINCT
-            c2.qdrant_point_id AS point_id,
-            c2.qdrant_collection AS collection,
-            seed_entity.name AS seed,
-            eN.name AS target,
-            [x IN rels | type(x)] AS rels
-        LIMIT $limit
+        {traversal_tail}
     """
-
+    params = {
+        "seed_entity_names": seed_entity_names,
+        "rel_types": rel_types,
+        "target_entity_names": target_entity_names,
+        "fuzzy_threshold": fuzzy_threshold,
+        "entity_cap": max(1, fanout_val),
+        "path_limit": max(1, limit_val * 4),
+        "collections": collections,
+        "seen_ids": list(seen_point_ids),
+        "hops": max(1, min(hops, 3)),
+        "limit": max(1, limit_val),
+    }
     try:
-        with driver.session() as session:
-            result = session.run(
-                query,
-                seed_entity_names=seed_entity_names,
-                rel_types=rel_types,
-                target_entity_names=target_entity_names,
-                fuzzy_threshold=fuzzy_threshold,
-                entity_cap=max(1, fanout_val),
-                path_limit=max(1, limit_val * 4),
-                collections=collections,
-                seen_ids=list(seen_point_ids),
-                hops=max(1, min(hops, 3)),
-                limit=max(1, limit_val),
-            )
-            targets = []
-            paths: dict[str, dict] = {}
-            for rec in result:
-                pid = rec["point_id"]
-                coll = rec["collection"]
-                targets.append((pid, coll))
-                paths[pid] = {
-                    "seed": rec["seed"],
-                    "target": rec["target"],
-                    "rels": rec["rels"],
-                }
-            return targets, paths
+        return _run_query(scan_query, params)
     except Exception as exc:
-        logger.warning("[_traverse_graph_for_targeted_expansion] failed: %s", exc)
+        logger.warning("[_traverse_graph_for_targeted_expansion] fallback scan failed: %s", exc)
         return [], {}
 
 
@@ -394,6 +465,7 @@ def expand_docs_via_graph(
 
     try:
         driver = _get_driver()
+        _ensure_schema(driver)
         collections = [f"kb_{kb_id}" for kb_id in kb_ids]
         if datastore_ids:
             collections += [f"ds_{ds_id}" for ds_id in datastore_ids]
