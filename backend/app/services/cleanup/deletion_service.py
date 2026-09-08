@@ -133,9 +133,12 @@ def _delete_qdrant_for_kb(kb_id: int) -> None:
     collection_name = f"kb_{kb_id}"
     try:
         qdrant = _get_qdrant()
-        logger.warning("[DELETE] _delete_qdrant_for_kb: deleting collection %s", collection_name)
+        logger.info(
+            "[QDRANT-DELETE] dropping collection=%s cause=kb_deletion kb_id=%d",
+            collection_name, kb_id,
+        )
         qdrant.delete_collection(collection_name)
-        logger.info("DeletionService: deleted Qdrant collection %s", collection_name)
+        logger.info("[QDRANT-DELETE] dropped collection=%s", collection_name)
     except Exception as e:
         logger.warning("DeletionService: Qdrant delete failed for kb_%d: %s", kb_id, e)
 
@@ -175,9 +178,12 @@ def _delete_qdrant_for_ds(db: Session, datastore_id: int) -> None:
         try:
             collections = [c.name for c in qdrant.get_collections().collections]
             if collection_name in collections:
-                logger.warning("[DELETE] _delete_qdrant_for_ds: deleting collection %s", collection_name)
+                logger.info(
+                    "[QDRANT-DELETE] dropping collection=%s cause=datastore_deletion datastore_id=%d",
+                    collection_name, datastore_id,
+                )
                 qdrant.delete_collection(collection_name)
-                logger.info("DeletionService: deleted Qdrant collection %s", collection_name)
+                logger.info("[QDRANT-DELETE] dropped collection=%s", collection_name)
         except Exception as e:
             logger.warning("DeletionService: Qdrant collection delete failed: %s", e)
     except Exception as e:

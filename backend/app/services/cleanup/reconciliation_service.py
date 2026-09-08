@@ -167,9 +167,12 @@ def _drop_stale_collections(
     logger.debug("[RECONCILE] Qdrant: active_%s_names=%s stale_%s_collections=%s", label, active_names, label, stale)
     for cname in stale:
         try:
-            logger.info("[RECONCILE] Qdrant: dropping stale collection %s", cname)
+            logger.info(
+                "[QDRANT-DELETE] dropping collection=%s cause=reconciliation_stale_%s active_ids=%s",
+                cname, label, active_ids,
+            )
             qdrant.delete_collection(cname)
-            logger.info("[RECONCILE] Qdrant: dropped stale collection %s", cname)
+            logger.info("[QDRANT-DELETE] dropped collection=%s", cname)
         except Exception as e:
             logger.warning("[RECONCILE] Qdrant: failed to drop %s: %s", cname, e)
     summary["qdrant"]["dropped_collections"] += len(stale)
