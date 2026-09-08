@@ -135,12 +135,13 @@ class ChartGenerateInput(BaseModel):
 class ChartGenerateTool(BaseAgentTool):
     name: str = "chart_generate"
     ui_label: str = "Generating chart"
-    description: str = (
-        "Generate an ECharts option JSON from structured data. "
-        "Use after extract_data to create pie/bar/line/scatter/radar/gauge/funnel charts. "
-        "Reads data automatically from accumulated_data in state (populated by "
-        "prior extract_data calls). No need to pass data."
-    )
+    description: str = "Generate an ECharts option JSON from structured data. Reads data automatically from accumulated_data in state."
+    prompt_snippet: str = "Create inline visualizations (ECharts)"
+    prompt_guidelines: list[str] = [
+        "chart_generate: Use when a chart materially improves understanding of structured data. Requires clean structured input from extract_data or file_extract_table.",
+        "chart_generate: This is the only path for inline charts. Do not use code_execute to simulate charts.",
+        "chart_generate: For charts inside a downloadable document, use create_office_document — it handles charts internally. Do NOT call chart_generate separately for those.",
+    ]
     args_schema: type[BaseModel] = ChartGenerateInput
 
     def _run(self, *args: Any, **kwargs: Any) -> Any:

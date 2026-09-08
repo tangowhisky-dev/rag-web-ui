@@ -87,10 +87,12 @@ def _apply_filter(df: Any, filter_expr: Optional[str]) -> Any:
 class FileExtractTableTool(BaseAgentTool):
     name: str = "file_extract_table"
     ui_label: str = "Extracting table from file"
-    description: str = (
-        "Extract a structured table from a CSV, Excel, or HTML table in an "
-        "attached file. Returns JSON columns and rows for chart_generate or code_execute."
-    )
+    description: str = "Extract a structured table from a CSV, Excel, or HTML table in an attached file. Returns JSON columns and rows."
+    prompt_snippet: str = "Extract tabular data from CSV/Excel/HTML in an attached file"
+    prompt_guidelines: list[str] = [
+        "file_extract_table: Best for CSV, Excel, HTML, and structured tables that need analysis, transformation, charting, or reuse. Preserve source structure where possible.",
+        "file_extract_table: Set accumulate=true to feed 2-column (label, value) tables into accumulated_data for chart_generate.",
+    ]
     args_schema: type[BaseModel] = FileExtractTableInput
 
     def _run(self, *args: Any, **kwargs: Any) -> Any:

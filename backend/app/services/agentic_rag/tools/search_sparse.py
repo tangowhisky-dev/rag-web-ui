@@ -28,11 +28,12 @@ class SearchSparseInput(BaseModel):
 
 class SearchSparseTool(BaseAgentTool):
     name: str = "search_sparse"
-    description: str = (
-        "SPLADE sparse vector search with lexical term expansion. Best for "
-        "keyword matching when exact search misses but the query has distinctive "
-        "terms. Returns ranked chunks with scores and citation metadata."
-    )
+    description: str = "SPLADE sparse vector search with lexical term expansion. Returns ranked chunks with scores and citation metadata."
+    prompt_snippet: str = "Keyword retrieval with term expansion (SPLADE)"
+    prompt_guidelines: list[str] = [
+        "search_sparse: Best for distinctive terminology, jargon, acronyms, multi-keyword queries where lexical overlap matters but exact matching is too strict. Complements dense search.",
+        "search_sparse: Use when search_exact is too strict and search_dense is too fuzzy.",
+    ]
     args_schema: type = SearchSparseInput
     ui_label: str = "Searching (sparse)"
 

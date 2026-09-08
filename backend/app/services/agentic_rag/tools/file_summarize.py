@@ -73,10 +73,11 @@ async def _summarize_chunks(llm, chunks: list[str], focus: Optional[str]) -> lis
 class FileSummarizeTool(BaseAgentTool):
     name: str = "file_summarize"
     ui_label: str = "Summarizing file"
-    description: str = (
-        "Summarize a large attached file. Use when the user says 'summarise this file' "
-        "or the file is too big to fit in the context window."
-    )
+    description: str = "Summarize a large attached file using map-reduce."
+    prompt_snippet: str = "Summarize a large attached file (map-reduce)"
+    prompt_guidelines: list[str] = [
+        "file_summarize: Best for high-level summaries, executive overviews, or files too large to read directly. Use file_read when the user asks about specific content.",
+    ]
     args_schema: type[BaseModel] = FileSummarizeInput
 
     def _run(self, *args: Any, **kwargs: Any) -> Any:

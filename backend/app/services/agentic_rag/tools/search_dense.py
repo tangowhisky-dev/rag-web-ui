@@ -28,10 +28,12 @@ class SearchDenseInput(BaseModel):
 
 class SearchDenseTool(BaseAgentTool):
     name: str = "search_dense"
-    description: str = (
-        "Dense vector search. Best for semantic/conceptual matching. "
-        "Returns ranked chunks with scores and citation metadata."
-    )
+    description: str = "Dense vector search for semantic/conceptual matching. Returns ranked chunks with scores and citation metadata."
+    prompt_snippet: str = "Semantic retrieval (dense vectors)"
+    prompt_guidelines: list[str] = [
+        "search_dense: Best default for conceptual, natural-language, paraphrased, and meaning-based questions. Use when relevant documents may not share the user's exact wording.",
+        "search_dense: Default first choice for most questions. Switch to search_exact for code/IDs or search_sparse for distinctive terms if dense returns irrelevant results.",
+    ]
     args_schema: type = SearchDenseInput
     ui_label: str = "Searching (dense)"
 

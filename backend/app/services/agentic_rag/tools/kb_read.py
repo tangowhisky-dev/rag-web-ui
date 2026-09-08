@@ -28,18 +28,18 @@ class KbReadInput(BaseModel):
     section: Optional[str] = Field(default=None, description="Heading text to read (e.g. 'Integrity'). Reads from this heading until the next heading of same or higher level.")
     start_char: Optional[int] = Field(default=None, description="Start character offset (from kb_outline or kb_grep). If omitted with end_char, reads from beginning.")
     end_char: Optional[int] = Field(default=None, description="End character offset. If omitted, reads to end of section or document.")
-    max_tokens: int = Field(default=4000, ge=500, le=16000, description="Token budget for returned content.")
+    max_tokens: int = Field(default=50000, ge=500, description="Token budget for returned content. Set high to read the full document, or low to read just a section. If truncated, call kb_read again with a different start_char to continue reading.")
 
 
 class KbReadTool(BaseAgentTool):
     name: str = "kb_read"
     ui_label: str = "Reading KB document"
-    description: str = (
-        "Read a specific section or character range of a KB document's markdown. "
-        "Use after kb_outline to read the relevant section, or after kb_grep to "
-        "read context around a matching line. Use when search tools return "
-        "insufficient evidence for a specific document."
-    )
+    description: str = "Read a specific section or character range of a KB document's markdown."
+    prompt_snippet: str = "Read document content (section or character range)"
+    prompt_guidelines: list[str] = [
+        "kb_read: Use for targeted sections after locating them via retrieval, outline, or grep. Read only the required range; use larger limits only when full-document context is genuinely needed.",
+        "kb_read: If truncated, call again with a different start_char to continue reading.",
+    ]
     args_schema: type[BaseModel] = KbReadInput
 
     def _run(self, *args: Any, **kwargs: Any) -> Any:

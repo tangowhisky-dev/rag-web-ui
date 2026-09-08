@@ -66,10 +66,12 @@ def _resolve_source_text(ctx: ToolContext, input_obj: SummarizeAnswerInput) -> s
 class SummarizeAnswerTool(BaseAgentTool):
     name: str = "summarize_answer"
     ui_label: str = "Summarizing answer"
-    description: str = (
-        "Summarize the previous assistant answer or a file. "
-        "Use for 'summarize it in 10 points' or 'tl;dr' requests."
-    )
+    description: str = "Summarize the previous assistant answer or a file."
+    prompt_snippet: str = "Transform an existing answer (TL;DR, reformat, shorten)"
+    prompt_guidelines: list[str] = [
+        "summarize_answer: Best for TL;DR, shortening, restructuring, reformatting, or changing the presentation of an already-produced answer.",
+        "summarize_answer: Do not use for source retrieval or attached-file summarization. Use file_summarize for attached files.",
+    ]
     args_schema: type[BaseModel] = SummarizeAnswerInput
 
     def _run(self, *args: Any, **kwargs: Any) -> Any:

@@ -50,13 +50,15 @@ def resolve_filter_to_doc_ids(
         return None
 
     from app.models.knowledge import Document
+    from app.services.retrieval.retrieval import get_effective_datastore_ids
     from datetime import datetime as _dt
-    from sqlalchemy import or_, and_
+    from sqlalchemy import or_
 
+    ds_ids = get_effective_datastore_ids(kb_ids, None, db)
     q = db.query(Document.id).filter(
         or_(
             Document.knowledge_base_id.in_(kb_ids),
-            and_(Document.knowledge_base_id.is_(None), Document.data_store_id.isnot(None)),
+            Document.data_store_id.in_(ds_ids) if ds_ids else False,
         )
     )
 

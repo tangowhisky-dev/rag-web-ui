@@ -23,11 +23,12 @@ class GraphExpandInput(BaseModel):
 
 class GraphExpandTool(BaseAgentTool):
     name: str = "graph_expand"
-    description: str = (
-        "Graph expansion via Neo4j. Finds related chunks through entity relationships. "
-        "Call when initial search results are insufficient and the KB has graph data. "
-        "Seeds are read automatically from state.retrieved_docs — no need to pass them."
-    )
+    description: str = "Graph expansion via Neo4j. Finds related chunks through entity relationships. Seeds are read automatically from state.retrieved_docs."
+    prompt_snippet: str = "Retrieve graph-connected knowledge (Neo4j entity relationships)"
+    prompt_guidelines: list[str] = [
+        "graph_expand: Best for relationship, dependency, entity-linking, and multi-hop questions. Use when direct retrieval is incomplete, not as a default expansion step.",
+        "graph_expand: Use only with high-confidence retrieved seed documents/entities. Prefer expansion from a small number of diverse, relevant seeds. Do not expand weak or noisy retrieval results.",
+    ]
     args_schema: type = GraphExpandInput
     ui_label: str = "Expanding via graph"
 

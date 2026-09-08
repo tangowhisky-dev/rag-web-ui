@@ -149,9 +149,7 @@ class CodeExecuteTool(BaseAgentTool):
     name: str = "code_execute"
     ui_label: str = "Executing Python code"
     description: str = (
-        "Execute Python code in a restricted sandbox for computation, "
-        "data transformation, or statistics. Use with data from extract_data or file_extract_table. "
-        "Do NOT use this to build chart/ECharts options — use chart_generate for that.\n"
+        "Execute Python code in a restricted sandbox for computation, data transformation, or statistics.\n"
         "Sandbox details:\n"
         "- Available builtins: sum, min, max, len, print, list, dict, set, tuple, range, enumerate, "
         "sorted, reversed, all, any, abs, round, int, float, str, bool, map, filter, zip, type, isinstance.\n"
@@ -164,6 +162,12 @@ class CodeExecuteTool(BaseAgentTool):
         "- Output: set the 'result' variable to return a value, or use print() to capture stdout. "
         "Example: result = sum([1, 2, 3]) or print('hello')."
     )
+    prompt_snippet: str = "Perform computation and data transformation (restricted Python sandbox)"
+    prompt_guidelines: list[str] = [
+        "code_execute: Best for calculations, aggregation, statistics, validation, and structured data transformation. Use only when deterministic computation adds value.",
+        "code_execute: Do NOT use this to build chart/ECharts options — use chart_generate for that.",
+        "code_execute: Set output_as_data=true to feed results into accumulated_data for chart_generate or create_office_document.",
+    ]
     args_schema: type[BaseModel] = CodeExecuteInput
 
     def _run(self, *args: Any, **kwargs: Any) -> Any:

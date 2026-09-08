@@ -423,15 +423,15 @@ class OfficeGenerateTool(BaseAgentTool):
     ui_label: str = "Generating Office document"
     description: str = (
         "Create or append to an Office document. Only three formats supported: pptx, docx, xlsx. "
-        "Any other format will be rejected. "
         "Data is read automatically from state.accumulated_data — do NOT pass data values. "
         "Provide only structure: format, title, slides/sections/sheets, chart types, theme. "
-        "For multi-slide decks: call office_generate with 1-2 slides at a time. "
-        "First call creates the file (append=false). Subsequent calls use append=true "
-        "to add slides to the same file. This avoids JSON corruption from large tool calls. "
-        "Call office_load_skill first to get design guidelines. "
         "Returns file_id for download."
     )
+    prompt_snippet: str = "Incrementally generate or append to Office artifacts"
+    prompt_guidelines: list[str] = [
+        "office_generate: Best for complex, iterative, or highly designed DOCX/PPTX/XLSX generation. Generate in small logical units, typically 1-2 slides at a time.",
+        "office_generate: Call office_load_skill first. Pass instructions and structure rather than raw unprocessed data — data is read from state.accumulated_data automatically.",
+    ]
     args_schema: type[BaseModel] = OfficeGenerateInput
 
     @staticmethod

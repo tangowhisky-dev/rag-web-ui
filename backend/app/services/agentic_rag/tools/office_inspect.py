@@ -38,13 +38,12 @@ class OfficeInspectInput(BaseModel):
 class OfficeInspectTool(BaseAgentTool):
     name: str = "office_inspect"
     ui_label: str = "Inspecting Office document"
-    description: str = (
-        "Inspect a generated Office document for quality issues. Modes: "
-        "outline (heading structure), issues (overflow/contrast/placeholders), "
-        "annotated (text with formatting), text (raw text), screenshot (render to PNG for visual QA), "
-        "get (read a specific element), query (search elements by selector), validate (schema check). "
-        "Use after office_generate to verify quality. Use office_edit to fix any issues found."
-    )
+    description: str = "Inspect a generated Office document for quality issues. Modes: outline, issues, annotated, text, screenshot, get, query, validate."
+    prompt_snippet: str = "Validate generated Office artifacts"
+    prompt_guidelines: list[str] = [
+        "office_inspect: Use after generation for complex or important artifacts. Inspect structure, text, visual quality, screenshots, and validation errors as appropriate.",
+        "office_inspect: Modes: outline (structure), issues (quality problems), screenshot (visual QA), text (raw text), validate (schema check).",
+    ]
     args_schema: type[BaseModel] = OfficeInspectInput
 
     def prepare_arguments(self, args: dict) -> dict:

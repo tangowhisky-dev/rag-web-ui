@@ -79,10 +79,12 @@ def _extract_section(content: str, section: Optional[str]) -> tuple:
 class FileReadTool(BaseAgentTool):
     name: str = "file_read"
     ui_label: str = "Reading file"
-    description: str = (
-        "Read content from an attached file. Use for questions about a specific "
-        "section or when the user says 'this file' without asking for a summary."
-    )
+    description: str = "Read content from an attached file."
+    prompt_snippet: str = "Read attached file content (section, page, or range)"
+    prompt_guidelines: list[str] = [
+        "file_read: Best for answering questions about specific sections, pages, sheets, or ranges of an attached file. Prefer targeted reads over summarizing the entire file.",
+        "file_read: Use file_summarize instead when the file is large and you need a summary, not a specific section.",
+    ]
     args_schema: type[BaseModel] = FileReadInput
 
     def _run(self, *args: Any, **kwargs: Any) -> Any:

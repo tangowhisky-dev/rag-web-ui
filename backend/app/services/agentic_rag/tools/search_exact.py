@@ -28,11 +28,12 @@ class SearchExactInput(BaseModel):
 
 class SearchExactTool(BaseAgentTool):
     name: str = "search_exact"
-    description: str = (
-        "MySQL fulltext search across chunk text and document titles. "
-        "Fast. Best for exact terms, code identifiers, title fragments. "
-        "Returns ranked chunks with scores and citation metadata."
-    )
+    description: str = "MySQL fulltext search across chunk text and document titles. Returns ranked chunks with scores and citation metadata."
+    prompt_snippet: str = "Exact lexical retrieval (MySQL FTS)"
+    prompt_guidelines: list[str] = [
+        "search_exact: Best for identifiers, filenames, people, project names, error messages, codes, quoted phrases, and uncommon terms — when exact wording matters.",
+        "search_exact: If results are weak or incomplete, fall back to search_sparse or search_dense. Do not repeat the same query.",
+    ]
     args_schema: type = SearchExactInput
     ui_label: str = "Searching (exact)"
 

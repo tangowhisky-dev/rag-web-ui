@@ -30,8 +30,13 @@ _COMPACT_KEEP_STDOUT_LINES = 20
 
 def _tool_descriptions_text(tools: list) -> str:
     lines = []
+    guidelines: list[str] = []
     for t in tools:
-        lines.append(f"- {t.name}: {t.description}")
+        snippet = getattr(t, "prompt_snippet", "")
+        if snippet:
+            lines.append(f"- {t.name}: {snippet}")
+        else:
+            lines.append(f"- {t.name}: {t.description}")
         # Include the args schema so the LLM knows the exact field names and
         # types. Essential for json_text mode where bind_tools is not called;
         # harmless in native mode (the schema is redundant but consistent).
@@ -47,6 +52,14 @@ def _tool_descriptions_text(tools: list) -> str:
         if field_lines:
             lines.append("  args:")
             lines.extend(field_lines)
+        # Collect per-tool guidelines for the Guidelines section.
+        for g in getattr(t, "prompt_guidelines", []) or []:
+            guidelines.append(g)
+    if guidelines:
+        lines.append("")
+        lines.append("Guidelines:")
+        for g in guidelines:
+            lines.append(f"- {g}")
     return "\n".join(lines)
 
 

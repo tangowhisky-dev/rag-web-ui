@@ -35,12 +35,12 @@ class OfficeEditInput(BaseModel):
 class OfficeEditTool(BaseAgentTool):
     name: str = "office_edit"
     ui_label: str = "Editing Office document"
-    description: str = (
-        "Edit an existing generated Office document with OfficeCLI batch commands. "
-        "Use after office_inspect finds issues. Each command is a dict with "
-        "'command' (add/set/remove/move), 'path' or 'parent', 'type', and 'props'. "
-        "The file is modified in-place — no new file is created."
-    )
+    description: str = "Edit an existing generated Office document with OfficeCLI batch commands. The file is modified in-place."
+    prompt_snippet: str = "Repair generated Office artifacts"
+    prompt_guidelines: list[str] = [
+        "office_edit: Use after inspection identifies concrete issues. Batch related fixes into one edit operation, then re-inspect if quality is critical.",
+        "office_edit: The file is modified in-place — no new file is created.",
+    ]
     args_schema: type[BaseModel] = OfficeEditInput
 
     def prepare_arguments(self, args: dict) -> dict:

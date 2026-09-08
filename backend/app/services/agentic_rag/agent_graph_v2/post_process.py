@@ -142,6 +142,20 @@ async def post_process_node_v2(state, ctx) -> dict:
     """Post-process the answer: substitute markers, normalize citations, save, score."""
     with _agent_step("finalize"):
         writer = _writer()
+
+        # Cancellation check: if the chat was cancelled, skip all generation,
+        # citation normalization, scoring, and DB persistence. The chat_service
+        # layer already saved the partial response to the DB message row.
+        chat_id = ctx.chat_id if ctx is not None else None
+        if chat_id is not None and is_cancelled(chat_id):
+            logger.debug("[post_process_v2] cancelled — skipping generation and persistence | chat_id=%s", chat_id)
+            return {
+                "final_answer": "",
+                "answer": "",
+                "cited_docs": [],
+                "messages": [],
+            }
+
         precomputed = state.get("precomputed_answer", "")
         query = state.get("original_query", "")
         observations = state.get("observations", [])
