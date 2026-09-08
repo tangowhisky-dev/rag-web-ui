@@ -25,7 +25,7 @@ from app.services.agentic_rag.token_budget import count_tokens
 from app.services.settings_service import get_setting
 
 from ..agent_graph.compaction import _compact_if_needed
-from ..agent_graph.helpers import _coerce_observation, _wall_clock_exceeded, _writer
+from ..agent_graph.helpers import _coerce_observation, _total_tool_budget, _wall_clock_exceeded, _writer
 from ..agent_graph.observations import (
     _observations_metadata_text,
     _tool_descriptions_text,
@@ -58,7 +58,8 @@ def _format_retrieved_docs_for_think(docs: list[dict], max_docs: int = 10, max_c
 
 def _build_v2_user_prompt(
     iteration: int,
-    max_iter: int,
+    tool_budget: int,
+    tool_calls_used: int,
     original: str,
     summary_text: str,
     history_text: str,
@@ -103,11 +104,12 @@ def _build_v2_user_prompt(
         parts.append(f"Tool observations so far:\n{obs_text}\n\n")
     if docs_text:
         parts.append(f"Retrieved evidence (cite these as [N](N) in your answer):\n{docs_text}\n\n")
-    parts.append(f"Round: {iteration}/{max_iter}\n")
+    remaining = tool_budget - tool_calls_used
+    parts.append(f"Tool calls remaining: {remaining}/{tool_budget}\n")
     parts.append(f"User message: {original}\n")
-    if iteration >= max_iter:
+    if remaining <= 0:
         parts.append(
-            "\nYou have reached the tool-call limit. Write your answer now using the evidence gathered. "
+            "\nYou have exhausted your tool-call budget. Write your answer now using the evidence gathered. "
             "Do not call any more tools."
         )
     else:
@@ -162,7 +164,8 @@ async def think_node_v2(state, ctx) -> dict:
     with _agent_step("think"):
         ctx.state = state
         iteration = state.get("iteration", 0) + 1
-        max_iter = get_setting(ctx.db, "AGENT_MAX_ITERATIONS", ctx.org_id)
+        tool_budget = _total_tool_budget(ctx.db, ctx.org_id)
+        tool_calls_used = sum(state.get("tool_call_counts", {}).values())
 
         # Wall-clock check: force finalize if time exceeded.
         if _wall_clock_exceeded(state):
@@ -182,10 +185,10 @@ async def think_node_v2(state, ctx) -> dict:
         summary_text = state.get("compaction_summary") or ""
         kb_profile_text = format_profile_summary(state.get("kb_profile", {}))
 
-        system = AGENT_V2_PROMPT.format(max_iterations=max_iter)
+        system = AGENT_V2_PROMPT
         retrieved_docs = state.get("retrieved_docs", [])
         user = _build_v2_user_prompt(
-            iteration, max_iter, query, summary_text, history_text,
+            iteration, tool_budget, tool_calls_used, query, summary_text, history_text,
             state.get("last_answer_object"), observations, retrieved_docs,
             tools_text, kb_profile_text, state.get("file_markdown"),
         )
@@ -205,7 +208,7 @@ async def think_node_v2(state, ctx) -> dict:
             history_text = history_to_text(recent)
             summary_text = state.get("compaction_summary") or ""
             user = _build_v2_user_prompt(
-                iteration, max_iter, query, summary_text, history_text,
+                iteration, tool_budget, tool_calls_used, query, summary_text, history_text,
                 state.get("last_answer_object"), observations, retrieved_docs,
                 tools_text, kb_profile_text, state.get("file_markdown"),
             )
@@ -232,14 +235,15 @@ async def think_node_v2(state, ctx) -> dict:
         tool_calls = parsed.tool_calls
         final_answer_text = parsed.final_answer
 
-        # At max iterations, force answer even if LLM emitted tool calls.
-        if iteration >= max_iter:
+        # If tool budget exhausted, force answer even if LLM emitted tool calls.
+        budget_exhausted = tool_calls_used >= tool_budget
+        if budget_exhausted:
             tool_calls = []
 
         # Guard: if the query asks for a file creation but create_office_document
         # was never called, force another iteration with a reminder. This catches
         # smaller models that write "I have created..." without calling the tool.
-        if not tool_calls and iteration < max_iter:
+        if not tool_calls and not budget_exhausted:
             counts = state.get("tool_call_counts", {})
             if _needs_office_creation(query) and counts.get("create_office_document", 0) == 0:
                 logger.info("[think_v2] query requests file creation but create_office_document not called — forcing retry")
@@ -268,17 +272,18 @@ async def think_node_v2(state, ctx) -> dict:
 
 def route_think_v2(state) -> str:
     """Route after think: tool if there are tool calls, otherwise post_process."""
-    iteration = state.get("iteration", 0)
     from app.db.session import SessionLocal
     from app.services.settings_service import get_setting as _gs
     org_id = state.get("org_id")
     _db = SessionLocal()
     try:
-        max_iter = _gs(_db, "AGENT_MAX_ITERATIONS", org_id)
+        tool_budget = _gs(_db, "AGENT_TOTAL_TOOL_BUDGET", org_id)
     finally:
         _db.close()
 
-    if iteration >= max_iter or _wall_clock_exceeded(state):
+    tool_calls_used = sum(state.get("tool_call_counts", {}).values())
+
+    if tool_calls_used >= tool_budget or _wall_clock_exceeded(state):
         return "post_process"
 
     if state.get("tool_calls"):

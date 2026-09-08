@@ -91,7 +91,7 @@ Do NOT use "content" for sections — use "heading" and "paragraphs".\
  Pass only structure (titles, headings, bullet text, chart types).
 - For text-only documents: provide paragraphs/bullets directly.
 - Supported formats: pptx, docx, xlsx ONLY.
-- You have at most {max_iterations} rounds. Use them wisely.
+- You have a limited tool-call budget. The prompt shows how many calls remain.
 - When done, write a brief plain-text summary (no tool calls) describing\
  what was created: file name, format, number of slides/sections/sheets,\
  and key content.
@@ -104,7 +104,8 @@ def _build_subagent_user_prompt(
     accumulated_data_text: str,
     tools_text: str,
     iteration: int,
-    max_iter: int,
+    tool_budget: int,
+    calls_used: int,
     observations: list[Observation],
 ) -> str:
     """Build the user prompt for the office sub-agent."""
@@ -128,9 +129,10 @@ def _build_subagent_user_prompt(
                 parts.append(f"     → {result_summary}\n")
         parts.append("\n")
 
-    parts.append(f"Round: {iteration}/{max_iter}\n")
-    if iteration >= max_iter:
-        parts.append("\nYou have reached the limit. Write a summary of what was created (or failed to create).")
+    remaining = tool_budget - calls_used
+    parts.append(f"Tool calls remaining: {remaining}/{tool_budget}\n")
+    if remaining <= 0:
+        parts.append("\nYou have exhausted your tool-call budget. Write a summary of what was created (or failed to create).")
     else:
         parts.append("\nCall the next tool, or write a plain-text summary if the document is created.")
     return "".join(parts)
@@ -169,14 +171,14 @@ def _format_accumulated_data(data: list) -> str:
 async def run_office_subagent(
     ctx,
     request: str,
-    max_iterations: int = 6,
+    tool_budget: int = 25,
 ) -> dict:
     """Run the office sub-agent loop.
 
     Args:
         ctx: ToolContext (shared with main agent — has state with accumulated_data, etc.)
         request: Natural language document request from the main agent.
-        max_iterations: Max think→tool rounds.
+        tool_budget: Total tool-call budget (inherited from AGENT_TOTAL_TOOL_BUDGET).
 
     Returns:
         dict with keys: ok, file_id, file_name, format, summary, error
@@ -204,14 +206,21 @@ async def run_office_subagent(
     accumulated_data = ctx.state.get("accumulated_data", []) if ctx.state else []
     accumulated_data_text = _format_accumulated_data(accumulated_data)
 
-    system = OFFICE_SUBAGENT_PROMPT.format(max_iterations=max_iterations)
+    system = OFFICE_SUBAGENT_PROMPT
     observations: list[Observation] = []
     counts: dict[str, int] = {}
+    summary = ""
 
-    for iteration in range(1, max_iterations + 1):
+    iteration = 0
+    while True:
+        iteration += 1
+        calls_used = sum(counts.values())
+        if calls_used >= tool_budget:
+            break
+
         user = _build_subagent_user_prompt(
             request, evidence_text, accumulated_data_text,
-            tools_text, iteration, max_iterations, observations,
+            tools_text, iteration, tool_budget, calls_used, observations,
         )
 
         writer({"event": "office_subagent_step", "iteration": iteration, "phase": "think"})
@@ -229,13 +238,8 @@ async def run_office_subagent(
         parsed = parse_think_response(resp, mode="auto")
         tool_calls = parsed.tool_calls
 
-        # Force stop at max iterations
-        if iteration >= max_iter if (max_iter := max_iterations) else False:
-            tool_calls = []
-
         if not tool_calls:
             # Sub-agent wrote a summary — we're done
-            summary = ""
             if isinstance(parsed.final_answer, str) and parsed.final_answer.strip():
                 summary = parsed.final_answer.strip()
             writer({"event": "office_subagent", "status": "done", "summary": summary[:300]})
@@ -254,12 +258,10 @@ async def run_office_subagent(
                 ))
                 continue
 
-            # Check per-tool cap
-            cap = _office_tool_cap(ctx, name)
-            if counts.get(name, 0) >= cap:
+            if calls_used >= tool_budget:
                 observations.append(Observation(
                     tool=name, arguments=args, result={},
-                    error=f"Tool '{name}' cap ({cap}) reached. Use a different tool or write summary.",
+                    error=f"Tool-call budget ({tool_budget}) exhausted. Write your summary.",
                     tokens=0,
                 ))
                 continue
@@ -275,6 +277,7 @@ async def run_office_subagent(
             )
             observations.append(obs)
             counts[name] = counts.get(name, 0) + 1
+            calls_used += 1
 
             # Sync observations to ctx.state so prepare_arguments on
             # office_inspect/office_edit can find file_id from office_generate.
@@ -304,7 +307,7 @@ async def run_office_subagent(
             "file_id": latest.get("file_id"),
             "file_name": latest.get("file_name"),
             "format": latest.get("format"),
-            "summary": summary if 'summary' in dir() else f"Created {latest.get('file_name', 'document')}",
+            "summary": summary or f"Created {latest.get('file_name', 'document')}",
             "error": None,
         }
 
@@ -315,17 +318,6 @@ async def run_office_subagent(
         "file_id": None,
         "file_name": None,
         "format": None,
-        "summary": summary if 'summary' in dir() else "Failed to create document",
+        "summary": summary or "Failed to create document",
         "error": errors[-1] if errors else "No document was generated",
     }
-
-
-def _office_tool_cap(ctx, tool_name: str) -> int:
-    """Get per-tool cap for office sub-agent tools."""
-    caps = {
-        "office_load_skill": 1,
-        "office_generate": 3,
-        "office_inspect": 3,
-        "office_edit": 3,
-    }
-    return caps.get(tool_name, 2)

@@ -1,17 +1,19 @@
 """Tool node for agentic-v2.
 
 Dispatches tool calls in parallel, records observations, and loops back
-to think. No duplicate detection, no consecutive same-tool limits, no
-reranker confidence short-circuits, no plan satisfaction checks.
+to think.
 
-The LLM sees its own prior observations in the think prompt, so it won't
-repeat calls unless it has a reason. If it does repeat, the tool just
-runs again — simpler and more honest than trying to outsmart the LLM.
+Guards:
+- Total tool-call budget (AGENT_TOTAL_TOOL_BUDGET) — forces answer when exhausted.
+- Same-tool repeat limit (AGENT_MAX_SAME_TOOL_REPEAT) — blocks consecutive
+  calls to the same tool with similar arguments to prevent local-model loops.
+
+No per-tool caps — the agent is free to call any tool within the total budget.
 
 Kept from the current system:
 - Parallel dispatch of independent tool calls
-- Per-tool call budget (caps)
 - Total tool-call budget
+- Same-tool repeat guard
 - Transient error retry with backoff
 - Non-transient errors returned as observations (isError pattern)
 - Retrieved docs merging into state
@@ -45,18 +47,50 @@ from ..agent_graph.tooling import (
 logger = logging.getLogger(__name__)
 
 
+def _call_signature(name: str, args: dict) -> tuple[str, str]:
+    """Stable hash key for a tool call (tool name + sorted JSON of args)."""
+    import json
+    return (name, json.dumps(args, sort_keys=True, default=str))
+
+
 async def _dispatch_v2(
     tool_calls: list[dict],
     tools: dict,
     counts: dict,
     ctx,
+    prior_observations: list = None,
 ) -> tuple[list[Observation], dict, bool]:
-    """Dispatch tool calls in parallel. Returns (observations, updated_counts, should_terminate)."""
+    """Dispatch tool calls in parallel. Returns (observations, updated_counts, should_terminate).
+
+    Guards:
+    1. Total tool-call budget (AGENT_TOTAL_TOOL_BUDGET) — forces answer when exhausted.
+    2. Clarify per-tool cap (AGENT_MAX_CLARIFY) — limits human-in-the-loop rounds.
+    3. Same-tool repeat limit (AGENT_MAX_SAME_TOOL_REPEAT) — blocks consecutive
+       calls to the same tool with similar arguments to prevent local-model loops.
+    No other per-tool caps — the agent is free to call any tool within the total budget.
+    """
     writer = _writer()
     new_observations: list[Observation] = []
     total_budget = _total_tool_budget(ctx.db, ctx.org_id)
     total_calls = sum(counts.values())
+    max_same_repeat = get_setting(ctx.db, "AGENT_MAX_SAME_TOOL_REPEAT", ctx.org_id)
     caps = _tool_call_budget(ctx.db, ctx.org_id)
+
+    # Build call signatures from prior observations for same-tool repeat guard.
+    prior_obs = prior_observations or []
+    prior_signatures: dict[str, object] = {}
+    for obs in prior_obs:
+        prior_signatures.setdefault(_call_signature(obs.tool, obs.arguments), obs)
+
+    # Count consecutive same-tool calls from the end of prior_observations.
+    def _consecutive_same_tool_count(tool_name: str) -> int:
+        count = 0
+        for obs in reversed(prior_obs):
+            if obs.tool == tool_name:
+                count += 1
+            else:
+                break
+        return count
 
     coros = []
     executed_flags: list[bool] = []
@@ -70,7 +104,7 @@ async def _dispatch_v2(
         label = getattr(tool_obj, "ui_label", None) if tool_obj else None
         writer({"event": "tool_call", "tool": name, "arguments": args, "label": label or name})
 
-        # Budget checks
+        # Guard 1: Total tool-call budget exhausted.
         if total_calls >= total_budget:
             async def _budget_exceeded(name=name, args=args, cap=total_budget):
                 return {"tool": name, "arguments": args, "result": {},
@@ -78,13 +112,27 @@ async def _dispatch_v2(
             coros.append(_budget_exceeded())
             executed_flags.append(False)
             continue
+
+        # Guard 2: Per-tool cap for special tools (only clarify).
         cap = caps.get(name)
-        current = counts.get(name, 0)
-        if cap is not None and current >= cap:
+        if cap is not None and counts.get(name, 0) >= cap:
             async def _cap_exceeded(name=name, args=args, cap=cap):
                 return {"tool": name, "arguments": args, "result": {},
                         "error": f"Tool '{name}' call cap ({cap}) reached. Use a different tool or write your answer.", "tokens": 0}
             coros.append(_cap_exceeded())
+            executed_flags.append(False)
+            continue
+
+        # Guard 3: Same-tool repeat limit — blocks consecutive calls to the
+        # same tool with similar arguments. Prevents local-model loops where
+        # the LLM keeps re-emitting the same tool call with slight variations.
+        sig = _call_signature(name, args)
+        if sig in prior_signatures and _consecutive_same_tool_count(name) >= max_same_repeat:
+            async def _repeat_exceeded(name=name, args=args, cap=max_same_repeat):
+                return {"tool": name, "arguments": args, "result": {},
+                        "error": f"Tool '{name}' called {cap} times consecutively with similar arguments. "
+                                 "Change strategy or write your answer.", "tokens": 0}
+            coros.append(_repeat_exceeded())
             executed_flags.append(False)
             continue
 
@@ -194,7 +242,7 @@ async def tool_node_v2(state, ctx) -> dict:
         counts = dict(state.get("tool_call_counts", {}))
 
         new_observations, counts, should_terminate = await _dispatch_v2(
-            tool_calls, tools, counts, ctx,
+            tool_calls, tools, counts, ctx, prior_observations=prior_observations,
         )
 
         retry_terminate = await _retry_transient_v2(new_observations, tool_calls, tools, ctx)

@@ -95,10 +95,10 @@ class RetrieveParallelTool(BaseTool):
         writer({"event": "retrieve_parallel", "status": "started",
                 "queries": queries})
 
-        max_iter = 4
+        tool_budget = 25
         try:
             from app.services.settings_service import get_setting
-            max_iter = get_setting(ctx.db, "RETRIEVAL_SUBAGENT_MAX_ITERATIONS", ctx.org_id) or 4
+            tool_budget = get_setting(ctx.db, "AGENT_TOTAL_TOOL_BUDGET", ctx.org_id) or 25
         except Exception:
             pass
 
@@ -106,7 +106,7 @@ class RetrieveParallelTool(BaseTool):
             results = await run_retrieval_subagents_parallel(
                 ctx=ctx,
                 sub_queries=queries,
-                max_iterations=max_iter,
+                tool_budget=tool_budget,
             )
         except Exception as exc:
             logger.exception("[retrieve_parallel] sub-agents failed: %s", exc)

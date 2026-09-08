@@ -42,33 +42,13 @@ def _writer():
         return lambda x: None
 
 
-# Per-turn call caps for tools that can be invoked in a tight loop.
-# Resolved per-request via the settings service (org-overridable).
+# Per-turn call caps for tools that need special limits.
+# Only clarify (human-in-the-loop) has a per-tool cap — all other tools
+# are limited only by the total tool-call budget (AGENT_TOTAL_TOOL_BUDGET)
+# and the same-tool repeat guard (AGENT_MAX_SAME_TOOL_REPEAT).
 def _tool_call_budget(db, org_id) -> dict:
     return {
-        # Clarification (human-in-the-loop)
         "clarify": get_setting(db, "AGENT_MAX_CLARIFY", org_id),
-        # Atomic search tools
-        "search_exact": get_setting(db, "AGENT_MAX_SEARCH_EXACT", org_id),
-        "search_sparse": get_setting(db, "AGENT_MAX_SEARCH_SPARSE", org_id),
-        "search_dense": get_setting(db, "AGENT_MAX_SEARCH_DENSE", org_id),
-        "rerank_results": get_setting(db, "AGENT_MAX_RERANK", org_id),
-        "graph_expand": get_setting(db, "AGENT_MAX_GRAPH_EXPAND", org_id),
-        # Discovery
-        "kb_search_documents": get_setting(db, "AGENT_MAX_KB_SEARCH", org_id),
-        # Read
-        "kb_grep": get_setting(db, "AGENT_MAX_KB_GREP", org_id),
-        "kb_read": get_setting(db, "AGENT_MAX_KB_READ", org_id),
-        "kb_outline": get_setting(db, "AGENT_MAX_KB_READ", org_id),
-        # Processing
-        "code_execute": get_setting(db, "AGENT_MAX_CODE_EXEC", org_id),
-        "extract_data": get_setting(db, "AGENT_MAX_EXTRACT_DATA", org_id),
-        "chart_generate": get_setting(db, "AGENT_MAX_CHART_GENERATE", org_id),
-        # Office document generation
-        "office_load_skill": get_setting(db, "AGENT_MAX_OFFICE_LOAD_SKILL", org_id),
-        "office_generate": get_setting(db, "AGENT_MAX_OFFICE_GENERATE", org_id),
-        "office_inspect": get_setting(db, "AGENT_MAX_OFFICE_INSPECT", org_id),
-        "office_edit": get_setting(db, "AGENT_MAX_OFFICE_EDIT", org_id),
     }
 
 

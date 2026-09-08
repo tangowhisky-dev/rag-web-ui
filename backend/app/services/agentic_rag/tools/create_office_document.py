@@ -76,10 +76,10 @@ class CreateOfficeDocumentTool(BaseTool):
                 "terminate": False,
             }
 
-        max_iter = 6
+        tool_budget = 25
         try:
             from app.services.settings_service import get_setting
-            max_iter = get_setting(ctx.db, "OFFICE_SUBAGENT_MAX_ITERATIONS", ctx.org_id) or 6
+            tool_budget = get_setting(ctx.db, "AGENT_TOTAL_TOOL_BUDGET", ctx.org_id) or 25
         except Exception:
             pass
 
@@ -90,7 +90,7 @@ class CreateOfficeDocumentTool(BaseTool):
             result = await run_office_subagent(
                 ctx=ctx,
                 request=request,
-                max_iterations=max_iter,
+                tool_budget=tool_budget,
             )
         except Exception as exc:
             logger.exception("[create_office_document] sub-agent failed: %s", exc)

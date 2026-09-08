@@ -469,19 +469,18 @@ def test_applicable_tools_includes_with_kb():
 
 # ── Tool call budget ───────────────────────────────────────────────────────────
 
-def test_tool_call_budget_includes_kb_tools():
+def test_tool_call_budget_only_has_clarify():
     from app.services.agentic_rag.agent_graph import _tool_call_budget
     with patch("app.services.agentic_rag.agent_graph.helpers.get_setting", side_effect=lambda db, key, org_id=None: {
-        "AGENT_MAX_RETRIEVALS": 3, "AGENT_MAX_CODE_EXEC": 3,
-        "AGENT_MAX_KB_GREP": 5, "AGENT_MAX_KB_READ": 10,
+        "AGENT_MAX_CLARIFY": 2,
     }.get(key, 0)):
         budget = _tool_call_budget(None, None)
-    assert "kb_grep" in budget
-    assert "kb_read" in budget
-    assert "kb_outline" in budget
-    assert budget["kb_grep"] == 5
-    assert budget["kb_read"] == 10
-    assert budget["kb_outline"] == 10
+    assert "clarify" in budget
+    assert budget["clarify"] == 2
+    # Per-tool caps removed — only total budget + same-tool repeat guard remain
+    assert "kb_grep" not in budget
+    assert "kb_read" not in budget
+    assert "search_dense" not in budget
 
 
 if __name__ == "__main__":

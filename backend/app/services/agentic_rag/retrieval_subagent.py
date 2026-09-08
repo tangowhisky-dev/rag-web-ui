@@ -67,7 +67,7 @@ You are a retrieval specialist. Your job: find the best evidence for a single\
 
 # Rules
 
-- You have at most {max_iterations} rounds.
+- You have a limited tool-call budget. The prompt shows how many calls remain.
 - Return evidence, NOT an answer. Do not write prose explanations.
 - When you have enough evidence, write a JSON summary (no tool calls):
   {{"evidence_found": true, "summary": "brief description of what was found",\
@@ -82,7 +82,8 @@ def _build_retrieval_user_prompt(
     sub_query: str,
     tools_text: str,
     iteration: int,
-    max_iter: int,
+    tool_budget: int,
+    calls_used: int,
     observations: list[Observation],
 ) -> str:
     """Build the user prompt for the retrieval sub-agent."""
@@ -112,9 +113,10 @@ def _build_retrieval_user_prompt(
                     parts.append(f"     → {json.dumps(result, default=str)[:100]}\n")
         parts.append("\n")
 
-    parts.append(f"Round: {iteration}/{max_iter}\n")
-    if iteration >= max_iter:
-        parts.append("\nYou have reached the limit. Write your JSON summary now.")
+    remaining = tool_budget - calls_used
+    parts.append(f"Tool calls remaining: {remaining}/{tool_budget}\n")
+    if remaining <= 0:
+        parts.append("\nYou have exhausted your tool-call budget. Write your JSON summary now.")
     else:
         parts.append("\nCall the next tool, or write your JSON summary if you have enough evidence.")
     return "".join(parts)
@@ -207,14 +209,14 @@ def _extract_evidence_from_observations(observations: list[Observation]) -> list
 async def run_retrieval_subagent(
     ctx,
     sub_query: str,
-    max_iterations: int = 4,
+    tool_budget: int = 25,
 ) -> dict:
     """Run a single retrieval sub-agent loop.
 
     Args:
         ctx: ToolContext (shared with main agent).
         sub_query: A single sub-query to retrieve evidence for.
-        max_iterations: Max think→tool rounds.
+        tool_budget: Total tool-call budget (inherited from AGENT_TOTAL_TOOL_BUDGET).
 
     Returns:
         dict with keys: ok, evidence (list of dicts), summary, query
@@ -238,14 +240,20 @@ async def run_retrieval_subagent(
     tools_list = list(tools.values())
     tools_text = _tool_descriptions_text(tools_list)
 
-    system = RETRIEVAL_SUBAGENT_PROMPT.format(max_iterations=max_iterations)
+    system = RETRIEVAL_SUBAGENT_PROMPT
     observations: list[Observation] = []
     counts: dict[str, int] = {}
     summary = ""
 
-    for iteration in range(1, max_iterations + 1):
+    iteration = 0
+    while True:
+        iteration += 1
+        calls_used = sum(counts.values())
+        if calls_used >= tool_budget:
+            break
+
         user = _build_retrieval_user_prompt(
-            sub_query, tools_text, iteration, max_iterations, observations,
+            sub_query, tools_text, iteration, tool_budget, calls_used, observations,
         )
 
         try:
@@ -260,9 +268,6 @@ async def run_retrieval_subagent(
 
         parsed = parse_think_response(resp, mode="auto")
         tool_calls = parsed.tool_calls
-
-        if iteration >= max_iterations:
-            tool_calls = []
 
         if not tool_calls:
             # Sub-agent wrote a summary
@@ -282,12 +287,10 @@ async def run_retrieval_subagent(
                 ))
                 continue
 
-            # Per-tool cap
-            cap = _retrieval_tool_cap(name)
-            if counts.get(name, 0) >= cap:
+            if calls_used >= tool_budget:
                 observations.append(Observation(
                     tool=name, arguments=args, result={},
-                    error=f"Tool '{name}' cap ({cap}) reached. Use a different tool or write summary.",
+                    error=f"Tool-call budget ({tool_budget}) exhausted. Write your summary.",
                     tokens=0,
                 ))
                 continue
@@ -300,6 +303,7 @@ async def run_retrieval_subagent(
             )
             observations.append(obs)
             counts[name] = counts.get(name, 0) + 1
+            calls_used += 1
 
     # Extract evidence from all observations
     evidence = _extract_evidence_from_observations(observations)
@@ -312,32 +316,17 @@ async def run_retrieval_subagent(
     }
 
 
-def _retrieval_tool_cap(tool_name: str) -> int:
-    """Per-tool cap for retrieval sub-agent."""
-    caps = {
-        "search_exact": 2,
-        "search_dense": 2,
-        "search_sparse": 2,
-        "kb_search_documents": 3,
-        "kb_read": 3,
-        "kb_outline": 2,
-        "kb_grep": 2,
-        "rerank_results": 1,
-    }
-    return caps.get(tool_name, 2)
-
-
 async def run_retrieval_subagents_parallel(
     ctx,
     sub_queries: list[str],
-    max_iterations: int = 4,
+    tool_budget: int = 25,
 ) -> list[dict]:
     """Run multiple retrieval sub-agents in parallel.
 
     Args:
         ctx: ToolContext (shared — each sub-agent gets its own copy of tools).
         sub_queries: List of independent sub-queries.
-        max_iterations: Max think→tool rounds per sub-agent.
+        tool_budget: Total tool-call budget per sub-agent (inherited from AGENT_TOTAL_TOOL_BUDGET).
 
     Returns:
         list of dicts (one per sub-query): ok, evidence, summary, query
@@ -345,7 +334,7 @@ async def run_retrieval_subagents_parallel(
     writer = _get_writer() if False else None  # writer not needed here
 
     tasks = [
-        run_retrieval_subagent(ctx, q, max_iterations=max_iterations)
+        run_retrieval_subagent(ctx, q, tool_budget=tool_budget)
         for q in sub_queries
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)

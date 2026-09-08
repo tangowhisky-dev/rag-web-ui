@@ -121,7 +121,7 @@ def _estimate_token_usage(state: _V2LoopState, query: str, file_markdown: Option
         return events
 
     # Estimate: system prompt once per think iteration + user prompt + observations.
-    system_tokens = count_tokens(AGENT_V2_PROMPT.format(max_iterations=15))
+    system_tokens = count_tokens(AGENT_V2_PROMPT)
     prompt_tokens = system_tokens * max(state.think_iterations, 1)
     prompt_tokens += count_tokens(query)
     prompt_tokens += sum(
