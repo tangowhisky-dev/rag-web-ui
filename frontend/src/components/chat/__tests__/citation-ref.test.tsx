@@ -40,7 +40,7 @@ describe("CitationRef kind metadata", () => {
       "chunk", "file", "section", "range", "grep", "table", "outline",
     ];
     for (const kind of kinds) {
-      const ref: CitationRef = { citation_kind: kind, document_id: 1, source_tool: "search_dense" };
+      const ref: CitationRef = { citation_kind: kind, document_id: 1, source_tool: "semantic_search" };
       expect(ref.citation_kind).toBe(kind);
     }
   });
@@ -73,7 +73,7 @@ describe("CitationRef kind metadata", () => {
       document_id: 1,
       chunk_index: 3,
       quoted_text: "A mutex is a synchronization primitive...",
-      source_tool: "search_dense",
+      source_tool: "semantic_search",
     };
     expect(ref.quoted_text).toContain("mutex");
   });

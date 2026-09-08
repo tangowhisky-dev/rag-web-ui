@@ -47,7 +47,7 @@ class ExtractDataInput(BaseModel):
     document_ids: Optional[List[int]] = Field(
         default=None,
         description="For source='retrieved_docs': extract from only these document_ids "
-        "(from kb_search_documents metadata). If null, extracts from all retrieved docs "
+        "(from title_search metadata). If null, extracts from all retrieved docs "
         "(first 10). Use this for batch processing: call extract_data with document_ids "
         "for 5-10 docs at a time, then chart_generate with source='accumulated'.",
     )

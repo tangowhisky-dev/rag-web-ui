@@ -85,7 +85,7 @@ work with current shared modules which have been updated for v2.
 # #             plan = Plan.model_validate_json(block) if block else Plan()
 # #         except Exception as parse_exc:
 # #             logger.warning("[plan_node] JSON parse failed: %s", parse_exc)
-# #             plan = Plan(intent="rag", subtasks=[Subtask(id="a", description=original, tool_hint="search_dense")])
+# #             plan = Plan(intent="rag", subtasks=[Subtask(id="a", description=original, tool_hint="semantic_search")])
 # #     return plan
 # #
 # #
@@ -140,7 +140,7 @@ work with current shared modules which have been updated for v2.
 # #         needs_clarification = _check_clarification_budget(plan, state, ctx)
 # #
 # #         # Pre-populate tool calls for independent subtasks (no depends_on)
-# #         # that use atomic search tools or kb_search_documents. This ensures
+# #         # that use search tools or title_search. This ensures
 # #         # the first round of retrieval uses the correct strategy without
 # #         # depending on the think LLM noticing per-subtask params in its prompt.
 # #         precomputed_tool_calls: list[dict] = []
@@ -166,8 +166,8 @@ work with current shared modules which have been updated for v2.
 # #                     logger.debug("[plan_node] pre-populated kb_metadata for subtask %s: %s", st.id, call["arguments"])
 # #                     continue
 # #
-# #                 # kb_search_documents: document-level retrieval.
-# #                 if st.tool_hint == "kb_search_documents":
+# #                 # title_search: document-level retrieval.
+# #                 if st.tool_hint == "title_search":
 # #                     suggested_filters = st.suggested_filters or {}
 # #                     suggested_sort = st.suggested_sort
 # #                     sort_field = "file_modified_at"
@@ -176,7 +176,7 @@ work with current shared modules which have been updated for v2.
 # #                         sort_field = suggested_sort.get("field", "file_modified_at")
 # #                         sort_direction = suggested_sort.get("direction", "desc")
 # #                     call: dict = {
-# #                         "tool": "kb_search_documents",
+# #                         "tool": "title_search",
 # #                         "arguments": {
 # #                             "sort_field": sort_field,
 # #                             "sort_direction": sort_direction,
@@ -197,13 +197,13 @@ work with current shared modules which have been updated for v2.
 # #                         call["arguments"]["content_type"] = suggested_filters["content_type"]
 # #                     precomputed_tool_calls.append(call)
 # #                     logger.debug(
-# #                         "[plan_node] pre-populated kb_search_documents for subtask %s: %s",
+# #                         "[plan_node] pre-populated title_search for subtask %s: %s",
 # #                         st.id, call["arguments"],
 # #                     )
 # #                     continue
 # #
-# #                 # Atomic search tools: pre-populate from suggested_query/filters.
-# #                 if st.tool_hint in ("search_exact", "search_sparse", "search_dense"):
+# #                 # Search tools: pre-populate from suggested_query/filters.
+# #                 if st.tool_hint in ("keyword_search", "semantic_search"):
 # #                     query = st.suggested_query or original
 # #                     call = {"tool": st.tool_hint, "arguments": {"query": query}}
 # #                     suggested_filters = st.suggested_filters

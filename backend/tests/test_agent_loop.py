@@ -41,12 +41,11 @@ class TestToolRegistry:
         tools = build_tools(ctx)
         names = {t.name for t in tools}
         expected = {
-            "search_exact",
-            "search_sparse",
-            "search_dense",
+            "keyword_search",
+            "semantic_search",
             "rerank_results",
             "graph_expand",
-            "kb_search_documents",
+            "title_search",
             "current_datetime",
             "file_read",
             "file_extract_table",
@@ -75,7 +74,7 @@ class TestToolRegistry:
         assert "file_read" in names
         # file_extract_table is filtered out without a file
         assert "file_extract_table" not in names
-        assert "search_dense" in names
+        assert "semantic_search" in names
 
     def test_office_generate_always_available(self):
         """create_office_document should be available even without data —
@@ -281,10 +280,10 @@ class TestTriedRagRetrieveQueries:
         # rag_retrieve query the ladder already exhausted, wasting an
         # iteration. This list is surfaced in the think prompt to discourage it.
         observations = [
-            Observation(tool="search_dense", arguments={"query": "race condition"}, result={"docs": [], "sufficient": False}),
+            Observation(tool="semantic_search", arguments={"query": "race condition"}, result={"docs": [], "sufficient": False}),
             Observation(tool="code_execute", arguments={"code": "1+1"}, result={"result": 2}),
-            Observation(tool="search_dense", arguments={"query": "mutual exclusion condition"}, result={"docs": [], "sufficient": False}),
-            Observation(tool="search_dense", arguments={"query": "race condition"}, result={"docs": [], "sufficient": False}),
+            Observation(tool="semantic_search", arguments={"query": "mutual exclusion condition"}, result={"docs": [], "sufficient": False}),
+            Observation(tool="semantic_search", arguments={"query": "race condition"}, result={"docs": [], "sufficient": False}),
         ]
         assert _tried_search_queries(observations) == ["race condition", "mutual exclusion condition"]
 
@@ -418,10 +417,10 @@ class TestConvergence:
 
         plan = Plan(
             intent="rag",
-            subtasks=[Subtask(id="a", description="find x", tool_hint="search_dense", depends_on=[], expected_output="answer")],
+            subtasks=[Subtask(id="a", description="find x", tool_hint="semantic_search", depends_on=[], expected_output="answer")],
         )
         obs = Observation(
-            tool="search_dense",
+            tool="semantic_search",
             arguments={"query": "what is mutex"},
             result={"hits": [{"content": "a mutex is..."}]},
             error=None,
@@ -430,7 +429,7 @@ class TestConvergence:
         return {
             "plan": plan,
             "observations": [obs],
-            "tool_call_counts": {"search_dense": 1},
+            "tool_call_counts": {"semantic_search": 1},
             "iteration": 0,
             "original_query": "what is mutex",
             "messages": [],
@@ -478,7 +477,7 @@ class TestLoadContextNodeResetsPerTurnState:
             "original_query": "what's next?",
             "observations": [
                 Observation(
-                    tool="search_dense",
+                    tool="semantic_search",
                     arguments={"query": "turn 1 query"},
                     result={"docs": [{"page_content": "turn 1 doc chunk"}]},
                     error=None,
@@ -486,7 +485,7 @@ class TestLoadContextNodeResetsPerTurnState:
                 )
             ],
             "iteration": 3,
-            "tool_call_counts": {"search_dense": 2},
+            "tool_call_counts": {"semantic_search": 2},
             "force_finalize": True,
             "precomputed_answer": "turn 1 answer",
             "tool_calls": [{"tool": "chart_generate", "arguments": {}}],

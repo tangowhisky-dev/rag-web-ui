@@ -434,9 +434,8 @@ def test_applicable_tools_filters_without_kb():
     # file_extract_table should be filtered out without a file
     assert "file_extract_table" not in names
     # Search tools should be available
-    assert "search_exact" in names
-    assert "search_sparse" in names
-    assert "search_dense" in names
+    assert "keyword_search" in names
+    assert "semantic_search" in names
     # Deferred tools should be filtered out before any search
     assert "rerank_results" not in names
     assert "graph_expand" not in names

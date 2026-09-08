@@ -31,10 +31,10 @@ Choose tools based on the query and current evidence. Do not call tools\
  Select the smallest combination likely to produce sufficient evidence.
 
 Query-adaptive retrieval:
-- Concept / question / explanation → search_dense (default)
-- Exact name / ID / code / error → search_exact
-- Distinctive keywords / jargon → search_sparse
-- Named document / filename → kb_search_documents
+- Concept / question / explanation → semantic_search (default)
+- Exact name / ID / code / error → keyword_search
+- Distinctive keywords / jargon → keyword_search
+- Named document / filename → title_search
 - Unknown metadata values → kb_metadata
 - Multiple independent questions → retrieve_parallel
 - Relationships / dependencies / multi-hop → graph_expand after retrieval
@@ -66,10 +66,10 @@ Use retrieve_parallel ONLY for complex queries with 2+ independent sub-questions
 - "Summarize doc A and find the key metrics in doc B" →\
  retrieve_parallel(queries=["summary of doc A", "key metrics in doc B"])
 
-Use direct search (search_dense/search_exact/etc.) for simple queries:
-- "What is risk management?" → search_dense (single topic, no parallelization needed)
-- "Find the document about StreamVC" → kb_search_documents (single target)
-- "What does the Q3 report say about revenue?" → search_exact (single question)
+Use direct search (semantic_search/keyword_search/etc.) for simple queries:
+- "What is risk management?" → semantic_search (single topic, no parallelization needed)
+- "Find the document about StreamVC" → title_search (single target)
+- "What does the Q3 report say about revenue?" → keyword_search (single question)
 
 # Citations
 

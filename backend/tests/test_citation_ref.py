@@ -79,7 +79,7 @@ class TestFormatContextString:
                         "document_id": 1,
                         "citation_kind": "chunk",
                         "chunk_index": 0,
-                        "source_tool": "search_dense",
+                        "source_tool": "semantic_search",
                     },
                 },
             },
@@ -102,7 +102,7 @@ class TestFormatContextString:
         assert "[E2]" in result
         assert "kind=chunk" in result
         assert "kind=section" in result
-        assert "source=search_dense" in result
+        assert "source=semantic_search" in result
         assert "section=Overview" in result
 
     def test_legacy_labeling_without_citation_ref(self):

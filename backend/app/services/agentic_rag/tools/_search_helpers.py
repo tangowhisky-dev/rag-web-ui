@@ -1,7 +1,7 @@
-"""Shared helpers for atomic search tools.
+"""Shared helpers for search tools.
 
-Extracted from the original monolithic retrieval tool so all search tools (search_exact,
-search_sparse, search_dense) share the same filter resolution and
+Extracted from the original monolithic retrieval tool so all search tools (keyword_search,
+semantic_search) share the same filter resolution and
 synonym expansion logic.
 """
 

@@ -147,7 +147,7 @@ def _extract_evidence_from_observations(observations: list[Observation]) -> list
                 "source_tool": obs.tool,
             })
 
-        # kb_search_documents returns "docs" with structure:
+        # title_search returns "docs" with structure:
         # {"page_content": "...", "metadata": {"document_id": N, "title": "...", ...}}
         docs = result.get("docs", [])
         for doc in docs:

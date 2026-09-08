@@ -76,7 +76,7 @@ class KbMetadataTool(BaseAgentTool):
     prompt_snippet: str = "Discover KB schema and metadata values"
     prompt_guidelines: list[str] = [
         "kb_metadata: Use when the required filter values or document attributes are unknown. Best for exploring available document types, date ranges, fields, and valid metadata values.",
-        "kb_metadata: Do not call when filters are already known — go directly to kb_search_documents or search tools.",
+        "kb_metadata: Do not call when filters are already known — go directly to title_search or search tools.",
     ]
     args_schema: type[BaseModel] = KbMetadataInput
 

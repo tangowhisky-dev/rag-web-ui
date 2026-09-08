@@ -3,7 +3,7 @@
 Tests all query types with real LM Studio models:
 1. Simple RAG query (direct search)
 2. Complex multi-part query (retrieve_parallel)
-3. Named document query (kb_search_documents + file_read)
+3. Named document query (title_search + file_read)
 4. Chart generation (code_execute + chart_generate)
 5. PPTX generation (create_office_document)
 6. DOCX generation (create_office_document)
@@ -91,8 +91,8 @@ async def run_scenario(db, label, query, expected_tools=None, expect_office=Fals
         failures.append(f"expected chart but got 0 (tools={tool_calls})")
     if expect_citations and citations == 0 and not expect_office:
         # Citations not required for office-only or chart-only queries
-        if any(t in tool_calls for t in ("search_dense", "search_exact", "search_sparse",
-                                          "kb_search_documents", "file_read", "retrieve_parallel")):
+        if any(t in tool_calls for t in ("semantic_search", "keyword_search",
+                                          "title_search", "file_read", "retrieve_parallel")):
             failures.append(f"expected citations but got 0 (tools={tool_calls})")
     if expected_tools:
         for t in expected_tools:
@@ -154,7 +154,7 @@ async def main():
     r = await run_scenario(
         db, "named_doc",
         "What does the Warranty & Service document say?",
-        expected_tools=None,  # kb_search_documents or search_exact
+        expected_tools=None,  # title_search or keyword_search
         expect_citations=True,
     )
     results.append(r)

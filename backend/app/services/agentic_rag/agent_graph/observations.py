@@ -243,7 +243,7 @@ def _non_retrieval_observations_text(observations: list[Observation]) -> str:
         result = obs.result if isinstance(obs.result, dict) else {}
         # Skip retrieval tools whose docs are already in retrieved_docs.
         # Check both the top-level result and the nested "result" key
-        # (kb_search_documents returns {"ok":..., "result":{"docs":[...]}}).
+        # (title_search returns {"ok":..., "result":{"docs":[...]}}).
         nested = result.get("result", {}) if isinstance(result.get("result"), dict) else {}
         if "docs" in result or "docs" in nested or "hits" in result or obs.tool in _retrieval_tools:
             continue
@@ -260,7 +260,7 @@ def _observations_metadata_text(observations: list[Observation]) -> str:
     """Format observations for think_node: metadata-only for search/retrieval
     tools, full result for non-retrieval tools.
 
-    Search tools (search_exact, search_sparse, search_dense, rerank_results,
+    Search tools (keyword_search, semantic_search, rerank_results,
     graph_expand): the reranker already determined relevance.
     think_node only needs to know *what was found* (hit_count, best_score)
     to decide whether to call another tool or finalize — not the chunk content.
@@ -314,7 +314,7 @@ def _observations_metadata_text(observations: list[Observation]) -> str:
             summary = json.dumps(result, default=str)
             parts.append(f"  result: {summary}")
             continue
-        # kb_search_documents — metadata only, no chunk content.
+        # title_search — metadata only, no chunk content.
         doc_count = len(result.get("docs", []))
         confidence = result.get("confidence", "N/A")
         sufficient = result.get("sufficient")
@@ -335,7 +335,7 @@ def _tried_search_queries(observations: list[Observation]) -> list[str]:
     tool_node reuses the prior observation instead of re-running it).
     """
     seen: list[str] = []
-    _search_tools = {"search_exact", "search_sparse", "search_dense", "rerank_results"}
+    _search_tools = {"keyword_search", "semantic_search", "rerank_results"}
     for raw_obs in observations:
         obs = _coerce_observation(raw_obs)
         if obs.tool in _search_tools:

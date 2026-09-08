@@ -122,7 +122,7 @@ def applicable_tools(ctx: "ToolContext") -> list:
       and office_edit internally. The main agent never sees those 4 tools.
     - retrieve_parallel always available — the LLM decides when to use it
       (only for complex multi-part queries with independent sub-questions).
-      Simple queries use search_dense/search_exact directly.
+      Simple queries use semantic_search/keyword_search directly.
     """
     tools = build_tools(ctx)
     state = ctx.state

@@ -105,8 +105,8 @@ class Subtask(BaseModel):
     tool_hint: str = Field(default="any", description="Preferred tool name or 'any'.")
     depends_on: List[str] = Field(default_factory=list, description="Subtask ids that must complete first.")
     expected_output: str = Field(default="", description="What the agent expects to observe.")
-    # Per-subtask retrieval parameters. When the subtask uses an atomic
-    # search tool or kb_search_documents, these let the planner express a
+    # Per-subtask retrieval parameters. When the subtask uses a
+    # search tool or title_search, these let the planner express a
     # specific strategy per sub-query.
     suggested_filters: Optional[dict] = Field(
         default=None,
@@ -125,12 +125,12 @@ class Subtask(BaseModel):
     )
     suggested_top_n: Optional[int] = Field(
         default=None,
-        description="For kb_search_documents: max documents to return. Use 3 for "
+        description="For title_search: max documents to return. Use 3 for "
         "'latest' queries, 20-50+ for aggregate queries. If null, defaults to 3.",
     )
     suggested_metadata_only: Optional[bool] = Field(
         default=None,
-        description="For kb_search_documents: return only metadata (title, date, type) "
+        description="For title_search: return only metadata (title, date, type) "
         "without markdown. Use for discovery subtasks in aggregate queries.",
     )
 
