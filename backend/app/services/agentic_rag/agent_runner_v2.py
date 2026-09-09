@@ -75,14 +75,22 @@ def _handle_node_update(node: str, update: dict, state: _V2LoopState) -> Optiona
         state.citations = update.get("cited_docs", [])
         if isinstance(update.get("answer_usage"), dict):
             state.provider_usage = update["answer_usage"]
+        # Scoring is done inside post_process; extract confidence/followups
+        # for the done event and last_answer event.
+        if "final_confidence" in update:
+            state.usage["final_confidence"] = update.get("final_confidence")
+            state.usage["confidence_level"] = update.get("confidence_level")
+            state.usage["faithfulness"] = update.get("faithfulness")
+            state.usage["completeness"] = update.get("completeness")
+            state.usage["retrieval_score"] = update.get("retrieval_score")
         lao = update.get("last_answer_object")
         if lao is not None:
             lao_dict = lao.model_dump() if hasattr(lao, "model_dump") else lao
             return {"event": "last_answer", "last_answer_object": lao_dict}
         return {"event": "progress", "phase": "finalize", "message": "Finalising answer"}
     # answer_evaluation runs inside post_process in v2, but its updates
-    # are merged into the post_process node update. Handle scoring fields
-    # if they appear at the root level.
+    # are merged into the post_process node update. Keep as a fallback for
+    # any other node that emits scoring fields.
     if "final_confidence" in update:
         state.usage["final_confidence"] = update.get("final_confidence")
         state.usage["confidence_level"] = update.get("confidence_level")

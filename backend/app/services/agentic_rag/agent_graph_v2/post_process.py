@@ -263,6 +263,10 @@ async def post_process_node_v2(state, ctx) -> dict:
         except Exception as exc:
             logger.warning("[post_process_v2] answer scoring failed: %s", exc)
 
+        # Ensure the persisted LAO includes any followups/fields added by
+        # answer scoring so they survive a page refresh.
+        lao = updates.get("last_answer_object", lao)
+
         # ── Save to DB ──────────────────────────────────────────────────
         if message_id:
             try:
