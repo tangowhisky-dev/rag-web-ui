@@ -237,6 +237,11 @@ async def post_process_node_v2(state, ctx) -> dict:
             id=f"assistant-{message_id}" if message_id else None,
         )
 
+        # Make the final answer and cited evidence available to
+        # answer_evaluation so it can score rather than bailing out.
+        state["answer"] = final
+        state["cited_docs"] = cited_docs
+
         updates: dict = {
             "final_answer": final,
             "answer": final,
