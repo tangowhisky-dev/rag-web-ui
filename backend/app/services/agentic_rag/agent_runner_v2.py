@@ -6,6 +6,7 @@ Mirrors the interface of agent_runner.run_agent_loop but uses the v2 graph
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -23,6 +24,10 @@ from app.services.agentic_rag.tool_context import ToolContext
 from app.services.infrastructure import is_cancelled
 
 logger = logging.getLogger(__name__)
+
+# Keep a hard reference to background extraction tasks so they aren't
+# garbage collected before they run.
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
 
 
 class _V2LoopState:
@@ -270,8 +275,7 @@ async def run_agent_loop_v2(
                 }
             except Exception:
                 pass
-            import asyncio
-            asyncio.create_task(
+            task = asyncio.create_task(
                 _background_extract_and_persist(
                     message_id=message_id,
                     answer=state.full_answer,
@@ -279,8 +283,11 @@ async def run_agent_loop_v2(
                     eval_kwargs=eval_kwargs,
                 )
             )
+            _BACKGROUND_TASKS.add(task)
+            task.add_done_callback(_BACKGROUND_TASKS.discard)
+            logger.info("[agent_runner_v2] spawned background extraction | message_id=%s", message_id)
         except Exception as exc:
-            logger.debug("[agent_runner_v2] failed to spawn background extraction: %s", exc)
+            logger.warning("[agent_runner_v2] failed to spawn background extraction: %s", exc)
 
 
 async def resume_agent_loop_v2(
@@ -363,8 +370,7 @@ async def resume_agent_loop_v2(
                 }
             except Exception:
                 pass
-            import asyncio
-            asyncio.create_task(
+            task = asyncio.create_task(
                 _background_extract_and_persist(
                     message_id=message_id,
                     answer=state.full_answer,
@@ -372,5 +378,8 @@ async def resume_agent_loop_v2(
                     eval_kwargs=eval_kwargs,
                 )
             )
+            _BACKGROUND_TASKS.add(task)
+            task.add_done_callback(_BACKGROUND_TASKS.discard)
+            logger.info("[agent_runner_v2] spawned background extraction | message_id=%s", message_id)
         except Exception as exc:
-            logger.debug("[agent_runner_v2] failed to spawn background extraction: %s", exc)
+            logger.warning("[agent_runner_v2] failed to spawn background extraction: %s", exc)
