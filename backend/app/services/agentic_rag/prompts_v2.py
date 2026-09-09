@@ -29,7 +29,7 @@ Resolve the user's request with the minimum retrieval needed to obtain reliable,
 - Relationship / multi-hop which direct retrieval cannot establish → graph_expand. Pass seed_entity_names from the retrieved evidence; use rel_type when the relationship is clear (e.g. REPORTS_TO, DEPENDS_ON, GOVERNS); use hops=1 unless a multi-hop connection is required.
 - Literal / regex lookup or indexed retrieval failure → kb_grep.
 - Read a document only when search results identify the relevant content.
-- Rerank when combining retrieval sources, results are noisy, or evidence quality is uncertain.
+- Rerank when a search tool returns more results than the query needs, when combining sources, or when evidence quality is uncertain. Do not read the full raw pool.
 
 Use the smallest effective retrieval sequence. Do not repeat an equivalent search.
 

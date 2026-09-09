@@ -28,6 +28,7 @@ class RerankResultsTool(BaseAgentTool):
     prompt_snippet: str = "Score, merge, and deduplicate retrieval candidates"
     prompt_guidelines: list[str] = [
         "rerank_results: Use after combining results from multiple retrieval paths or when the candidate set is large or noisy. Not needed after a single small, high-confidence result set.",
+        "rerank_results: If a search just returned more results than the query needs, call this next. Set top_n to the number of sources required (e.g., 3-5 for a focused fact, 10-15 for a broad overview). It reads hits from state; do not pass them as arguments.",
         "rerank_results: Return the highest-ranked non-duplicate results that fit the available evidence/context budget. Preserve additional candidates only when needed for diversity or unresolved sub-questions.",
     ]
     args_schema: type = RerankResultsInput

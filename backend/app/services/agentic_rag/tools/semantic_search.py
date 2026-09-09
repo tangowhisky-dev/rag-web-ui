@@ -32,6 +32,7 @@ class SemanticSearchTool(BaseAgentTool):
     prompt_snippet: str = "Semantic retrieval (dense vectors)"
     prompt_guidelines: list[str] = [
         "semantic_search: Best for conceptual, natural-language, paraphrased, and meaning-based questions. Use when relevant documents may not share the user's exact wording.",
+        "semantic_search: If this returns more results than the query needs, call rerank_results before file_read or answering. Do not read the full candidate pool.",
     ]
     args_schema: type = SemanticSearchInput
     ui_label: str = "Searching (semantic)"
