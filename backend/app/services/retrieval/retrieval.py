@@ -680,7 +680,7 @@ def dense_search_docs(
     pool = candidates * _LEG_POOL_MULTIPLIER
     return _candidates_to_docs(
         _dense_search(query, kb_ids, datastore_ids, db, pool, org_id, min_score=min_score, doc_ids=doc_ids), "dense"
-    )[:candidates]
+    )
 
 
 def _rrf_fuse(ranked_lists: List[List[LangchainDocument]], k: int = 60) -> List[LangchainDocument]:
@@ -731,7 +731,7 @@ def sparse_search_docs(
     pool = candidates * _LEG_POOL_MULTIPLIER
     main_results = _candidates_to_docs(
         _sparse_search(query, kb_ids, datastore_ids, db, pool, org_id, min_score=min_score, doc_ids=doc_ids), "sparse"
-    )[:candidates]
+    )
     if not extra_queries:
         return main_results
     ranked_lists = [main_results]
@@ -739,10 +739,10 @@ def sparse_search_docs(
         try:
             ranked_lists.append(_candidates_to_docs(
                 _sparse_search(sq, kb_ids, datastore_ids, db, pool, org_id, min_score=min_score, doc_ids=doc_ids), "sparse"
-            )[:candidates])
+            ))
         except Exception as exc:
             logger.warning("[sparse_search] synonym query %r failed: %s", sq, exc)
-    return _rrf_fuse(ranked_lists)[:candidates]
+    return _rrf_fuse(ranked_lists)
 
 
 def exact_search_docs(
@@ -765,7 +765,7 @@ def exact_search_docs(
     pool = candidates * _LEG_POOL_MULTIPLIER
     main_results = _candidates_to_docs(
         _exact_search(query, kb_ids, datastore_ids, db, pool, org_id, min_score=min_score, doc_ids=doc_ids), "exact"
-    )[:candidates]
+    )
     if not extra_queries:
         return main_results
     ranked_lists = [main_results]
@@ -773,7 +773,7 @@ def exact_search_docs(
         try:
             ranked_lists.append(_candidates_to_docs(
                 _exact_search(sq, kb_ids, datastore_ids, db, pool, org_id, min_score=min_score, doc_ids=doc_ids), "exact"
-            )[:candidates])
+            ))
         except Exception as exc:
             logger.warning("[exact_search] synonym query %r failed: %s", sq, exc)
-    return _rrf_fuse(ranked_lists)[:candidates]
+    return _rrf_fuse(ranked_lists)
