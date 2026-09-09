@@ -48,6 +48,7 @@ interface Message {
   clientId: string;
   role: "assistant" | "user" | "system" | "data";
   content: string;
+  parentMessageId?: string;
   citations?: Citation[];
   confidence?: "very_high" | "high" | "medium" | "low" | "none";
   confidenceScore?: number;
@@ -97,6 +98,7 @@ interface ChatMessage {
   content: string;
   role: "assistant" | "user";
   created_at: string;
+  parent_message_id?: number;
   confidence_level?: string;
   confidence_score?: number;
   confidence_breakdown?: string;
@@ -266,6 +268,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
         clientId: msg.id.toString(),
         role: msg.role,
         content: msg.content,
+        parentMessageId: msg.parent_message_id?.toString(),
         file_name: msg.file_name ?? undefined,
         file_id: msg.file_id ?? undefined,
         citations: msg.citations ?? [],
@@ -277,6 +280,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       clientId: msg.id.toString(),
       role: msg.role,
       content: msg.content,
+      parentMessageId: msg.parent_message_id?.toString(),
       citations: msg.citations ?? [],
       confidence: msg.confidence_level as Message["confidence"] | undefined,
       confidenceScore: msg.confidence_score ?? undefined,
@@ -425,8 +429,21 @@ function ChatPageInner({ params }: { params: { id: string } }) {
   // Stable callback for Answer's onDelete — prevents re-rendering every
   // Answer when the parent re-renders during streaming.
   const handleDeleteMessage = useCallback((id: string) => {
-    setMessages((prev) => prev.filter((m) => m.id !== id));
-  }, [setMessages]);
+    setMessages((prev) => {
+      const toDelete = new Set<string>();
+      const collect = (targetId: string) => {
+        if (toDelete.has(targetId)) return;
+        toDelete.add(targetId);
+        for (const m of prev) {
+          if (m.parentMessageId === targetId) {
+            collect(m.id);
+          }
+        }
+      };
+      collect(id);
+      return prev.filter((m) => !toDelete.has(m.id));
+    });
+  }, []);
 
   const flushToBrowser = async () => {
     await new Promise<void>((resolve) => {

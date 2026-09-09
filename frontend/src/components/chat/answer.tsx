@@ -790,14 +790,19 @@ export const Answer: FC<{
   }, [parsedContent.answerText]);
 
   const handleDelete = useCallback(async () => {
-    if (!messageId || !chatId) return;
+    if (!messageId || !chatId || isStreaming) return;
+    if (!/^\d+$/.test(messageId)) {
+      // Client-generated UUID hasn't been persisted yet — just remove from UI.
+      onDelete?.(messageId);
+      return;
+    }
     try {
       await api.delete(`/api/chat/${chatId}/messages/${messageId}`);
       onDelete?.(messageId);
     } catch (e) {
       console.error("Failed to delete message:", e);
     }
-  }, [messageId, chatId, onDelete]);
+  }, [messageId, chatId, onDelete, isStreaming]);
 
   const handleExport = useCallback(async (format: "pdf" | "word" | "image") => {
     if (!messageId || !chatId) return;
