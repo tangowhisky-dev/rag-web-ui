@@ -183,7 +183,7 @@ _ORG_OVERRIDABLE = [
                "float", 0.5, scope="org", reload="next_request", min_value=0.0,
                description="Minimum cosine similarity for dense vector results. Lower accepts more semantic matches; adaptive retrieval relaxes this on retries."),
     SettingDef("SPARSE_MIN_SCORE", "Retrieval", "Sparse min score",
-               "float", 5.0, scope="org", reload="next_request", min_value=0.0,
+               "float", 10.0, scope="org", reload="next_request", min_value=0.0,
                description="SPLADE term weight scale, not MySQL FTS scale."),
     SettingDef("EXACT_MIN_SCORE", "Retrieval", "Exact min score",
                "float", 0.5, scope="org", reload="next_request", min_value=0.0,
@@ -221,7 +221,7 @@ _ORG_OVERRIDABLE = [
 
     # Reranker (model is app-only; threshold is org-overridable)
     SettingDef("RERANKER_SCORE_THRESHOLD", "Reranker", "Reranker score threshold",
-               "float", -2.0, scope="org", reload="next_request",
+               "float", 0.0, scope="org", reload="next_request",
                description="Minimum cross-encoder logit to pass reranking. Lower = more results pass; adaptive retrieval uses progressively lower thresholds on retries."),
     SettingDef("ELBOW_CUT_ENABLED", "Reranker", "Elbow cutoff enabled",
                "bool", False, scope="org", reload="next_request",
