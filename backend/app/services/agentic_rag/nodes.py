@@ -165,6 +165,8 @@ async def answer_evaluation_node(
 
         answer = state.get("answer", "")
         query = state.get("original_query", "")
+        _db = ctx.db if ctx is not None else None
+        _org_id = ctx.org_id if ctx is not None else None
         # Use cited_docs from state (set by finalize_node for both evidence
         # and legacy citation paths). Fall back to cited_doc_indices for
         # backward compatibility, then to all docs.
@@ -177,7 +179,8 @@ async def answer_evaluation_node(
             if cited_indices:
                 docs = [all_docs[i - 1] for i in cited_indices if 0 < i <= len(all_docs)]
             else:
-                docs = all_docs
+                top_k = get_setting(_db, "RETRIEVAL_TOP_K", _org_id) if _db else 20
+                docs = all_docs[:min(len(all_docs), top_k)]
 
         retrieval_conf = state.get("best_retrieval_confidence", 0.0)
 

@@ -260,6 +260,27 @@ async def think_node_v2(state, ctx) -> dict:
         tool_calls = parsed.tool_calls
         final_answer_text = parsed.final_answer
 
+        # Guard: if the LLM just received a large search result pool and did not
+        # choose to rerank, force a rerank step before it finalizes or reads.
+        if not any(tc.get("tool") == "rerank_results" for tc in tool_calls):
+            try:
+                rerank_threshold = get_setting(ctx.db, "RETRIEVAL_TOP_K", ctx.org_id)
+            except Exception:
+                rerank_threshold = 20
+            obs = state.get("observations", [{}])[-1] if state.get("observations") else None
+            if obs is not None:
+                if hasattr(obs, "tool"):
+                    last_tool = obs.tool
+                    last_result = obs.result or {}
+                else:
+                    last_tool = obs.get("tool")
+                    last_result = obs.get("result", {})
+                last_count = last_result.get("count", 0) if isinstance(last_result, dict) else 0
+                if last_tool in {"semantic_search", "keyword_search", "exact_search", "retrieve_parallel"} and last_count > rerank_threshold:
+                    logger.info("[think_v2] forcing rerank_results after %s returned %d hits", last_tool, last_count)
+                    tool_calls = [{"tool": "rerank_results", "arguments": {"query": state.get("original_query", ""), "top_n": rerank_threshold}}]
+                    final_answer_text = None
+
         # If tool budget exhausted, force answer even if LLM emitted tool calls.
         budget_exhausted = tool_calls_used >= tool_budget
         if budget_exhausted:
