@@ -28,6 +28,7 @@ import logging
 from app.services.agentic_rag.nodes import _agent_step
 from app.services.agentic_rag.schemas import Observation
 from app.services.agentic_rag.tools import applicable_tools
+from app.services.infrastructure import is_cancelled
 from app.services.settings_service import get_setting
 
 from ..agent_graph.helpers import (
@@ -122,6 +123,8 @@ async def _dispatch_v2(
         sig = _call_signature(name, args)
 
         # Idempotency: reuse prior observation for exact duplicate calls.
+        # The call still counts against the tool-call budget — the model
+        # made a tool call, we just served it from cache.
         prior = prior_signatures.get(sig)
         if prior is not None:
             logger.debug("[tool_node_v2] duplicate call skipped, reusing prior observation: tool=%s args=%s", name, args)
@@ -140,7 +143,8 @@ async def _dispatch_v2(
                 coros.append(_dup_repeat_exceeded())
             else:
                 coros.append(_reuse_prior(prior))
-            executed_flags.append(False)
+            total_calls += 1
+            executed_flags.append(True)
             continue
 
         # Total tool-call budget guard.
@@ -204,6 +208,7 @@ async def _dispatch_v2(
             "tool": obs.tool,
             "label": _tool_label(obs.tool, tool_calls),
             "summary": _summarize_result(obs),
+            "details": obs.result.get("ui_details") if isinstance(obs.result, dict) else None,
             "error": obs.error,
         })
         if executed_flags[i]:
@@ -262,6 +267,12 @@ async def tool_node_v2(state, ctx) -> dict:
         if not tool_calls:
             return {}
 
+        # Cancellation check before dispatching tools.
+        chat_id = ctx.chat_id if ctx is not None else None
+        if chat_id is not None and is_cancelled(chat_id):
+            logger.debug("[tool_v2] cancelled before dispatch | chat_id=%s", chat_id)
+            return {"tool_calls": [], "force_finalize": True}
+
         ctx.state = state
         tools = {t.name: t for t in applicable_tools(ctx)}
         prior_observations = [_coerce_observation(o) for o in state.get("observations", [])]
@@ -293,20 +304,6 @@ async def tool_node_v2(state, ctx) -> dict:
         if merged_docs:
             state_update["retrieved_docs"] = merged_docs
             state_update["best_retrieval_confidence"] = best_confidence
-
-        # If rerank_results was called this turn, its returned order is the
-        # authoritative result set. _merge_retrieved_docs deduplicates by
-        # content_hash, which otherwise discards the reranked copy and keeps
-        # the original search order.
-        rerank_observations = [
-            o for o in new_observations
-            if o.tool == "rerank_results" and not o.error
-        ]
-        if rerank_observations:
-            hits = rerank_observations[-1].result.get("hits", [])
-            if hits:
-                state_update["retrieved_docs"] = [_hit_to_doc_dict(h) for h in hits]
-                # best_confidence already reflects the reranker scores above.
 
         # Propagate accumulated_data and generated_files from tool state.
         if "accumulated_data" in ctx.state:

@@ -39,6 +39,20 @@ interface AgentStep {
   [key: string]: unknown;
 }
 
+interface SubagentProgressEvent {
+  subagent_id: string;
+  sub_query: string;
+  status: "started" | "tool_call" | "tool_done" | "done";
+  tool?: string;
+  label?: string;
+  hit_count?: number;
+  error?: string | null;
+  evidence_count?: number;
+  summary?: string;
+  subagent_type?: "retrieval" | "office";
+  iteration?: number;
+}
+
 interface Message {
   id: string;
   // Stable identity for React keys — unlike `id`, this never changes even
@@ -76,6 +90,8 @@ interface Message {
   plan?: Record<string, unknown>;
   toolCalls?: Array<Record<string, unknown>>;
   toolObservations?: Array<Record<string, unknown>>;
+  subagentProgress?: SubagentProgressEvent[];
+  thinkingContent?: { content: string; done: boolean; elapsed?: number };
   lastAnswerObject?: Record<string, unknown>;
   chartOptions?: Array<Record<string, unknown>>;
   officeFiles?: OfficeFileRef[];
@@ -632,6 +648,12 @@ function ChatPageInner({ params }: { params: { id: string } }) {
           elapsed?: number;
         };
         setThinkingContent(payload);
+        if (payload.done && payload.content) {
+          appendAssistantChunk(assistantId, (message) => ({
+            ...message,
+            thinkingContent: payload,
+          }));
+        }
       } catch (e) {
         console.error("Failed to parse thinking event:", e);
       }
@@ -700,6 +722,20 @@ function ChatPageInner({ params }: { params: { id: string } }) {
         ]);
       } catch (e) {
         console.error("Failed to parse tool_retry event:", e);
+      }
+      return;
+    }
+
+    // sp: subagent_progress — per-subagent live progress events
+    if (trimmedLine.startsWith("sp:")) {
+      try {
+        const payload = JSON.parse(trimmedLine.slice(3)) as SubagentProgressEvent;
+        appendAssistantChunk(assistantId, (message) => ({
+          ...message,
+          subagentProgress: [...(message.subagentProgress ?? []), payload],
+        }));
+      } catch (e) {
+        console.error("Failed to parse subagent_progress event:", e);
       }
       return;
     }
@@ -1098,6 +1134,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
             agentSteps: undefined,
             toolCalls: undefined,
             toolObservations: undefined,
+            subagentProgress: undefined,
             toolTrace: undefined,
             plan: undefined,
             synthesisMode: undefined,
@@ -1320,7 +1357,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                           agentSteps={message.id === lastAssistantId ? message.agentSteps : undefined}
                           taskList={message.id === lastAssistantId ? taskList : undefined}
                           progressMessages={message.id === lastAssistantId && isLoading ? progressMessages : undefined}
-                          thinkingContent={message.id === lastAssistantId && isLoading ? thinkingContent : undefined}
+                          thinkingContent={message.id === lastAssistantId && isLoading ? thinkingContent : message.thinkingContent}
                           synthesisMode={message.synthesisMode}
                           isStreaming={isLoading && message.id === lastAssistantId}
                           onDelete={handleDeleteMessage}
@@ -1332,6 +1369,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                           plan={message.plan}
                           toolCalls={message.toolCalls}
                           toolObservations={message.toolObservations}
+                          subagentProgress={message.subagentProgress}
                           lastAnswerObject={message.lastAnswerObject}
                           chartOptions={message.chartOptions}
                           officeFiles={message.officeFiles}

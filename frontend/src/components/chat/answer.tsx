@@ -11,7 +11,7 @@ import React, {
 } from "react";
 import { AnchorHTMLAttributes } from "react";
 import { Copy, Trash2, FileText, FileImage, FileType } from "lucide-react";
-import { AgenticProgress, AgentStepEvent } from "./agentic-progress";
+import { AgenticProgress, AgentStepEvent, type SubagentProgressEvent } from "./agentic-progress";
 import { AgentLoopPanel } from "./agent-loop-panel";
 import { GeneratedFileChip } from "./generated-file-chip";
 import { SelectionActions } from "./selection-actions";
@@ -671,6 +671,7 @@ export const Answer: FC<{
   plan?: Record<string, unknown>;
   toolCalls?: Array<Record<string, unknown>>;
   toolObservations?: Array<Record<string, unknown>>;
+  subagentProgress?: SubagentProgressEvent[];
   lastAnswerObject?: {
     followups?: string[];
     [key: string]: unknown;
@@ -691,7 +692,7 @@ export const Answer: FC<{
     done: boolean;
     elapsed?: number;
   } | null;
-}> = React.memo(({ messageId, chatId, markdown, citations = [], confidence, confidenceScore, suggestion, failedLegs, agentSteps, taskList, progressMessages, isStreaming = false, onDelete, finalConfidence, finalConfidenceLevel, faithfulness, completeness, retrievalScore, toolCalls, toolObservations, chartOptions, officeFiles, lastAnswerObject, onFollowUp, thinkingContent }) => {
+}> = React.memo(({ messageId, chatId, markdown, citations = [], confidence, confidenceScore, suggestion, failedLegs, agentSteps, taskList, progressMessages, isStreaming = false, onDelete, finalConfidence, finalConfidenceLevel, faithfulness, completeness, retrievalScore, toolCalls, toolObservations, subagentProgress, chartOptions, officeFiles, lastAnswerObject, onFollowUp, thinkingContent }) => {
   const [citationInfoMap, setCitationInfoMap] = useState<
     Record<string, CitationInfo>
   >({});
@@ -900,7 +901,7 @@ export const Answer: FC<{
           Single source of truth for status text; raw per-leg progress
           events (dense/sparse/exact/neo4j) are folded into "Gathering
           sources …" here instead of also being shown verbatim. */}
-      <AgenticProgress agentSteps={filteredAgentSteps} isStreaming={isStreaming} toolCalls={toolCalls} toolObservations={toolObservations} progressMessages={progressMessages} />
+      <AgenticProgress agentSteps={filteredAgentSteps} isStreaming={isStreaming} toolCalls={toolCalls} toolObservations={toolObservations} progressMessages={progressMessages} subagentProgress={subagentProgress} />
 
       {/* Confidence warning (no confidence) */}
       {confidence === "none" && suggestion && (

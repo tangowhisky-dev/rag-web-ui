@@ -83,21 +83,25 @@ class CreateOfficeDocumentTool(BaseTool):
                 "terminate": False,
             }
 
-        tool_budget = 25
+        tool_budget = 20
         try:
             from app.services.settings_service import get_setting
-            tool_budget = get_setting(ctx.db, "AGENT_TOTAL_TOOL_BUDGET", ctx.org_id) or 25
+            tool_budget = get_setting(ctx.db, "OFFICE_SUBAGENT_TOOL_BUDGET", ctx.org_id) or 20
         except Exception:
             pass
 
         # Lazy import to avoid circular dependency
         from app.services.agentic_rag.office_subagent import run_office_subagent
 
+        import uuid
+        subagent_id = str(uuid.uuid4())[:8]
+
         try:
             result = await run_office_subagent(
                 ctx=ctx,
                 request=request,
                 tool_budget=tool_budget,
+                subagent_id=subagent_id,
             )
         except Exception as exc:
             logger.exception("[create_office_document] sub-agent failed: %s", exc)

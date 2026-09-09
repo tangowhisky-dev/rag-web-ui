@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 import time
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, AIMessageChunk
 
 from app.services.agentic_rag.kb_profile import format_profile_summary
 from app.services.agentic_rag.llm_factory import build_chat_llm
@@ -222,17 +222,46 @@ async def think_node_v2(state, ctx) -> dict:
         try:
             tool_temp = get_setting(ctx.db, "TOOL_CALL_TEMPERATURE", ctx.org_id)
             if mode == "json_text":
-                llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=tool_temp)
-                resp = await llm.ainvoke([
+                llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=tool_temp, streaming=True)
+                stream = llm.astream([
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ])
             else:
-                llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=tool_temp)
-                resp = await llm.bind_tools(tools).ainvoke([
+                llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=tool_temp, streaming=True)
+                stream = llm.bind_tools(tools).astream([
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ])
+
+            # Stream content tokens to the frontend as they arrive.
+            # Tool-call chunks (native mode) carry no content, so no tokens
+            # are emitted for tool-call iterations — only for the final
+            # answer iteration.
+            accumulated: AIMessageChunk | None = None
+            reasoning_accumulated = ""
+            async for chunk in stream:
+                if chat_id is not None and is_cancelled(chat_id):
+                    logger.debug("[think_v2] cancelled during LLM stream | chat_id=%s", chat_id)
+                    break
+                if not isinstance(chunk, AIMessageChunk):
+                    continue
+                content = chunk.content if isinstance(chunk.content, str) else ""
+                if content:
+                    writer({"event": "token", "content": content})
+                # Stream reasoning content live for thinking models that expose
+                # it via additional_kwargs.reasoning_content (DeepSeek, Qwen, etc.)
+                chunk_reasoning = ""
+                if chunk.additional_kwargs:
+                    chunk_reasoning = chunk.additional_kwargs.get("reasoning_content", "") or ""
+                if chunk_reasoning:
+                    reasoning_accumulated += chunk_reasoning
+                    writer({"event": "thinking", "content": reasoning_accumulated, "done": False})
+                accumulated = chunk if accumulated is None else accumulated + chunk
+
+            # Reconstruct an AIMessage-like object for the parser.
+            # AIMessageChunk supports .content and .tool_calls just like AIMessage.
+            resp = accumulated if accumulated is not None else AIMessage(content="")
         except Exception as exc:
             logger.warning("[think_v2] LLM call failed: %s", exc)
             return {"iteration": iteration, "tool_calls": [], "force_finalize": True}
@@ -240,10 +269,14 @@ async def think_node_v2(state, ctx) -> dict:
         # Emit "thought for N seconds" with reasoning content (if any).
         think_elapsed = time.monotonic() - think_start
         parsed = parse_think_response(resp, mode=mode)
-        if parsed.reasoning:
+        # Use parsed.reasoning if available, otherwise fall back to what we
+        # accumulated from streaming chunks (some providers don't surface
+        # reasoning_content on the final accumulated message).
+        final_reasoning = parsed.reasoning or (reasoning_accumulated if reasoning_accumulated else None)
+        if final_reasoning:
             writer({
                 "event": "thinking",
-                "content": parsed.reasoning,
+                "content": final_reasoning,
                 "done": True,
                 "elapsed": round(think_elapsed, 1),
             })
@@ -260,33 +293,18 @@ async def think_node_v2(state, ctx) -> dict:
         tool_calls = parsed.tool_calls
         final_answer_text = parsed.final_answer
 
-        # Guard: if the LLM just received a large search result pool and did not
-        # choose to rerank, force a rerank step before it finalizes or reads.
-        if not any(tc.get("tool") == "rerank_results" for tc in tool_calls):
-            try:
-                rerank_threshold = get_setting(ctx.db, "RETRIEVAL_TOP_K", ctx.org_id)
-            except Exception:
-                rerank_threshold = 20
-            obs = state.get("observations", [{}])[-1] if state.get("observations") else None
-            if obs is not None:
-                if hasattr(obs, "tool"):
-                    last_tool = obs.tool
-                    last_result = obs.result or {}
-                else:
-                    last_tool = obs.get("tool")
-                    last_result = obs.get("result", {})
-                last_count = last_result.get("count", 0) if isinstance(last_result, dict) else 0
-                if last_tool in {"semantic_search", "keyword_search", "exact_search", "retrieve_parallel"} and last_count > rerank_threshold:
-                    logger.info("[think_v2] forcing rerank_results after %s returned %d hits", last_tool, last_count)
-                    tool_calls = [{"tool": "rerank_results", "arguments": {"query": state.get("original_query", ""), "top_n": rerank_threshold}}]
-                    final_answer_text = None
-
         # If tool budget exhausted, force answer even if LLM emitted tool calls.
         budget_exhausted = tool_calls_used >= tool_budget
         if budget_exhausted:
             tool_calls = []
 
         if tool_calls:
+            # Clear any content tokens that were streamed before we detected
+            # tool calls (happens in json_text mode where the LLM writes the
+            # JSON tool-call as content). In native mode, tool-call chunks
+            # carry no content, so nothing was streamed.
+            if resp.content:
+                writer({"event": "answer_rewrite", "content": "", "citations": []})
             return {**compaction_updates, "iteration": iteration, "tool_calls": tool_calls}
 
         # No tool calls → the LLM wrote the answer (or signaled final_answer).
@@ -296,11 +314,17 @@ async def think_node_v2(state, ctx) -> dict:
         answer_text = ""
         if isinstance(final_answer_text, str) and final_answer_text.strip():
             answer_text = final_answer_text
+        elif resp.content:
+            # LLM emitted {"final_answer": true} or similar JSON signal as
+            # content. Clear the streamed tokens so the fallback generator
+            # in post_process starts from a clean slate.
+            writer({"event": "answer_rewrite", "content": "", "citations": []})
         return {
             **compaction_updates,
             "iteration": iteration,
             "tool_calls": [],
             "precomputed_answer": answer_text,
+            "reasoning_content": final_reasoning or "",
         }
 
 

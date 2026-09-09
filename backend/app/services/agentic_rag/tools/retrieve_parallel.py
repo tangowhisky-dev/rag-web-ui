@@ -36,14 +36,15 @@ class RetrieveParallelTool(BaseTool):
     """Tool that spawns parallel retrieval sub-agents."""
 
     name: str = "retrieve_parallel"
+    ui_label: str = "Subagent synthesis"
     description: str = (
         "Retrieve evidence for MULTIPLE independent sub-queries in parallel. "
         "Returns merged evidence chunks with citation metadata. Pass 2-4 sub-queries as a list."
     )
     prompt_snippet: str = "Run independent retrieval tasks concurrently"
     prompt_guidelines: list[str] = [
-        "retrieve_parallel: Use only when the query contains 2-4 genuinely independent information needs. Each sub-query must be self-contained.",
-        "retrieve_parallel: Do not parallelize sequential or dependent retrieval. For simple single-topic queries, use semantic_search/keyword_search directly — no sub-agent overhead.",
+        "retrieve_parallel: Use for multi-part queries with 2-4 distinct entities or sub-topics (e.g. 'compare X and Y', 'vulnerabilities of A and B'). Each sub-query targets one part.",
+        "retrieve_parallel: Do not use for single-topic queries or sequential/dependent retrieval. For simple single-topic queries, use semantic_search/keyword_search directly.",
     ]
     args_schema: type = RetrieveParallelInput
     ctx: Any = None
@@ -96,10 +97,10 @@ class RetrieveParallelTool(BaseTool):
         writer({"event": "retrieve_parallel", "status": "started",
                 "queries": queries})
 
-        tool_budget = 25
+        tool_budget = 10
         try:
             from app.services.settings_service import get_setting
-            tool_budget = get_setting(ctx.db, "AGENT_TOTAL_TOOL_BUDGET", ctx.org_id) or 25
+            tool_budget = get_setting(ctx.db, "RETRIEVAL_SUBAGENT_TOOL_BUDGET", ctx.org_id) or 10
         except Exception:
             pass
 
@@ -153,9 +154,6 @@ class RetrieveParallelTool(BaseTool):
                 seen_hashes.add(dedup_key)
                 all_evidence.append(chunk)
 
-        # Cap total evidence to keep main agent context manageable
-        all_evidence = all_evidence[:25]
-
         writer({"event": "retrieve_parallel", "status": "done",
                 "evidence_count": len(all_evidence),
                 "sub_queries": len(queries)})
@@ -166,9 +164,15 @@ class RetrieveParallelTool(BaseTool):
                 "hits": all_evidence,
                 "count": len(all_evidence),
                 "sub_query_summaries": summaries,
+                "queries": queries,
                 "gaps": all_gaps,
                 "conflicts": all_conflicts,
                 "failure_modes": all_failure_modes,
+                "ui_details": {
+                    "sub_queries": queries,
+                    "sub_query_summaries": summaries,
+                    "count": len(all_evidence),
+                },
             },
             "error": None,
             "tokens": sum(len(e.get("content", "")) for e in all_evidence) // 4,

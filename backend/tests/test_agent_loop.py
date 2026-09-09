@@ -43,7 +43,6 @@ class TestToolRegistry:
         expected = {
             "keyword_search",
             "semantic_search",
-            "rerank_results",
             "graph_expand",
             "title_search",
             "current_datetime",

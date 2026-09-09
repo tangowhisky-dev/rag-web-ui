@@ -19,12 +19,50 @@ Ingestion roles (not part of the agent loop):
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from langchain_openai import ChatOpenAI
 from sqlalchemy.orm import Session
 
 from app.services.settings_service import get_setting
+
+logger = logging.getLogger(__name__)
+
+
+# ── Monkey-patch: preserve reasoning_content from thinking models ─────────
+# langchain-openai 1.6.0 drops `reasoning_content` from both streaming deltas
+# and non-streaming messages. We patch the two converter functions to extract
+# it into `additional_kwargs` so downstream code can access it.
+import langchain_openai.chat_models.base as _lc_base
+from typing import Any, Mapping, cast
+from langchain_core.messages import (
+    AIMessage, AIMessageChunk, BaseMessage, BaseMessageChunk,
+    FunctionMessage, FunctionMessageChunk, HumanMessage, HumanMessageChunk,
+    SystemMessage, SystemMessageChunk, ToolMessage, ToolMessageChunk,
+)
+
+_orig_convert_delta = _lc_base._convert_delta_to_message_chunk
+
+def _patched_convert_delta(_dict: Mapping[str, Any], default_class: type[BaseMessageChunk]) -> BaseMessageChunk:
+    chunk = _orig_convert_delta(_dict, default_class)
+    rc = _dict.get("reasoning_content")
+    if rc and isinstance(chunk, AIMessageChunk):
+        chunk.additional_kwargs["reasoning_content"] = rc
+    return chunk
+
+_orig_convert_dict = _lc_base._convert_dict_to_message
+
+def _patched_convert_dict(_dict: Mapping[str, Any]) -> BaseMessage:
+    msg = _orig_convert_dict(_dict)
+    rc = _dict.get("reasoning_content")
+    if rc and isinstance(msg, AIMessage):
+        msg.additional_kwargs["reasoning_content"] = rc
+    return msg
+
+_lc_base._convert_delta_to_message_chunk = _patched_convert_delta
+_lc_base._convert_dict_to_message = _patched_convert_dict
+logger.debug("[llm_factory] patched langchain-openai to preserve reasoning_content")
 
 
 # Role → (role-specific key setting, role-specific base URL setting)

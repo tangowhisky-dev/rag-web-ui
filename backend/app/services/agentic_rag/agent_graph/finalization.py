@@ -129,9 +129,15 @@ async def _stream_final_answer(
     user: str,
     writer,
     docs: list | None = None,
-) -> tuple[str, Optional[dict]]:
-    """Stream the final answer from the LLM. Returns (final, answer_usage)."""
+) -> tuple[str, Optional[dict], str]:
+    """Stream the final answer from the LLM. Returns (final, answer_usage, reasoning).
+
+    Reasoning content from thinking models (reasoning_content in
+    additional_kwargs) is streamed live as ``thinking`` events and returned
+    so the caller can persist it.
+    """
     answer_usage: Optional[dict] = None
+    reasoning_accumulated = ""
     try:
         gen_temp = get_setting(ctx.db, "GENERATION_TEMPERATURE", ctx.org_id)
         llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=gen_temp, streaming=True)
@@ -160,6 +166,13 @@ async def _stream_final_answer(
             if content:
                 writer({"event": "token", "content": content})
                 final += content
+            # Stream reasoning content live for thinking models.
+            chunk_reasoning = ""
+            if chunk.additional_kwargs:
+                chunk_reasoning = chunk.additional_kwargs.get("reasoning_content", "") or ""
+            if chunk_reasoning:
+                reasoning_accumulated += chunk_reasoning
+                writer({"event": "thinking", "content": reasoning_accumulated, "done": False})
         if not final:
             final = "I'm sorry, I couldn't generate a response at this time."
     except Exception as exc:
@@ -186,7 +199,7 @@ async def _stream_final_answer(
             logger.info("[finalize_node] synthesized fallback answer from %d retrieved docs", len(docs))
     if not final:
         final = "I'm sorry, I couldn't generate a response at this time."
-    return final, answer_usage
+    return final, answer_usage, reasoning_accumulated
 
 
 def _build_last_answer_object_deterministic(
@@ -236,6 +249,7 @@ async def finalize_node(state, ctx) -> dict:
         plan = state.get("plan")
         compaction_updates: dict = {}
         answer_usage: Optional[dict] = None
+        fallback_reasoning = ""
 
         # Collect every valid chart_generate result up front so both the
         # prompt instructions and the post-generation substitution use the
@@ -292,7 +306,7 @@ async def finalize_node(state, ctx) -> dict:
                     observations, ctx, office_files,
                 )
 
-            final, answer_usage = await _stream_final_answer(ctx, system, user, writer, docs)
+            final, answer_usage, fallback_reasoning = await _stream_final_answer(ctx, system, user, writer, docs)
 
         # Keep that copy before substituting, then rewrite citations and
         # stream the display-ready answer immediately, without waiting on
@@ -338,6 +352,7 @@ async def finalize_node(state, ctx) -> dict:
             **compaction_updates,
             "final_answer": final,
             "answer": final,
+            "fallback_reasoning": fallback_reasoning,
             "last_answer_object": lao,
             "retrieved_docs": docs,
             "cited_docs": cited_docs,
@@ -359,6 +374,12 @@ async def save_memory_node(state, ctx) -> dict:
             return {}
 
         msg.content = state.get("final_answer", "")
+        # Prepend reasoning as  tags so the frontend's parseThinkContent
+        # can extract it on page reload (matches v2 post_process pattern).
+        reasoning = state.get("fallback_reasoning", "")
+        if reasoning:
+            close_tag = "/think>"
+            msg.content = "<think" + ">" + reasoning + "<" + close_tag + "\n\n" + msg.content
         plan = state.get("plan")
         if plan:
             msg.plan = plan.model_dump() if isinstance(plan, Plan) else plan

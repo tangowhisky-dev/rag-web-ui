@@ -439,7 +439,7 @@ class TestToolRegistry:
         names = {t.name for t in tools}
         assert "keyword_search" in names
         assert "semantic_search" in names
-        assert "rerank_results" in names
+        assert "rerank_results" not in names
         assert "graph_expand" in names
         assert "rag_retrieve" not in names
 
@@ -452,11 +452,11 @@ class TestToolRegistry:
         assert "rerank_results" not in names
         assert "graph_expand" not in names
 
-    def test_applicable_tools_includes_rerank_after_search(self):
+    def test_applicable_tools_includes_graph_expand_after_search(self):
         from app.services.agentic_rag.tools import applicable_tools
         ctx = MagicMock()
         ctx.state = {"tool_call_counts": {"semantic_search": 1}}
         tools = applicable_tools(ctx)
         names = {t.name for t in tools}
-        assert "rerank_results" in names
+        assert "rerank_results" not in names
         assert "graph_expand" in names

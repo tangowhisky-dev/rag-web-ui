@@ -11,6 +11,7 @@ from app.services.agentic_rag.tool_context import ToolContext, enforce_rbac, wri
 from app.services.agentic_rag.tools.base import BaseAgentTool
 from app.services.retrieval import get_effective_datastore_ids
 from app.services.retrieval.retrieval import dense_search_docs
+from app.services.retrieval.reranker import rerank, soft_elbow_truncate
 from app.services.settings_service import get_setting
 
 from ._search_helpers import _emit_progress, resolve_filter_to_doc_ids
@@ -33,7 +34,7 @@ class SemanticSearchTool(BaseAgentTool):
     prompt_guidelines: list[str] = [
         "semantic_search: Best for conceptual, natural-language, paraphrased, and meaning-based questions that do not contain specific identifiers, acronyms, or distinctive technical terms.",
         "semantic_search: Use when keyword_search returns weak or irrelevant results, or when the user's wording differs substantially from the document wording.",
-        "semantic_search: If this returns more results than the query needs, call rerank_results before file_read or answering. Do not read the full candidate pool.",
+        "semantic_search: Results are cross-encoder reranked and soft-elbow filtered before returning. No separate rerank call needed.",
     ]
     args_schema: type = SemanticSearchInput
     ui_label: str = "Searching (semantic)"
@@ -84,6 +85,26 @@ class SemanticSearchTool(BaseAgentTool):
         except Exception as exc:
             logger.warning("[semantic_search] failed: %s", exc)
             return {"ok": False, "result": {}, "error": str(exc), "tokens": 0, "terminate": False}
+
+        # dense_search_docs fetches a pool of top_k * 4 candidates.
+        # Rerank with cross-encoder and apply soft-elbow truncation.
+        # Skip rerank only when the pool is very small (<= top_k // 2).
+        if len(docs) > input_obj.top_k // 2:
+            score_threshold = get_setting(ctx.db, "RERANKER_SCORE_THRESHOLD", ctx.org_id)
+            elbow_enabled = get_setting(ctx.db, "ELBOW_CUT_ENABLED", ctx.org_id)
+            try:
+                docs = rerank(
+                    query=input_obj.query,
+                    docs=docs,
+                    score_threshold=score_threshold,
+                    db=ctx.db,
+                    org_id=ctx.org_id,
+                )
+                if elbow_enabled:
+                    docs = soft_elbow_truncate(docs, max_keep=input_obj.top_k)
+            except Exception as exc:
+                logger.warning("[semantic_search] rerank failed, using raw scores: %s", exc)
+                docs = sorted(docs, key=lambda d: d.metadata.get("score", 0.0), reverse=True)[:input_obj.top_k]
 
         hits = []
         for doc in docs:

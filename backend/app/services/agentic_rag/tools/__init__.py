@@ -25,7 +25,6 @@ from .office_inspect import OfficeInspectTool
 from .office_load_skill import OfficeLoadSkillTool
 from .create_office_document import CreateOfficeDocumentTool
 from .retrieve_parallel import RetrieveParallelTool
-from .rerank_results import RerankResultsTool
 from .semantic_search import SemanticSearchTool
 from .summarize import SummarizeTool
 from .title_search import TitleSearchTool
@@ -34,10 +33,9 @@ from .title_search import TitleSearchTool
 _TOOL_CLASSES = [
     # Human-in-the-loop clarification (always available)
     ClarifyTool,
-    # Search tools
+    # Search tools (reranking is built into keyword_search and semantic_search)
     KeywordSearchTool,
     SemanticSearchTool,
-    RerankResultsTool,
     GraphExpandTool,
     # Discovery
     TitleSearchTool,
@@ -114,8 +112,8 @@ def applicable_tools(ctx: "ToolContext") -> list:
     - Chart only if there is data to chart (last_answer_object.data,
       retrieved docs, or a successful code_execute / extract_data
       observation earlier in the same turn).
-    - rerank_results and graph_expand only after at least one search tool
-      has been called (deferred tool gating).
+    - graph_expand only after at least one search tool has been called
+      (deferred tool gating).
     - extract_data only after a read or search tool has been called.
     - create_office_document always available — delegates to a sub-agent
       that handles office_load_skill, office_generate, office_inspect,
@@ -145,7 +143,7 @@ def applicable_tools(ctx: "ToolContext") -> list:
     elif not has_data:
         tools = _filter_tools_by_name(tools, ("chart_generate",))
     if not has_search:
-        tools = _filter_tools_by_name(tools, ("rerank_results", "graph_expand"))
+        tools = _filter_tools_by_name(tools, ("graph_expand",))
 
     # Replace 4 individual office tools with the sub-agent wrapper.
     # The sub-agent uses the individual tools internally via build_tools().

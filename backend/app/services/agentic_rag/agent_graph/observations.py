@@ -235,7 +235,7 @@ def _non_retrieval_observations_text(observations: list[Observation]) -> str:
     _retrieval_tools = frozenset({
         "title_search", "file_read",
         "keyword_search", "semantic_search",
-        "rerank_results", "graph_expand",
+        "graph_expand",
     })
     parts = []
     for i, raw_obs in enumerate(observations, 1):
@@ -260,7 +260,7 @@ def _observations_metadata_text(observations: list[Observation]) -> str:
     """Format observations for think_node: metadata-only for search/retrieval
     tools, full result for non-retrieval tools.
 
-    Search tools (keyword_search, semantic_search, rerank_results,
+    Search tools (keyword_search, semantic_search,
     graph_expand): the reranker already determined relevance.
     think_node only needs to know *what was found* (hit_count, best_score)
     to decide whether to call another tool or finalize — not the chunk content.
@@ -270,7 +270,7 @@ def _observations_metadata_text(observations: list[Observation]) -> str:
     """
     _search_tools = frozenset({
         "keyword_search", "semantic_search",
-        "rerank_results", "graph_expand",
+        "graph_expand",
     })
     parts = []
     for i, raw_obs in enumerate(observations, 1):
@@ -335,7 +335,7 @@ def _tried_search_queries(observations: list[Observation]) -> list[str]:
     tool_node reuses the prior observation instead of re-running it).
     """
     seen: list[str] = []
-    _search_tools = {"keyword_search", "semantic_search", "rerank_results"}
+    _search_tools = {"keyword_search", "semantic_search"}
     for raw_obs in observations:
         obs = _coerce_observation(raw_obs)
         if obs.tool in _search_tools:
@@ -357,7 +357,7 @@ def _compact_observations(observations: list[Observation]) -> list[Observation]:
     """
     _search_tools = frozenset({
         "keyword_search", "semantic_search",
-        "rerank_results", "graph_expand",
+        "graph_expand",
     })
     compacted = []
     for raw_obs in observations:

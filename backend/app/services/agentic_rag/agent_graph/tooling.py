@@ -319,7 +319,7 @@ def _seed_existing_docs(existing_docs, seen_hashes, merged_docs):
 
 
 # Tools that return hits in the new atomic search format: {"hits": [...]}
-_SEARCH_TOOLS = frozenset({"keyword_search", "semantic_search", "rerank_results", "graph_expand", "retrieve_parallel"})
+_SEARCH_TOOLS = frozenset({"keyword_search", "semantic_search", "graph_expand", "retrieve_parallel"})
 
 
 def _hit_to_doc_dict(hit: dict) -> dict:
@@ -356,7 +356,7 @@ def _merge_observation_docs(all_observations, seen_hashes, merged_docs):
                         seen_hashes.add(h)
                         merged_docs.append(doc_dict)
                 # Search hits with reranker scores or dense scores contribute confidence.
-                # _reranker_score (from rerank_results) is a cross-encoder score
+                # _reranker_score (from cross-encoder reranking inside search tools)
                 # that can be negative; normalize via sigmoid to 0-1.
                 # score from semantic_search is cosine similarity (0-1).
                 # score from keyword_search (exact leg) is MySQL FTS score (0-10+); clamp to 0-1.

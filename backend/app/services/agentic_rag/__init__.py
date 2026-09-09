@@ -34,7 +34,7 @@ LangGraph components:
   evaluator.py     - Answer evaluation helpers
   llm_factory.py   - LLM client construction
   tools/           - Tool implementations (keyword_search, semantic_search,
-                     rerank_results, graph_expand, file_read, kb_grep,
+                     graph_expand, file_read, kb_grep,
                      kb_outline, title_search, kb_metadata, code_execute,
                      chart_generate, extract_data, summarize, current_datetime,
                      file_extract_table)

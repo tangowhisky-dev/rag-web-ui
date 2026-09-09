@@ -10,6 +10,12 @@ import {
   type ToolState,
 } from "@/components/ai-elements/tool";
 import {
+  Task,
+  TaskTrigger,
+  TaskContent,
+  TaskItem,
+} from "@/components/ai-elements/task";
+import {
   SearchIcon,
   BrainIcon,
   FileTextIcon,
@@ -23,6 +29,10 @@ import {
   ScanSearchIcon,
   ZoomInIcon,
   DatabaseIcon,
+  Loader2Icon,
+  FileCheckIcon,
+  XCircleIcon,
+  ChevronDownIcon,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
@@ -101,12 +111,27 @@ export interface ProgressMessage {
   original_query?: string;
 }
 
+export interface SubagentProgressEvent {
+  subagent_id: string;
+  sub_query: string;
+  status: "started" | "tool_call" | "tool_done" | "done";
+  tool?: string;
+  label?: string;
+  hit_count?: number;
+  error?: string | boolean | null;
+  evidence_count?: number;
+  summary?: string;
+  subagent_type?: "retrieval" | "office";
+  iteration?: number;
+}
+
 export interface AgenticProgressProps {
   agentSteps?: AgentStepEvent[];
   isStreaming: boolean;
   toolCalls?: Array<Record<string, unknown>>;
   toolObservations?: Array<Record<string, unknown>>;
   progressMessages?: ProgressMessage[];
+  subagentProgress?: SubagentProgressEvent[];
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -149,6 +174,7 @@ export const AgenticProgress = ({
   isStreaming,
   toolCalls,
   toolObservations,
+  subagentProgress,
 }: AgenticProgressProps) => {
   const [isOpen, setIsOpen] = useState(true);
   const dismissRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -206,6 +232,76 @@ export const AgenticProgress = ({
     return entries;
   }, [phases, toolPairs]);
 
+  // Group subagent progress events by subagent_id, preserving arrival order.
+  // Each subagent becomes one Task card with its internal tool calls as items.
+  const subagentGroups = useMemo(() => {
+    if (!subagentProgress?.length) return [] as Array<{
+      id: string;
+      subQuery: string;
+      isOffice: boolean;
+      isDone: boolean;
+      succeeded: boolean;
+      items: Array<{ text: string; status: "active" | "complete" | "error" }>;
+    }>;
+    const groups: Record<string, {
+      id: string;
+      subQuery: string;
+      isOffice: boolean;
+      isDone: boolean;
+      succeeded: boolean;
+      items: Array<{ text: string; status: "active" | "complete" | "error" }>;
+    }> = {};
+    const order: string[] = [];
+    for (const ev of subagentProgress) {
+      const sid = ev.subagent_id;
+      if (!groups[sid]) {
+        groups[sid] = {
+          id: sid,
+          subQuery: ev.sub_query,
+          isOffice: ev.subagent_type === "office",
+          isDone: false,
+          succeeded: false,
+          items: [],
+        };
+        order.push(sid);
+      }
+      const g = groups[sid];
+      if (ev.status === "started") {
+        g.subQuery = ev.sub_query;
+        g.isOffice = ev.subagent_type === "office";
+      } else if (ev.status === "tool_call") {
+        g.items.push({
+          text: ev.label || ev.tool || "tool call",
+          status: "active",
+        });
+      } else if (ev.status === "tool_done") {
+        // Replace the last active item or append
+        const lastActive = [...g.items].reverse().findIndex((i) => i.status === "active");
+        if (lastActive >= 0) {
+          const idx = g.items.length - 1 - lastActive;
+          g.items[idx] = {
+            text: ev.error
+              ? `${ev.label || ev.tool || "tool"}: failed`
+              : ev.hit_count !== undefined
+                ? `${ev.label || ev.tool || "tool"}: ${ev.hit_count} results`
+                : ev.label || ev.tool || "tool",
+            status: ev.error ? "error" : "complete",
+          };
+        }
+      } else if (ev.status === "done") {
+        g.isDone = true;
+        g.succeeded = (ev.evidence_count ?? 0) > 0;
+        g.items.push({
+          text: g.isOffice
+            ? (g.succeeded ? `Created document` : "Failed to create document")
+            : `Returned ${ev.evidence_count ?? 0} results`,
+          status: "complete",
+        });
+      }
+    }
+    return order.map((id) => groups[id]);
+  }, [subagentProgress]);
+
   // Auto-collapse after streaming ends
   useEffect(() => {
     if (isStreaming) {
@@ -227,7 +323,7 @@ export const AgenticProgress = ({
     };
   }, []);
 
-  if (phases.length === 0 && toolPairs.length === 0) return null;
+  if (phases.length === 0 && toolPairs.length === 0 && subagentGroups.length === 0) return null;
 
   // Determine which phase is currently active (last phase while streaming)
   const currentPhaseIdx = isStreaming ? phases.length - 1 : -1;
@@ -274,6 +370,84 @@ export const AgenticProgress = ({
             // Summary comes from the backend (to: event) or falls back to error
             const summary = (pair.observation?.summary as string | undefined) ?? undefined;
             const obsError = pair.observation?.error as string | undefined;
+
+            // retrieve_parallel: render sub-agent Task cards BEFORE the
+            // synthesis step, so the timeline shows the correct sequence:
+            // sub-agents search → results merged.
+            if (toolName === "retrieve_parallel") {
+              const details = pair.observation?.details as
+                | {
+                    sub_queries?: string[];
+                    count?: number;
+                  }
+                | undefined;
+              return (
+                <div key={`tool-${i}`} className="space-y-2">
+                  {subagentGroups.map((sg) => {
+                    const isInProgress = !sg.isDone;
+                    const subagentFailed = sg.isDone && !sg.succeeded;
+                    const Icon = sg.isOffice
+                      ? (sg.isDone
+                          ? (subagentFailed ? XCircleIcon : FileCheckIcon)
+                          : Loader2Icon)
+                      : (sg.isDone ? CheckCircleIcon : SearchIcon);
+                    const titlePrefix = sg.isOffice ? "Office subagent" : "Subagent";
+                    const titleAction = sg.isDone
+                      ? (sg.isOffice
+                          ? (subagentFailed ? "Failed to create" : "Created")
+                          : "Searched for")
+                      : "Searching for";
+                    return (
+                      <Task key={sg.id} defaultOpen={isInProgress}>
+                        <TaskTrigger
+                          title={`${titlePrefix}: ${titleAction} ${sg.subQuery}`}
+                        >
+                          <div className="flex w-full cursor-pointer items-center gap-2 text-muted-foreground text-xs transition-colors hover:text-foreground">
+                            {isInProgress ? (
+                              <Loader2Icon className="size-4 animate-spin text-muted-foreground" />
+                            ) : (
+                              <Icon className={`size-4 ${subagentFailed ? "text-red-600" : "text-emerald-600"}`} />
+                            )}
+                            <span className="text-xs">
+                              {titlePrefix}: {titleAction} <span className="text-foreground font-medium">{sg.subQuery}</span>
+                            </span>
+                            <ChevronDownIcon className="ml-auto size-4 transition-transform group-data-[state=open]:rotate-180" />
+                          </div>
+                        </TaskTrigger>
+                        <TaskContent>
+                          {sg.items.map((item, idx) => (
+                            <TaskItem key={idx}>
+                              {item.status === "error" ? (
+                                <span className="flex items-center gap-1.5 text-[11px] text-red-600">
+                                  <XCircleIcon className="size-3" />
+                                  {item.text}
+                                </span>
+                              ) : (
+                                <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                                  <span>—</span>
+                                  {item.text}
+                                </span>
+                              )}
+                            </TaskItem>
+                          ))}
+                        </TaskContent>
+                      </Task>
+                    );
+                  })}
+                  <ChainOfThoughtStep
+                    icon={SparklesIcon}
+                    label={
+                      isRunning ? (
+                        <Shimmer duration={1.5}>Synthesizing subagent results…</Shimmer>
+                      ) : (
+                        `Synthesized ${details?.count ?? 0} merged hits`
+                      )
+                    }
+                    status={isRunning ? "active" : "complete"}
+                  />
+                </div>
+              );
+            }
 
             return (
               <ChainOfThoughtStep

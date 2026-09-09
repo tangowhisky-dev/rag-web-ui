@@ -224,11 +224,11 @@ _ORG_OVERRIDABLE = [
                "float", 0.0, scope="org", reload="next_request",
                description="Minimum cross-encoder logit to pass reranking. Lower = more results pass; adaptive retrieval uses progressively lower thresholds on retries."),
     SettingDef("ELBOW_CUT_ENABLED", "Reranker", "Elbow cutoff enabled",
-               "bool", False, scope="org", reload="next_request",
-               description="When True, replaces the flat RERANKER_SCORE_THRESHOLD with adaptive elbow "
-                           "cutoff: finds the largest consecutive score drop and cuts there, while "
-                           "still applying the threshold as an absolute floor. Adapts to per-query "
-                           "score distributions."),
+               "bool", True, scope="org", reload="next_request",
+               description="When True, applies adaptive elbow cutoff after reranking: "
+                           "finds the largest consecutive score drop and cuts there, while "
+                           "still applying RERANKER_SCORE_THRESHOLD as an absolute floor. "
+                           "Adapts to per-query score distributions."),
 
     # GraphRAG query-time
     SettingDef("GRAPHRAG_RETRIEVAL_HOPS", "GraphRAG", "Graph query hops",
@@ -248,6 +248,12 @@ _ORG_OVERRIDABLE = [
     SettingDef("AGENT_MAX_CLARIFY", "Agentic", "Max clarify calls",
                "int", 2, scope="org", reload="next_request", min_value=0,
                description="Cap on clarify (human-in-the-loop) tool calls per user query. Prevents infinite clarification loops."),
+    SettingDef("RETRIEVAL_SUBAGENT_TOOL_BUDGET", "Agentic", "Retrieval subagent tool budget",
+               "int", 10, scope="org", reload="next_request", min_value=1,
+               description="Tool-call budget per retrieval sub-agent. Separate from the main agent budget. Lower values keep sub-agents focused and fast."),
+    SettingDef("OFFICE_SUBAGENT_TOOL_BUDGET", "Agentic", "Office subagent tool budget",
+               "int", 20, scope="org", reload="next_request", min_value=1,
+               description="Tool-call budget for the office document sub-agent. Higher than retrieval because document generation may need load_skill + generate + inspect + edit cycles."),
     SettingDef("OFFICECLI_BINARY_PATH", "Agentic", "OfficeCLI binary path",
                "str", "officecli", scope="app", reload="next_request",
                description="Path to the officecli binary. Default 'officecli' assumes it's on PATH."),

@@ -109,6 +109,15 @@ class TitleSearchTool(BaseAgentTool):
     ]
     args_schema: type[BaseModel] = TitleSearchInput
 
+    def prepare_arguments(self, args: dict) -> dict:
+        """Coerce list values to strings for string fields (LLM quirk)."""
+        for key in ("title_contains", "content_type", "document_status",
+                    "effective_as_of", "modified_after", "modified_before"):
+            val = args.get(key)
+            if isinstance(val, list):
+                args[key] = val[0] if val else None
+        return args
+
     def _run(self, *args: Any, **kwargs: Any) -> Any:
         raise NotImplementedError("Use arun() for agent tools.")
 

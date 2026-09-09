@@ -47,11 +47,14 @@ You are a retrieval specialist. Your job: find the best evidence for a single\
 - graph_expand: Find related entities/chunks through Neo4j graph relationships.\
  Args: {"seed_entity_names": [...], "rel_type": "...", "hops": 1}
 - file_read: Read a specific document or file by ID.\
+ Use the document_id from prior search results (shown as doc_id=N).\
  Args: {"document_id": N, "offset": 1, "limit": 200}
 - kb_grep: Regex or literal search within one document.\
+ Use the document_id from prior search results.\
  Args: {"pattern": "...", "document_id": N}
-- kb_outline: Get document outline/structure. Args: {"document_id": N}
-- rerank_results: Rerank a mixed result set. Args: {"top_k": 5}
+- kb_outline: Get document outline/structure.\
+ Use the document_id from prior search results.\
+ Args: {"document_id": N}
 
 # Strategy
 
@@ -67,7 +70,7 @@ You are a retrieval specialist. Your job: find the best evidence for a single\
    - direct ↔ relationship (graph_expand)
    - content ↔ metadata (title_search)
 3. If you find the right document but need more context: call file_read or\
- kb_grep. If results are mixed, call rerank_results.
+ kb_grep. Search results are already reranked — no separate rerank call needed.
 
 # Failure Modes and Recovery
 
@@ -134,6 +137,28 @@ When you have enough evidence, or have exhausted the budget, return a single JSO
 """
 
 
+def _format_evidence_for_prompt(observations: list[Observation], max_docs: int = 15, max_chars: int = 400) -> str:
+    """Format deduplicated evidence from all observations for the sub-agent prompt.
+
+    Mirrors the main agent's _format_retrieved_docs_for_think: extracts evidence
+    from all search/read observations, deduplicates by content_hash, and formats
+    top N docs with title + score + content preview.
+    """
+    evidence = _extract_evidence_from_observations(observations)
+    if not evidence:
+        return ""
+    # Sort by score descending
+    evidence.sort(key=lambda e: e.get("score", 0.0), reverse=True)
+    parts: list[str] = []
+    for i, doc in enumerate(evidence[:max_docs], 1):
+        title = (doc.get("title") or doc.get("file_name") or "Unknown")[:60]
+        doc_id = doc.get("document_id", "")
+        score = doc.get("score", 0.0)
+        content = (doc.get("content") or "")[:max_chars].replace("\n", " ")
+        parts.append(f"[E{i}] {title} (doc_id={doc_id}, score={score:.2f})\n  {content}")
+    return "\n\n".join(parts)
+
+
 def _build_retrieval_user_prompt(
     sub_query: str,
     tools_text: str,
@@ -155,26 +180,84 @@ def _build_retrieval_user_prompt(
             if obs.error:
                 parts.append(f"     → ERROR: {obs.error[:200]}\n")
             else:
-                # Show hit count and top result title
+                # Compact metadata for search tools (like main agent's
+                # _observations_metadata_text). Actual evidence content
+                # is shown in the separate "Evidence found so far" section
+                # below, deduplicated across all tool calls.
                 result = obs.result or {}
                 if "hits" in result:
                     hits = result["hits"]
-                    top_title = hits[0].get("title", "") if hits else ""
-                    parts.append(f"     → {len(hits)} hits, top: {top_title[:60]}\n")
+                    best_score = max((h.get("score", 0) or 0) for h in hits) if hits else 0
+                    search_type = result.get("search_type", "")
+                    type_text = f" type={search_type}" if search_type else ""
+                    parts.append(f"     → hit_count={len(hits)} best_score={best_score:.3f}{type_text}\n")
                 elif "docs" in result:
                     docs = result["docs"]
-                    top_title = docs[0].get("title", "") if docs else ""
-                    parts.append(f"     → {len(docs)} docs, top: {top_title[:60]}\n")
+                    doc_count = len(docs)
+                    confidence = result.get("confidence", "N/A")
+                    parts.append(f"     → doc_count={doc_count} confidence={confidence}\n")
+                elif obs.tool == "file_read":
+                    # Show line range + content preview + continuation hint
+                    # so the LLM can use what it read and page further if needed.
+                    offset = obs.arguments.get("offset", 1)
+                    limit = obs.arguments.get("limit", 200)
+                    title = result.get("title", "")
+                    total_lines = result.get("total_lines", "?")
+                    end_line = result.get("end_line", offset + limit - 1)
+                    content_preview = (result.get("content", "") or "")[:300].replace("\n", " ")
+                    hint = result.get("continuation_hint", "")
+                    parts.append(f"     → read lines {offset}-{end_line}/{total_lines} of '{title[:50]}' (doc_id={obs.arguments.get('document_id')})\n")
+                    parts.append(f"       content: {content_preview}…\n")
+                    if hint:
+                        parts.append(f"       {hint}\n")
+                elif obs.tool == "kb_grep" and "matches" in result:
+                    matches = result.get("matches", [])
+                    parts.append(f"     → {result.get('total_matches', len(matches))} matches in {result.get('documents_searched', '?')} docs:\n")
+                    for m in matches[:5]:
+                        parts.append(f"       • doc={m.get('document_id')} line={m.get('line_number')}: {(m.get('line_text', '') or '')[:80]}\n")
+                elif obs.tool == "kb_outline" and "headings" in result:
+                    headings = result.get("headings", [])
+                    title = result.get("title", "")
+                    parts.append(f"     → outline of '{title[:50]}' (doc_id={result.get('document_id')}): {len(headings)} headings\n")
+                    for h in headings[:5]:
+                        parts.append(f"       • {h.get('level', '?')}: {(h.get('text', '') or '')[:60]}\n")
                 else:
-                    parts.append(f"     → {json.dumps(result, default=str)[:100]}\n")
+                    parts.append(f"     → {json.dumps(result, default=str)[:150]}\n")
         parts.append("\n")
+
+    # Evidence section: deduplicated content from all search/read calls.
+    # This mirrors the main agent's _format_retrieved_docs_for_think —
+    # the LLM sees actual evidence content to assess relevance without
+    # calling another tool.
+    evidence_text = _format_evidence_for_prompt(observations)
+    if evidence_text:
+        parts.append(f"Evidence found so far (deduplicated, cite by [E1], [E2], etc.):\n{evidence_text}\n\n")
 
     remaining = tool_budget - calls_used
     parts.append(f"Tool calls remaining: {remaining}/{tool_budget}\n")
     if remaining <= 0:
         parts.append("\nYou have exhausted your tool-call budget. Write your JSON summary now.")
     else:
-        parts.append("\nCall the next tool, or write your final JSON in the required output format if you have enough evidence.")
+        total_hits = sum(
+            len(o.result.get("hits", o.result.get("docs", [])))
+            for o in observations
+            if not o.error and isinstance(o.result, dict)
+        )
+        distinct_tools = len({o.tool for o in observations if not o.error})
+        if distinct_tools >= 5:
+            # The LLM has tried many different tools. Even with hits, if the
+            # evidence isn't relevant to the sub-query, it's time to finalize.
+            parts.append(
+                f"\nYou have tried {distinct_tools} different tools with {total_hits} total hits. "
+                "Assess honestly: are the hits actually about the sub-query topic? "
+                "If the results keep pointing to a different topic, the document likely doesn't "
+                "contain what you need. Write your final JSON now with failure_mode=LOW_RELEVANCE "
+                "and describe what you found in gaps."
+            )
+        elif total_hits >= 3:
+            parts.append(f"\nYou already have {total_hits} hits from prior searches. If the evidence is relevant, write your final JSON now. Only call another tool if the results so far are clearly insufficient.")
+        else:
+            parts.append("\nCall the next tool, or write your final JSON in the required output format if you have enough evidence.")
     return "".join(parts)
 
 
@@ -278,14 +361,16 @@ def _extract_evidence_from_observations(observations: list[Observation]) -> list
 async def run_retrieval_subagent(
     ctx,
     sub_query: str,
-    tool_budget: int = 25,
+    tool_budget: int = 10,
+    subagent_id: str = "",
 ) -> dict:
     """Run a single retrieval sub-agent loop.
 
     Args:
         ctx: ToolContext (shared with main agent).
         sub_query: A single sub-query to retrieve evidence for.
-        tool_budget: Total tool-call budget (inherited from AGENT_TOTAL_TOOL_BUDGET).
+        tool_budget: Per-subagent tool-call budget (from SUBAGENT_TOOL_BUDGET).
+        subagent_id: Unique identifier for progress event streaming.
 
     Returns:
         dict with keys: ok, evidence (list of dicts), summary, query
@@ -295,13 +380,16 @@ async def run_retrieval_subagent(
     from app.services.agentic_rag.agent_graph.observations import _tool_descriptions_text
     from app.services.agentic_rag.tools import build_tools
     from app.services.settings_service import get_setting
+    from app.services.agentic_rag.agent_graph.helpers import _writer as _get_writer
+
+    writer = _get_writer()
 
     # Build search/read tools only
     all_tools = build_tools(ctx)
     retrieval_tool_names = {
         "keyword_search", "semantic_search",
         "title_search", "file_read", "kb_outline", "kb_grep",
-        "rerank_results", "graph_expand",
+        "graph_expand",
     }
     tools = {t.name: t for t in all_tools if t.name in retrieval_tool_names}
     tools_list = list(tools.values())
@@ -311,13 +399,20 @@ async def run_retrieval_subagent(
     observations: list[Observation] = []
     counts: dict[str, int] = {}
     final_state = {}
-    total_budget = get_setting(ctx.db, "AGENT_TOTAL_TOOL_BUDGET", ctx.org_id)
+    seen_signatures: set[str] = set()  # persists across iterations
+
+    writer({"event": "subagent_progress", "subagent_id": subagent_id,
+            "sub_query": sub_query, "status": "started"})
 
     iteration = 0
     while True:
         iteration += 1
         calls_used = sum(counts.values())
-        if calls_used >= tool_budget:
+        # Budget counts ALL tool call attempts (successful + dedup-blocked +
+        # errors). This prevents the LLM from wasting iterations on blocked
+        # calls after the budget is notionally exhausted.
+        total_attempts = len(observations)
+        if calls_used >= tool_budget or total_attempts >= tool_budget or iteration > tool_budget + 2:
             break
 
         user = _build_retrieval_user_prompt(
@@ -327,6 +422,11 @@ async def run_retrieval_subagent(
         try:
             tool_temp = get_setting(ctx.db, "TOOL_CALL_TEMPERATURE", ctx.org_id)
             llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=tool_temp)
+            if iteration == 1:
+                from app.services.agentic_rag.llm_factory import get_org_llm
+                cfg = get_org_llm(ctx.org_id, ctx.db, role="chat")
+                logger.info("[retrieval_subagent %s] model=%s base=%s",
+                            subagent_id, cfg["model_name"], cfg["api_base"])
             resp = await llm.bind_tools(tools_list).ainvoke([
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -358,14 +458,33 @@ async def run_retrieval_subagent(
             args = tc.get("arguments", {})
             tool = tools.get(name)
 
-            # Total tool-call budget (shared with main agent)
-            if sum(counts.values()) >= total_budget:
+            # Dedup guard: skip identical tool+key-arg combinations.
+            # The signature uses the primary search key for each tool:
+            #   query for keyword/semantic search
+            #   title_contains for title_search
+            #   pattern for kb_grep
+            #   document_id for kb_outline
+            #   document_id:offset for file_read (allows paging)
+            # This prevents the LLM from repeating the same search with
+            # cosmetic variations (e.g. metadata_only=true vs false).
+            if name == "file_read":
+                sig_key = f"{args.get('document_id')}:{args.get('offset', 1)}"
+            else:
+                sig_key = (
+                    args.get("query")
+                    or args.get("title_contains")
+                    or args.get("pattern")
+                    or str(args.get("document_id") or "")
+                )
+            sig = f"{name}:{sig_key}"
+            if sig in seen_signatures:
                 observations.append(Observation(
                     tool=name, arguments=args, result={},
-                    error=f"Total tool-call budget ({total_budget}) reached. Write your final JSON now.",
+                    error=f"Duplicate call: {sig} already tried. Try a different tool or query.",
                     tokens=0,
                 ))
-                break
+                continue
+            seen_signatures.add(sig)
 
             if tool is None:
                 observations.append(Observation(
@@ -382,6 +501,11 @@ async def run_retrieval_subagent(
                 ))
                 continue
 
+            label = getattr(tool, "ui_label", name)
+            writer({"event": "subagent_progress", "subagent_id": subagent_id,
+                    "sub_query": sub_query, "status": "tool_call",
+                    "tool": name, "label": label})
+
             result = await _run_tool(tool, name, args)
             obs = Observation(
                 tool=result["tool"], arguments=result["arguments"],
@@ -391,6 +515,17 @@ async def run_retrieval_subagent(
             observations.append(obs)
             counts[name] = counts.get(name, 0) + 1
             calls_used += 1
+
+            hit_count = 0
+            if not obs.error and isinstance(obs.result, dict):
+                hit_count = obs.result.get("count", 0)
+            if obs.error:
+                logger.warning("[retrieval_subagent %s] tool %s failed: %s",
+                               subagent_id, name, obs.error)
+            writer({"event": "subagent_progress", "subagent_id": subagent_id,
+                    "sub_query": sub_query, "status": "tool_done",
+                    "tool": name, "label": label, "hit_count": hit_count,
+                    "error": bool(obs.error)})
 
     # Extract evidence from all observations and merge with any citations
     # the sub-agent explicitly included in its final JSON.
@@ -418,6 +553,10 @@ async def run_retrieval_subagent(
     strategy = final_state.get("strategy") or None
     summary = "; ".join(gaps + conflicts) if (gaps or conflicts) else ("complete" if complete else "no evidence")
 
+    writer({"event": "subagent_progress", "subagent_id": subagent_id,
+            "sub_query": sub_query, "status": "done",
+            "evidence_count": len(evidence)})
+
     return {
         "ok": len(evidence) > 0,
         "evidence": evidence,
@@ -434,21 +573,24 @@ async def run_retrieval_subagent(
 async def run_retrieval_subagents_parallel(
     ctx,
     sub_queries: list[str],
-    tool_budget: int = 25,
+    tool_budget: int = 10,
 ) -> list[dict]:
     """Run multiple retrieval sub-agents in parallel.
 
     Args:
         ctx: ToolContext (shared — each sub-agent gets its own copy of tools).
         sub_queries: List of independent sub-queries.
-        tool_budget: Total tool-call budget per sub-agent (inherited from AGENT_TOTAL_TOOL_BUDGET).
+        tool_budget: Per-subagent tool-call budget (from SUBAGENT_TOOL_BUDGET).
 
     Returns:
         list of dicts (one per sub-query): ok, evidence, summary, query
     """
+    import uuid
+
+    subagent_ids = [str(uuid.uuid4())[:8] for _ in sub_queries]
     tasks = [
-        run_retrieval_subagent(ctx, q, tool_budget=tool_budget)
-        for q in sub_queries
+        run_retrieval_subagent(ctx, q, tool_budget=tool_budget, subagent_id=sid)
+        for q, sid in zip(sub_queries, subagent_ids)
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 

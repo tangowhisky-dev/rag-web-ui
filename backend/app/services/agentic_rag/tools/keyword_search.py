@@ -16,6 +16,7 @@ from app.services.agentic_rag.tool_context import ToolContext, enforce_rbac, wri
 from app.services.agentic_rag.tools.base import BaseAgentTool
 from app.services.retrieval import get_effective_datastore_ids
 from app.services.retrieval.retrieval import exact_search_docs, sparse_search_docs
+from app.services.retrieval.reranker import rerank, soft_elbow_truncate
 from app.services.settings_service import get_setting
 
 from ._search_helpers import _emit_progress, expand_synonyms, resolve_filter_to_doc_ids
@@ -38,6 +39,7 @@ class KeywordSearchTool(BaseAgentTool):
     prompt_guidelines: list[str] = [
         "keyword_search: Best as the first search when the query contains identifiers, acronyms, code, error messages, jargon, or distinctive terminology. It runs strict MySQL FTS plus SPLADE sparse expansion, so it also captures related keyword overlaps.",
         "keyword_search: Prefer keyword_search over semantic_search when the query includes any specific technical term, even if the overall question is conceptual.",
+        "keyword_search: Results are cross-encoder reranked and soft-elbow filtered before returning. No separate rerank call needed.",
         "keyword_search: Fall back to semantic_search if keyword_search returns weak or irrelevant results.",
     ]
     args_schema: type = KeywordSearchInput
@@ -131,8 +133,35 @@ class KeywordSearchTool(BaseAgentTool):
             if h not in seen or score > seen[h].metadata.get("score", 0.0):
                 seen[h] = doc
 
-        # Sort by score descending, take top_k
-        merged = sorted(seen.values(), key=lambda d: d.metadata.get("score", 0.0), reverse=True)[:input_obj.top_k]
+        merged = list(seen.values())
+
+        # Rerank with cross-encoder and apply soft-elbow truncation.
+        # Skip rerank only when the merged pool is very small (<= top_k // 2).
+        if len(merged) > input_obj.top_k // 2:
+            score_threshold = get_setting(ctx.db, "RERANKER_SCORE_THRESHOLD", ctx.org_id)
+            elbow_enabled = get_setting(ctx.db, "ELBOW_CUT_ENABLED", ctx.org_id)
+            try:
+                from langchain_core.documents import Document as LangchainDocument
+                lc_docs = [
+                    LangchainDocument(page_content=d.page_content, metadata=d.metadata)
+                    for d in merged
+                ]
+                reranked = rerank(
+                    query=query,
+                    docs=lc_docs,
+                    score_threshold=score_threshold,
+                    db=ctx.db,
+                    org_id=ctx.org_id,
+                )
+                if elbow_enabled:
+                    merged = soft_elbow_truncate(reranked, max_keep=input_obj.top_k)
+                else:
+                    merged = reranked
+            except Exception as exc:
+                logger.warning("[keyword_search] rerank failed, using raw scores: %s", exc)
+                merged = sorted(merged, key=lambda d: d.metadata.get("score", 0.0), reverse=True)[:input_obj.top_k]
+        else:
+            merged = sorted(merged, key=lambda d: d.metadata.get("score", 0.0), reverse=True)
 
         hits = []
         for doc in merged:

@@ -140,6 +140,35 @@ def rerank(
     )
     return result
 
+def soft_elbow_truncate(
+    docs: List[LangchainDocument],
+    min_keep: int = 3,
+    max_keep: int = 20,
+    drop_threshold: float = 2.0,
+) -> List[LangchainDocument]:
+    """Truncate a reranked list at the first significant score drop.
+
+    Walks the sorted (descending by _reranker_score) list and cuts at the
+    first index where ``score[i-1] - score[i] >= drop_threshold``.  Keeps
+    at least *min_keep* docs and at most *max_keep* (safety valve for
+    pathological cases where all chunks score similarly with no drop).
+
+    Args:
+        docs:           Output of :func:`rerank` (already sorted descending).
+        min_keep:       Minimum docs to return regardless of drops.
+        max_keep:       Hard safety cap.  Set to ``top_k`` by the caller.
+        drop_threshold: Absolute score gap between adjacent docs that
+                        indicates the relevant cluster has ended.
+    """
+    if len(docs) <= min_keep:
+        return docs
+    scores = [d.metadata.get("_reranker_score", 0.0) for d in docs]
+    for i in range(1, min(len(docs), max_keep)):
+        if scores[i - 1] - scores[i] >= drop_threshold:
+            return docs[:max(i, min_keep)]
+    return docs[:max_keep]
+
+
 def preload_cross_encoder() -> None:
     """Eagerly load the cross-encoder reranker at app startup.
 

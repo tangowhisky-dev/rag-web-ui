@@ -157,6 +157,7 @@ async def post_process_node_v2(state, ctx) -> dict:
             }
 
         precomputed = state.get("precomputed_answer", "")
+        reasoning_content = state.get("reasoning_content", "")
         query = state.get("original_query", "")
         observations = state.get("observations", [])
         docs = state.get("retrieved_docs", [])
@@ -203,7 +204,12 @@ async def post_process_node_v2(state, ctx) -> dict:
                     docs, state.get("file_markdown"), Plan(), chart_options,
                     query, query, summary_text, history_text, observations, ctx, office_files,
                 )
-            final, answer_usage = await _stream_final_answer(ctx, system, user, writer, docs)
+            final, answer_usage, fallback_reasoning = await _stream_final_answer(ctx, system, user, writer, docs)
+            # Use fallback reasoning if the think node didn't produce any.
+            if fallback_reasoning and not reasoning_content:
+                reasoning_content = fallback_reasoning
+                # Emit a done event so the frontend persists the reasoning.
+                writer({"event": "thinking", "content": reasoning_content, "done": True})
 
         # Substitute chart and office markers.
         final = _substitute_chart_markers(final, chart_options)
@@ -278,7 +284,15 @@ async def post_process_node_v2(state, ctx) -> dict:
             try:
                 msg = ctx.db.query(Message).filter(Message.id == message_id).first()
                 if msg:
-                    msg.content = final
+                    # Prepend reasoning as <think> tags so the frontend's
+                    # parseThinkContent can extract it on page reload.
+                    # The answer_rewrite event sends just the answer (no tags)
+                    # so the live streaming display is unaffected.
+                    saved_content = final
+                    if reasoning_content:
+                        close_tag = "/think>"
+                        saved_content = "<think" + ">" + reasoning_content + "<" + close_tag + "\n\n" + final
+                    msg.content = saved_content
                     msg.last_answer_object = lao.model_dump()
                     msg.tool_calls = [_coerce_observation(obs).model_dump() for obs in observations]
                     # Persist answer scoring fields if scoring produced them.

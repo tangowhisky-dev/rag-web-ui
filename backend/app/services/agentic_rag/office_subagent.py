@@ -171,14 +171,16 @@ def _format_accumulated_data(data: list) -> str:
 async def run_office_subagent(
     ctx,
     request: str,
-    tool_budget: int = 25,
+    tool_budget: int = 20,
+    subagent_id: str = "",
 ) -> dict:
     """Run the office sub-agent loop.
 
     Args:
         ctx: ToolContext (shared with main agent — has state with accumulated_data, etc.)
         request: Natural language document request from the main agent.
-        tool_budget: Total tool-call budget (inherited from AGENT_TOTAL_TOOL_BUDGET).
+        tool_budget: Per-subagent tool-call budget (from OFFICE_SUBAGENT_TOOL_BUDGET).
+        subagent_id: Unique identifier for progress event streaming.
 
     Returns:
         dict with keys: ok, file_id, file_name, format, summary, error
@@ -191,7 +193,9 @@ async def run_office_subagent(
     from app.services.settings_service import get_setting
 
     writer = _get_writer()
-    writer({"event": "office_subagent", "status": "started", "request": request[:200]})
+    writer({"event": "subagent_progress", "subagent_id": subagent_id,
+            "sub_query": request[:200], "status": "started",
+            "subagent_type": "office"})
 
     # Build the 4 office tools — these share ctx so they can read/write state
     all_tools = build_tools(ctx)
@@ -233,7 +237,10 @@ async def run_office_subagent(
             tools_text, iteration, tool_budget, calls_used, observations,
         )
 
-        writer({"event": "office_subagent_step", "iteration": iteration, "phase": "think"})
+        writer({"event": "subagent_progress", "subagent_id": subagent_id,
+                "sub_query": request[:200], "status": "tool_call",
+                "tool": "thinking", "label": "Office: thinking",
+                "subagent_type": "office", "iteration": iteration})
 
         try:
             tool_temp = get_setting(ctx.db, "TOOL_CALL_TEMPERATURE", ctx.org_id)
@@ -260,25 +267,22 @@ async def run_office_subagent(
                 errors = [o.error for o in observations if o.error]
                 if errors and not ctx.state.get("generated_files"):
                     summary = f"Failed to generate document: {errors[-1]}"
-            writer({"event": "office_subagent", "status": "done", "summary": summary[:300]})
+            writer({"event": "subagent_progress", "subagent_id": subagent_id,
+                    "sub_query": request[:200], "status": "done",
+                    "subagent_type": "office",
+                    "evidence_count": len(new_files),
+                    "summary": summary[:300] if summary else ""})
             break
 
         # Execute tool calls
-        writer({"event": "office_subagent_step", "iteration": iteration, "phase": "tool"})
-        total_budget = get_setting(ctx.db, "AGENT_TOTAL_TOOL_BUDGET", ctx.org_id)
+        writer({"event": "subagent_progress", "subagent_id": subagent_id,
+                "sub_query": request[:200], "status": "tool_call",
+                "tool": "office_tools", "label": "Office: executing tools",
+                "subagent_type": "office", "iteration": iteration})
         for tc in tool_calls:
             name = tc.get("tool")
             args = tc.get("arguments", {})
             tool = tools.get(name)
-
-            # Total tool-call budget (shared with main agent)
-            if sum(counts.values()) >= total_budget:
-                observations.append(Observation(
-                    tool=name, arguments=args, result={},
-                    error=f"Total tool-call budget ({total_budget}) reached. Write your summary now.",
-                    tokens=0,
-                ))
-                break
 
             if tool is None:
                 observations.append(Observation(
@@ -295,8 +299,11 @@ async def run_office_subagent(
                 ))
                 continue
 
-            writer({"event": "tool_call", "tool": name, "arguments": args,
-                    "label": f"office: {name}"})
+            label = getattr(tool, "ui_label", f"office: {name}")
+            writer({"event": "subagent_progress", "subagent_id": subagent_id,
+                    "sub_query": request[:200], "status": "tool_call",
+                    "tool": name, "label": label,
+                    "subagent_type": "office", "iteration": iteration})
 
             result = await _run_tool(tool, name, args)
             obs = Observation(
@@ -316,17 +323,25 @@ async def run_office_subagent(
 
             # Emit observation
             summary_text = ""
+            file_created = False
             if obs.result:
                 if obs.tool == "office_generate" and obs.result.get("file_id"):
                     summary_text = f"Created: {obs.result.get('file_name', '')}"
+                    file_created = True
                     writer({"event": "file", "file_id": obs.result["file_id"],
                             "file_name": obs.result.get("file_name", ""),
                             "format": obs.result.get("format", "")})
                 else:
                     summary_text = json.dumps(obs.result, default=str)[:150]
-            writer({"event": "tool_observation", "tool": obs.tool,
-                    "label": f"office: {obs.tool}", "summary": summary_text,
-                    "error": obs.error})
+            if obs.error:
+                logger.warning("[office_subagent %s] tool %s failed: %s",
+                               subagent_id, obs.tool, obs.error)
+            writer({"event": "subagent_progress", "subagent_id": subagent_id,
+                    "sub_query": request[:200], "status": "tool_done",
+                    "tool": obs.tool, "label": label,
+                    "hit_count": 1 if file_created else 0,
+                    "error": bool(obs.error), "summary": summary_text,
+                    "subagent_type": "office", "iteration": iteration})
 
     # Collect results from state — only files generated during THIS run count.
     generated_files = ctx.state.get("generated_files", []) if ctx.state else []

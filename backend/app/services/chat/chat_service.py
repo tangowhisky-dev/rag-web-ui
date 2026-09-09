@@ -251,6 +251,11 @@ async def _handle_thinking(event, ctx):
     await asyncio.sleep(0)
 
 
+async def _handle_subagent_progress(event, ctx):
+    yield f'sp:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
+    await asyncio.sleep(0)
+
+
 async def _handle_interrupt(event, ctx):
     question = event.get("question", "")
     thread_id = event.get("thread_id", "")
@@ -295,6 +300,7 @@ EVENT_HANDLERS = {
     "progress": _handle_progress,
     "task_list": _handle_task_list,
     "thinking": _handle_thinking,
+    "subagent_progress": _handle_subagent_progress,
     "interrupt": _handle_interrupt,
 }
 
