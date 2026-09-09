@@ -33,10 +33,12 @@ class KeywordSearchInput(BaseModel):
 
 class KeywordSearchTool(BaseAgentTool):
     name: str = "keyword_search"
-    description: str = "Keyword search across chunk text. Runs strict (MySQL FTS) and expanded (SPLADE) matching, merges and deduplicates results. Best for code, identifiers, error messages, distinctive terminology, jargon, acronyms."
+    description: str = "Hybrid keyword search across chunk text. Runs strict MySQL full-text search and expanded SPLADE sparse matching, merges and deduplicates results. Best as the first search when the query contains specific technical terms, identifiers, acronyms, code, error messages, jargon, or distinctive phrases; the SPLADE expansion also captures related keyword overlaps. Prefer semantic_search only when the question is fully paraphrased or contains no specific technical terms."
     prompt_snippet: str = "Keyword retrieval (strict + expanded, merged)"
     prompt_guidelines: list[str] = [
-        "keyword_search: Best for code, identifiers, filenames, people names, error messages, distinctive terminology, jargon, acronyms — when exact wording or keyword overlap matters.",
+        "keyword_search: Best as the first search when the query contains identifiers, acronyms, code, error messages, jargon, or distinctive terminology. It runs strict MySQL FTS plus SPLADE sparse expansion, so it also captures related keyword overlaps.",
+        "keyword_search: Prefer keyword_search over semantic_search when the query includes any specific technical term, even if the overall question is conceptual.",
+        "keyword_search: Fall back to semantic_search if keyword_search returns weak or irrelevant results.",
     ]
     args_schema: type = KeywordSearchInput
     ui_label: str = "Searching (keyword)"

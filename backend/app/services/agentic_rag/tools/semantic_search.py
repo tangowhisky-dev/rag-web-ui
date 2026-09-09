@@ -28,10 +28,11 @@ class SemanticSearchInput(BaseModel):
 
 class SemanticSearchTool(BaseAgentTool):
     name: str = "semantic_search"
-    description: str = "Dense vector search for semantic/conceptual matching. Finds chunks by meaning, not exact wording. Best for natural-language questions, paraphrased queries, and conceptual lookups."
+    description: str = "Dense vector search for semantic/conceptual matching. Finds chunks by meaning, not exact wording. Best for paraphrased, natural-language, or purely conceptual questions that do not contain specific technical identifiers or acronyms. Use as a fallback when keyword_search returns weak or irrelevant results."
     prompt_snippet: str = "Semantic retrieval (dense vectors)"
     prompt_guidelines: list[str] = [
-        "semantic_search: Best for conceptual, natural-language, paraphrased, and meaning-based questions. Use when relevant documents may not share the user's exact wording.",
+        "semantic_search: Best for conceptual, natural-language, paraphrased, and meaning-based questions that do not contain specific identifiers, acronyms, or distinctive technical terms.",
+        "semantic_search: Use when keyword_search returns weak or irrelevant results, or when the user's wording differs substantially from the document wording.",
         "semantic_search: If this returns more results than the query needs, call rerank_results before file_read or answering. Do not read the full candidate pool.",
     ]
     args_schema: type = SemanticSearchInput
