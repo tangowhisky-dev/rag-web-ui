@@ -162,6 +162,7 @@ async def answer_evaluation_node(
     """
     with _agent_step("answer_evaluation"):
         from .evaluator import evaluate_answer
+        from app.services.settings_service import get_setting
 
         answer = state.get("answer", "")
         query = state.get("original_query", "")
