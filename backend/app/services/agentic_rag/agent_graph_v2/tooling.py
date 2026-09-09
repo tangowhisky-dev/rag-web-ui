@@ -38,6 +38,7 @@ from ..agent_graph.helpers import (
     _writer,
 )
 from ..agent_graph.tooling import (
+    _hit_to_doc_dict,
     _merge_retrieved_docs,
     _run_tool,
     _summarize_result,
@@ -292,6 +293,20 @@ async def tool_node_v2(state, ctx) -> dict:
         if merged_docs:
             state_update["retrieved_docs"] = merged_docs
             state_update["best_retrieval_confidence"] = best_confidence
+
+        # If rerank_results was called this turn, its returned order is the
+        # authoritative result set. _merge_retrieved_docs deduplicates by
+        # content_hash, which otherwise discards the reranked copy and keeps
+        # the original search order.
+        rerank_observations = [
+            o for o in new_observations
+            if o.tool == "rerank_results" and not o.error
+        ]
+        if rerank_observations:
+            hits = rerank_observations[-1].result.get("hits", [])
+            if hits:
+                state_update["retrieved_docs"] = [_hit_to_doc_dict(h) for h in hits]
+                # best_confidence already reflects the reranker scores above.
 
         # Propagate accumulated_data and generated_files from tool state.
         if "accumulated_data" in ctx.state:

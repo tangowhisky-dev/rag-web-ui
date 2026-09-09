@@ -188,6 +188,29 @@ class TestNormalizeEvidenceCitations:
         assert normalized.count("[2]") == 1
         assert len(cited) == 2
 
+    def test_hybrid_em_citation_uses_target(self):
+        evidence = [
+            {"page_content": "A", "metadata": {"citation_ref": {"citation_id": "E1"}}},
+            {"page_content": "B", "metadata": {"citation_ref": {"citation_id": "E2"}}},
+        ]
+        # [1](E2) is a malformed hybrid: display 1, target E2. Should use E2.
+        answer = "See [1](E2)."
+        normalized, cited = normalize_evidence_citations(answer, evidence)
+        assert "[1]" in normalized
+        assert "[1](1)" in normalized or "[1]" in normalized
+        assert len(cited) == 1
+        assert cited[0] == evidence[1]
+
+    def test_mismatched_nn_citation_is_stripped(self):
+        evidence = [
+            {"page_content": "A", "metadata": {"citation_ref": {"citation_id": "E1"}}},
+        ]
+        # [1](2) has mismatched display/target and should be stripped.
+        answer = "See [1](2)."
+        normalized, cited = normalize_evidence_citations(answer, evidence)
+        assert "[1](2)" not in normalized
+        assert cited == []
+
 
 class TestLastAnswerObjectCitations:
     def test_citations_use_new_schema(self):

@@ -226,25 +226,31 @@ def normalize_evidence_citations(answer: str, evidence: list[dict]) -> tuple[str
         answer = pat.sub(_extract_reasoning, answer)
 
     # Collect unique E-numbers in first-appearance order.
-    # Match [E1], [1](1), and bare [1] formats (N refers to the E-N label).
+    # Match [E1], [N](EM), [N](N), and bare [N] formats (N refers to the E-N label).
     valid_cited: list[int] = []
     seen: set[int] = set()
-    # First pass: [E1] format
-    for match in re.finditer(r"\[E(\d+)\]", answer, re.IGNORECASE):
-        n = int(match.group(1))
-        if 1 <= n <= max_e and n not in seen:
-            valid_cited.append(n)
-            seen.add(n)
-    # Second pass: [N](N) format (only if not already seen as [E1])
-    for match in re.finditer(r"\[(\d+)\]\(\d+\)", answer):
-        n = int(match.group(1))
-        if 1 <= n <= max_e and n not in seen:
-            valid_cited.append(n)
-            seen.add(n)
-    # Third pass: bare [N] format (shorthand used by smaller models)
-    for match in re.finditer(r"\[(\d{1,3})\](?!\()", answer):
-        n = int(match.group(1))
-        if 1 <= n <= max_e and n not in seen:
+    _citation_re = re.compile(
+        r"\[E(\d+)\]|"                      # [E1]
+        r"\[(\d+)\]\(E(\d+)\)|"            # [N](EM) hybrid
+        r"\[(\d+)\]\((\d+)\)|"              # [N](N)
+        r"\[(\d{1,3})\](?!\()",              # bare [N]
+        re.IGNORECASE,
+    )
+    for match in _citation_re.finditer(answer):
+        n: int | None = None
+        if (g := match.group(1)) is not None:
+            n = int(g)
+        elif (g := match.group(3)) is not None:
+            # [N](EM): use the E-number target
+            n = int(g)
+        elif (g := match.group(5)) is not None:
+            # [N](N): require both numbers equal
+            if match.group(4) != match.group(5):
+                continue
+            n = int(g)
+        elif (g := match.group(6)) is not None:
+            n = int(g)
+        if n is not None and 1 <= n <= max_e and n not in seen:
             valid_cited.append(n)
             seen.add(n)
 
@@ -271,14 +277,26 @@ def normalize_evidence_citations(answer: str, evidence: list[dict]) -> tuple[str
         return ""
     # Replace [E1] format → sentinel
     normalized = re.sub(r"\[E(\d+)\]", _replace_marker, answer, flags=re.IGNORECASE)
-    # Replace [N](N) format → sentinel
+    # Replace [N](EM) hybrid and [N](N) link formats → sentinel.
+    # [N](EM) uses the E-number target; [N](N) requires both numbers equal.
     def _replace_link(match: re.Match) -> str:
-        n = int(match.group(1))
-        if n in index_map:
+        n: int | None = None
+        if match.group(2) is not None:
+            n = int(match.group(2))  # [N](EM) target
+        elif match.group(4) is not None:
+            if match.group(3) != match.group(4):
+                return ""
+            n = int(match.group(4))  # [N](N)
+        if n is not None and n in index_map:
             new_n = index_map[n]
             return _make_sentinel(f"[{new_n}]({new_n})")
         return ""
-    normalized = re.sub(r"\[(\d+)\]\(\d+\)", _replace_link, normalized)
+    normalized = re.sub(
+        r"\[(\d+)\]\(E(\d+)\)|\[(\d+)\]\((\d+)\)",
+        _replace_link,
+        normalized,
+        flags=re.IGNORECASE,
+    )
     # Replace bare [N] format → sentinel (only matches [N] not followed by "(")
     normalized = re.sub(r"\[(\d{1,3})\](?!\()", _replace_marker, normalized)
     # Restore sentinels to final citation text
@@ -291,6 +309,7 @@ def normalize_evidence_citations(answer: str, evidence: list[dict]) -> tuple[str
     # Restore reasoning sections with citations stripped
     def _strip_reasoning_citations(text: str) -> str:
         text = re.sub(r"\[E\d+\]", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\[\d+\]\(E\d+\)", "", text, flags=re.IGNORECASE)
         text = re.sub(r"\[\d+\]\(\d+\)", "", text)
         return text
     normalized = re.sub(

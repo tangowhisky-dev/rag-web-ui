@@ -36,7 +36,7 @@ from ..agent_graph.observations import (
 logger = logging.getLogger(__name__)
 
 
-def _format_retrieved_docs_for_think(docs: list[dict], max_docs: int = 10, max_chars: int = 400) -> str:
+def _format_retrieved_docs_for_think(docs: list[dict], max_docs: int = 20, max_chars: int = 400) -> str:
     """Format retrieved docs with content previews for the think prompt.
 
     In v2, the think node IS the finalizer — the LLM needs to see the actual
@@ -109,7 +109,7 @@ def _build_v2_user_prompt(
     if obs_text:
         parts.append(f"Tool observations so far:\n{obs_text}\n\n")
     if docs_text:
-        parts.append(f"Retrieved evidence (cite these as [N](N) in your answer):\n{docs_text}\n\n")
+        parts.append(f"Retrieved evidence (cite these as [E1], [E2], etc. in your answer):\n{docs_text}\n\n")
     parts.append(f"Available this turn:\n{available_tools_text}\n\n")
     parts.append(f"User message: {original}\n")
 
@@ -143,7 +143,7 @@ def _build_v2_user_prompt(
         parts.append(
             "Call the next tool(s) to gather evidence, or write your final answer as plain text "
             "(no tool calls) when you have enough to respond. "
-            "When writing your answer, cite evidence using [N](N) format where N matches the evidence item number."
+            "When writing your answer, cite evidence using [E1], [E2], etc. where the number matches the evidence item number."
         )
 
     return "".join(parts)

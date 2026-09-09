@@ -160,7 +160,6 @@ async def post_process_node_v2(state, ctx) -> dict:
         query = state.get("original_query", "")
         observations = state.get("observations", [])
         docs = state.get("retrieved_docs", [])
-        docs = group_docs_by_document(docs)
         answer_usage: Optional[dict] = None
 
         chart_options = _collect_chart_options(observations)
@@ -168,11 +167,15 @@ async def post_process_node_v2(state, ctx) -> dict:
 
         if precomputed and precomputed.strip():
             # The LLM wrote the answer in the think node. Use it directly.
+            # Do NOT group docs here: the model's [E-N] citations refer to
+            # the ungrouped retrieved_docs order shown in the think prompt.
             final = precomputed
-            writer({"event": "answer_rewrite", "content": final, "citations": []})
         else:
             # Fallback: the LLM signaled final_answer=true but didn't write text.
-            # Generate from evidence using the old finalize approach.
+            # Generate from evidence using the old finalize approach. Group
+            # first so the model sees contiguous chunks and cites the grouped
+            # order, which matches the normalization below.
+            docs = group_docs_by_document(docs)
             from app.services.agentic_rag.nodes import history_to_text, select_recent_history
             recent = select_recent_history(
                 state.get("messages", []),
@@ -237,10 +240,13 @@ async def post_process_node_v2(state, ctx) -> dict:
             id=f"assistant-{message_id}" if message_id else None,
         )
 
-        # Make the final answer and cited evidence available to
+        # Make the final answer, cited evidence, and LAO available to
         # answer_evaluation so it can score rather than bailing out.
+        # (state["last_answer_object"] still holds the previous turn's LAO
+        # from load_context — must be overwritten before evaluation runs.)
         state["answer"] = final
         state["cited_docs"] = cited_docs
+        state["last_answer_object"] = lao
 
         updates: dict = {
             "final_answer": final,
