@@ -205,16 +205,21 @@ def parse_think_response(
     if mode in ("auto", "native") and getattr(response, "tool_calls", None):
         tool_calls = _normalize_tool_calls(response.tool_calls)
         if tool_calls:
-            logger.debug("[tool_call_parser] native tool_calls: %s", tool_calls)
+            logger.info("[tool_call_parser] native tool_calls: %s", tool_calls)
             return ParsedThinkResponse(tool_calls=tool_calls, reasoning=reasoning)
 
     if mode == "auto":
-        logger.warning("[tool_call_parser] gateway returned no native tool_calls — falling back to JSON-text parsing")
+        logger.debug("[tool_call_parser] no native tool_calls; trying JSON-text fallback")
 
     # Tier 2: JSON-text fallback.
     if mode in ("auto", "json_text"):
         result = _parse_json_text_fallback(raw)
+        if result is not None and result.tool_calls:
+            logger.info("[tool_call_parser] json-text tool_calls: %s", result.tool_calls)
+            result.reasoning = reasoning
+            return result
         if result is not None:
+            # JSON fallback found a final_answer, not a tool call.
             result.reasoning = reasoning
             return result
 

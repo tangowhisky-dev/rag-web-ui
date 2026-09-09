@@ -198,6 +198,16 @@ def normalize_evidence_citations(answer: str, evidence: list[dict]) -> tuple[str
 
     max_e = len(evidence)
 
+    # Pre-process multi-citation brackets like [E1, E6, E8] into [E1][E6][E8].
+    # This keeps the existing per-format regexes simple while allowing LLMs
+    # to emit grouped citations.
+    answer = re.sub(
+        r"\[(E\d+(?:\s*,\s*E\d+)*)\]",
+        lambda m: "".join(f"[E{n}]" for n in re.findall(r"E(\d+)", m.group(1), re.IGNORECASE)),
+        answer,
+        flags=re.IGNORECASE,
+    )
+
     # Split out code blocks
     _code_segments: list[str] = []
     def _extract_code(m: re.Match) -> str:
