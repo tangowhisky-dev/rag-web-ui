@@ -86,6 +86,10 @@ async def _dispatch_v2(
 
     prior_signatures: dict[tuple[str, str], Observation] = {}
     for obs in prior_observations:
+        # Only cache successful observations — failed calls should be
+        # retried, not served from cache.
+        if obs.error:
+            continue
         prior_signatures.setdefault(_call_signature(obs.tool, obs.arguments), obs)
 
     def _consecutive_same_signature_count(signature: tuple[str, str]) -> int:

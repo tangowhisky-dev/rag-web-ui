@@ -396,7 +396,7 @@ export const AgenticProgress = ({
                       ? (sg.isOffice
                           ? (subagentFailed ? "Failed to create" : "Created")
                           : "Searched for")
-                      : "Searching for";
+                      : (sg.isOffice ? "Creating" : "Searching for");
                     return (
                       <Task key={sg.id} defaultOpen={isInProgress}>
                         <TaskTrigger

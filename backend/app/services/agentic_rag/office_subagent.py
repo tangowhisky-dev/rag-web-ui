@@ -29,6 +29,18 @@ from app.services.agentic_rag.tool_call_parser import parse_think_response
 from app.services.agentic_rag.token_budget import count_tokens
 from app.services.agentic_rag.schemas import Observation
 
+
+def _office_sig(tool: str, args: dict) -> str:
+    """Build a dedup signature for an office tool call."""
+    if tool == "office_generate":
+        return f"{tool}:{args.get('format')}:{args.get('append', False)}"
+    elif tool == "office_edit":
+        return f"{tool}:{args.get('file_id')}:{json.dumps(args.get('commands', []), default=str)[:100]}"
+    elif tool == "office_inspect":
+        return f"{tool}:{args.get('file_id')}:{args.get('mode', 'outline')}"
+    else:
+        return f"{tool}:{args.get('format') or ''}"
+
 # Lazy imports to avoid circular dependency
 # (agent_graph → tools → create_office_document → office_subagent → agent_graph)
 
@@ -294,26 +306,29 @@ async def run_office_subagent(
             tool = tools.get(name)
 
             # Dedup guard: skip identical tool+key-arg combinations.
-            # office_generate with append=true is allowed to repeat (appending
-            # slides/sections to the same file), so we include append in the
-            # signature for office_generate.
-            if name == "office_generate":
-                sig_key = f"{args.get('format')}:{args.get('append', False)}"
-            elif name == "office_edit":
-                sig_key = f"{args.get('file_id')}:{json.dumps(args.get('commands', []), default=str)[:100]}"
-            elif name == "office_inspect":
-                sig_key = f"{args.get('file_id')}:{args.get('mode', 'outline')}"
-            else:
-                sig_key = str(args.get("format") or "")
-            sig = f"{name}:{sig_key}"
+            # Only successful calls are cached — failed calls should be
+            # retried. office_generate with append=true is allowed to
+            # repeat (appending slides/sections to the same file), so we
+            # include append in the signature for office_generate.
+            sig = _office_sig(name, args)
+            # Only block if this exact signature was previously successful.
+            # Failed calls are removed from seen_signatures so they can be retried.
             if sig in seen_signatures:
-                observations.append(Observation(
-                    tool=name, arguments=args, result={},
-                    error=f"Duplicate call: {sig} already tried. Try a different approach.",
-                    tokens=0,
-                ))
-                continue
-            seen_signatures.add(sig)
+                prior_success = any(
+                    o.tool == name and not o.error
+                    and _office_sig(o.tool, o.arguments) == sig
+                    for o in observations
+                )
+                if prior_success:
+                    observations.append(Observation(
+                        tool=name, arguments=args, result={},
+                        error=f"Duplicate call: {sig} already tried. Try a different approach.",
+                        tokens=0,
+                    ))
+                    continue
+                # Failed before — allow retry, don't re-add sig.
+            else:
+                seen_signatures.add(sig)
 
             if tool is None:
                 observations.append(Observation(
