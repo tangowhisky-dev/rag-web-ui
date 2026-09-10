@@ -448,6 +448,10 @@ def delete_message(
 ) -> Any:
     """Delete a message and all its descendants (children via parent_message_id).
 
+    Also deletes generated Office files (ChatFile rows with is_generated=True)
+    and their on-disk stored_path, plus any ChatFile rows referencing the
+    deleted messages.
+
     Accepts string IDs because the frontend uses client-generated UUIDs
     for messages that haven't been persisted yet. Non-numeric IDs return 404.
     """
@@ -487,6 +491,32 @@ def delete_message(
             to_delete.append(child.id)
     _collect_children(msg_id)
     to_delete.append(msg_id)
+
+    # Delete generated Office files on disk and their ChatFile rows.
+    # User-uploaded files (is_generated=False) are left for the chat-level
+    # cleanup; only generated files are tied to a specific message.
+    generated_files = (
+        db.query(ChatFile)
+        .filter(
+            ChatFile.message_id.in_(to_delete),
+            ChatFile.is_generated == True,  # noqa: E712
+        )
+        .all()
+    )
+    for cf in generated_files:
+        if cf.stored_path and os.path.exists(cf.stored_path):
+            try:
+                os.remove(cf.stored_path)
+            except OSError:
+                pass
+        db.delete(cf)
+
+    # Delete all ChatFile rows (including user uploads) referencing the
+    # deleted messages, so no orphaned rows remain.
+    db.query(ChatFile).filter(ChatFile.message_id.in_(to_delete)).delete(
+        synchronize_session=False
+    )
+
     # Delete children first (deepest first) to respect FK constraints.
     for child_id in reversed(to_delete):
         child = db.query(Message).filter(Message.id == child_id).first()
