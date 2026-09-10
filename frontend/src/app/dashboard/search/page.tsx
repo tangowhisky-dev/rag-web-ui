@@ -5,7 +5,6 @@ import {
   Search as SearchIcon,
   Info,
   Loader2,
-  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Clock,
@@ -134,7 +133,7 @@ export default function SearchPage() {
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [suggestionsLoading, setSuggestionsLoading] = useState(false);
 
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
   // Fetch KBs on mount
   useEffect(() => {
@@ -234,47 +233,62 @@ export default function SearchPage() {
     <DashboardLayout pageTitle="Search">
       <div
         className={cn(
-          "flex flex-col transition-all duration-500 ease-in-out",
+          "flex flex-col",
           hasSearched
-            ? "items-start pt-6"
-            : "items-center justify-center min-h-[70vh]",
+            ? "items-start"
+            : "items-start pt-[1vh]",
         )}
       >
         <div className="w-full max-w-3xl mx-auto">
-          {/* Hero icon — only before search */}
-          {!hasSearched && (
-            <div className="flex flex-col items-center mb-8 animate-in fade-in zoom-in-95 duration-700">
-              <SearchAiIcon className="h-24 w-24 text-primary" />
-              <h1 className="mt-4 text-2xl font-semibold tracking-tight text-foreground">
-                AI-powered search across your knowledge bases
-              </h1>
-              {/* <p className="mt-1 text-sm text-muted-foreground">
-                AI-powered retrieval across your knowledge bases
-              </p> */}
-            </div>
-          )}
+          {/* Hero icon + title — shown before and after search */}
+          <div className={cn(
+            "flex items-center gap-3",
+            !hasSearched ? "flex-col mb-6 animate-in fade-in zoom-in-95 duration-700" : "mb-3",
+          )}>
+            <SearchAiIcon className={cn(
+              "text-primary",
+              hasSearched ? "h-10 w-10" : "h-24 w-24",
+            )} />
+            <h1 className={cn(
+              "font-semibold tracking-tight text-foreground",
+              hasSearched ? "text-lg" : "mt-4 text-2xl",
+            )}>
+              AI-powered search across your knowledge bases
+            </h1>
+          </div>
 
           {/* Search bar — single input, Enter to submit */}
           <form
             onSubmit={(e) => { e.preventDefault(); handleSearch(); }}
             className={cn(
-              "relative transition-all duration-500",
-              hasSearched ? "mb-4" : "mb-6",
+              "relative",
+              hasSearched ? "mb-1" : "mb-6",
             )}
           >
           <div className="relative">
-            <SearchIcon className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-            <input
+            <SearchIcon className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
+            <textarea
               ref={inputRef}
-              type="text"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSearch();
+                }
+              }}
               placeholder="Type + Enter to search…"
-              className="w-full rounded-lg border bg-background pl-10 pr-10 py-2.5 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+              rows={1}
+              className="w-full rounded-lg border bg-background pl-10 pr-6 py-2.5 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring resize-none overflow-hidden"
+              style={{
+                fieldSizing: "content",
+                minHeight: "44px",
+                maxHeight: "200px",
+              }}
               autoFocus
             />
             {/* Loading spinner or expanded-query indicator inside the input */}
-            <div className="absolute right-2.5 top-1/2 -translate-y-1/2 flex items-center gap-1">
+            <div className="absolute right-2.5 top-3 flex items-center gap-1">
               {loading && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
               {!loading && showExpandedTooltip && (
                 <Popover>
@@ -301,17 +315,17 @@ export default function SearchPage() {
 
         {/* KB selection — collapsed after search, expanded before */}
         {hasSearched ? (
-          <div className="mb-4">
+          <div className="mb-4 flex items-center gap-2 flex-wrap">
             <button
               type="button"
               onClick={() => setKbPickerOpen((v) => !v)}
-              className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+              className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors shrink-0"
             >
               <span className="tabular-nums">{selectedCount} KB{selectedCount !== 1 ? "s" : ""} selected</span>
-              <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", kbPickerOpen && "rotate-180")} />
+              <ChevronRight className={cn("h-3.5 w-3.5 transition-transform", kbPickerOpen && "rotate-180")} />
             </button>
             {kbPickerOpen && (
-              <div className="flex flex-wrap gap-2 mt-2">
+              <div className="flex flex-wrap gap-2">
                 {kbs.map((kb) => {
                   const selected = selectedKbIds.includes(kb.id);
                   return (
@@ -358,10 +372,11 @@ export default function SearchPage() {
             )}
           </div>
         )}
+        </div>
 
         {/* Loading skeleton */}
         {loading && (
-          <div className="space-y-3">
+          <div className="w-full max-w-3xl mx-auto space-y-3">
             <div className="h-4 w-32 rounded bg-muted/40 animate-pulse" />
             <SkeletonCard />
             <SkeletonCard />
@@ -372,64 +387,77 @@ export default function SearchPage() {
 
         {/* No results */}
         {!loading && hasSearched && groupedResults.length === 0 && (
-          <div className="text-center py-20 text-muted-foreground">
+          <div className="w-full max-w-3xl mx-auto text-center py-20 text-muted-foreground">
             <p className="text-sm">No results found for &ldquo;{query}&rdquo;.</p>
           </div>
         )}
 
-        {/* Empty state — recent searches + LLM suggestions */}
+        {/* Empty state — recent searches + LLM suggestions in 2 columns */}
         {!loading && !hasSearched && (
-          <div className="py-10">
-            {/* LLM suggestions */}
-            {suggestionsLoading && (
-              <div className="max-w-md mx-auto space-y-2">
-                {[0, 1, 2].map((i) => (
-                  <div key={i} className="h-9 rounded-lg bg-muted/40 animate-pulse" />
-                ))}
+          <div className="py-10 w-full px-24 sm:px-32 lg:px-40">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-8">
+              {/* Column 1: Recent searches */}
+              <div>
+                {recentSearches.length > 0 && (
+                  <div>
+                    <div className="flex items-center gap-1.5 mb-2 text-xs text-muted-foreground">
+                      <Clock className="h-3.5 w-3.5" />
+                      <span>Recent searches</span>
+                    </div>
+                    <Suggestions className="!flex-nowrap flex-col items-stretch">
+                      {recentSearches.map((item) => (
+                        <Suggestion
+                          key={item.id}
+                          suggestion={item.query}
+                          onClick={handleSearch}
+                          className="w-full"
+                        >
+                          <span className="flex items-center justify-between w-full">
+                            <span className="truncate">{item.query}</span>
+                            <span className="text-xs text-muted-foreground/50 tabular-nums shrink-0 ml-2">
+                              {item.result_count} result{item.result_count !== 1 ? "s" : ""}
+                            </span>
+                          </span>
+                        </Suggestion>
+                      ))}
+                    </Suggestions>
+                  </div>
+                )}
               </div>
-            )}
-            {!suggestionsLoading && suggestions.length > 0 && (
-              <div className="max-w-2xl mx-auto mb-8 animate-in fade-in duration-500">
-                <div className="flex items-center gap-1.5 mb-3 text-xs text-muted-foreground">
-                  <Sparkles className="h-3.5 w-3.5" />
-                  <span>Suggested searches</span>
-                </div>
-                <Suggestions>
-                  {suggestions.map((s, i) => (
-                    <Suggestion
-                      key={i}
-                      suggestion={s}
-                      onClick={handleSearch}
-                    />
-                  ))}
-                </Suggestions>
-              </div>
-            )}
 
-            {/* Recent searches */}
-            {recentSearches.length > 0 && (
-              <div className="max-w-md mx-auto">
-                <div className="flex items-center gap-1.5 mb-2 text-xs text-muted-foreground">
-                  <Clock className="h-3.5 w-3.5" />
-                  <span>Recent searches</span>
-                </div>
-                <div className="space-y-1">
-                  {recentSearches.map((item) => (
-                    <button
-                      key={item.id}
-                      type="button"
-                      onClick={() => handleSearch(item.query)}
-                      className="flex items-center justify-between w-full text-left rounded-md px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-colors group"
-                    >
-                      <span className="truncate">{item.query}</span>
-                      <span className="text-xs text-muted-foreground/50 tabular-nums shrink-0 ml-2">
-                        {item.result_count} result{item.result_count !== 1 ? "s" : ""}
-                      </span>
-                    </button>
-                  ))}
-                </div>
+              {/* Column 2: Suggested searches */}
+              <div>
+                {suggestionsLoading && (
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-1.5 mb-2 text-xs text-muted-foreground">
+                      <Sparkles className="h-3.5 w-3.5" />
+                      <span>Suggested searches</span>
+                    </div>
+                    {[0, 1, 2].map((i) => (
+                      <div key={i} className="h-9 rounded-lg bg-muted/40 animate-pulse" />
+                    ))}
+                  </div>
+                )}
+                {!suggestionsLoading && suggestions.length > 0 && (
+                  <div className="animate-in fade-in duration-500">
+                    <div className="flex items-center gap-1.5 mb-2 text-xs text-muted-foreground">
+                      <Sparkles className="h-3.5 w-3.5" />
+                      <span>Suggested searches</span>
+                    </div>
+                    <Suggestions className="!flex-nowrap flex-col items-stretch">
+                      {suggestions.map((s, i) => (
+                        <Suggestion
+                          key={i}
+                          suggestion={s}
+                          onClick={handleSearch}
+                          className="w-full"
+                        />
+                      ))}
+                    </Suggestions>
+                  </div>
+                )}
               </div>
-            )}
+            </div>
           </div>
         )}
 
@@ -441,10 +469,15 @@ export default function SearchPage() {
           const endIdx = Math.min((page + 1) * PAGE_SIZE, groupedResults.length);
           const totalChunks = results.length;
           return (
-            <div className="space-y-3">
-              <p className="text-xs text-muted-foreground tabular-nums">
-                {groupedResults.length} document{groupedResults.length !== 1 ? "s" : ""} ({totalChunks} chunk{totalChunks !== 1 ? "s" : ""}) · {latencyMs}ms
-              </p>
+            <div className="w-full max-w-3xl mx-auto space-y-3">
+              <div className="flex items-center justify-between">
+                <p className="text-xs text-muted-foreground tabular-nums">
+                  {groupedResults.length} document{groupedResults.length !== 1 ? "s" : ""} ({totalChunks} chunk{totalChunks !== 1 ? "s" : ""}) · {latencyMs}ms
+                </p>
+                <p className="text-xs text-muted-foreground/60">
+                  Click on result card to download/ open file
+                </p>
+              </div>
               {pageResults.map((group, i) => {
                 const kbName = group.kbId
                   ? kbs.find((kb) => kb.id === group.kbId)?.name ?? `#${group.kbId}`
@@ -495,7 +528,6 @@ export default function SearchPage() {
             </div>
           );
         })()}
-        </div>
       </div>
     </DashboardLayout>
   );

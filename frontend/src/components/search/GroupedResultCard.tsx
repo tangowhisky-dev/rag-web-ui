@@ -12,7 +12,17 @@ import {
 } from "lucide-react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import rehypeRaw from "rehype-raw";
 import { cn } from "@/lib/utils";
+
+// The result card is wrapped in an <a download> link. Markdown content may
+// contain raw URLs / mailto: links that render as nested <a> tags, causing
+// hydration errors. Override <a> to render as a plain <span>.
+const markdownComponents = {
+  a: ({ children }: React.AnchorHTMLAttributes<HTMLAnchorElement>) => (
+    <span>{children}</span>
+  ),
+};
 
 export interface SearchResult {
   chunk_text: string;
@@ -75,15 +85,53 @@ function cleanFilename(name: string): string {
   return stem.replace(/\s+/g, " ").trim();
 }
 
-function highlightInMarkdown(text: string, query: string): string {
-  const terms = query
-    .split(/\s+/)
-    .map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
-    .filter((t) => t.length >= 2);
-  if (terms.length === 0) return text;
+const STOP_WORDS = new Set([
+  "the", "a", "an", "and", "or", "but", "is", "are", "was", "were", "be",
+  "been", "being", "have", "has", "had", "do", "does", "did", "will",
+  "would", "could", "should", "may", "might", "must", "can", "of", "in",
+  "on", "at", "to", "for", "with", "by", "from", "as", "that", "this",
+  "these", "those", "it", "its", "if", "then", "than", "so", "no", "not",
+]);
 
-  const regex = new RegExp(`\\b(${terms.join("|")})\\b`, "gi");
-  return text.replace(regex, "**$1**");
+function buildHighlightPatterns(query: string): string[] {
+  const raw = query.split(/\s+/).filter(Boolean);
+  if (raw.length === 0) return [];
+
+  // Strip leading and trailing stop words, keep stop words between keywords.
+  let start = 0;
+  let end = raw.length;
+  while (start < end && STOP_WORDS.has(raw[start].toLowerCase())) start++;
+  while (end > start && STOP_WORDS.has(raw[end - 1].toLowerCase())) end--;
+  const trimmed = raw.slice(start, end);
+  if (trimmed.length === 0) return [];
+
+  const esc = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+  const patterns: string[] = [];
+  // Full phrase (stop words kept between keywords).
+  patterns.push(esc(trimmed.join(" ")));
+  // Individual non-stop terms (length >= 2).
+  for (const t of trimmed) {
+    if (t.length >= 2 && !STOP_WORDS.has(t.toLowerCase())) {
+      patterns.push(esc(t));
+    }
+  }
+  return patterns;
+}
+
+function highlightInMarkdown(text: string, query: string): string {
+  // Strip markdown links — keep only the link text so the result card's
+  // outer <a> wrapper doesn't get nested <a> tags from rendered markdown.
+  text = text.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
+
+  const patterns = buildHighlightPatterns(query);
+  if (patterns.length === 0) return text;
+
+  // Longer patterns first so the regex engine matches the full phrase
+  // before falling back to individual terms at the same position.
+  patterns.sort((a, b) => b.length - a.length);
+  const regex = new RegExp(`\\b(${patterns.join("|")})\\b`, "gi");
+  return text.replace(regex, '<mark class="search-hit">$1</mark>');
 }
 
 export function groupResultsByDocument(results: SearchResult[]): GroupedSearchResult[] {
@@ -137,6 +185,7 @@ function useChunkScroll(
   const canScrollRight = currentIndex < totalChunks - visibleChunks;
 
   const scrollLeft = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
     e.stopPropagation();
     setCurrentIndex((prev) => {
       if (prev <= 0) return prev;
@@ -150,6 +199,7 @@ function useChunkScroll(
   }, [visibleChunks, scrollContainerRef, setCurrentIndex]);
 
   const scrollRight = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
     e.stopPropagation();
     setCurrentIndex((prev) => {
       if (prev >= totalChunks - visibleChunks) return prev;
@@ -195,7 +245,7 @@ function ChunkPreview({ chunk, index, totalChunks, visibleChunks, query }: Chunk
           </span>
         </div>
         <div className="text-sm text-muted-foreground leading-relaxed prose prose-sm dark:prose-invert max-w-none pointer-events-none line-clamp-4">
-          <Markdown remarkPlugins={[remarkGfm]}>
+          <Markdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]} components={markdownComponents}>
             {highlightInMarkdown(snippet(chunk.original_text || chunk.chunk_text), query)}
           </Markdown>
         </div>
@@ -226,19 +276,12 @@ export default function GroupedResultCard({ group, query, kbName }: GroupedResul
 
   const handleMouseEnter = () => setIsExpanded(true);
   const handleMouseLeave = () => setIsExpanded(false);
-  const handleFocus = () => setIsExpanded(true);
-  const handleBlur = (e: React.FocusEvent) => {
-    if (!e.currentTarget.contains(e.relatedTarget)) setIsExpanded(false);
-  };
 
   return (
     <div
-      className="rounded-lg border bg-card transition-all duration-300 ease-in-out hover:shadow-lg hover:scale-[1.01] group"
+      className="rounded-lg border border-border bg-card transition-all duration-300 ease-in-out hover:shadow-lg hover:scale-[1.01] hover:border-blue-400/50 group"
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
-      onFocus={handleFocus}
-      onBlur={handleBlur}
-      tabIndex={0}
     >
       {/* Header - always visible */}
       <div className="p-4">
@@ -254,17 +297,19 @@ export default function GroupedResultCard({ group, query, kbName }: GroupedResul
                   {group.fileName}
                 </span>
               )}
-              <span className="text-xs text-muted-foreground/50">
-                {group.totalChunks} chunk{["", "s"][Number(group.totalChunks !== 1)]}
-              </span>
             </div>
           </div>
-          <span className={cn(
-            "shrink-0 rounded-full border px-2 py-0.5 text-xs font-medium tabular-nums",
-            tier.className,
-          )}>
-            {group.bestScore.toFixed(2)}
-          </span>
+          <div className="flex items-center gap-2 shrink-0">
+            <span className="text-xs text-muted-foreground/50 tabular-nums">
+              {group.totalChunks} chunk{["", "s"][Number(group.totalChunks !== 1)]}
+            </span>
+            <span className={cn(
+              "shrink-0 rounded-full border px-2 py-0.5 text-xs font-medium tabular-nums",
+              tier.className,
+            )}>
+              {group.bestScore.toFixed(2)}
+            </span>
+          </div>
         </div>
       </div>
 
@@ -276,7 +321,7 @@ export default function GroupedResultCard({ group, query, kbName }: GroupedResul
         )}
       >
         <div className="text-sm text-muted-foreground leading-relaxed prose prose-sm dark:prose-invert max-w-none pointer-events-none line-clamp-3">
-          <Markdown remarkPlugins={[remarkGfm]}>
+          <Markdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]} components={markdownComponents}>
             {highlightInMarkdown(snippet(group.chunks[0].original_text || group.chunks[0].chunk_text), query)}
           </Markdown>
         </div>
@@ -295,17 +340,25 @@ export default function GroupedResultCard({ group, query, kbName }: GroupedResul
             <>
               <button
                 onClick={scrollLeft}
-                disabled={!canScrollLeft}
-                className="absolute left-2 top-1/2 -translate-y-1/2 z-10 rounded-full bg-background/80 backdrop-blur-sm border p-1.5 text-muted-foreground hover:text-foreground hover:bg-background transition-all disabled:opacity-30 disabled:cursor-not-allowed shadow-sm"
+                onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                className={cn(
+                  "absolute left-2 top-1/2 -translate-y-1/2 z-10 rounded-full bg-background/80 backdrop-blur-sm border p-1.5 text-muted-foreground hover:text-foreground hover:bg-background transition-all shadow-sm",
+                  !canScrollLeft && "opacity-30 cursor-not-allowed hover:text-muted-foreground hover:bg-background/80",
+                )}
                 aria-label="Previous chunk"
+                aria-disabled={!canScrollLeft}
               >
                 <ChevronLeft className="h-4 w-4" />
               </button>
               <button
                 onClick={scrollRight}
-                disabled={!canScrollRight}
-                className="absolute right-2 top-1/2 -translate-y-1/2 z-10 rounded-full bg-background/80 backdrop-blur-sm border p-1.5 text-muted-foreground hover:text-foreground hover:bg-background transition-all disabled:opacity-30 disabled:cursor-not-allowed shadow-sm"
+                onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                className={cn(
+                  "absolute right-2 top-1/2 -translate-y-1/2 z-10 rounded-full bg-background/80 backdrop-blur-sm border p-1.5 text-muted-foreground hover:text-foreground hover:bg-background transition-all shadow-sm",
+                  !canScrollRight && "opacity-30 cursor-not-allowed hover:text-muted-foreground hover:bg-background/80",
+                )}
                 aria-label="Next chunk"
+                aria-disabled={!canScrollRight}
               >
                 <ChevronRight className="h-4 w-4" />
               </button>

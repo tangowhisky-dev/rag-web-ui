@@ -137,14 +137,14 @@ def search(
     if threshold < 1.0 and len(merged) > 1:
         merged = semantic_dedup(merged, threshold)
 
-    # 5. Rerank with cross-encoder (score all, no threshold filter)
+    # 5. Rerank with cross-encoder (apply RERANKER_SCORE_THRESHOLD from settings)
     from langchain_core.documents import Document as LangchainDocument
     lc_docs = [
         LangchainDocument(page_content=d.get("page_content", ""), metadata=d.get("metadata", {}))
         for d in merged
     ]
     try:
-        reranked = rerank(query=expanded_query, docs=lc_docs, score_threshold=float("-inf"))
+        reranked = rerank(query=expanded_query, docs=lc_docs, db=db, org_id=org_id)
     except Exception as exc:
         logger.warning("[SEARCH] rerank failed: %s", exc)
         reranked = lc_docs
@@ -207,14 +207,28 @@ def get_search_history(
     current_user: User = Depends(get_current_user),
     limit: int = 10,
 ) -> Any:
-    """Return recent searches for the current user, newest first."""
+    """Return recent distinct searches for the current user, newest first.
+
+    Duplicate queries are collapsed — only the most recent occurrence of
+    each distinct query is returned.
+    """
     rows = (
         db.query(SearchHistory)
         .filter(SearchHistory.user_id == current_user.id)
         .order_by(SearchHistory.created_at.desc())
-        .limit(min(limit, 50))
+        .limit(min(limit * 5, 100))
         .all()
     )
+    seen: set[str] = set()
+    distinct: list[SearchHistory] = []
+    for r in rows:
+        key = r.query.strip().lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        distinct.append(r)
+        if len(distinct) >= limit:
+            break
     return [
         SearchHistoryItem(
             id=r.id,
@@ -222,7 +236,7 @@ def get_search_history(
             result_count=r.result_count,
             created_at=r.created_at.isoformat() if r.created_at else "",
         )
-        for r in rows
+        for r in distinct
     ]
 
 
@@ -243,38 +257,61 @@ async def get_suggestions(
     Uses the configured chat LLM with a concise system prompt. Falls back
     to an empty list if no LLM is configured or the call fails.
     """
-    # Fetch recent searches (up to 20 for context)
+    # Fetch the user's last 3 search queries
     rows = (
         db.query(SearchHistory)
         .filter(SearchHistory.user_id == current_user.id)
         .order_by(SearchHistory.created_at.desc())
-        .limit(20)
+        .limit(3)
         .all()
     )
-    if not rows:
+
+    # Fetch the user's last 3 chat queries (role=user messages across their chats)
+    from sqlalchemy import text as _text
+    chat_rows = db.execute(_text(
+        "SELECT m.content FROM messages m "
+        "JOIN chats c ON m.chat_id = c.id "
+        "WHERE c.user_id = :uid AND m.role = 'user' "
+        "ORDER BY m.created_at DESC LIMIT 3"
+    ), {"uid": current_user.id})
+    recent_chat_queries = [r[0].strip() for r in chat_rows if r[0] and r[0].strip()]
+
+    if not rows and not recent_chat_queries:
         return SuggestionResponse(suggestions=[])
 
-    recent_queries = [r.query for r in rows]
+    recent_searches = [r.query for r in rows]
 
-    # Resolve LLM config
-    model_name = get_setting(db, "UTILITY_MODEL", None) or get_setting(db, "OPENAI_MODEL", None)
-    api_base = get_setting(db, "OPENAI_API_BASE", None)
-    api_key = get_setting(db, "OPENAI_API_KEY", None)
+    # Resolve utility LLM config (utility model + its own API base/key).
+    from app.services.agentic_rag.llm_factory import get_org_llm
+    org_id = current_user.org_id if hasattr(current_user, "org_id") else None
+    llm_cfg = get_org_llm(org_id, db, role="utility")
+    model_name = llm_cfg["model_name"]
+    api_base = llm_cfg["api_base"]
+    api_key = llm_cfg["api_key"]
     if not model_name or not api_base:
         return SuggestionResponse(suggestions=[])
 
-    if not api_key:
-        api_key = "not-required"
-
     system_prompt = (
-        "You are a search assistant. Given the user's recent search queries, "
-        "suggest 3 new queries they might want to search next. "
+        "You are a search assistant. Given the user's recent search history and chat queries, "
+        "suggest 3 new queries they might want to search next.\n\n"
+        "Each suggestion must be a self-contained question or search phrase.\n"
+        "Aim for variety:\n"
+        "- one that broadens the scope (a wider search around the topic),\n"
+        "- one that narrows the scope (a more specific or pinpoint query),\n"
+        "- one that is a natural continuation of the user's recent interests.\n"
+        "Do not repeat queries the user has already searched or asked.\n"
         "Return ONLY a JSON array of 3 strings, no explanation."
     )
-    user_prompt = "Recent searches:\n" + "\n".join(f"- {q}" for q in recent_queries[:15])
+    parts = []
+    if recent_searches:
+        parts.append("Recent searches:\n" + "\n".join(f"- {q}" for q in recent_searches))
+    if recent_chat_queries:
+        parts.append("Recent chat questions:\n" + "\n".join(f"- {q}" for q in recent_chat_queries))
+    user_prompt = "\n\n".join(parts)
 
     try:
         from openai import AsyncOpenAI
+        from app.services.infrastructure.reasoning_tags import extract_reasoning
         client = AsyncOpenAI(api_key=api_key, base_url=api_base)
         resp = await client.chat.completions.create(
             model=model_name,
@@ -282,10 +319,19 @@ async def get_suggestions(
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            temperature=0.7,
-            max_tokens=200,
+            temperature=1.0,
         )
-        content = resp.choices[0].message.content or ""
+        msg = resp.choices[0].message
+        raw = msg.content or ""
+        # Thinking models (e.g. Gemma, Qwen) may put all output in
+        # reasoning_content and leave content empty. Fall back to
+        # reasoning_content to find the JSON.
+        if not raw.strip():
+            raw = getattr(msg, "reasoning_content", None) or ""
+        # Extract reasoning and clean the answer — same approach as the
+        # retrieval pipeline (tool_call_parser.parse_think_response).
+        # extract_reasoning returns (reasoning, answer_text, is_complete).
+        _reasoning, content, _is_complete = extract_reasoning(raw)
         # Parse JSON array from response — handle markdown code fences
         content = content.strip()
         if content.startswith("```"):
