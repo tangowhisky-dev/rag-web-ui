@@ -1500,7 +1500,22 @@ function ChatPageInner({ params }: { params: { id: string } }) {
           }
           try {
             await api.delete(`/api/chat/${params.id}/messages/${id}`);
-            setMessages((prev) => prev.filter((m) => m.id !== id));
+            // Remove the deleted message and all its descendants from the UI.
+            // The backend cascades the delete to children via parent_message_id.
+            setMessages((prev) => {
+              const toDelete = new Set<string>();
+              const collect = (targetId: string) => {
+                if (toDelete.has(targetId)) return;
+                toDelete.add(targetId);
+                for (const m of prev) {
+                  if (m.parentMessageId === targetId) {
+                    collect(m.id);
+                  }
+                }
+              };
+              collect(id);
+              return prev.filter((m) => !toDelete.has(m.id));
+            });
           } catch (e) {
             console.error("Failed to delete message:", e);
           }

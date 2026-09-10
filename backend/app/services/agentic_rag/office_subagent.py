@@ -18,6 +18,7 @@ distracted gemma-4-12b from calling office_generate after searching.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -29,6 +30,28 @@ from app.services.agentic_rag.llm_factory import build_chat_llm
 from app.services.agentic_rag.tool_call_parser import parse_think_response
 from app.services.agentic_rag.token_budget import count_tokens
 from app.services.agentic_rag.schemas import Observation
+
+
+def _content_hash(args: dict) -> str:
+    """Short hash of slides/sections/sheets content for dedup signatures."""
+    h = hashlib.md5()
+    for key in ("slides", "sections", "sheets"):
+        val = args.get(key)
+        if val is not None:
+            h.update(json.dumps(val, sort_keys=True, default=str).encode())
+    return h.hexdigest()[:8]
+
+
+def _office_sig(tool: str, args: dict) -> str:
+    """Build a dedup signature for an office tool call."""
+    if tool == "office_generate":
+        return f"{tool}:{args.get('format')}:{args.get('append', False)}:{_content_hash(args)}"
+    elif tool == "office_edit":
+        return f"{tool}:{args.get('file_id')}:{json.dumps(args.get('commands', []), default=str)[:100]}"
+    elif tool == "office_inspect":
+        return f"{tool}:{args.get('file_id')}:{args.get('mode', 'outline')}"
+    else:
+        return f"{tool}:{args.get('format') or ''}"
 
 # Lazy imports to avoid circular dependency
 # (agent_graph → tools → create_office_document → office_subagent → agent_graph)
@@ -340,13 +363,18 @@ async def run_office_subagent(
 
         try:
             tool_temp = get_setting(ctx.db, "TOOL_CALL_TEMPERATURE", ctx.org_id)
+            if iteration == 1:
+                from app.services.agentic_rag.llm_factory import get_org_llm
+                cfg = get_org_llm(ctx.org_id, ctx.db, role="chat")
+                logger.info("[office_subagent %s] model=%s base=%s",
+                            subagent_id, cfg["model_name"], cfg["api_base"])
             llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=tool_temp)
             resp = await llm.bind_tools(tools_list).ainvoke([
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ])
         except Exception as exc:
-            logger.warning("[office_subagent] LLM call failed: %s", exc)
+            logger.warning("[office_subagent %s] LLM call failed: %s", subagent_id, exc)
             break
 
         parsed = parse_think_response(resp, mode="auto")
@@ -356,9 +384,6 @@ async def run_office_subagent(
             # Sub-agent wrote a summary — we're done
             if isinstance(parsed.final_answer, str) and parsed.final_answer.strip():
                 summary = parsed.final_answer.strip()
-            # If the sub-agent was forced to stop at max iterations without
-            # writing a summary, include the last error so the main agent
-            # knows the generation failed.
             if not summary:
                 errors = [o.error for o in observations if o.error]
                 if errors and not ctx.state.get("generated_files"):
@@ -377,6 +402,31 @@ async def run_office_subagent(
             name = tc.get("tool")
             args = tc.get("arguments", {})
             tool = tools.get(name)
+
+            # Dedup guard: skip identical tool+key-arg combinations.
+            # Only successful calls are cached — failed calls should be
+            # retried. office_generate with append=true is allowed to
+            # repeat (appending slides/sections to the same file), so we
+            # include append in the signature for office_generate.
+            sig = _office_sig(name, args)
+            # Only block if this exact signature was previously successful.
+            # Failed calls are removed from seen_signatures so they can be retried.
+            if sig in seen_signatures:
+                prior_success = any(
+                    o.tool == name and not o.error
+                    and _office_sig(o.tool, o.arguments) == sig
+                    for o in observations
+                )
+                if prior_success:
+                    observations.append(Observation(
+                        tool=name, arguments=args, result={},
+                        error=f"Duplicate call: {sig} already tried. Try a different approach.",
+                        tokens=0,
+                    ))
+                    continue
+                # Failed before — allow retry, don't re-add sig.
+            else:
+                seen_signatures.add(sig)
 
             if tool is None:
                 observations.append(Observation(
@@ -431,9 +481,8 @@ async def run_office_subagent(
             counts[name] = counts.get(name, 0) + 1
             calls_used += 1
 
-            # Sync observations to ctx.state under a sub-agent-specific key so
-            # office_inspect/office_edit can find file_id from office_generate
-            # without polluting the main agent's observations.
+            # Sync observations to ctx.state so office_inspect/office_edit can
+            # find file_id from office_generate.
             if ctx.state is not None:
                 ctx.state["_office_subagent_observations"] = observations
 
@@ -491,6 +540,6 @@ async def run_office_subagent(
         "file_id": None,
         "file_name": None,
         "format": None,
-        "summary": summary if (summary := locals().get("summary", "")) else f"Failed to generate document: {error_msg}",
+        "summary": summary or f"Failed to generate document: {error_msg}",
         "error": error_msg,
     }

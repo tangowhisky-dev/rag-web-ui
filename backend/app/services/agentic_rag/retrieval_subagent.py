@@ -31,6 +31,18 @@ from app.services.agentic_rag.schemas import Observation
 logger = logging.getLogger(__name__)
 
 
+def _retrieval_sig_key(name: str, args: dict) -> str:
+    """Build the dedup signature key for a retrieval tool call."""
+    if name == "file_read":
+        return f"{args.get('document_id')}:{args.get('offset', 1)}"
+    return (
+        args.get("query")
+        or args.get("title_contains")
+        or args.get("pattern")
+        or str(args.get("document_id") or "")
+    )
+
+
 RETRIEVAL_SUBAGENT_PROMPT = """\
 You are a retrieval specialist. Your job: find the best evidence for a single\
  sub-query, diagnose retrieval failures, and return a structured result the\
@@ -468,21 +480,26 @@ async def run_retrieval_subagent(
             if name == "file_read":
                 sig_key = f"{args.get('document_id')}:{args.get('offset', 1)}"
             else:
-                sig_key = (
-                    args.get("query")
-                    or args.get("title_contains")
-                    or args.get("pattern")
-                    or str(args.get("document_id") or "")
-                )
+                sig_key = _retrieval_sig_key(name, args)
             sig = f"{name}:{sig_key}"
             if sig in seen_signatures:
-                observations.append(Observation(
-                    tool=name, arguments=args, result={},
-                    error=f"Duplicate call: {sig} already tried. Try a different tool or query.",
-                    tokens=0,
-                ))
-                continue
-            seen_signatures.add(sig)
+                # Only block if the prior call was successful — failed calls
+                # should be retried, not served from cache.
+                prior_success = any(
+                    o.tool == name and not o.error
+                    and f"{o.tool}:{_retrieval_sig_key(o.tool, o.arguments)}" == sig
+                    for o in observations
+                )
+                if prior_success:
+                    observations.append(Observation(
+                        tool=name, arguments=args, result={},
+                        error=f"Duplicate call: {sig} already tried. Try a different tool or query.",
+                        tokens=0,
+                    ))
+                    continue
+                # Failed before — allow retry, don't re-add sig.
+            else:
+                seen_signatures.add(sig)
 
             if tool is None:
                 observations.append(Observation(
