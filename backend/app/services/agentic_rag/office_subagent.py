@@ -18,6 +18,7 @@ distracted gemma-4-12b from calling office_generate after searching.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from typing import Any
@@ -30,10 +31,20 @@ from app.services.agentic_rag.token_budget import count_tokens
 from app.services.agentic_rag.schemas import Observation
 
 
+def _content_hash(args: dict) -> str:
+    """Short hash of slides/sections/sheets content for dedup signatures."""
+    h = hashlib.md5()
+    for key in ("slides", "sections", "sheets"):
+        val = args.get(key)
+        if val is not None:
+            h.update(json.dumps(val, sort_keys=True, default=str).encode())
+    return h.hexdigest()[:8]
+
+
 def _office_sig(tool: str, args: dict) -> str:
     """Build a dedup signature for an office tool call."""
     if tool == "office_generate":
-        return f"{tool}:{args.get('format')}:{args.get('append', False)}"
+        return f"{tool}:{args.get('format')}:{args.get('append', False)}:{_content_hash(args)}"
     elif tool == "office_edit":
         return f"{tool}:{args.get('file_id')}:{json.dumps(args.get('commands', []), default=str)[:100]}"
     elif tool == "office_inspect":
