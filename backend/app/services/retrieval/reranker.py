@@ -153,6 +153,11 @@ def soft_elbow_truncate(
     at least *min_keep* docs and at most *max_keep* (safety valve for
     pathological cases where all chunks score similarly with no drop).
 
+    Outlier-aware: if the first gap is disproportionately large compared
+    to the remaining gaps (top chunk is an outlier above a relevant
+    cluster), the first gap is skipped and the search for the real elbow
+    starts from the second gap. All docs above the real elbow are returned.
+
     Args:
         docs:           Output of :func:`rerank` (already sorted descending).
         min_keep:       Minimum docs to return regardless of drops.
@@ -163,7 +168,29 @@ def soft_elbow_truncate(
     if len(docs) <= min_keep:
         return docs
     scores = [d.metadata.get("_reranker_score", 0.0) for d in docs]
-    for i in range(1, min(len(docs), max_keep)):
+    limit = min(len(docs), max_keep)
+    if limit <= 1:
+        return docs[:max_keep]
+
+    drops = [scores[i - 1] - scores[i] for i in range(1, limit)]
+    if not drops:
+        return docs[:max_keep]
+
+    # Outlier detection: if the first gap is disproportionately large
+    # compared to the median of the remaining gaps, the top chunk is an
+    # outlier above a relevant cluster. Skip the first gap and look for
+    # the real elbow starting from the second gap.
+    start = 1
+    if len(drops) > 1:
+        rest = sorted(drops[1:])
+        median_rest = rest[len(rest) // 2]
+        if median_rest > 0:
+            if drops[0] > 2.0 * median_rest:
+                start = 2
+        elif drops[0] > 0:
+            start = 2
+
+    for i in range(start, limit):
         if scores[i - 1] - scores[i] >= drop_threshold:
             return docs[:max(i, min_keep)]
     return docs[:max_keep]

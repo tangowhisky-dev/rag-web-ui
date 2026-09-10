@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 from langchain_core.messages import AIMessage
@@ -233,6 +234,31 @@ def _format_evidence_for_subagent(docs: list[dict], max_chars: int = 2000) -> st
     return "\n\n".join(parts)
 
 
+def _summarize_office_request(request: str) -> str:
+    """Extract a short label like 'presentation about <title>' from the request."""
+    lower = request.lower()
+    if any(k in lower for k in ("pptx", "ppt", "powerpoint", "slide", "deck")):
+        kind = "presentation"
+    elif any(k in lower for k in ("xlsx", "excel", "spreadsheet")):
+        kind = "spreadsheet"
+    elif any(k in lower for k in ("docx", "word", "document")):
+        kind = "document"
+    else:
+        kind = "document"
+    # Try "Title: <text>" pattern (case-insensitive).
+    m = re.search(r"title\s*:\s*(.+?)(?:\.\s|\n|$)", request, re.IGNORECASE)
+    if m:
+        title = m.group(1).strip().rstrip(".")
+        return f"{kind} about {title}"
+    # Try "about <text>" pattern.
+    m = re.search(r"\babout\s+(.+?)(?:\.\s|\n|$)", request, re.IGNORECASE)
+    if m:
+        title = m.group(1).strip().rstrip(".")
+        return f"{kind} about {title}"
+    # Fallback: first 60 chars.
+    return f"{kind} about {request[:60].strip()}"
+
+
 def _format_accumulated_data(data: list) -> str:
     """Format accumulated_data for the sub-agent prompt."""
     if not data:
@@ -261,16 +287,16 @@ async def run_office_subagent(
         dict with keys: ok, file_id, file_name, format, summary, error
     """
     # Lazy imports (break circular dependency)
-    from app.services.agentic_rag.agent_graph.helpers import _writer as _get_writer
+    from app.services.agentic_rag.agent_graph.helpers import _emit_timeline, _writer as _get_writer
     from app.services.agentic_rag.agent_graph.tooling import _run_tool
     from app.services.agentic_rag.agent_graph.observations import _tool_descriptions_text
     from app.services.agentic_rag.tools import build_tools
     from app.services.settings_service import get_setting
 
     writer = _get_writer()
-    writer({"event": "subagent_progress", "subagent_id": subagent_id,
-            "sub_query": request[:200], "status": "started",
-            "subagent_type": "office"})
+    short_label = _summarize_office_request(request)
+    _emit_timeline(type="subagent_start", subagent_id=subagent_id,
+                   subagent_type="office", label=short_label)
 
     # Build the 4 office tools — these share ctx so they can read/write state
     all_tools = build_tools(ctx)
@@ -312,11 +338,6 @@ async def run_office_subagent(
             tools_text, iteration, tool_budget, calls_used, observations,
         )
 
-        writer({"event": "subagent_progress", "subagent_id": subagent_id,
-                "sub_query": request[:200], "status": "tool_call",
-                "tool": "thinking", "label": "Office: thinking",
-                "subagent_type": "office", "iteration": iteration})
-
         try:
             tool_temp = get_setting(ctx.db, "TOOL_CALL_TEMPERATURE", ctx.org_id)
             llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=tool_temp)
@@ -345,18 +366,13 @@ async def run_office_subagent(
             # Count new files generated so far
             _gen = ctx.state.get("generated_files", []) if ctx.state else []
             _new = [f for f in _gen if f.get("file_id") and f["file_id"] not in pre_existing_file_ids]
-            writer({"event": "subagent_progress", "subagent_id": subagent_id,
-                    "sub_query": request[:200], "status": "done",
-                    "subagent_type": "office",
-                    "evidence_count": len(_new),
-                    "summary": summary[:300] if summary else ""})
+            _emit_timeline(type="subagent_done", subagent_id=subagent_id,
+                           subagent_type="office", label=short_label,
+                           succeeded=len(_new) > 0, evidence_count=len(_new))
             break
 
-        # Execute tool calls
-        writer({"event": "subagent_progress", "subagent_id": subagent_id,
-                "sub_query": request[:200], "status": "tool_call",
-                "tool": "office_tools", "label": "Office: executing tools",
-                "subagent_type": "office", "iteration": iteration})
+        # Execute tool calls (no "executing tools" wrapper event — each tool
+        # emits its own subagent_step with a descriptive label).
         for tc in tool_calls:
             name = tc.get("tool")
             args = tc.get("arguments", {})
@@ -396,10 +412,14 @@ async def run_office_subagent(
             seen_signatures.add(sig)
 
             label = getattr(tool, "ui_label", f"office: {name}")
-            writer({"event": "subagent_progress", "subagent_id": subagent_id,
-                    "sub_query": request[:200], "status": "tool_call",
-                    "tool": name, "label": label,
-                    "subagent_type": "office", "iteration": iteration})
+            # For office_generate, use "Updating" on subsequent calls (file already exists).
+            if name == "office_generate":
+                _existing = ctx.state.get("generated_files", []) if ctx.state else []
+                if any(f.get("file_id") for f in _existing):
+                    label = "Updating Office document"
+            tool_step = _emit_timeline(type="subagent_step", subagent_id=subagent_id,
+                                       step_type="tool", tool=name, label=label,
+                                       status="active")
 
             result = await _run_tool(tool, name, args)
             obs = Observation(
@@ -426,18 +446,21 @@ async def run_office_subagent(
                     file_created = True
                     writer({"event": "file", "file_id": obs.result["file_id"],
                             "file_name": obs.result.get("file_name", ""),
-                            "format": obs.result.get("format", "")})
+                            "format": obs.result.get("format", ""),
+                            "title": obs.result.get("title", ""),
+                            "slide_count": obs.result.get("slide_count"),
+                            "sheet_count": obs.result.get("sheet_count"),
+                            "chart_count": obs.result.get("chart_count")})
                 else:
                     summary_text = json.dumps(obs.result, default=str)[:150]
             if obs.error:
                 logger.warning("[office_subagent %s] tool %s failed: %s",
                                subagent_id, obs.tool, obs.error)
-            writer({"event": "subagent_progress", "subagent_id": subagent_id,
-                    "sub_query": request[:200], "status": "tool_done",
-                    "tool": obs.tool, "label": label,
-                    "hit_count": 1 if file_created else 0,
-                    "error": bool(obs.error), "summary": summary_text,
-                    "subagent_type": "office", "iteration": iteration})
+            _emit_timeline(id=tool_step, type="subagent_step", subagent_id=subagent_id,
+                           step_type="tool", tool=obs.tool, label=label,
+                           hit_count=1 if file_created else 0,
+                           error=bool(obs.error), summary=summary_text,
+                           status="complete")
 
     # Collect results from state — only files generated during THIS run count.
     generated_files = ctx.state.get("generated_files", []) if ctx.state else []
@@ -453,6 +476,10 @@ async def run_office_subagent(
             "file_name": latest.get("file_name"),
             "format": latest.get("format"),
             "summary": summary or f"Created {latest.get('file_name', 'document')}",
+            "slide_count": latest.get("slide_count"),
+            "sheet_count": latest.get("sheet_count"),
+            "chart_count": latest.get("chart_count"),
+            "title": latest.get("title"),
             "error": None,
         }
 

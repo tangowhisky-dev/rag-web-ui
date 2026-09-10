@@ -7,14 +7,19 @@ import {
 } from "@/components/ai-elements/chain-of-thought";
 import { Shimmer } from "@/components/ai-elements/shimmer";
 import {
-  type ToolState,
-} from "@/components/ai-elements/tool";
-import {
   Task,
   TaskTrigger,
   TaskContent,
   TaskItem,
 } from "@/components/ai-elements/task";
+import {
+  Collapsible,
+  CollapsibleTrigger,
+  CollapsibleContent,
+} from "@/components/ui/collapsible";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import rehypeHighlight from "rehype-highlight";
 import {
   SearchIcon,
   BrainIcon,
@@ -36,53 +41,55 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
-// ── Node → Phase mapping ─────────────────────────────────────────────────────
+// ── Unified timeline event type ──────────────────────────────────────────────
+// Emitted by the backend via `tl:` SSE events. See helpers.py _emit_timeline().
 
-const NODE_PHASE: Record<string, string> = {
-  // Phase 1: Analyzing query
-  load_context: "Analyzing query",
-  plan: "Analyzing query",
-  clarify_interrupt: "Analyzing query",
+export interface TimelineEvent {
+  id: string;
+  type: "phase" | "thinking" | "tool_call" | "tool_result" | "subagent_start" | "subagent_step" | "subagent_done";
+  ts?: number;
+  label?: string;
+  status?: string;
+  content?: string;
+  elapsed?: number;
+  tool?: string;
+  summary?: string;
+  details?: Record<string, unknown> | null;
+  error?: string | null;
+  hit_count?: number;
+  subagent_id?: string;
+  subagent_type?: "retrieval" | "office";
+  step_type?: "thinking" | "tool";
+  succeeded?: boolean;
+  evidence_count?: number;
+}
 
-  // Phase 2: Gathering sources (atomic search tools run inside the tool node)
-  // "tool" node is not mapped — tool calls are shown as Tool cards.
+export interface AgenticProgressProps {
+  timelineEvents?: TimelineEvent[];
+  isStreaming: boolean;
+}
 
-  // Phase 3: Thinking & sufficiency
-  think: "Thinking",
-  sufficiency_check: "Verifying",
+// ── Icon maps ────────────────────────────────────────────────────────────────
 
-  // Phase 4: Generating answer
-  generating: "Generating answer",
-  generate_answer: "Generating answer",
-
-  // Phase 5: Finalizing answer
-  finalize: "Finalizing answer",
-  answer_scoring: "Finalizing answer",
-  finalize_answer: "Finalizing answer",
-
-  // Phase 6: Calculating confidence
-  answer_evaluation: "Calculating confidence",
-};
-
-// Map phase labels to icons
 const PHASE_ICONS: Record<string, LucideIcon> = {
   "Analyzing query": SearchIcon,
   "Gathering sources": ZoomInIcon,
-  Synthesizing: FileTextIcon,
-  Thinking: BrainIcon,
-  Reflecting: BrainIcon,
-  Verifying: CheckCircleIcon,
+  "Synthesizing": FileTextIcon,
+  "Thinking": BrainIcon,
+  "Reflecting": BrainIcon,
+  "Verifying": CheckCircleIcon,
   "Generating answer": FileTextIcon,
   "Finalizing answer": CheckCircleIcon,
-  "Calculating confidence": BarChartIcon,
+  "Confidence calculation": BarChartIcon,
+  "Saving memory": DatabaseIcon,
 };
 
-// Map tool names to icons
 const TOOL_ICONS: Record<string, LucideIcon> = {
   keyword_search: ScanSearchIcon,
   semantic_search: ScanSearchIcon,
   rerank_results: ScanSearchIcon,
   graph_expand: ScanSearchIcon,
+  title_search: ScanSearchIcon,
   kb_metadata: DatabaseIcon,
   kb_grep: ScanTextIcon,
   kb_outline: BookOpenIcon,
@@ -92,215 +99,222 @@ const TOOL_ICONS: Record<string, LucideIcon> = {
   chart_generate: BarChartIcon,
   summarize: SparklesIcon,
   extract_data: WrenchIcon,
+  retrieve_parallel: SearchIcon,
+  create_office_document: FileCheckIcon,
 };
 
-// ── Types ────────────────────────────────────────────────────────────────────
+const SUBAGENT_ICONS: Record<string, { active: LucideIcon; done: LucideIcon; failed: LucideIcon }> = {
+  retrieval: { active: SearchIcon, done: CheckCircleIcon, failed: XCircleIcon },
+  office: { active: Loader2Icon, done: FileCheckIcon, failed: XCircleIcon },
+};
 
-export interface AgentStepEvent {
-  node: string;
-  latency_ms: number;
+// ── Render entry types ───────────────────────────────────────────────────────
+// The flat timeline events are processed into render entries. Subagent events
+// are grouped into a single entry with their internal steps.
+
+interface SubagentItem {
+  id: string;
+  stepType: "thinking" | "tool";
+  label: string;
   status: string;
-  [key: string]: unknown;
-}
-
-export interface ProgressMessage {
-  phase: string;
-  message: string;
-  details?: Record<string, unknown>;
-  rewritten_query?: string;
-  original_query?: string;
-}
-
-export interface SubagentProgressEvent {
-  subagent_id: string;
-  sub_query: string;
-  status: "started" | "tool_call" | "tool_done" | "done";
-  tool?: string;
-  label?: string;
-  hit_count?: number;
-  error?: string | boolean | null;
-  evidence_count?: number;
+  hitCount?: number;
+  error?: boolean;
   summary?: string;
-  subagent_type?: "retrieval" | "office";
-  iteration?: number;
 }
 
-export interface AgenticProgressProps {
-  agentSteps?: AgentStepEvent[];
-  isStreaming: boolean;
-  toolCalls?: Array<Record<string, unknown>>;
-  toolObservations?: Array<Record<string, unknown>>;
-  progressMessages?: ProgressMessage[];
-  subagentProgress?: SubagentProgressEvent[];
-}
+type RenderEntry =
+  | { kind: "phase"; event: TimelineEvent }
+  | { kind: "thinking"; event: TimelineEvent }
+  | { kind: "tool"; event: TimelineEvent }
+  | { kind: "subagent"; startEvent: TimelineEvent; steps: SubagentItem[]; doneEvent?: TimelineEvent };
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+// Tools that delegate to a subagent — their tool_call/tool_result events
+// are suppressed in the timeline because the subagent's own events
+// (subagent_start/subagent_step/subagent_done) handle the display.
+const SUBAGENT_TOOL_NAMES = new Set(["create_office_document"]);
 
-interface ToolCallPair {
-  call: Record<string, unknown>;
-  observation?: Record<string, unknown>;
-}
+function buildRenderEntries(events: TimelineEvent[]): RenderEntry[] {
+  const entries: RenderEntry[] = [];
+  let currentSubagent: { startEvent: TimelineEvent; steps: SubagentItem[] } | null = null;
 
-function pairToolCallsAndObservations(
-  toolCalls: Array<Record<string, unknown>>,
-  toolObservations: Array<Record<string, unknown>>
-): ToolCallPair[] {
-  return toolCalls.map((call, i) => ({
-    call,
-    observation: toolObservations[i],
-  }));
-}
-
-function getToolState(pair: ToolCallPair): ToolState {
-  if (pair.observation) {
-    if (pair.observation.error) return "output-error";
-    return "output-available";
+  for (const ev of events) {
+    switch (ev.type) {
+      case "phase":
+        entries.push({ kind: "phase", event: ev });
+        break;
+      case "thinking":
+        entries.push({ kind: "thinking", event: ev });
+        break;
+      case "tool_call":
+      case "tool_result":
+        // Skip tool events for subagent-delegating tools — the subagent
+        // events (subagent_start/subagent_done) handle the display.
+        if (ev.tool && SUBAGENT_TOOL_NAMES.has(ev.tool)) {
+          break;
+        }
+        entries.push({ kind: "tool", event: ev });
+        break;
+      case "subagent_start":
+        currentSubagent = { startEvent: ev, steps: [] };
+        break;
+      case "subagent_step": {
+        if (currentSubagent) {
+          // Merge by id — if the step already exists (active → complete update),
+          // update it in place. Otherwise append.
+          const existing = currentSubagent.steps.find((s) => s.id === ev.id);
+          if (existing) {
+            existing.status = ev.status ?? existing.status;
+            existing.hitCount = ev.hit_count ?? existing.hitCount;
+            existing.error = ev.error ? true : existing.error;
+            existing.summary = ev.summary ?? existing.summary;
+          } else {
+            currentSubagent.steps.push({
+              id: ev.id,
+              stepType: ev.step_type ?? "tool",
+              label: ev.label ?? ev.tool ?? "step",
+              status: ev.status ?? "active",
+              hitCount: ev.hit_count,
+              error: ev.error ? true : false,
+              summary: ev.summary,
+            });
+          }
+        }
+        break;
+      }
+      case "subagent_done":
+        if (currentSubagent) {
+          entries.push({
+            kind: "subagent",
+            startEvent: currentSubagent.startEvent,
+            steps: currentSubagent.steps,
+            doneEvent: ev,
+          });
+          currentSubagent = null;
+        }
+        break;
+    }
   }
-  return "input-available";
+  // If a subagent is still in progress (no done event yet), add it
+  if (currentSubagent) {
+    entries.push({
+      kind: "subagent",
+      startEvent: currentSubagent.startEvent,
+      steps: currentSubagent.steps,
+    });
+  }
+  return entries;
 }
 
-function getToolLabel(call: Record<string, unknown>): string {
-  return (call.label as string) || (call.tool as string) || "Tool";
+// ── ThinkingStep: "Thought (Ns)" as the clickable trigger ───────────────────
+// The label itself expands/collapses the reasoning content — no nested
+// "Show reasoning" sub-component.
+
+const MAX_REASONING_HEIGHT = 100; // px — fixed height prevents wobbling from line wrapping
+const MAX_SUBAGENT_STEPS = 5;
+
+interface ThinkingStepProps {
+  content: string;
+  elapsed?: number;
+  isActive: boolean;
+  isComplete: boolean;
 }
 
-function getToolName(call: Record<string, unknown>): string {
-  return (call.tool as string) || "tool";
-}
+const ThinkingStep = ({
+  content,
+  elapsed,
+  isActive,
+  isComplete,
+}: ThinkingStepProps) => {
+  const [isOpen, setIsOpen] = useState(isActive);
+  const [expanded, setExpanded] = useState(false);
+
+  // Auto-open when streaming starts, auto-close 1s after streaming ends.
+  useEffect(() => {
+    if (isActive) {
+      setIsOpen(true);
+    } else if (isComplete) {
+      const timer = setTimeout(() => setIsOpen(false), 1000);
+      return () => clearTimeout(timer);
+    }
+  }, [isActive, isComplete]);
+
+  const label = isActive
+    ? <Shimmer duration={1.5}>Thinking…</Shimmer>
+    : `Thought${elapsed ? ` (${Math.round(elapsed)}s)` : ""}`;
+
+  return (
+    <Collapsible open={isOpen} onOpenChange={setIsOpen}>
+      <ChainOfThoughtStep
+        icon={BrainIcon}
+        label={
+          <CollapsibleTrigger asChild>
+            <button className="flex w-full items-center gap-1 text-left cursor-pointer hover:text-foreground transition-colors">
+              <span>{label}</span>
+              <ChevronDownIcon
+                className="size-3 ml-auto transition-transform text-muted-foreground/60"
+                style={{ transform: isOpen ? "rotate(180deg)" : "rotate(0deg)" }}
+              />
+            </button>
+          </CollapsibleTrigger>
+        }
+        status={isComplete ? "complete" : "active"}
+      >
+        <CollapsibleContent className="text-xs text-muted-foreground overflow-hidden">
+          <div className="mt-2 relative">
+            <div
+              className="reasoning-content data-[state=closed]:fade-out-0 data-[state=open]:slide-in-from-top-2 data-[state=closed]:animate-out data-[state=open]:animate-in outline-none overflow-y-auto"
+              style={{ maxHeight: expanded ? undefined : MAX_REASONING_HEIGHT }}
+            >
+              {/* Use plain text during streaming for performance; markdown when complete. */}
+              {isActive ? (
+                <pre className="whitespace-pre-wrap break-words font-sans text-xs leading-relaxed">
+                  {content}
+                </pre>
+              ) : (
+                <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+                  {content}
+                </ReactMarkdown>
+              )}
+            </div>
+            {/* Gradient fade: transparent at top → solid background at bottom.
+                Spans full width, only visible when collapsed. */}
+            {!expanded && (
+              <div
+                className="pointer-events-none absolute bottom-0 left-0 right-0 h-16"
+                style={{
+                  background: "linear-gradient(to bottom, transparent, hsl(var(--background)))",
+                }}
+              />
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            className="w-full flex items-center justify-center gap-1 text-muted-foreground/70 hover:text-foreground transition-colors text-[11px] py-1"
+          >
+            <ChevronDownIcon
+              className="size-3 transition-transform"
+              style={{ transform: expanded ? "rotate(180deg)" : "rotate(0deg)" }}
+            />
+            {expanded ? "Show less" : "Show all"}
+          </button>
+        </CollapsibleContent>
+      </ChainOfThoughtStep>
+    </Collapsible>
+  );
+};
 
 // ── Component ────────────────────────────────────────────────────────────────
 
 export const AgenticProgress = ({
-  agentSteps,
+  timelineEvents,
   isStreaming,
-  toolCalls,
-  toolObservations,
-  subagentProgress,
 }: AgenticProgressProps) => {
   const [isOpen, setIsOpen] = useState(true);
+  const [showFullTimeline, setShowFullTimeline] = useState(false);
   const dismissRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
-  // Build deduplicated phase list — every phase appears at most once.
-  // The agent loop may revisit retrieval/synthesis/verification nodes
-  // across iterations; showing each repeat would produce a confusing
-  // timeline (e.g. "Gathering sources" x6).
-  const phases = useMemo(() => {
-    if (!agentSteps?.length) return [] as string[];
-    const seen = new Set<string>();
-    const unique: string[] = [];
-    for (const step of agentSteps) {
-      const phase = NODE_PHASE[step.node];
-      if (!phase) continue;
-      if (!seen.has(phase)) {
-        seen.add(phase);
-        unique.push(phase);
-      }
-    }
-    return unique;
-  }, [agentSteps]);
-
-  // Pair tool calls with their observations
-  const toolPairs = useMemo(() => {
-    if (!toolCalls?.length) return [] as ToolCallPair[];
-    return pairToolCallsAndObservations(
-      toolCalls,
-      toolObservations ?? []
-    );
-  }, [toolCalls, toolObservations]);
-
-  // Unified timeline: phases with tool cards inserted after "Thinking"
-  // (in the atomic-tools pipeline, tools run after think and before
-  // sufficiency_check/verifying).
-  const timeline = useMemo(() => {
-    type Entry =
-      | { kind: "phase"; phase: string; phaseIdx: number }
-      | { kind: "tool"; pair: ToolCallPair; toolIdx: number };
-    const entries: Entry[] = [];
-    const toolAnchorIdx = phases.indexOf("Thinking");
-    phases.forEach((phase, i) => {
-      entries.push({ kind: "phase", phase, phaseIdx: i });
-      if (i === toolAnchorIdx) {
-        toolPairs.forEach((pair, ti) => {
-          entries.push({ kind: "tool", pair, toolIdx: ti });
-        });
-      }
-    });
-    if (toolAnchorIdx === -1) {
-      toolPairs.forEach((pair, ti) => {
-        entries.push({ kind: "tool", pair, toolIdx: ti });
-      });
-    }
-    return entries;
-  }, [phases, toolPairs]);
-
-  // Group subagent progress events by subagent_id, preserving arrival order.
-  // Each subagent becomes one Task card with its internal tool calls as items.
-  const subagentGroups = useMemo(() => {
-    if (!subagentProgress?.length) return [] as Array<{
-      id: string;
-      subQuery: string;
-      isOffice: boolean;
-      isDone: boolean;
-      succeeded: boolean;
-      items: Array<{ text: string; status: "active" | "complete" | "error" }>;
-    }>;
-    const groups: Record<string, {
-      id: string;
-      subQuery: string;
-      isOffice: boolean;
-      isDone: boolean;
-      succeeded: boolean;
-      items: Array<{ text: string; status: "active" | "complete" | "error" }>;
-    }> = {};
-    const order: string[] = [];
-    for (const ev of subagentProgress) {
-      const sid = ev.subagent_id;
-      if (!groups[sid]) {
-        groups[sid] = {
-          id: sid,
-          subQuery: ev.sub_query,
-          isOffice: ev.subagent_type === "office",
-          isDone: false,
-          succeeded: false,
-          items: [],
-        };
-        order.push(sid);
-      }
-      const g = groups[sid];
-      if (ev.status === "started") {
-        g.subQuery = ev.sub_query;
-        g.isOffice = ev.subagent_type === "office";
-      } else if (ev.status === "tool_call") {
-        g.items.push({
-          text: ev.label || ev.tool || "tool call",
-          status: "active",
-        });
-      } else if (ev.status === "tool_done") {
-        // Replace the last active item or append
-        const lastActive = [...g.items].reverse().findIndex((i) => i.status === "active");
-        if (lastActive >= 0) {
-          const idx = g.items.length - 1 - lastActive;
-          g.items[idx] = {
-            text: ev.error
-              ? `${ev.label || ev.tool || "tool"}: failed`
-              : ev.hit_count !== undefined
-                ? `${ev.label || ev.tool || "tool"}: ${ev.hit_count} results`
-                : ev.label || ev.tool || "tool",
-            status: ev.error ? "error" : "complete",
-          };
-        }
-      } else if (ev.status === "done") {
-        g.isDone = true;
-        g.succeeded = (ev.evidence_count ?? 0) > 0;
-        g.items.push({
-          text: g.isOffice
-            ? (g.succeeded ? `Created document` : "Failed to create document")
-            : `Returned ${ev.evidence_count ?? 0} results`,
-          status: "complete",
-        });
-      }
-    }
-    return order.map((id) => groups[id]);
-  }, [subagentProgress]);
+  const entries = useMemo(() => buildRenderEntries(timelineEvents ?? []), [timelineEvents]);
 
   // Auto-collapse after streaming ends
   useEffect(() => {
@@ -310,12 +324,12 @@ export const AgenticProgress = ({
         dismissRef.current = undefined;
       }
       Promise.resolve().then(() => setIsOpen(true));
-    } else if (phases.length > 0 || toolPairs.length > 0) {
+    } else if (entries.length > 0) {
       dismissRef.current = setTimeout(() => {
         setIsOpen(false);
       }, 2000);
     }
-  }, [isStreaming, phases.length, toolPairs.length]);
+  }, [isStreaming, entries.length]);
 
   useEffect(() => {
     return () => {
@@ -323,10 +337,13 @@ export const AgenticProgress = ({
     };
   }, []);
 
-  if (phases.length === 0 && toolPairs.length === 0 && subagentGroups.length === 0) return null;
+  if (entries.length === 0) return null;
 
-  // Determine which phase is currently active (last phase while streaming)
-  const currentPhaseIdx = isStreaming ? phases.length - 1 : -1;
+  // Limit visible timeline to last N entries to prevent unbounded growth.
+  const MAX_VISIBLE = 12;
+  const hasMore = entries.length > MAX_VISIBLE;
+  const visibleEntries = showFullTimeline ? entries : entries.slice(-MAX_VISIBLE);
+  const hiddenCount = entries.length - MAX_VISIBLE;
 
   return (
     <div className="not-prose mb-2">
@@ -335,22 +352,37 @@ export const AgenticProgress = ({
           {isStreaming ? <Shimmer duration={1.5}>Agent working…</Shimmer> : "Agent timeline"}
         </ChainOfThoughtHeader>
         <ChainOfThoughtContent>
-          {timeline.map((entry) => {
+          {hasMore && !showFullTimeline && (
+            <button
+              type="button"
+              onClick={() => setShowFullTimeline(true)}
+              className="flex items-center gap-1 text-muted-foreground/60 hover:text-foreground transition-colors text-[11px] mb-1"
+            >
+              <ChevronDownIcon className="size-3 rotate-180" />
+              {hiddenCount} earlier steps hidden
+            </button>
+          )}
+          {visibleEntries.map((entry) => {
+            // Use event ID for stable keys to prevent unmount/remount flickering.
+            const key = "startEvent" in entry
+              ? `subagent-${entry.startEvent.id}`
+              : `${entry.kind}-${entry.event.id}`;
+
+            // ── Phase entry ───────────────────────────────────────────────
             if (entry.kind === "phase") {
-              const phase = entry.phase;
-              const i = entry.phaseIdx;
-              const isActive = i === currentPhaseIdx;
-              const isComplete = i < currentPhaseIdx || !isStreaming;
-              const Icon = PHASE_ICONS[phase] ?? BrainIcon;
+              const ev = entry.event;
+              const isActive = ev.status === "active" && isStreaming;
+              const isComplete = ev.status === "complete" || !isStreaming;
+              const Icon = PHASE_ICONS[ev.label ?? ""] ?? BrainIcon;
               return (
                 <ChainOfThoughtStep
-                  key={`phase-${phase}-${i}`}
+                  key={key}
                   icon={Icon}
                   label={
                     isActive ? (
-                      <Shimmer duration={1.5}>{`${phase}…`}</Shimmer>
+                      <Shimmer duration={1.5}>{`${ev.label}…`}</Shimmer>
                     ) : (
-                      phase
+                      ev.label ?? "Step"
                     )
                   }
                   status={isComplete ? "complete" : isActive ? "active" : "pending"}
@@ -358,113 +390,165 @@ export const AgenticProgress = ({
               );
             }
 
-            // Tool card entry
-            const pair = entry.pair;
-            const i = entry.toolIdx;
-            const toolName = getToolName(pair.call);
-            const label = getToolLabel(pair.call);
-            const state = getToolState(pair);
-            const isRunning = state === "input-available" && isStreaming;
-            const ToolIcon = TOOL_ICONS[toolName] ?? WrenchIcon;
+            // ── Thinking entry (inline reasoning) ─────────────────────────
+            if (entry.kind === "thinking") {
+              const ev = entry.event;
+              const content = ev.content;
+              const isActive = ev.status === "active" && isStreaming;
+              const isComplete = ev.status === "complete" || !isStreaming;
 
-            // Summary comes from the backend (to: event) or falls back to error
-            const summary = (pair.observation?.summary as string | undefined) ?? undefined;
-            const obsError = pair.observation?.error as string | undefined;
-
-            // retrieve_parallel: render sub-agent Task cards BEFORE the
-            // synthesis step, so the timeline shows the correct sequence:
-            // sub-agents search → results merged.
-            if (toolName === "retrieve_parallel") {
-              const details = pair.observation?.details as
-                | {
-                    sub_queries?: string[];
-                    count?: number;
-                  }
-                | undefined;
-              return (
-                <div key={`tool-${i}`} className="space-y-2">
-                  {subagentGroups.map((sg) => {
-                    const isInProgress = !sg.isDone;
-                    const subagentFailed = sg.isDone && !sg.succeeded;
-                    const Icon = sg.isOffice
-                      ? (sg.isDone
-                          ? (subagentFailed ? XCircleIcon : FileCheckIcon)
-                          : Loader2Icon)
-                      : (sg.isDone ? CheckCircleIcon : SearchIcon);
-                    const titlePrefix = sg.isOffice ? "Office subagent" : "Subagent";
-                    const titleAction = sg.isDone
-                      ? (sg.isOffice
-                          ? (subagentFailed ? "Failed to create" : "Created")
-                          : "Searched for")
-                      : "Searching for";
-                    return (
-                      <Task key={sg.id} defaultOpen={isInProgress}>
-                        <TaskTrigger
-                          title={`${titlePrefix}: ${titleAction} ${sg.subQuery}`}
-                        >
-                          <div className="flex w-full cursor-pointer items-center gap-2 text-muted-foreground text-xs transition-colors hover:text-foreground">
-                            {isInProgress ? (
-                              <Loader2Icon className="size-4 animate-spin text-muted-foreground" />
-                            ) : (
-                              <Icon className={`size-4 ${subagentFailed ? "text-red-600" : "text-emerald-600"}`} />
-                            )}
-                            <span className="text-xs">
-                              {titlePrefix}: {titleAction} <span className="text-foreground font-medium">{sg.subQuery}</span>
-                            </span>
-                            <ChevronDownIcon className="ml-auto size-4 transition-transform group-data-[state=open]:rotate-180" />
-                          </div>
-                        </TaskTrigger>
-                        <TaskContent>
-                          {sg.items.map((item, idx) => (
-                            <TaskItem key={idx}>
-                              {item.status === "error" ? (
-                                <span className="flex items-center gap-1.5 text-[11px] text-red-600">
-                                  <XCircleIcon className="size-3" />
-                                  {item.text}
-                                </span>
-                              ) : (
-                                <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-                                  <span>—</span>
-                                  {item.text}
-                                </span>
-                              )}
-                            </TaskItem>
-                          ))}
-                        </TaskContent>
-                      </Task>
-                    );
-                  })}
-                  <ChainOfThoughtStep
-                    icon={SparklesIcon}
-                    label={
-                      isRunning ? (
-                        <Shimmer duration={1.5}>Synthesizing subagent results…</Shimmer>
-                      ) : (
-                        `Synthesized ${details?.count ?? 0} merged hits`
-                      )
-                    }
-                    status={isRunning ? "active" : "complete"}
+              if (content && content.trim().length > 0) {
+                // "Thought (Ns)" is the clickable trigger — clicking it
+                // expands/collapses the reasoning text directly.
+                return (
+                  <ThinkingStep
+                    key={key}
+                    content={content}
+                    elapsed={ev.elapsed}
+                    isActive={isActive}
+                    isComplete={isComplete}
                   />
-                </div>
+                );
+              }
+
+              // No reasoning content — simple "Thinking" step
+              return (
+                <ChainOfThoughtStep
+                  key={key}
+                  icon={BrainIcon}
+                  label={
+                    isActive ? (
+                      <Shimmer duration={1.5}>Thinking…</Shimmer>
+                    ) : (
+                      `Thought${ev.elapsed ? ` (${Math.round(ev.elapsed)}s)` : ""}`
+                    )
+                  }
+                  status={isComplete ? "complete" : "active"}
+                />
               );
             }
 
-            return (
-              <ChainOfThoughtStep
-                key={`tool-${i}`}
-                icon={ToolIcon}
-                label={
-                  isRunning ? (
-                    <Shimmer duration={1.5}>{`${label}…`}</Shimmer>
-                  ) : (
-                    label
-                  )
-                }
-                description={obsError ? <span className="text-red-600">{obsError}</span> : summary}
-                status={isRunning ? "active" : "complete"}
-              />
-            );
+            // ── Tool entry ────────────────────────────────────────────────
+            if (entry.kind === "tool") {
+              const ev = entry.event;
+              const isActive = ev.status === "active" && isStreaming;
+              const isComplete = ev.status === "complete" || !isStreaming;
+              const toolName = ev.tool ?? "tool";
+              const label = ev.label ?? toolName;
+              const ToolIcon = TOOL_ICONS[toolName] ?? WrenchIcon;
+              const summary = ev.summary;
+              const obsError = ev.error;
+
+              return (
+                <ChainOfThoughtStep
+                  key={key}
+                  icon={ToolIcon}
+                  label={
+                    isActive ? (
+                      <Shimmer duration={1.5}>{`${label}…`}</Shimmer>
+                    ) : (
+                      <span>
+                        {label}
+                        {summary ? <span className="text-muted-foreground"> · {summary}</span> : null}
+                      </span>
+                    )
+                  }
+                  description={obsError ? <span className="text-red-600">{obsError}</span> : undefined}
+                  status={isComplete ? "complete" : "active"}
+                />
+              );
+            }
+
+            // ── Subagent entry ────────────────────────────────────────────
+            if (entry.kind === "subagent") {
+              const startEv = entry.startEvent;
+              const doneEv = entry.doneEvent;
+              const subagentType = startEv.subagent_type ?? "retrieval";
+              const subagentLabel = startEv.label ?? "subagent";
+              const isInProgress = !doneEv;
+              const succeeded = doneEv?.succeeded ?? false;
+              const icons = SUBAGENT_ICONS[subagentType] ?? SUBAGENT_ICONS.retrieval;
+              // const titlePrefix = subagentType === "office" ? "Subagent" : "Subagent";
+              const titlePrefix = "Subagent";
+              const titleAction = doneEv
+                ? (subagentType === "office"
+                    ? (succeeded ? "Created" : "Failed to create")
+                    : "Searched for")
+                : (subagentType === "office" ? "Creating" : "Searching for");
+
+              return (
+                <Task key={key} defaultOpen={isInProgress}>
+                  <TaskTrigger title={`${titlePrefix}: ${titleAction} ${subagentLabel}`}>
+                    <div className="flex w-full cursor-pointer items-center gap-2 text-muted-foreground text-xs transition-colors hover:text-foreground">
+                      {isInProgress ? (
+                        <Loader2Icon className="size-4 animate-spin text-muted-foreground" />
+                      ) : (
+                        (() => {
+                          const Icon = succeeded ? icons.done : icons.failed;
+                          return <Icon className={`size-4 ${succeeded ? "text-emerald-600" : "text-red-600"}`} />;
+                        })()
+                      )}
+                      <span className="text-xs">
+                        {titlePrefix}: {titleAction} <span className="text-muted-foreground font-medium">{subagentLabel}</span>
+                      </span>
+                      <ChevronDownIcon className="ml-auto size-4 transition-transform group-data-[state=open]:rotate-180" />
+                    </div>
+                  </TaskTrigger>
+                  <TaskContent>
+                    {entry.steps.length > MAX_SUBAGENT_STEPS && (
+                      <div className="text-muted-foreground/60 text-[11px] mb-1">
+                        … {entry.steps.length - MAX_SUBAGENT_STEPS} earlier steps hidden
+                      </div>
+                    )}
+                    {(entry.steps.length > MAX_SUBAGENT_STEPS
+                      ? entry.steps.slice(-MAX_SUBAGENT_STEPS)
+                      : entry.steps
+                    ).map((item, i) => {
+                      if (item.error) {
+                        return (
+                          <TaskItem key={item.id ?? i}>
+                            <span className="flex items-center gap-1.5 text-[11px] text-red-600">
+                              <XCircleIcon className="size-3" />
+                              {item.label}: failed
+                            </span>
+                          </TaskItem>
+                        );
+                      }
+                      // For office subagents, suppress result suffix — the label
+                      // alone is sufficient ("Generating/Updating Office document").
+                      // For retrieval subagents, show summary or hit count.
+                      const isOffice = subagentType === "office";
+                      const resultSuffix = isOffice ? "" : (
+                        item.summary
+                          ? ` · ${item.summary}`
+                          : (item.hitCount !== undefined ? ` · ${item.hitCount} results` : "")
+                      );
+                      return (
+                        <TaskItem key={item.id ?? i}>
+                          <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                            <span>—</span>
+                            {item.label}{resultSuffix}
+                          </span>
+                        </TaskItem>
+                      );
+                    })}
+                  </TaskContent>
+                </Task>
+              );
+            }
+
+            return null;
           })}
+          {hasMore && showFullTimeline && (
+            <button
+              type="button"
+              onClick={() => setShowFullTimeline(false)}
+              className="flex items-center gap-1 text-muted-foreground/60 hover:text-foreground transition-colors text-[11px] mt-1"
+            >
+              <ChevronDownIcon className="size-3" />
+              Collapse to recent steps
+            </button>
+          )}
         </ChainOfThoughtContent>
       </ChainOfThought>
     </div>

@@ -27,11 +27,13 @@ from app.services.infrastructure import is_cancelled
 from app.services.settings_service import get_setting
 
 from ..agent_graph.compaction import _compact_if_needed
-from ..agent_graph.helpers import _coerce_observation, _total_tool_budget, _wall_clock_exceeded, _writer
+from ..agent_graph.helpers import _coerce_observation, _emit_timeline, _total_tool_budget, _wall_clock_exceeded, _writer
 from ..agent_graph.observations import (
     _observations_metadata_text,
+    _prune_contiguous_overlaps,
     _tried_search_queries,
 )
+from ..utils import group_docs_by_document
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +127,7 @@ def _build_v2_user_prompt(
         _coerce_observation(o).tool == "create_office_document"
         for o in observations
     )
-    if asks_for_office and not office_called and iteration < max_iter:
+    if asks_for_office and not office_called and iteration < tool_budget:
         parts.append(
             "\n⚠ IMPORTANT: The user asked to CREATE a document. You MUST call "
             "create_office_document to actually create the file. Do NOT just describe "
@@ -177,6 +179,10 @@ async def think_node_v2(state, ctx) -> dict:
 
         system = get_agent_v2_system_prompt()
         retrieved_docs = state.get("retrieved_docs", [])
+        # Group chunks by document (consecutive chunks together) and prune
+        # chunking overlap so the LLM sees clean, ordered evidence.
+        retrieved_docs = group_docs_by_document(retrieved_docs)
+        retrieved_docs = _prune_contiguous_overlaps(retrieved_docs)
         user = _build_v2_user_prompt(
             iteration, tool_budget, tool_calls_used, query, summary_text, history_text,
             state.get("last_answer_object"), observations, retrieved_docs,
@@ -191,6 +197,8 @@ async def think_node_v2(state, ctx) -> dict:
             state = {**state, **compaction_local}
             observations = state.get("observations", [])
             retrieved_docs = state.get("retrieved_docs", [])
+            retrieved_docs = group_docs_by_document(retrieved_docs)
+            retrieved_docs = _prune_contiguous_overlaps(retrieved_docs)
             recent = select_recent_history(
                 state.get("messages", []),
                 max_pairs=get_setting(ctx.db, "AGENT_HISTORY_PAIRS", ctx.org_id),
@@ -200,7 +208,7 @@ async def think_node_v2(state, ctx) -> dict:
             user = _build_v2_user_prompt(
                 iteration, tool_budget, tool_calls_used, query, summary_text, history_text,
                 state.get("last_answer_object"), observations, retrieved_docs,
-                tools_text, kb_profile_text, state.get("file_markdown"),
+                available_tools_text, kb_profile_text, state.get("file_markdown"),
             )
 
         mode = get_setting(ctx.db, "TOOL_CALL_MODE", None)
@@ -214,9 +222,9 @@ async def think_node_v2(state, ctx) -> dict:
             logger.debug("[think_v2] cancelled before LLM call | chat_id=%s", chat_id)
             return {"iteration": iteration, "tool_calls": [], "precomputed_answer": ""}
 
-        # Emit "thinking..." event so the frontend shows the thinking indicator.
+        # Emit timeline thinking step — inline in the CoT at its actual position.
         writer = _writer()
-        writer({"event": "thinking", "content": "", "done": False})
+        think_step_id = _emit_timeline(type="thinking", content="", status="active")
         think_start = time.monotonic()
 
         try:
@@ -240,6 +248,7 @@ async def think_node_v2(state, ctx) -> dict:
             # answer iteration.
             accumulated: AIMessageChunk | None = None
             reasoning_accumulated = ""
+            finalize_phase_id: str | None = None
             async for chunk in stream:
                 if chat_id is not None and is_cancelled(chat_id):
                     logger.debug("[think_v2] cancelled during LLM stream | chat_id=%s", chat_id)
@@ -248,6 +257,13 @@ async def think_node_v2(state, ctx) -> dict:
                     continue
                 content = chunk.content if isinstance(chunk.content, str) else ""
                 if content:
+                    # Emit "Finalizing answer" phase before the first content
+                    # token so the timeline shows the phase BEFORE the answer
+                    # starts streaming (not after, which was the bug when
+                    # post_process emitted it).
+                    if finalize_phase_id is None:
+                        finalize_phase_id = _emit_timeline(
+                            type="phase", label="Finalizing answer", status="active")
                     writer({"event": "token", "content": content})
                 # Stream reasoning content live for thinking models that expose
                 # it via additional_kwargs.reasoning_content (DeepSeek, Qwen, etc.)
@@ -256,8 +272,13 @@ async def think_node_v2(state, ctx) -> dict:
                     chunk_reasoning = chunk.additional_kwargs.get("reasoning_content", "") or ""
                 if chunk_reasoning:
                     reasoning_accumulated += chunk_reasoning
-                    writer({"event": "thinking", "content": reasoning_accumulated, "done": False})
+                    _emit_timeline(id=think_step_id, type="thinking", content=reasoning_accumulated, status="active")
                 accumulated = chunk if accumulated is None else accumulated + chunk
+
+            # Close the "Finalizing answer" phase if we opened one.
+            if finalize_phase_id is not None:
+                _emit_timeline(id=finalize_phase_id, type="phase",
+                               label="Finalizing answer", status="complete")
 
             # Reconstruct an AIMessage-like object for the parser.
             # AIMessageChunk supports .content and .tool_calls just like AIMessage.
@@ -274,21 +295,12 @@ async def think_node_v2(state, ctx) -> dict:
         # reasoning_content on the final accumulated message).
         final_reasoning = parsed.reasoning or (reasoning_accumulated if reasoning_accumulated else None)
         if final_reasoning:
-            writer({
-                "event": "thinking",
-                "content": final_reasoning,
-                "done": True,
-                "elapsed": round(think_elapsed, 1),
-            })
+            _emit_timeline(id=think_step_id, type="thinking", content=final_reasoning,
+                           status="complete", elapsed=round(think_elapsed, 1))
         else:
-            # No reasoning content — close the thinking indicator with
-            # elapsed time but empty content (non-thinking model).
-            writer({
-                "event": "thinking",
-                "content": "",
-                "done": True,
-                "elapsed": round(think_elapsed, 1),
-            })
+            # No reasoning content — close the step with empty content.
+            _emit_timeline(id=think_step_id, type="thinking", content="",
+                           status="complete", elapsed=round(think_elapsed, 1))
 
         tool_calls = parsed.tool_calls
         final_answer_text = parsed.final_answer

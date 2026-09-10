@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 from app.core.config import settings
 from app.services.agentic_rag.tool_context import ToolContext
@@ -177,3 +177,135 @@ async def expand_synonyms(query: str, ctx: ToolContext) -> tuple[str, list[str]]
 
     logger.debug("[search_helpers] synonyms for %r: corrected=%r, synonyms=%s", query, corrected, synonyms)
     return corrected, synonyms
+
+
+# ── Neighbor context injection ──────────────────────────────────────────────
+
+_NEIGHBOR_TOP_N = 5
+_NEIGHBOR_WINDOW = 1
+
+
+def _fetch_neighbor_chunks(
+    db: Any,
+    doc_id: int,
+    chunk_indices: list[int],
+) -> list[dict]:
+    """Fetch chunk_text and chunk_metadata for specific chunk indices from MySQL.
+
+    Returns a list of dicts with keys: chunk_index, chunk_text, chunk_metadata.
+    """
+    if not chunk_indices:
+        return []
+    from sqlalchemy import text
+    placeholders = ",".join(str(i) for i in chunk_indices)
+    try:
+        rows = db.execute(text(
+            f"SELECT chunk_index, chunk_text, chunk_metadata "
+            f"FROM document_chunks "
+            f"WHERE document_id = :doc_id AND chunk_index IN ({placeholders})"
+        ), {"doc_id": doc_id})
+        result = []
+        for row in rows:
+            meta = row[2] if row[2] else {}
+            if isinstance(meta, str):
+                meta = json.loads(meta)
+            result.append({
+                "chunk_index": row[0],
+                "chunk_text": row[1],
+                "chunk_metadata": meta,
+            })
+        return result
+    except Exception as exc:
+        logger.warning("[neighbor] failed to fetch chunks for doc %s: %s", doc_id, exc)
+        return []
+
+
+def inject_neighbor_context(
+    docs: list,
+    db: Any,
+    top_n: int = _NEIGHBOR_TOP_N,
+    window: int = _NEIGHBOR_WINDOW,
+) -> list:
+    """Inject prev/next chunks for top-ranked evidence.
+
+    For each of the top-N reranked docs, fetches the adjacent chunk(s) from
+    the same document via MySQL. Injected neighbors are deduplicated against
+    existing evidence. Returns the combined list (original docs + injected
+    neighbors) in reranker order.
+
+    Reordering by document/chunk_index and overlap pruning are handled
+    downstream by ``group_docs_by_document()`` and ``_prune_contiguous_overlaps()``
+    in the v2 think node — this function does not duplicate that work.
+
+    Args:
+        docs:  Reranked + elbow-truncated LangchainDocument list.
+        db:    SQLAlchemy session for MySQL chunk lookups.
+        top_n: How many of the top docs to inject neighbors for.
+        window: How many chunks on each side to fetch (1 = prev+next).
+
+    Returns:
+        Combined list of LangchainDocument objects with neighbors appended.
+    """
+    if not docs or db is None:
+        return docs
+
+    from langchain_core.documents import Document as LangchainDocument
+
+    # Collect existing (doc_id, chunk_index) pairs to avoid duplicate injection.
+    existing: set[tuple[int, int]] = set()
+    for doc in docs:
+        meta = doc.metadata or {}
+        did = meta.get("document_id")
+        ci = meta.get("chunk_index")
+        if did is not None and ci is not None:
+            existing.add((did, ci))
+
+    # For top-N docs, find neighbor chunk indices to fetch.
+    to_fetch: dict[int, set[int]] = {}  # doc_id -> set of chunk_indices
+    for doc in docs[:top_n]:
+        meta = doc.metadata or {}
+        did = meta.get("document_id")
+        ci = meta.get("chunk_index")
+        if did is None or ci is None:
+            continue
+        for offset in range(-window, window + 1):
+            if offset == 0:
+                continue
+            neighbor_ci = ci + offset
+            if (did, neighbor_ci) in existing:
+                continue
+            to_fetch.setdefault(did, set()).add(neighbor_ci)
+
+    # Batch-fetch neighbor chunks from MySQL.
+    neighbor_docs: list[LangchainDocument] = []
+    for did, chunk_indices in to_fetch.items():
+        rows = _fetch_neighbor_chunks(db, did, sorted(chunk_indices))
+        for row in rows:
+            ci = row["chunk_index"]
+            if (did, ci) in existing:
+                continue
+            existing.add((did, ci))
+            meta = dict(row.get("chunk_metadata") or {})
+            # Carry over metadata from the parent doc if missing.
+            meta.setdefault("document_id", did)
+            meta["chunk_index"] = ci
+            meta["_is_neighbor"] = True
+            # Build citation_ref so the neighbor can be cited.
+            meta.setdefault("citation_ref", {
+                "document_id": did,
+                "citation_kind": "chunk",
+                "chunk_index": ci,
+                "page": meta.get("page"),
+                "quoted_text": row["chunk_text"][:200],
+                "source_tool": "neighbor_context",
+                "citation_id": "",
+            })
+            neighbor_docs.append(LangchainDocument(
+                page_content=row["chunk_text"],
+                metadata=meta,
+            ))
+
+    if not neighbor_docs:
+        return docs
+
+    return list(docs) + neighbor_docs

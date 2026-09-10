@@ -55,7 +55,7 @@ export function GeneratedFileChip({ file, chatId }: GeneratedFileChipProps) {
     <button
       type="button"
       onClick={handleDownload}
-      title={file.summary || file.file_name}
+      title="Click to download generated document"
       className="group inline-flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm hover:bg-accent transition-colors"
     >
       <Icon className="h-4 w-4 shrink-0 text-primary" />

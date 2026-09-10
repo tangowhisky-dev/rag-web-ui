@@ -10,8 +10,8 @@ import React, {
   ClassAttributes,
 } from "react";
 import { AnchorHTMLAttributes } from "react";
-import { Copy, Trash2, FileText, FileImage, FileType } from "lucide-react";
-import { AgenticProgress, AgentStepEvent, type SubagentProgressEvent } from "./agentic-progress";
+import { Copy, Trash2, FileText, FileImage, FileType, Loader2Icon } from "lucide-react";
+import { AgenticProgress, type TimelineEvent } from "./agentic-progress";
 import { AgentLoopPanel } from "./agent-loop-panel";
 import { GeneratedFileChip } from "./generated-file-chip";
 import { SelectionActions } from "./selection-actions";
@@ -519,7 +519,12 @@ const CitationLink: FC<CitationLinkProps> = (props) => {
     : null;
 
   if (!citation) {
-    return <a>[{props.href}]</a>;
+    // If href is not a numeric citation, render as a normal link or nothing.
+    // This prevents stray [] brackets for office:// or other non-citation links.
+    if (!citationId && props.href) {
+      return <a href={props.href}>{props.children}</a>;
+    }
+    return null;
   }
 
   const top = citation as Record<string, any>;
@@ -655,9 +660,7 @@ export const Answer: FC<{
     error?: string | null;
     latency_ms: number;
   }>;
-  agentSteps?: AgentStepEvent[];
   taskList?: Array<{ id: number; text: string; status: string }>;
-  progressMessages?: Array<{ phase: string; message: string; details?: Record<string, unknown> }>;
   synthesisMode?: boolean;
   isStreaming?: boolean;
   onDelete?: (id: string) => void;
@@ -669,9 +672,7 @@ export const Answer: FC<{
   retrievalScore?: number;
   // Enterprise agent loop state
   plan?: Record<string, unknown>;
-  toolCalls?: Array<Record<string, unknown>>;
-  toolObservations?: Array<Record<string, unknown>>;
-  subagentProgress?: SubagentProgressEvent[];
+  timelineEvents?: TimelineEvent[];
   lastAnswerObject?: {
     followups?: string[];
     [key: string]: unknown;
@@ -692,7 +693,7 @@ export const Answer: FC<{
     done: boolean;
     elapsed?: number;
   } | null;
-}> = React.memo(({ messageId, chatId, markdown, citations = [], confidence, confidenceScore, suggestion, failedLegs, agentSteps, taskList, progressMessages, isStreaming = false, onDelete, finalConfidence, finalConfidenceLevel, faithfulness, completeness, retrievalScore, toolCalls, toolObservations, subagentProgress, chartOptions, officeFiles, lastAnswerObject, onFollowUp, thinkingContent }) => {
+}> = React.memo(({ messageId, chatId, markdown, citations = [], confidence, confidenceScore, suggestion, failedLegs, taskList, isStreaming = false, onDelete, finalConfidence, finalConfidenceLevel, faithfulness, completeness, retrievalScore, timelineEvents, chartOptions, officeFiles, lastAnswerObject, onFollowUp, thinkingContent }) => {
   const [citationInfoMap, setCitationInfoMap] = useState<
     Record<string, CitationInfo>
   >({});
@@ -718,21 +719,6 @@ export const Answer: FC<{
       setRenderKey((k) => k + 1);
     }
   }, [citations.length]);
-
-  // Extract generate_answer latency from agentSteps
-  const generateAnswerLatencyMs = useMemo(() => {
-    if (!agentSteps?.length) return null;
-    const doneStep = agentSteps.find(
-      (s) => s.node === "generate_answer" && s.status === "done",
-    );
-    return doneStep?.latency_ms ?? null;
-  }, [agentSteps]);
-
-  // Filter out generate_answer from agentSteps — we display its latency inline
-  const filteredAgentSteps = useMemo(() => {
-    if (!agentSteps?.length) return undefined;
-    return agentSteps.filter((s) => s.node !== "generate_answer");
-  }, [agentSteps]);
 
   const parsedContent = useMemo(() => parseThinkContent(markdown), [markdown]);
 
@@ -775,6 +761,21 @@ export const Answer: FC<{
   }), [citations, citationInfoMap, genericDocMap]);
 
   const markdownComponents = useMemo(() => ({ a: CitationLink, code: CodeBlock }), []);
+
+  // Memoize markdown plugin arrays — without this, inline array literals
+  // create new references on every render, causing the Markdown component
+  // to re-render even when content hasn't changed (e.g. during timeline updates).
+  const remarkPlugins = useMemo(() => [remarkGfm, remarkMath], []);
+  const rehypePlugins = useMemo(
+    () => [rehypeHighlight, [rehypeKatex, { throwOnError: false }]] as any,
+    [],
+  );
+
+  // Memoize preprocessed citation text — only re-parse when answer text changes.
+  const processedAnswerText = useMemo(
+    () => parsedContent.answerText ? preprocessCitations(parsedContent.answerText) : "",
+    [parsedContent.answerText],
+  );
 
   // ── Action handlers ────────────────────────────────────────────────────────
   const [copied, setCopied] = useState(false);
@@ -851,7 +852,7 @@ export const Answer: FC<{
 
   const contentRef = useRef<HTMLDivElement>(null);
 
-  if (!markdown && !(agentSteps?.length)) {
+  if (!markdown && !(timelineEvents?.length)) {
     return (
       <div className="flex flex-col gap-2">
         <Skeleton className="max-w-sm h-4 bg-zinc-200" />
@@ -897,11 +898,11 @@ export const Answer: FC<{
           </TaskCollapsible>
         </div>
       )}
-      {/* Agentic progress — transient, grey, fades between phases.
-          Single source of truth for status text; raw per-leg progress
-          events (dense/sparse/exact/neo4j) are folded into "Gathering
-          sources …" here instead of also being shown verbatim. */}
-      <AgenticProgress agentSteps={filteredAgentSteps} isStreaming={isStreaming} toolCalls={toolCalls} toolObservations={toolObservations} progressMessages={progressMessages} subagentProgress={subagentProgress} />
+      {/* Agentic progress — unified timeline rendering chain-of-thought.
+          Includes phases, inline thinking, tool calls, and subagent cards.
+          Loop reasoning is rendered inline within the timeline at the
+          position where it occurred, not as a separate panel. */}
+      <AgenticProgress timelineEvents={timelineEvents} isStreaming={isStreaming} />
 
       {/* Confidence warning (no confidence) */}
       {confidence === "none" && suggestion && (
@@ -910,20 +911,18 @@ export const Answer: FC<{
           <span>{suggestion}</span>
         </div>
       )}
-      {/* Reasoning / thinking display.
-          Two sources, two phases:
-          1. Final answer streaming (post_process): parseThinkContent() extracts
-             reasoning tags from the streamed markdown — shown live in grey text.
-          2. Think node (tool-calling phase): thinkingContent prop from th: events
-             — shown as "thinking..." → "thought for N seconds" (collapsed).
-          Priority: streaming final answer reasoning > think-node reasoning. */}
+      {/* Final-answer reasoning — displayed near the answer text.
+          Two sources:
+          1. <think>/<reasoning> tags parsed from the streamed markdown.
+          2. th: events with phase="answer" (thinkingContent prop).
+          Priority: parsed tags > th: events. */}
       {parsedContent.thinkContent !== null ? (
         <Reasoning
           isStreaming={!parsedContent.isThinkingComplete}
           defaultOpen={!parsedContent.isThinkingComplete}
         >
           <ReasoningTrigger />
-          <ReasoningContent>
+          <ReasoningContent maxLines={5}>
             {parsedContent.thinkContent}
           </ReasoningContent>
         </Reasoning>
@@ -934,7 +933,7 @@ export const Answer: FC<{
           duration={thinkingContent.done ? Math.round(thinkingContent.elapsed ?? 0) : undefined}
         >
           <ReasoningTrigger />
-          <ReasoningContent>
+          <ReasoningContent maxLines={5}>
             {thinkingContent.content}
           </ReasoningContent>
         </Reasoning>
@@ -945,18 +944,34 @@ export const Answer: FC<{
           <div className="prose prose-sm dark:prose-invert max-w-none">
             <Markdown
               key={`${citations.length > 0 ? "with-citations" : "no-citations"}-${renderKey}`}
-              remarkPlugins={[remarkGfm, remarkMath]}
-              rehypePlugins={[rehypeHighlight, [rehypeKatex, { throwOnError: false }]]}
+              remarkPlugins={remarkPlugins}
+              rehypePlugins={rehypePlugins}
               components={markdownComponents}
             >
-              {preprocessCitations(parsedContent.answerText)}
+              {processedAnswerText}
             </Markdown>
           </div>
         </CitationLinkContext.Provider>
       )}
       
-      {isStreaming && (
+      {isStreaming && !lastAnswerObject && (
         <span className="inline-block w-2 h-4 ml-0.5 align-middle bg-foreground/80 animate-pulse" aria-hidden="true" />
+      )}
+
+      {/* ── Generated office files (download chips) ────────────────────────── */}
+      {officeFiles && officeFiles.length > 0 && (
+        <div className="mt-3 not-prose">
+          <p className="text-xs font-medium text-muted-foreground mb-2">File(s) created:</p>
+          <div className="flex flex-wrap gap-2">
+            {officeFiles.map((file) => (
+              <GeneratedFileChip
+                key={file.file_id}
+                file={file}
+                chatId={chatId ?? ""}
+              />
+            ))}
+          </div>
+        </div>
       )}
 
       {/* Selection actions — floating toolbar on text selection */}
@@ -1030,7 +1045,7 @@ export const Answer: FC<{
 
           {/* Right: confidence + speed */}
           <div className="flex-1 min-w-0 max-w-[14rem] flex flex-col gap-1.5">
-            {finalConfidence !== undefined && (
+            {finalConfidence !== undefined ? (
               <ConfidenceCollapsible
                 level={finalConfidenceLevel}
                 score={confidenceScore}
@@ -1042,12 +1057,12 @@ export const Answer: FC<{
                 retrievalScore={retrievalScore}
                 failedLegs={failedLegs}
               />
-            )}
-            {generateAnswerLatencyMs !== null && (
-              <span className="text-[10px] text-zinc-400 dark:text-zinc-500 select-none">
-                Generated in {generateAnswerLatencyMs < 1000 ? `${generateAnswerLatencyMs}ms` : `${(generateAnswerLatencyMs / 1000).toFixed(1)}s`}
-              </span>
-            )}
+            ) : isStreaming && lastAnswerObject ? (
+              <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <Loader2Icon className="size-3 animate-spin" />
+                <span>Calculating Confidence…</span>
+              </div>
+            ) : null}
           </div>
         </div>
       )}
@@ -1072,18 +1087,6 @@ export const Answer: FC<{
         // panel's own render for older messages that never got one.
         chartOptions={markdown.includes("```echarts") ? undefined : chartOptions}
       />
-
-      {officeFiles && officeFiles.length > 0 && (
-        <div className="mt-3 flex flex-wrap gap-2">
-          {officeFiles.map((file) => (
-            <GeneratedFileChip
-              key={file.file_id}
-              file={file}
-              chatId={chatId ?? ""}
-            />
-          ))}
-        </div>
-      )}
 
       <ConfirmDialog
         open={confirmDelete}

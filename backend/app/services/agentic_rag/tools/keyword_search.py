@@ -19,7 +19,7 @@ from app.services.retrieval.retrieval import exact_search_docs, sparse_search_do
 from app.services.retrieval.reranker import rerank, soft_elbow_truncate
 from app.services.settings_service import get_setting
 
-from ._search_helpers import _emit_progress, expand_synonyms, resolve_filter_to_doc_ids
+from ._search_helpers import _emit_progress, expand_synonyms, inject_neighbor_context, resolve_filter_to_doc_ids
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +162,12 @@ class KeywordSearchTool(BaseAgentTool):
                 merged = sorted(merged, key=lambda d: d.metadata.get("score", 0.0), reverse=True)[:input_obj.top_k]
         else:
             merged = sorted(merged, key=lambda d: d.metadata.get("score", 0.0), reverse=True)
+
+        # Inject prev/next chunks for top evidence and reorder by file position.
+        try:
+            merged = inject_neighbor_context(merged, ctx.db)
+        except Exception as exc:
+            logger.warning("[keyword_search] neighbor injection failed: %s", exc)
 
         hits = []
         for doc in merged:

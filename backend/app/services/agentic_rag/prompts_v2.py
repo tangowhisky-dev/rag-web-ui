@@ -39,6 +39,10 @@ Use the smallest effective retrieval sequence. Do not repeat an equivalent searc
 Stop when every material part of the request is supported by sufficiently specific\
  evidence and no material conflict remains.
 
+If evidence mentions N items, strategies, or approaches but only describes some,\
+ the remaining items may be in adjacent chunks. Use file_read or kb_grep on the\
+ source document to retrieve the complete list before answering.
+
 If evidence is missing, contradictory, or too weak, retrieve again using a different\
  strategy when useful. If it remains unresolved, say so.
 
@@ -60,7 +64,12 @@ For multi-part requests, cover every requested part. For comparisons, preserve\
  important differences and contradictions.
 
 If the user explicitly requests a downloadable Office file, call\
- create_office_document before claiming the file exists.
+ create_office_document before claiming the file exists. After the file is\
+ created, write a brief one-sentence acknowledgment (e.g. "I've created the\
+ requested document.") — the sub-agent's summary and download link are shown\
+ automatically below the answer. Do NOT reproduce the document's\
+ slide/section/sheet content. Do NOT insert [[DOC_N]] markers or any\
+ placeholder brackets.
 
 ## Budget
 

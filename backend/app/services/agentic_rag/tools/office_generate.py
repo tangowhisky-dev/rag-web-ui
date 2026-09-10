@@ -631,12 +631,30 @@ class OfficeGenerateTool(BaseAgentTool):
             ctx.db.refresh(chat_file)
 
         # 9. Update state — replace existing file_ref or add new one
+        # Count charts for file_ref and file event
+        chart_count = 0
+        for s in input_obj.slides or []:
+            if s.chart_type:
+                chart_count += 1
+        for s in input_obj.sections or []:
+            if s.chart:
+                chart_count += 1
+        for s in input_obj.sheets or []:
+            if s.chart:
+                chart_count += 1
+
+        slide_count = len(input_obj.slides) if input_obj.slides else None
+        sheet_count = len(input_obj.sheets) if input_obj.sheets else None
+
         file_ref = {
             "file_id": chat_file.id,
             "file_name": file_name,
             "format": fmt,
             "path": stored_path,
             "title": input_obj.title,
+            "slide_count": slide_count,
+            "sheet_count": sheet_count,
+            "chart_count": chart_count,
         }
         if ctx.state is not None:
             existing = ctx.state.get("generated_files", []) or []
@@ -663,19 +681,10 @@ class OfficeGenerateTool(BaseAgentTool):
             "file_name": file_name,
             "format": fmt,
             "title": input_obj.title,
+            "slide_count": slide_count,
+            "sheet_count": sheet_count,
+            "chart_count": chart_count,
         })
-
-        # 12. Count charts
-        chart_count = 0
-        for s in input_obj.slides or []:
-            if s.chart_type:
-                chart_count += 1
-        for s in input_obj.sections or []:
-            if s.chart:
-                chart_count += 1
-        for s in input_obj.sheets or []:
-            if s.chart:
-                chart_count += 1
 
         latency_ms = round((time.monotonic() - t0) * 1000)
         write_audit(ctx, "office_generate", {"format": fmt, "title": input_obj.title, "append": input_obj.append},

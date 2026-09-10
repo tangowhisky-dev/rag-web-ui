@@ -14,7 +14,7 @@ from app.services.retrieval.retrieval import dense_search_docs
 from app.services.retrieval.reranker import rerank, soft_elbow_truncate
 from app.services.settings_service import get_setting
 
-from ._search_helpers import _emit_progress, resolve_filter_to_doc_ids
+from ._search_helpers import _emit_progress, inject_neighbor_context, resolve_filter_to_doc_ids
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +105,12 @@ class SemanticSearchTool(BaseAgentTool):
             except Exception as exc:
                 logger.warning("[semantic_search] rerank failed, using raw scores: %s", exc)
                 docs = sorted(docs, key=lambda d: d.metadata.get("score", 0.0), reverse=True)[:input_obj.top_k]
+
+        # Inject prev/next chunks for top evidence and reorder by file position.
+        try:
+            docs = inject_neighbor_context(docs, ctx.db)
+        except Exception as exc:
+            logger.warning("[semantic_search] neighbor injection failed: %s", exc)
 
         hits = []
         for doc in docs:
