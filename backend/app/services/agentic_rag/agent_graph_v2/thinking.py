@@ -125,7 +125,7 @@ def _build_v2_user_prompt(
         _coerce_observation(o).tool == "create_office_document"
         for o in observations
     )
-    if asks_for_office and not office_called and iteration < max_iter:
+    if asks_for_office and not office_called and iteration < tool_budget:
         parts.append(
             "\n⚠ IMPORTANT: The user asked to CREATE a document. You MUST call "
             "create_office_document to actually create the file. Do NOT just describe "
