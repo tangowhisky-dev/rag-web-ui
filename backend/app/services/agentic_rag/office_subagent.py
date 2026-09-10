@@ -214,13 +214,7 @@ async def run_office_subagent(
     observations: list[Observation] = []
     counts: dict[str, int] = {}
     summary = ""
-
-    iteration = 0
-    while True:
-        iteration += 1
-        calls_used = sum(counts.values())
-        if calls_used >= tool_budget:
-            break
+    seen_signatures: set[str] = set()
 
     # Snapshot generated_files at start — files from previous turns persist
     # in the checkpointer. We only want to report success if NEW files were
@@ -231,7 +225,19 @@ async def run_office_subagent(
             if f.get("file_id"):
                 pre_existing_file_ids.add(f["file_id"])
 
-    for iteration in range(1, max_iterations + 1):
+    writer({"event": "subagent_progress", "subagent_id": subagent_id,
+            "sub_query": request[:200], "status": "started",
+            "subagent_type": "office"})
+
+    iteration = 0
+    while True:
+        iteration += 1
+        calls_used = sum(counts.values())
+        # Budget counts ALL attempts (successful + dedup-blocked + errors).
+        total_attempts = len(observations)
+        if calls_used >= tool_budget or total_attempts >= tool_budget or iteration > tool_budget + 2:
+            break
+
         user = _build_subagent_user_prompt(
             request, evidence_text, accumulated_data_text,
             tools_text, iteration, tool_budget, calls_used, observations,
@@ -244,13 +250,18 @@ async def run_office_subagent(
 
         try:
             tool_temp = get_setting(ctx.db, "TOOL_CALL_TEMPERATURE", ctx.org_id)
+            if iteration == 1:
+                from app.services.agentic_rag.llm_factory import get_org_llm
+                cfg = get_org_llm(ctx.org_id, ctx.db, role="chat")
+                logger.info("[office_subagent %s] model=%s base=%s",
+                            subagent_id, cfg["model_name"], cfg["api_base"])
             llm = build_chat_llm(ctx.org_id, ctx.db, role="chat", temperature=tool_temp)
             resp = await llm.bind_tools(tools_list).ainvoke([
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ])
         except Exception as exc:
-            logger.warning("[office_subagent] LLM call failed: %s", exc)
+            logger.warning("[office_subagent %s] LLM call failed: %s", subagent_id, exc)
             break
 
         parsed = parse_think_response(resp, mode="auto")
@@ -260,13 +271,15 @@ async def run_office_subagent(
             # Sub-agent wrote a summary — we're done
             if isinstance(parsed.final_answer, str) and parsed.final_answer.strip():
                 summary = parsed.final_answer.strip()
-            # If the sub-agent was forced to stop at max iterations without
-            # writing a summary, include the last error so the main agent
-            # knows the generation failed.
             if not summary:
                 errors = [o.error for o in observations if o.error]
                 if errors and not ctx.state.get("generated_files"):
                     summary = f"Failed to generate document: {errors[-1]}"
+            generated_files = ctx.state.get("generated_files", []) if ctx.state else []
+            new_files = [
+                f for f in generated_files
+                if f.get("file_id") and f["file_id"] not in pre_existing_file_ids
+            ]
             writer({"event": "subagent_progress", "subagent_id": subagent_id,
                     "sub_query": request[:200], "status": "done",
                     "subagent_type": "office",
@@ -275,14 +288,32 @@ async def run_office_subagent(
             break
 
         # Execute tool calls
-        writer({"event": "subagent_progress", "subagent_id": subagent_id,
-                "sub_query": request[:200], "status": "tool_call",
-                "tool": "office_tools", "label": "Office: executing tools",
-                "subagent_type": "office", "iteration": iteration})
         for tc in tool_calls:
             name = tc.get("tool")
             args = tc.get("arguments", {})
             tool = tools.get(name)
+
+            # Dedup guard: skip identical tool+key-arg combinations.
+            # office_generate with append=true is allowed to repeat (appending
+            # slides/sections to the same file), so we include append in the
+            # signature for office_generate.
+            if name == "office_generate":
+                sig_key = f"{args.get('format')}:{args.get('append', False)}"
+            elif name == "office_edit":
+                sig_key = f"{args.get('file_id')}:{json.dumps(args.get('commands', []), default=str)[:100]}"
+            elif name == "office_inspect":
+                sig_key = f"{args.get('file_id')}:{args.get('mode', 'outline')}"
+            else:
+                sig_key = str(args.get("format") or "")
+            sig = f"{name}:{sig_key}"
+            if sig in seen_signatures:
+                observations.append(Observation(
+                    tool=name, arguments=args, result={},
+                    error=f"Duplicate call: {sig} already tried. Try a different approach.",
+                    tokens=0,
+                ))
+                continue
+            seen_signatures.add(sig)
 
             if tool is None:
                 observations.append(Observation(
@@ -315,9 +346,8 @@ async def run_office_subagent(
             counts[name] = counts.get(name, 0) + 1
             calls_used += 1
 
-            # Sync observations to ctx.state under a sub-agent-specific key so
-            # office_inspect/office_edit can find file_id from office_generate
-            # without polluting the main agent's observations.
+            # Sync observations to ctx.state so office_inspect/office_edit can
+            # find file_id from office_generate.
             if ctx.state is not None:
                 ctx.state["_office_subagent_observations"] = observations
 
@@ -368,6 +398,6 @@ async def run_office_subagent(
         "file_id": None,
         "file_name": None,
         "format": None,
-        "summary": summary if (summary := locals().get("summary", "")) else f"Failed to generate document: {error_msg}",
+        "summary": summary or f"Failed to generate document: {error_msg}",
         "error": error_msg,
     }
