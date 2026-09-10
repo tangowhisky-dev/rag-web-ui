@@ -195,23 +195,51 @@ export type ReasoningContentProps = ComponentProps<
   typeof CollapsibleContent
 > & {
   children: string;
+  maxLines?: number;
 };
 
 export const ReasoningContent = memo(
-  ({ className, children, ...props }: ReasoningContentProps) => (
-    <CollapsibleContent
-      className={cn(
-        "mt-4 text-xs reasoning-content",
-        "data-[state=closed]:fade-out-0 data-[state=closed]:slide-out-to-top-2 data-[state=open]:slide-in-from-top-2 text-muted-foreground outline-none data-[state=closed]:animate-out data-[state=open]:animate-in",
-        className
-      )}
-      {...props}
-    >
-      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
-        {children}
-      </ReactMarkdown>
-    </CollapsibleContent>
-  )
+  ({ className, children, maxLines, ...props }: ReasoningContentProps) => {
+    const [expanded, setExpanded] = useState(false);
+    const lines = children.split("\n");
+    const needsTruncation = maxLines != null && lines.length > maxLines;
+    const displayContent =
+      needsTruncation && !expanded
+        ? lines.slice(-maxLines).join("\n")
+        : children;
+
+    return (
+      <CollapsibleContent
+        className={cn(
+          "mt-4 text-xs reasoning-content",
+          "data-[state=closed]:fade-out-0 data-[state=closed]:slide-out-to-top-2 data-[state=open]:slide-in-from-top-2 text-muted-foreground outline-none data-[state=closed]:animate-out data-[state=open]:animate-in",
+          className
+        )}
+        {...props}
+      >
+        {needsTruncation && !expanded && (
+          <div className="text-muted-foreground/60 text-[11px] mb-1 select-none">
+            … {lines.length - maxLines!} earlier lines hidden
+          </div>
+        )}
+        <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+          {displayContent}
+        </ReactMarkdown>
+        {needsTruncation && (
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            className="mt-2 flex items-center gap-1 text-muted-foreground/70 hover:text-foreground transition-colors text-[11px]"
+          >
+            <ChevronDownIcon
+              className={cn("size-3 transition-transform", expanded && "rotate-180")}
+            />
+            {expanded ? "Show less" : `Show all ${lines.length} lines`}
+          </button>
+        )}
+      </CollapsibleContent>
+    );
+  }
 );
 
 Reasoning.displayName = "Reasoning";

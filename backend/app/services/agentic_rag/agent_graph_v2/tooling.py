@@ -33,6 +33,7 @@ from app.services.settings_service import get_setting
 
 from ..agent_graph.helpers import (
     _coerce_observation,
+    _emit_timeline,
     _is_transient_error,
     _tool_call_budget,
     _total_tool_budget,
@@ -43,7 +44,6 @@ from ..agent_graph.tooling import (
     _merge_retrieved_docs,
     _run_tool,
     _summarize_result,
-    _tool_label,
 )
 
 logger = logging.getLogger(__name__)
@@ -73,7 +73,6 @@ async def _dispatch_v2(
        is allowed and is not guarded.
     No other per-tool caps — the agent is free to call any tool within the total budget.
     """
-    writer = _writer()
     new_observations: list[Observation] = []
     total_budget = _total_tool_budget(ctx.db, ctx.org_id)
     total_calls = sum(counts.values())
@@ -110,6 +109,8 @@ async def _dispatch_v2(
 
     coros = []
     executed_flags: list[bool] = []
+    tool_step_ids: list[str] = []
+    tool_labels: list[str] = []
 
     for tc in tool_calls:
         name = tc.get("tool")
@@ -118,7 +119,10 @@ async def _dispatch_v2(
         if tool_obj and hasattr(tool_obj, "prepare_arguments"):
             args = tool_obj.prepare_arguments(args)
         label = getattr(tool_obj, "ui_label", None) if tool_obj else None
-        writer({"event": "tool_call", "tool": name, "arguments": args, "label": label or name})
+        ui_label = label or name
+        step_id = _emit_timeline(type="tool_call", tool=name, label=ui_label, status="active")
+        tool_step_ids.append(step_id)
+        tool_labels.append(ui_label)
 
         sig = _call_signature(name, args)
 
@@ -203,14 +207,16 @@ async def _dispatch_v2(
             if res.get("terminate"):
                 should_terminate = True
         new_observations.append(obs)
-        writer({
-            "event": "tool_observation",
-            "tool": obs.tool,
-            "label": _tool_label(obs.tool, tool_calls),
-            "summary": _summarize_result(obs),
-            "details": obs.result.get("ui_details") if isinstance(obs.result, dict) else None,
-            "error": obs.error,
-        })
+        _emit_timeline(
+            id=tool_step_ids[i],
+            type="tool_result",
+            tool=obs.tool,
+            label=tool_labels[i],
+            summary=_summarize_result(obs),
+            details=obs.result.get("ui_details") if isinstance(obs.result, dict) else None,
+            error=obs.error,
+            status="complete",
+        )
         if executed_flags[i]:
             counts[obs.tool] = counts.get(obs.tool, 0) + 1
 

@@ -3,31 +3,26 @@
 Public API:
   run_agentic_rag() - async generator that streams SSE events
 
-The agent operates via a loop of LangGraph nodes:
+The v2 agent operates via a lean think ⇄ tool loop:
 1. Load conversation context (load_context)
-2. Plan the reasoning steps (plan_node)
-3. Think / reason through each step (think_node)
-4. Execute atomic search/read tools (tool_node)
-5. Check sufficiency (sufficiency_check)
-6. Finalize and stream the answer (finalize_node)
-7. Score answer quality (answer_scoring)
-8. Save memory (save_memory)
+2. Think: one LLM call with all tools bound — emits tool calls or final answer
+3. Tool: dispatch tool calls in parallel, record observations
+4. Post-process: generate/finalize answer, score quality, save memory
 
-Context compaction is not a node: it runs as a budget guard immediately
-before any LLM call with variable-length context (think, finalize).
-
-All tokens, progress, thinking traces, tool calls, and final answers stream in real-time.
+All tokens, progress, thinking traces, tool calls, and final answers stream in real-time
+via the unified timeline event protocol (tl: SSE events).
 
 LangGraph components:
-  agent_graph/     - Graph builder, node implementations, sufficiency check,
-                     execution check, planning, thinking, tooling, finalization,
-                     reflection (answer scoring + clarification), observations
-  agent_runner.py  - Graph execution runner
-  graph_state.py   - AgentState with accumulator reducers
-  nodes.py         - Shared node helpers (agent_step, history, LLM factory, evaluation)
-  prompts.py       - System/user prompts for planning, reasoning, and evaluation
-  schemas.py       - Pydantic models for state and tool schemas (CitationRef, Subtask, etc.)
-  streaming.py     - v3 stream transformer to SSE events
+  agent_graph/       - Shared modules (helpers, tooling, observations, compaction,
+                       finalization, load_context)
+  agent_graph_v2/    - v2 graph builder, think node, tool node, post-process node
+  agent_runner_v2.py - v2 graph execution runner
+  graph_state.py     - AgentState with accumulator reducers
+  nodes.py           - Shared node helpers (agent_step, history, LLM factory, evaluation)
+  prompts_v2.py      - System/user prompts for v2 agent
+  schemas.py         - Pydantic models for state and tool schemas (CitationRef, Subtask, etc.)
+  retrieval_subagent.py - Parallel retrieval sub-agent
+  office_subagent.py    - Office document generation sub-agent
   utils.py         - Helper functions (context formatting, citation normalization)
   token_budget.py  - Context-window budget management
   redis_memory.py  - Redis-backed checkpoint memory

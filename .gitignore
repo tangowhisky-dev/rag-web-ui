@@ -109,3 +109,4 @@ lpt[1-9].*
 /frontend/.pnpm-store
 /backend/benchmark_outputs
 /ruff
+/benchmarks

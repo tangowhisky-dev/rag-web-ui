@@ -8,7 +8,6 @@ from typing import Any, Generator, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_openai import ChatOpenAI
-from langgraph.config import get_stream_writer
 
 from app.core.settings_registry import get_def
 
@@ -73,33 +72,38 @@ def _messages_to_conversation_text(messages: list) -> str:
     return "\n\n".join(parts)
 
 
+# ── Node → phase label mapping ───────────────────────────────────────────────
+# Maps internal LangGraph node names to human-readable phase labels.
+# This is the single source of truth — the frontend renders the label as-is.
+#
+# v2 graph nodes: load_context, think, tool, post_process.
+# "think" is intentionally omitted — the think node emits its own
+# timeline "thinking" step with the actual reasoning content inline.
+# "tool" is omitted — tool calls show as tool_call/tool_result events.
+# "post_process" is omitted — "Finalizing answer" is emitted by the think
+# node when content starts streaming (or by post_process for the fallback path).
+NODE_PHASE_LABEL: dict[str, str] = {
+    "load_context": "Analyzing query",
+}
+
+
 @contextmanager
 def _agent_step(name: str) -> Generator[None, None, None]:
-    """Emit agent_step active/done lifecycle events around a node.
+    """Emit timeline phase events (active → complete) around a node.
 
     No-op when called outside a LangGraph runnable context (e.g. unit tests).
+    Nodes not in NODE_PHASE_LABEL are silently skipped (no timeline noise).
     """
-    writer = _safe_writer()
-    if writer is not None:
-        writer({"event": "agent_step", "node": name, "status": "active", "latency_ms": 0})
+    from .agent_graph.helpers import _emit_timeline
+    label = NODE_PHASE_LABEL.get(name)
+    if label is None:
+        yield
+        return
+    step_id = _emit_timeline(type="phase", label=label, status="active")
     try:
         yield
     finally:
-        if writer is not None:
-            writer({"event": "agent_step", "node": name, "status": "done", "latency_ms": 0})
-
-
-def _safe_writer():
-    """Return the stream writer if inside a graph context, else None.
-
-    Retrieval nodes are called both from the graph (where stream events work)
-    and from search tools (where there is no graph context). This
-    helper lets nodes emit progress events safely in both cases.
-    """
-    try:
-        return get_stream_writer()
-    except (RuntimeError, KeyError):
-        return None
+        _emit_timeline(id=step_id, type="phase", label=label, status="complete")
 
 
 # ── Answer Generation ──────────────────────────────────────────────────────

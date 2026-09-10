@@ -1,7 +1,6 @@
 """Runner for the agentic-v2 pipeline.
 
-Mirrors the interface of agent_runner.run_agent_loop but uses the v2 graph
-(unified think ⇄ tool loop, no planner/sufficiency/finalizer nodes).
+Uses the v2 graph (unified think ⇄ tool loop, no planner/sufficiency/finalizer nodes).
 """
 
 from __future__ import annotations

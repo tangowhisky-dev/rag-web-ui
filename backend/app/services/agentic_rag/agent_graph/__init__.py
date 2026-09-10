@@ -1,16 +1,13 @@
-"""Agent graph package — shared modules for v1 and v2 pipelines.
+"""Agent graph package — shared modules for the v2 pipeline.
 
-v1 graph (build.py, planning.py, thinking.py, sufficiency.py,
-execution_check.py, reflection.py) is commented out. v2 pipeline
-(agent_graph_v2/) is the active pipeline.
-
-Shared modules still used by v2:
-  - helpers.py: budgets, writer, wall-clock, chart/office marker substitution
-  - tooling.py: _run_tool, _merge_retrieved_docs, _summarize_result, _tool_label
+Shared modules used by v2:
+  - helpers.py: budgets, writer, wall-clock, chart/office marker substitution,
+    unified timeline event emitter
+  - tooling.py: _run_tool, _merge_retrieved_docs, _summarize_result
   - observations.py: observation formatting, tool descriptions, search history
   - compaction.py: context compaction for prompt budget management
   - finalization.py: _build_finalize_prompt, _stream_final_answer
-  - load_context.py: load_context_node (used by both v1 and v2)
+  - load_context.py: load_context_node
 """
 
 from __future__ import annotations
@@ -18,6 +15,7 @@ from __future__ import annotations
 # Shared helpers (used by v2)
 from .helpers import (
     _coerce_observation,
+    _emit_timeline,
     _extract_balanced,
     _extract_json_block,
     _is_transient_error,
@@ -58,14 +56,9 @@ from .load_context import load_context_node
 
 # Shared tooling (used by v2)
 from .tooling import (
-    _dispatch_tool_calls,
-    _merge_observation_docs,
     _merge_retrieved_docs,
-    _retry_failed_calls,
     _run_tool,
-    _seed_existing_docs,
     _summarize_result,
-    _tool_label,
 )
 
 # Shared finalization (used by v2)
@@ -119,6 +112,7 @@ from app.services.agentic_rag.graph_state import AgentState
 __all__ = [
     # Helpers
     "_coerce_observation",
+    "_emit_timeline",
     "_extract_balanced",
     "_extract_json_block",
     "_is_transient_error",
@@ -149,14 +143,9 @@ __all__ = [
     # Load context
     "load_context_node",
     # Tooling
-    "_dispatch_tool_calls",
-    "_merge_observation_docs",
     "_merge_retrieved_docs",
-    "_retry_failed_calls",
     "_run_tool",
-    "_seed_existing_docs",
     "_summarize_result",
-    "_tool_label",
     # Finalization
     "_build_finalize_prompt",
     "_build_last_answer_object_deterministic",

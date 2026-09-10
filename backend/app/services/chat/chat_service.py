@@ -15,25 +15,6 @@ from app.services.infrastructure import (
     get_cancel_token, clear_cancel_token, is_cancelled,
     heartbeat_cancel_check,
 )
-# ── SSE flush helpers ─────────────────────────────────────────────────────────
-# Uvicorn buffers SSE responses by default. These helpers force the HTTP
-# server to flush buffered data to the client so events arrive progressively.
-
-async def _sse_flush():
-    """Force-flush the SSE response buffer.
-    
-    Appends an empty SSE comment (':\\n') which signals the client to flush
-    its buffer, and yields control back to the event loop.
-    """
-    yield ':\n'  # SSE comment — triggers client-side flush
-    await asyncio.sleep(0)
-
-
-async def stream_flush():
-    """Wait for the async generator to produce at least one SSE flush chunk."""
-    async for _ in _sse_flush():
-        pass  # consume the generator
-
 
 def get_effective_llm_config(org_id: Optional[int], db: Session) -> dict:
     """Return LLM config dict for the given org, falling back to .env settings.
@@ -128,9 +109,9 @@ class _StreamContext:
 
 # ── Event handlers ─────────────────────────────────────────────────────────────
 
-async def _handle_agent_step(event, ctx):
-    yield f'4:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
-    await stream_flush()
+async def _handle_timeline(event, ctx):
+    yield f'tl:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
+    await asyncio.sleep(0)
 
 
 async def _handle_context(event, ctx):
@@ -216,16 +197,6 @@ async def _handle_plan(event, ctx):
     await asyncio.sleep(0)
 
 
-async def _handle_tool_call(event, ctx):
-    yield f'tc:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
-    await asyncio.sleep(0)
-
-
-async def _handle_tool_observation(event, ctx):
-    yield f'to:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
-    await asyncio.sleep(0)
-
-
 async def _handle_tool_retry(event, ctx):
     yield f'tr:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
     await asyncio.sleep(0)
@@ -248,11 +219,6 @@ async def _handle_task_list(event, ctx):
 
 async def _handle_thinking(event, ctx):
     yield f'th:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
-    await asyncio.sleep(0)
-
-
-async def _handle_subagent_progress(event, ctx):
-    yield f'sp:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
     await asyncio.sleep(0)
 
 
@@ -287,20 +253,17 @@ async def _handle_interrupt(event, ctx):
 
 
 EVENT_HANDLERS = {
-    "agent_step": _handle_agent_step,
+    "timeline": _handle_timeline,
     "context": _handle_context,
     "token": _handle_token,
     "answer_rewrite": _handle_answer_rewrite,
     "done": _handle_done,
     "plan": _handle_plan,
-    "tool_call": _handle_tool_call,
-    "tool_observation": _handle_tool_observation,
     "tool_retry": _handle_tool_retry,
     "last_answer": _handle_last_answer,
     "progress": _handle_progress,
     "task_list": _handle_task_list,
     "thinking": _handle_thinking,
-    "subagent_progress": _handle_subagent_progress,
     "interrupt": _handle_interrupt,
 }
 
@@ -524,8 +487,18 @@ async def generate_response(
       0:  token             (streaming answer text)
       2:  context           (retrieved docs + confidence metadata)
       3:  error             (exception message)
-      4:  agent_step        (LangGraph node start / finish event)
+      tl: timeline          (unified chain-of-thought events: phases, thinking, tools, subagents)
+      th: thinking          (final-answer reasoning from reasoning models)
+      p:  progress          (transient status messages)
+      t:  task_list         (subtask checklist)
+      tr: tool_retry        (tool call retry attempt)
+      pl: plan              (agent plan)
+      r:  answer_rewrite    (citation-normalised final answer)
+      la: last_answer       (structured summary + chart/office files)
+      f:  file              (generated Office file download info)
       d:  done              (finish reason + token usage)
+      c:  interrupt         (clarification request)
+      C:  clarify_resume    (clarification resolved)
 
     file_markdown is forwarded to run_stream; the graph routes the query
     internally — no special-casing in this function.
@@ -669,21 +642,3 @@ async def generate_response_resume(
         yield chunk
 
     _finalize_stream(bot_message, db, chat_id, ctx)
-# ── SSE flush helpers ─────────────────────────────────────────────────────────
-# Uvicorn buffers SSE responses by default. These helpers force the HTTP
-# server to flush buffered data to the client so events arrive progressively.
-
-async def _sse_flush():
-    """Force-flush the SSE response buffer.
-
-    Appends an empty SSE comment (':\\n') which signals the client to flush
-    its buffer, and yields control back to the event loop.
-    """
-    yield ':\n'  # SSE comment — triggers client-side flush
-    await asyncio.sleep(0)
-
-
-async def stream_flush():
-    """Wait for the async generator to produce at least one SSE flush chunk."""
-    async for _ in _sse_flush():
-        pass  # consume the generator

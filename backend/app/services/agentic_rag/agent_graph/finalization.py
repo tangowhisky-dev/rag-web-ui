@@ -172,7 +172,7 @@ async def _stream_final_answer(
                 chunk_reasoning = chunk.additional_kwargs.get("reasoning_content", "") or ""
             if chunk_reasoning:
                 reasoning_accumulated += chunk_reasoning
-                writer({"event": "thinking", "content": reasoning_accumulated, "done": False})
+                writer({"event": "thinking", "content": reasoning_accumulated, "done": False, "phase": "answer"})
         if not final:
             final = "I'm sorry, I couldn't generate a response at this time."
     except Exception as exc:

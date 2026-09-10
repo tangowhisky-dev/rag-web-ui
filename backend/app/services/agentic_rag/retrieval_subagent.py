@@ -380,9 +380,7 @@ async def run_retrieval_subagent(
     from app.services.agentic_rag.agent_graph.observations import _tool_descriptions_text
     from app.services.agentic_rag.tools import build_tools
     from app.services.settings_service import get_setting
-    from app.services.agentic_rag.agent_graph.helpers import _writer as _get_writer
-
-    writer = _get_writer()
+    from app.services.agentic_rag.agent_graph.helpers import _emit_timeline
 
     # Build search/read tools only
     all_tools = build_tools(ctx)
@@ -401,8 +399,8 @@ async def run_retrieval_subagent(
     final_state = {}
     seen_signatures: set[str] = set()  # persists across iterations
 
-    writer({"event": "subagent_progress", "subagent_id": subagent_id,
-            "sub_query": sub_query, "status": "started"})
+    _emit_timeline(type="subagent_start", subagent_id=subagent_id,
+                   subagent_type="retrieval", label=sub_query)
 
     iteration = 0
     while True:
@@ -502,9 +500,9 @@ async def run_retrieval_subagent(
                 continue
 
             label = getattr(tool, "ui_label", name)
-            writer({"event": "subagent_progress", "subagent_id": subagent_id,
-                    "sub_query": sub_query, "status": "tool_call",
-                    "tool": name, "label": label})
+            tool_step = _emit_timeline(type="subagent_step", subagent_id=subagent_id,
+                                       step_type="tool", tool=name, label=label,
+                                       status="active")
 
             result = await _run_tool(tool, name, args)
             obs = Observation(
@@ -522,10 +520,10 @@ async def run_retrieval_subagent(
             if obs.error:
                 logger.warning("[retrieval_subagent %s] tool %s failed: %s",
                                subagent_id, name, obs.error)
-            writer({"event": "subagent_progress", "subagent_id": subagent_id,
-                    "sub_query": sub_query, "status": "tool_done",
-                    "tool": name, "label": label, "hit_count": hit_count,
-                    "error": bool(obs.error)})
+            _emit_timeline(id=tool_step, type="subagent_step", subagent_id=subagent_id,
+                           step_type="tool", tool=name, label=label,
+                           hit_count=hit_count, error=bool(obs.error),
+                           status="complete")
 
     # Extract evidence from all observations and merge with any citations
     # the sub-agent explicitly included in its final JSON.
@@ -553,9 +551,9 @@ async def run_retrieval_subagent(
     strategy = final_state.get("strategy") or None
     summary = "; ".join(gaps + conflicts) if (gaps or conflicts) else ("complete" if complete else "no evidence")
 
-    writer({"event": "subagent_progress", "subagent_id": subagent_id,
-            "sub_query": sub_query, "status": "done",
-            "evidence_count": len(evidence)})
+    _emit_timeline(type="subagent_done", subagent_id=subagent_id,
+                   subagent_type="retrieval", label=sub_query,
+                   succeeded=len(evidence) > 0, evidence_count=len(evidence))
 
     return {
         "ok": len(evidence) > 0,

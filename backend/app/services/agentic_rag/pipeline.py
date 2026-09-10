@@ -1,9 +1,7 @@
 """Enterprise agent pipeline — uses the v2 agent loop.
 
-v1 pipeline (plan → clarify → think → tool → sufficiency_check → finalize →
-answer_scoring → save_memory) has been superseded by the v2 unified loop
-(load_context → think ⇄ tool → post_process → END). The v1 code is retained
-but commented out in agent_runner.py and agent_graph/build.py for reference.
+v2 unified loop: load_context → think ⇄ tool → post_process → END.
+The v1 pipeline has been removed.
 """
 
 from __future__ import annotations

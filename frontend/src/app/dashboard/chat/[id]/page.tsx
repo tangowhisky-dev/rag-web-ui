@@ -31,26 +31,32 @@ import ClarificationDialog from "@/components/chat/clarification-dialog";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { LoadingDots } from "@/components/ui/loading-dots";
 
-interface AgentStep {
-  node: string;
-  latency_ms: number;
-  status: string;
-  // optional per-node detail fields emitted by the backend
-  [key: string]: unknown;
-}
+// ── Unified timeline event types ─────────────────────────────────────────────
+// All chain-of-thought display events flow through a single `tl:` SSE stream.
+// See backend helpers.py _emit_timeline() for the emission side.
 
-interface SubagentProgressEvent {
-  subagent_id: string;
-  sub_query: string;
-  status: "started" | "tool_call" | "tool_done" | "done";
-  tool?: string;
+interface TimelineEvent {
+  id: string;
+  type: "phase" | "thinking" | "tool_call" | "tool_result" | "subagent_start" | "subagent_step" | "subagent_done";
+  ts?: number;
+  // phase
   label?: string;
-  hit_count?: number;
-  error?: string | null;
-  evidence_count?: number;
+  status?: string;
+  // thinking
+  content?: string;
+  elapsed?: number;
+  // tool
+  tool?: string;
   summary?: string;
+  details?: Record<string, unknown> | null;
+  error?: string | null;
+  hit_count?: number;
+  // subagent
+  subagent_id?: string;
   subagent_type?: "retrieval" | "office";
-  iteration?: number;
+  step_type?: "thinking" | "tool";
+  succeeded?: boolean;
+  evidence_count?: number;
 }
 
 interface Message {
@@ -77,7 +83,6 @@ interface Message {
     latency_ms: number;
   }>;
   synthesisMode?: boolean;
-  agentSteps?: AgentStep[];
   file_name?: string;  // filename of attached chat file, if any
   file_id?: number;    // chat_files.id — needed for download URL
   // Final evaluation metrics (from answer_evaluation_node)
@@ -88,9 +93,7 @@ interface Message {
   completeness?: number;
   // Enterprise agent loop per-turn state
   plan?: Record<string, unknown>;
-  toolCalls?: Array<Record<string, unknown>>;
-  toolObservations?: Array<Record<string, unknown>>;
-  subagentProgress?: SubagentProgressEvent[];
+  timelineEvents?: TimelineEvent[];
   thinkingContent?: { content: string; done: boolean; elapsed?: number };
   lastAnswerObject?: Record<string, unknown>;
   chartOptions?: Array<Record<string, unknown>>;
@@ -198,6 +201,10 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     done: boolean;
     elapsed?: number;
   } | null>(null);
+
+  // Unified timeline events from `tl:` SSE stream — replaces the old
+  // agentSteps + toolCalls + toolObservations + subagentProgress + loopThinkingContent.
+  const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[]>([]);
 
   // ── Pagination state ────────────────────────────────────────────────────────
   const [hasMoreMessages, setHasMoreMessages] = useState(false);
@@ -559,16 +566,47 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       return;
     }
 
-    // 4: agent_step — LangGraph node start/finish events for AgenticProgress
-    if (trimmedLine.startsWith("4:")) {
+    // tl: timeline — unified chain-of-thought events (phases, thinking,
+    // tool calls, subagent progress). Replaces the old 4:/tc:/to:/sp: streams.
+    if (trimmedLine.startsWith("tl:")) {
       try {
-        const step = JSON.parse(trimmedLine.slice(2)) as AgentStep;
-        appendAssistantChunk(assistantId, (message) => ({
-          ...message,
-          agentSteps: [...(message.agentSteps ?? []), step],
-        }));
+        const ev = JSON.parse(trimmedLine.slice(3)) as TimelineEvent;
+        // Update timeline: if the id already exists (e.g. tool_call → tool_result
+        // or thinking content accumulation), merge the update in place.
+        // Otherwise append.
+        setTimelineEvents((prev) => {
+          const idx = prev.findIndex((e) => e.id === ev.id);
+          if (idx >= 0) {
+            const updated = [...prev];
+            updated[idx] = { ...updated[idx], ...ev };
+            return updated;
+          }
+          return [...prev, ev];
+        });
+        // Persist timeline events to the message for page reload.
+        // Only persist terminal/new events to avoid double state updates
+        // on every incremental update during streaming. The live
+        // timelineEvents state handles display during streaming.
+        const shouldPersist = ev.status === "complete"
+          || ev.type === "subagent_start"
+          || ev.type === "subagent_done";
+        if (shouldPersist) {
+          appendAssistantChunk(assistantId, (message) => ({
+            ...message,
+            timelineEvents: (() => {
+              const prev = message.timelineEvents ?? [];
+              const idx = prev.findIndex((e) => e.id === ev.id);
+              if (idx >= 0) {
+                const updated = [...prev];
+                updated[idx] = { ...updated[idx], ...ev };
+                return updated;
+              }
+              return [...prev, ev];
+            })(),
+          }));
+        }
       } catch (e) {
-        console.error("Failed to parse agent_step event:", e);
+        console.error("Failed to parse timeline event:", e);
       }
       return;
     }
@@ -639,20 +677,25 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       return;
     }
 
-    // th: thinking — chain-of-thought from reasoning models (new agentic agent)
+    // th: thinking — final-answer reasoning from reasoning models.
+    // (Think-node reasoning is now in the tl: timeline stream.)
     if (trimmedLine.startsWith("th:")) {
       try {
         const payload = JSON.parse(trimmedLine.slice(3)) as {
           content: string;
           done: boolean;
           elapsed?: number;
+          phase?: "think" | "answer";
         };
-        setThinkingContent(payload);
-        if (payload.done && payload.content) {
-          appendAssistantChunk(assistantId, (message) => ({
-            ...message,
-            thinkingContent: payload,
-          }));
+        // Only handle final-answer reasoning here.
+        if (payload.phase !== "think") {
+          setThinkingContent(payload);
+          if (payload.done && payload.content) {
+            appendAssistantChunk(assistantId, (message) => ({
+              ...message,
+              thinkingContent: payload,
+            }));
+          }
         }
       } catch (e) {
         console.error("Failed to parse thinking event:", e);
@@ -670,34 +713,6 @@ function ChatPageInner({ params }: { params: { id: string } }) {
         }));
       } catch (e) {
         console.error("Failed to parse plan event:", e);
-      }
-      return;
-    }
-
-    // tc: tool_call — enterprise agent tool invocation
-    if (trimmedLine.startsWith("tc:")) {
-      try {
-        const payload = JSON.parse(trimmedLine.slice(3)) as Record<string, unknown>;
-        appendAssistantChunk(assistantId, (message) => ({
-          ...message,
-          toolCalls: [...(message.toolCalls ?? []), payload],
-        }));
-      } catch (e) {
-        console.error("Failed to parse tool_call event:", e);
-      }
-      return;
-    }
-
-    // to: tool_observation — enterprise agent tool result
-    if (trimmedLine.startsWith("to:")) {
-      try {
-        const payload = JSON.parse(trimmedLine.slice(3)) as Record<string, unknown>;
-        appendAssistantChunk(assistantId, (message) => ({
-          ...message,
-          toolObservations: [...(message.toolObservations ?? []), payload],
-        }));
-      } catch (e) {
-        console.error("Failed to parse tool_observation event:", e);
       }
       return;
     }
@@ -726,20 +741,6 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       return;
     }
 
-    // sp: subagent_progress — per-subagent live progress events
-    if (trimmedLine.startsWith("sp:")) {
-      try {
-        const payload = JSON.parse(trimmedLine.slice(3)) as SubagentProgressEvent;
-        appendAssistantChunk(assistantId, (message) => ({
-          ...message,
-          subagentProgress: [...(message.subagentProgress ?? []), payload],
-        }));
-      } catch (e) {
-        console.error("Failed to parse subagent_progress event:", e);
-      }
-      return;
-    }
-
     // la: last_answer — enterprise agent structured summary + chart options + office files
     if (trimmedLine.startsWith("la:")) {
       try {
@@ -761,10 +762,14 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     if (trimmedLine.startsWith("f:")) {
       try {
         const payload = JSON.parse(trimmedLine.slice(2)) as OfficeFileRef;
-        appendAssistantChunk(assistantId, (message) => ({
-          ...message,
-          officeFiles: [...(message.officeFiles ?? []), payload],
-        }));
+        appendAssistantChunk(assistantId, (message) => {
+          const existing = message.officeFiles ?? [];
+          // Deduplicate by file_id — subagent retries can emit the same file twice.
+          if (existing.some((f) => f.file_id === payload.file_id)) {
+            return message;
+          }
+          return { ...message, officeFiles: [...existing, payload] };
+        });
       } catch (e) {
         console.error("Failed to parse file event:", e);
       }
@@ -887,6 +892,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     setProgressMessages([]);
     setTaskList([]);
     setThinkingContent(null);
+    setTimelineEvents([]);
 
     const controller = new AbortController();
     abortControllerRef.current = controller;
@@ -1131,10 +1137,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
             completeness: targetAssistantMsg.completeness as number | undefined,
             retrievalScore: targetAssistantMsg.retrieval_score as number | undefined,
             // Clear streaming-only fields from the previous branch
-            agentSteps: undefined,
-            toolCalls: undefined,
-            toolObservations: undefined,
-            subagentProgress: undefined,
+            timelineEvents: undefined,
             toolTrace: undefined,
             plan: undefined,
             synthesisMode: undefined,
@@ -1186,6 +1189,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     setProgressMessages([]);
     setTaskList([]);
     setThinkingContent(null);
+    setTimelineEvents([]);
     setIsLoading(true);
 
     // Send clarification to backend and pipe the resumed SSE stream.
@@ -1333,7 +1337,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                     />
                     {/* Content */}
                     <div className="flex-1 min-w-0 text-sm">
-                      {isLoading && !message.content && !(message.id === lastAssistantId && message.agentSteps?.length) ? (
+                      {isLoading && !message.content && !(message.id === lastAssistantId && message.timelineEvents?.length) ? (
                         <div className="flex items-center justify-center py-2" aria-label="Generating response…">
                           <div className="relative w-5 h-5">
                             <div className="absolute inset-0 rounded-full bg-primary/40 animate-pulse" />
@@ -1354,10 +1358,9 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                           suggestion={message.suggestion}
                           failedLegs={message.failedLegs}
                           toolTrace={message.id === lastAssistantId ? message.toolTrace : undefined}
-                          agentSteps={message.id === lastAssistantId ? message.agentSteps : undefined}
                           taskList={message.id === lastAssistantId ? taskList : undefined}
-                          progressMessages={message.id === lastAssistantId && isLoading ? progressMessages : undefined}
                           thinkingContent={message.id === lastAssistantId && isLoading ? thinkingContent : message.thinkingContent}
+                          timelineEvents={message.id === lastAssistantId && isLoading ? timelineEvents : message.timelineEvents}
                           synthesisMode={message.synthesisMode}
                           isStreaming={isLoading && message.id === lastAssistantId}
                           onDelete={handleDeleteMessage}
@@ -1367,9 +1370,6 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                           completeness={message.completeness}
                           retrievalScore={message.retrievalScore}
                           plan={message.plan}
-                          toolCalls={message.toolCalls}
-                          toolObservations={message.toolObservations}
-                          subagentProgress={message.subagentProgress}
                           lastAnswerObject={message.lastAnswerObject}
                           chartOptions={message.chartOptions}
                           officeFiles={message.officeFiles}

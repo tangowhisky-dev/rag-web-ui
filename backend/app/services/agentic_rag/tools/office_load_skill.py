@@ -145,7 +145,7 @@ class OfficeLoadSkillInput(BaseModel):
 
 class OfficeLoadSkillTool(BaseAgentTool):
     name: str = "office_load_skill"
-    ui_label: str = "Loading OfficeCLI design guidelines"
+    ui_label: str = "Loading design guidelines"
     description: str = "Load OfficeCLI design guidelines for the target document format."
     prompt_snippet: str = "Load Office generation guidance (fonts, colors, layout)"
     prompt_guidelines: list[str] = [

@@ -3,8 +3,8 @@
 Contains utilities with no dependency on other agent_graph sub-modules:
 observation coercion, stream-writer access, per-tool call budgets,
 transient-error detection, correction hints, balanced-text extraction,
-chart-marker substitution, JSON-block extraction, and wall-clock budget
-checking.
+chart-marker substitution, JSON-block extraction, wall-clock budget
+checking, and the unified timeline event emitter.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import re
 import time
+import uuid
 
 from app.services.agentic_rag.schemas import Observation
 from app.services.settings_service import get_setting
@@ -40,6 +41,49 @@ def _writer():
         return get_stream_writer()
     except (RuntimeError, KeyError):
         return lambda x: None
+
+
+# ── Unified timeline event emitter ───────────────────────────────────────────
+#
+# All chain-of-thought display events (phases, thinking, tool calls, tool
+# results, subagent lifecycle) flow through this single helper as
+# `{"event": "timeline", ...}` dicts.  The frontend builds one ordered
+# list from these events — no more reconstructing a timeline from
+# disconnected agent_step + tool_call + subagent_progress + thinking arrays.
+#
+# Step types:
+#   phase        — agent loop phase (Analyzing query, Thinking, etc.)
+#   thinking     — reasoning content from a thinking model (inline in CoT)
+#   tool_call    — main-agent tool about to run
+#   tool_result  — main-agent tool finished
+#   subagent_start — subagent spawned (retrieval or office)
+#   subagent_step  — subagent internal step (tool call / tool result / thinking)
+#   subagent_done  — subagent finished
+#
+# Every step has a unique `id`.  Updates to the same step (e.g. active →
+# complete, thinking content accumulation) reuse the same id.
+
+_timeline_counter = 0
+
+
+def _timeline_id(prefix: str = "s") -> str:
+    """Generate a unique timeline step id."""
+    global _timeline_counter
+    _timeline_counter += 1
+    return f"{prefix}-{_timeline_counter}"
+
+
+def _emit_timeline(**kwargs) -> str:
+    """Emit a timeline event and return the step id.
+
+    The caller passes the step type and any fields.  `id` is auto-generated
+    if not provided.  `ts` is auto-stamped.
+    """
+    writer = _writer()
+    step_id = kwargs.pop("id", None) or _timeline_id(kwargs.get("type", "s"))
+    payload = {"event": "timeline", "id": step_id, "ts": time.time(), **kwargs}
+    writer(payload)
+    return step_id
 
 
 # Per-turn call caps are intentionally NOT enforced here except for
@@ -123,20 +167,20 @@ def _substitute_chart_markers(text: str, chart_options: list[dict]) -> str:
 
 
 def _substitute_office_markers(text: str, office_files: list[dict]) -> str:
-    """Replace [[DOC_N]] placeholders with markdown download links.
+    """Remove [[DOC_N]] placeholders from the answer text.
 
-    Any file whose marker the model omitted is appended at the end.
-    The frontend intercepts office:// links and renders file chips.
+    The frontend renders download chips via the officeFiles prop, so the
+    answer text should not contain any marker placeholders. Strip all
+    [[DOC_N]] markers (known and unknown indices) and clean up leftover
+    whitespace/punctuation around them.
     """
-    result = text
-    for i, f in enumerate(office_files, start=1):
-        marker = f"[[DOC_{i}]]"
-        link = f"[📄 {f.get('file_name', 'document')}](office://{f['file_id']})"
-        if marker in result:
-            result = result.replace(marker, link, 1)
-        else:
-            result = f"{result}\n\n{link}"
-    return result
+    # Remove all [[DOC_N]] markers regardless of index.
+    result = re.sub(r"\[\[DOC_\d+\]\]", "", text)
+    # Clean up double spaces left behind by marker removal.
+    result = re.sub(r"  +", " ", result)
+    # Clean up empty lines left behind.
+    result = re.sub(r"\n{3,}", "\n\n", result)
+    return result.strip()
 
 
 def _extract_json_block(text: str) -> str | None:
