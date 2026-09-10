@@ -123,6 +123,7 @@ export interface SubagentProgressEvent {
   summary?: string;
   subagent_type?: "retrieval" | "office";
   iteration?: number;
+  doc_type?: string;
 }
 
 export interface AgenticProgressProps {
@@ -249,6 +250,7 @@ export const AgenticProgress = ({
       isOffice: boolean;
       isDone: boolean;
       succeeded: boolean;
+      docType: string;
       items: Array<{ text: string; status: "active" | "complete" | "error" }>;
     }> = {};
     const order: string[] = [];
@@ -261,6 +263,7 @@ export const AgenticProgress = ({
           isOffice: ev.subagent_type === "office",
           isDone: false,
           succeeded: false,
+          docType: "document",
           items: [],
         };
         order.push(sid);
@@ -269,6 +272,7 @@ export const AgenticProgress = ({
       if (ev.status === "started") {
         g.subQuery = ev.sub_query;
         g.isOffice = ev.subagent_type === "office";
+        g.docType = ev.doc_type || "document";
       } else if (ev.status === "tool_call") {
         g.items.push({
           text: ev.label || ev.tool || "tool call",
@@ -396,7 +400,7 @@ export const AgenticProgress = ({
                       ? (sg.isOffice
                           ? (subagentFailed ? "Failed to create" : "Created")
                           : "Searched for")
-                      : (sg.isOffice ? "Creating" : "Searching for");
+                      : (sg.isOffice ? `Creating ${sg.docType}` : "Searching for");
                     return (
                       <Task key={sg.id} defaultOpen={isInProgress}>
                         <TaskTrigger

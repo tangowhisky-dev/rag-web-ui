@@ -205,9 +205,19 @@ async def run_office_subagent(
     from app.services.settings_service import get_setting
 
     writer = _get_writer()
+    # Infer a short document-type label from the request for progress events.
+    _req_lower = request.lower()
+    if "pptx" in _req_lower or "slide" in _req_lower or "presentation" in _req_lower or "deck" in _req_lower:
+        _doc_type = "presentation"
+    elif "xlsx" in _req_lower or "spreadsheet" in _req_lower or "sheet" in _req_lower:
+        _doc_type = "spreadsheet"
+    elif "docx" in _req_lower or "document" in _req_lower or "report" in _req_lower or "memo" in _req_lower:
+        _doc_type = "document"
+    else:
+        _doc_type = "document"
     writer({"event": "subagent_progress", "subagent_id": subagent_id,
             "sub_query": request[:200], "status": "started",
-            "subagent_type": "office"})
+            "subagent_type": "office", "doc_type": _doc_type})
 
     # Build the 4 office tools — these share ctx so they can read/write state
     all_tools = build_tools(ctx)
