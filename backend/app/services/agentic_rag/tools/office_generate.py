@@ -62,7 +62,7 @@ class OfficeSlideSpec(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _normalize_bullets(cls, data: Any) -> Any:
-        """Normalize bullets and accept field aliases from skill files."""
+        """Normalize bullets, layout aliases, and accept field aliases from skill files."""
         if isinstance(data, dict):
             # Accept aliases from skill files: title_text → title, subtitle_text → subtitle.
             # Drop speaker_notes and slide_number (not used — keeps tool calls small).
@@ -72,6 +72,31 @@ class OfficeSlideSpec(BaseModel):
                 data["subtitle"] = data.pop("subtitle_text")
             data.pop("speaker_notes", None)
             data.pop("slide_number", None)
+            # Normalize layout: OfficeCLI only supports blank, title, content
+            # (plus full names like "Title and Content", "Two Content", "Title Only").
+            # LLMs often use "title_and_content" which silently produces 0 slides.
+            layout = data.get("layout", "blank")
+            _LAYOUT_MAP = {
+                "title_and_content": "content",
+                "titlecontent": "content",
+                "title-content": "content",
+                "content_title": "content",
+                "section_header": "title",
+                "section-header": "title",
+                "section": "title",
+                "two_content": "content",
+                "twocontent": "content",
+                "comparison": "content",
+                "title_only": "title",
+                "titleonly": "title",
+            }
+            if isinstance(layout, str):
+                layout_lower = layout.lower().strip()
+                if layout_lower in _LAYOUT_MAP:
+                    data["layout"] = _LAYOUT_MAP[layout_lower]
+                elif layout_lower not in ("blank", "title", "content"):
+                    # Unknown layout — default to blank (always works).
+                    data["layout"] = "blank"
             # If 'content' is provided but 'bullets' is not, split content into bullets.
             if data.get("content") and not data.get("bullets"):
                 data["bullets"] = [b.strip() for b in str(data["content"]).split("\n") if b.strip()]
@@ -563,7 +588,11 @@ class OfficeGenerateTool(BaseAgentTool):
             verify_proc = subprocess.run(verify_cmd, capture_output=True, text=True, timeout=30)
             verify_output = verify_proc.stdout or ""
             if fmt == "pptx":
-                slide_count = verify_output.count("slide[")
+                # OfficeCLI outline output: "File: x.pptx | N slides\n├── Slide 1: ..."
+                # Count "Slide " (capital S) or "| N slides" — not "slide[".
+                import re
+                slide_match = re.search(r'\|\s*(\d+)\s+slides?', verify_output)
+                slide_count = int(slide_match.group(1)) if slide_match else 0
                 if slide_count == 0:
                     return {"ok": False, "result": {}, "error": "Generated PPTX has 0 slides. The batch commands did not produce any slides. Ensure you pass slides=[...] with title and bullets for each slide.", "tokens": 0}
             elif fmt == "docx":

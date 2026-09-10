@@ -55,11 +55,17 @@ You are an Office document generation specialist. You create polished,\
 
 # Field Names (CRITICAL — wrong names cause validation errors)
 
-PPTX slides: {{"layout": "title|title_and_content|blank",\
+PPTX slides: {{"layout": "title|content|blank",\
  "title": "Slide Title", "subtitle": "...",\
  "bullets": ["bullet 1", "bullet 2"],\
  "chart": {{"type": "bar|line|pie", "title": "..."}},\
  "speaker_notes": "..."}}
+
+VALID LAYOUTS (PPTX only): blank, title, content.\
+ Do NOT use "title_and_content", "section", "two_content",\
+ "comparison", or any other PowerPoint layout name — OfficeCLI\
+ silently produces 0 slides for unrecognized layouts.\
+ DOCX and XLSX do NOT have a layout field.
 
 DOCX sections: {{"heading": "Section Heading", "level": 1,\
  "paragraphs": ["paragraph 1", "paragraph 2"],\
@@ -74,16 +80,59 @@ XLSX sheets: {{"name": "Sheet Name",\
 Do NOT use "content" for sections — use "heading" and "paragraphs".\
  Do NOT use "title" for sections — use "heading".
 
+# Source Evidence
+
+Source evidence is provided in the user prompt under "Source evidence".\
+ Use this content to create slide bullets, section paragraphs, and sheet\
+ data. For text-only documents, summarize the evidence into concise\
+ bullets and paragraphs.
+
+# Charts
+
+Charts are optional. To add a chart to a slide/section/sheet, set\
+ chart_type (bar, line, pie, column, scatter, area, doughnut) and\
+ chart_title. Chart data is populated automatically from\
+ state.accumulated_data — do NOT pass data values in the tool call.\
+ For PPTX and DOCX, chart data is embedded inline. For XLSX, chart data\
+ comes from the worksheet cells you define in the sheet. If there is no\
+ accumulated_data, charts will be empty — skip the chart and use bullets\
+ or paragraphs instead.
+
 # Process
 
 1. Call office_load_skill with the target format.
 2. Call office_generate with append=false and the document structure.\
  For multi-slide decks: 1-2 slides per call, then append=true for the rest.
-3. If office_generate returns an error: read the error, fix the field names\
- or structure, and call office_generate again.
-4. Optionally call office_inspect to check quality.
-5. If issues found: call office_edit to fix them.
-6. Write a brief summary of what was created.
+3. If office_generate returns an error, fix the specific issue:
+   - "0 slides" or "Layout not found" error → your layout value is invalid.\
+ Use only: blank, title, content. The error message lists available layouts.\
+ Read it and pick one of those names.
+   - "No document structure" error → you forgot to pass slides, sections,\
+ or sheets. Add them with titles and content.
+   - "No content generated" error → your slides/sections have no bullets\
+ or paragraphs. Add bullet text from the source evidence.
+   - Validation error → check field names (heading not title for sections,\
+ paragraphs not content, bullets not text for slides).
+   Fix the issue and call office_generate again with the corrected args.
+4. Call office_inspect with mode="validate" to check the generated file.
+5. If validation passes AND the file has the expected number of\
+ slides/sections/sheets: write your summary NOW. Do not call more tools.
+6. If issues found: call office_edit to fix them, then re-inspect.
+7. Write a brief plain-text summary (no tool calls) describing\
+ what was created: file name, format, number of slides/sections/sheets,\
+ and key content.
+
+# When to Finalize
+
+- After office_generate returns a file_id AND office_inspect validates it:\
+ write your summary immediately. Do not call more tools unless validation\
+ found concrete issues.
+- If you have created a file but haven't inspected it: call office_inspect\
+ once, then finalize.
+- Do NOT regenerate a file that was already created successfully. If you\
+ want to add more content, use append=true instead of creating a new file.
+- If office_generate fails 3 times with the same error: stop and write a\
+ summary explaining what went wrong. Do not keep retrying.
 
 # Rules
 
@@ -92,9 +141,6 @@ Do NOT use "content" for sections — use "heading" and "paragraphs".\
 - For text-only documents: provide paragraphs/bullets directly.
 - Supported formats: pptx, docx, xlsx ONLY.
 - You have a limited tool-call budget. The prompt shows how many calls remain.
-- When done, write a brief plain-text summary (no tool calls) describing\
- what was created: file name, format, number of slides/sections/sheets,\
- and key content.
 """
 
 
@@ -121,18 +167,47 @@ def _build_subagent_user_prompt(
     if observations:
         parts.append("Prior tool calls:\n")
         for i, obs in enumerate(observations, 1):
-            parts.append(f"  {i}. {obs.tool}({json.dumps(obs.arguments, default=str)[:200]})")
+            args_str = json.dumps(obs.arguments, default=str)[:200]
+            parts.append(f"  {i}. {obs.tool}({args_str})")
             if obs.error:
                 parts.append(f"     → ERROR: {obs.error[:300]}\n")
             else:
-                result_summary = json.dumps(obs.result, default=str)[:200] if obs.result else "(empty)"
-                parts.append(f"     → {result_summary}\n")
+                result = obs.result or {}
+                if obs.tool == "office_load_skill":
+                    content_len = len(result.get("skill_content", ""))
+                    parts.append(f"     → skill loaded: format={result.get('format')} skill={result.get('skill')} ({content_len} chars of guidelines)\n")
+                elif obs.tool == "office_generate" and result.get("file_id"):
+                    parts.append(f"     → file_id={result.get('file_id')} file_name={result.get('file_name')} format={result.get('format')} slides={result.get('slide_count')} sections={result.get('section_count')} sheets={result.get('sheet_count')}\n")
+                elif obs.tool == "office_inspect":
+                    parts.append(f"     → {json.dumps(result, default=str)[:300]}\n")
+                else:
+                    parts.append(f"     → {json.dumps(result, default=str)[:200]}\n")
         parts.append("\n")
 
     remaining = tool_budget - calls_used
     parts.append(f"Tool calls remaining: {remaining}/{tool_budget}\n")
     if remaining <= 0:
         parts.append("\nYou have exhausted your tool-call budget. Write a summary of what was created (or failed to create).")
+    elif remaining <= 3:
+        # Graduated pressure: when budget is low, push the LLM to finalize
+        # if a file already exists, rather than starting over.
+        has_file = any(
+            o.tool == "office_generate" and o.result and o.result.get("file_id")
+            for o in observations if not o.error
+        )
+        if has_file:
+            parts.append(
+                f"\nYou have {remaining} calls left and a file has already been created. "
+                "If the file is valid, write your summary NOW. "
+                "Only call another tool if validation found concrete issues."
+            )
+        else:
+            parts.append(
+                f"\nYou have {remaining} calls left and no file has been created yet. "
+                "Focus on getting one office_generate call to succeed — "
+                "use layout='blank' or 'title' (NOT 'title_and_content'), "
+                "pass slides with title and bullets, and keep it simple."
+            )
     else:
         parts.append("\nCall the next tool, or write a plain-text summary if the document is created.")
     return "".join(parts)
@@ -213,14 +288,8 @@ async def run_office_subagent(
     system = OFFICE_SUBAGENT_PROMPT
     observations: list[Observation] = []
     counts: dict[str, int] = {}
+    seen_signatures: set[str] = set()
     summary = ""
-
-    iteration = 0
-    while True:
-        iteration += 1
-        calls_used = sum(counts.values())
-        if calls_used >= tool_budget:
-            break
 
     # Snapshot generated_files at start — files from previous turns persist
     # in the checkpointer. We only want to report success if NEW files were
@@ -231,7 +300,13 @@ async def run_office_subagent(
             if f.get("file_id"):
                 pre_existing_file_ids.add(f["file_id"])
 
-    for iteration in range(1, max_iterations + 1):
+    iteration = 0
+    while True:
+        iteration += 1
+        calls_used = sum(counts.values())
+        total_attempts = len(observations)
+        if calls_used >= tool_budget or total_attempts >= tool_budget or iteration > tool_budget + 2:
+            break
         user = _build_subagent_user_prompt(
             request, evidence_text, accumulated_data_text,
             tools_text, iteration, tool_budget, calls_used, observations,
@@ -267,10 +342,13 @@ async def run_office_subagent(
                 errors = [o.error for o in observations if o.error]
                 if errors and not ctx.state.get("generated_files"):
                     summary = f"Failed to generate document: {errors[-1]}"
+            # Count new files generated so far
+            _gen = ctx.state.get("generated_files", []) if ctx.state else []
+            _new = [f for f in _gen if f.get("file_id") and f["file_id"] not in pre_existing_file_ids]
             writer({"event": "subagent_progress", "subagent_id": subagent_id,
                     "sub_query": request[:200], "status": "done",
                     "subagent_type": "office",
-                    "evidence_count": len(new_files),
+                    "evidence_count": len(_new),
                     "summary": summary[:300] if summary else ""})
             break
 
@@ -298,6 +376,24 @@ async def run_office_subagent(
                     tokens=0,
                 ))
                 continue
+
+            # Dedup guard: skip identical tool+format calls. office_generate
+            # with the same format+title+append is a retry that will fail the
+            # same way. office_load_skill with the same format is redundant.
+            if name == "office_load_skill":
+                sig = f"{name}:{args.get('format', '')}:{args.get('skill', 'base')}"
+            elif name == "office_generate":
+                sig = f"{name}:{args.get('format', '')}:{args.get('title', '')}:{args.get('append', False)}"
+            else:
+                sig = f"{name}:{json.dumps(args, sort_keys=True, default=str)[:100]}"
+            if sig in seen_signatures:
+                observations.append(Observation(
+                    tool=name, arguments=args, result={},
+                    error=f"Duplicate call: {name} with same key args already tried. Change the approach or write your summary.",
+                    tokens=0,
+                ))
+                continue
+            seen_signatures.add(sig)
 
             label = getattr(tool, "ui_label", f"office: {name}")
             writer({"event": "subagent_progress", "subagent_id": subagent_id,

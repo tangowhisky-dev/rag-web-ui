@@ -38,7 +38,7 @@ def _writer():
     """Return a stream writer if one is available, else a no-op."""
     try:
         return get_stream_writer()
-    except RuntimeError:
+    except (RuntimeError, KeyError):
         return lambda x: None
 
 
