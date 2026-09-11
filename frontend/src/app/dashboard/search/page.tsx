@@ -400,7 +400,7 @@ export default function SearchPage() {
               <div>
                 {recentSearches.length > 0 && (
                   <div>
-                    <div className="flex items-center gap-1.5 mb-2 text-xs text-muted-foreground">
+                    <div className="flex items-center gap-1.5 mb-3 text-sm font-medium text-foreground">
                       <Clock className="h-3.5 w-3.5" />
                       <span>Recent searches</span>
                     </div>
@@ -429,7 +429,7 @@ export default function SearchPage() {
               <div>
                 {suggestionsLoading && (
                   <div className="space-y-2">
-                    <div className="flex items-center gap-1.5 mb-2 text-xs text-muted-foreground">
+                    <div className="flex items-center gap-1.5 mb-3 text-sm font-medium text-foreground">
                       <Sparkles className="h-3.5 w-3.5" />
                       <span>Suggested searches</span>
                     </div>
@@ -440,7 +440,7 @@ export default function SearchPage() {
                 )}
                 {!suggestionsLoading && suggestions.length > 0 && (
                   <div className="animate-in fade-in duration-500">
-                    <div className="flex items-center gap-1.5 mb-2 text-xs text-muted-foreground">
+                    <div className="flex items-center gap-1.5 mb-3 text-sm font-medium text-foreground">
                       <Sparkles className="h-3.5 w-3.5" />
                       <span>Suggested searches</span>
                     </div>
