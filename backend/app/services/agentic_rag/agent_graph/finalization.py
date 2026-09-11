@@ -29,7 +29,7 @@ from app.services.infrastructure import is_cancelled
 from app.services.settings_service import get_setting
 
 from .compaction import _compact_if_needed
-from .helpers import _coerce_observation, _substitute_chart_markers, _substitute_office_markers, _writer
+from .helpers import _coerce_observation, _substitute_chart_markers, _substitute_office_markers, _writer, debug_emit
 from .observations import _non_retrieval_observations_text
 
 logger = logging.getLogger(__name__)
@@ -72,6 +72,12 @@ def _build_finalize_prompt(
 ) -> tuple[str, str]:
     """Build the finalize system+user prompt. Returns (system, user)."""
     context_text = format_context_string(docs, file_markdown, db=ctx.db, org_id=ctx.org_id)
+    # Debug stream: the exact evidence block the answer LLM cites from —
+    # headers carry authority markers (status=/effective=/version=).
+    debug_emit("finalize_context", {
+        "context_text": context_text[:12000],
+        "doc_count": len(docs),
+    })
     # Non-retrieval tool results (code_execute, chart_generate, etc.)
     # are not in retrieved_docs; surface them separately. Retrieval
     # results are already in context_text — don't duplicate.

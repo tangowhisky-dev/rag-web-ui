@@ -310,7 +310,7 @@ async def run_office_subagent(
         dict with keys: ok, file_id, file_name, format, summary, error
     """
     # Lazy imports (break circular dependency)
-    from app.services.agentic_rag.agent_graph.helpers import _emit_timeline, _writer as _get_writer
+    from app.services.agentic_rag.agent_graph.helpers import _compact_args, _emit_timeline, _writer as _get_writer
     from app.services.agentic_rag.agent_graph.tooling import _run_tool
     from app.services.agentic_rag.agent_graph.observations import _tool_descriptions_text
     from app.services.agentic_rag.tools import build_tools
@@ -469,7 +469,7 @@ async def run_office_subagent(
                     label = "Updating Office document"
             tool_step = _emit_timeline(type="subagent_step", subagent_id=subagent_id,
                                        step_type="tool", tool=name, label=label,
-                                       status="active")
+                                       status="active", arguments=_compact_args(args))
 
             result = await _run_tool(tool, name, args)
             obs = Observation(

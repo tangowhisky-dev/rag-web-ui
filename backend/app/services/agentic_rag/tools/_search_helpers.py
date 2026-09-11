@@ -36,23 +36,76 @@ def _emit_progress(phase: str, message: str, **extra: Any) -> None:
         writer(payload)
 
 
+_STATUS_ALIASES = {"obsolete": "superseded"}
+
+_KNOWN_FILTER_KEYS = frozenset({
+    "title_contains", "file_name_contains", "content_type",
+    "created_after", "created_before",
+    "file_modified_after", "file_modified_before",
+    "file_created_after", "file_created_before",
+    "document_ids",
+    "document_status", "exclude_status",
+    "effective_as_of",
+    "effective_window_start", "effective_window_end",
+    "effective_from_after", "effective_from_before",
+    "effective_to_after", "effective_to_before",
+    "version", "owner",
+})
+
+
+def _filter_value_list(value) -> list[str]:
+    """Normalize a scalar-or-list filter value to a list of stripped strings."""
+    if value is None:
+        return []
+    items = value if isinstance(value, (list, tuple)) else [value]
+    return [str(v).strip() for v in items if v is not None and str(v).strip()]
+
+
+def _parse_filter_dt(value):
+    """Parse an ISO date/datetime filter value to a naive-UTC datetime.
+
+    Document date columns are naive DateTime — tz-aware input is normalized
+    so comparisons don't raise, and 'Z' suffixes are accepted. Returns None
+    for missing/unparseable values.
+    """
+    if value is None:
+        return None
+    from datetime import datetime as _dt, timezone as _tz
+    try:
+        dt = _dt.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    return dt.astimezone(_tz.utc).replace(tzinfo=None) if dt.tzinfo else dt
+
+
 def resolve_filter_to_doc_ids(
     db: Any,
     kb_ids: list[int],
     filters: dict | None,
-) -> list[int] | None:
+) -> tuple[list[int] | None, dict]:
     """Translate metadata filters to a list of document_ids via MySQL.
 
-    Returns None when no filters are provided (search all docs).
-    Returns an empty list if filters match zero documents.
+    Returns (None, meta) when no recognized filter is provided — the search
+    runs unfiltered. Returns ([], meta) when recognized filters match zero
+    documents. meta carries ``total_matching`` and ``ignored_keys`` so the
+    agent can distinguish "no documents matched" from "filter not applied"
+    and detect keys/values that were silently ignored.
     """
+    meta: dict = {"total_matching": None, "ignored_keys": []}
     if not filters:
-        return None
+        return None, meta
 
     from app.models.knowledge import Document
     from app.services.retrieval.retrieval import get_effective_datastore_ids
-    from datetime import datetime as _dt
     from sqlalchemy import or_
+
+    ignored = {k for k in filters if k not in _KNOWN_FILTER_KEYS}
+    # Present-but-empty values on known keys are also ignored.
+    ignored |= {
+        k for k, v in filters.items()
+        if k in _KNOWN_FILTER_KEYS and not v
+    }
+    applied = False
 
     ds_ids = get_effective_datastore_ids(kb_ids, None, db)
     q = db.query(Document.id).filter(
@@ -63,51 +116,154 @@ def resolve_filter_to_doc_ids(
     )
 
     if filters.get("title_contains"):
+        applied = True
         q = q.filter(Document.title.ilike(f"%{filters['title_contains']}%"))
     if filters.get("file_name_contains"):
+        applied = True
         q = q.filter(Document.file_name.ilike(f"%{filters['file_name_contains']}%"))
     if filters.get("content_type"):
+        applied = True
         q = q.filter(Document.content_type == filters["content_type"])
-    if filters.get("created_after"):
-        try:
-            after = _dt.fromisoformat(filters["created_after"])
-            q = q.filter(Document.created_at >= after)
-        except (ValueError, TypeError):
-            pass
-    if filters.get("created_before"):
-        try:
-            before = _dt.fromisoformat(filters["created_before"])
-            q = q.filter(Document.created_at <= before)
-        except (ValueError, TypeError):
-            pass
-    if filters.get("file_modified_after"):
-        try:
-            after = _dt.fromisoformat(filters["file_modified_after"])
-            q = q.filter(Document.file_modified_at >= after)
-        except (ValueError, TypeError):
-            pass
-    if filters.get("file_modified_before"):
-        try:
-            before = _dt.fromisoformat(filters["file_modified_before"])
-            q = q.filter(Document.file_modified_at <= before)
-        except (ValueError, TypeError):
-            pass
-    if filters.get("file_created_after"):
-        try:
-            after = _dt.fromisoformat(filters["file_created_after"])
-            q = q.filter(Document.file_created_at >= after)
-        except (ValueError, TypeError):
-            pass
-    if filters.get("file_created_before"):
-        try:
-            before = _dt.fromisoformat(filters["file_created_before"])
-            q = q.filter(Document.file_created_at <= before)
-        except (ValueError, TypeError):
-            pass
+    if filters.get("version"):
+        applied = True
+        q = q.filter(Document.version == str(filters["version"]).strip())
+    if filters.get("owner"):
+        applied = True
+        q = q.filter(Document.owner.ilike(f"%{filters['owner']}%"))
     if filters.get("document_ids"):
-        q = q.filter(Document.id.in_(filters["document_ids"]))
+        # LLMs sometimes pass a scalar instead of a list — normalize, and
+        # treat non-numeric values as ignored rather than erroring.
+        raw_ids = _filter_value_list(filters["document_ids"])
+        id_vals = [int(v) for v in raw_ids if str(v).lstrip("-").isdigit()]
+        if id_vals:
+            applied = True
+            q = q.filter(Document.id.in_(id_vals))
+        else:
+            ignored.add("document_ids")
 
-    return [r[0] for r in q.limit(200).all()]
+    # Plain date ranges. NULL effective_to rows never satisfy <=/>=
+    # comparisons, so effective_to_* filters return only expiring documents.
+    for key, col, is_after in (
+        ("created_after", Document.created_at, True),
+        ("created_before", Document.created_at, False),
+        ("file_modified_after", Document.file_modified_at, True),
+        ("file_modified_before", Document.file_modified_at, False),
+        ("file_created_after", Document.file_created_at, True),
+        ("file_created_before", Document.file_created_at, False),
+        ("effective_from_after", Document.effective_from, True),
+        ("effective_from_before", Document.effective_from, False),
+        ("effective_to_after", Document.effective_to, True),
+        ("effective_to_before", Document.effective_to, False),
+    ):
+        raw = filters.get(key)
+        if raw is None:
+            continue
+        dt = _parse_filter_dt(raw)
+        if dt is None:
+            ignored.add(key)
+            continue
+        applied = True
+        q = q.filter(col >= dt if is_after else col <= dt)
+
+    # Lifecycle status — 'obsolete' is accepted as an alias for 'superseded'
+    # because that is the term users/LLMs reach for naturally.
+    if "document_status" in filters:
+        statuses = [
+            _STATUS_ALIASES.get(s.lower(), s.lower())
+            for s in _filter_value_list(filters["document_status"])
+        ]
+        if statuses:
+            applied = True
+            q = q.filter(Document.document_status.in_(statuses))
+    if "exclude_status" in filters:
+        excl = [
+            _STATUS_ALIASES.get(s.lower(), s.lower())
+            for s in _filter_value_list(filters["exclude_status"])
+        ]
+        if excl:
+            applied = True
+            q = q.filter(Document.document_status.notin_(excl))
+
+    # Point-in-time validity: "what was in force on date D".
+    if "effective_as_of" in filters:
+        as_of = _parse_filter_dt(filters["effective_as_of"])
+        if as_of is None:
+            ignored.add("effective_as_of")
+        else:
+            applied = True
+            q = q.filter(Document.effective_from <= as_of)
+            q = q.filter(or_(Document.effective_to.is_(None), Document.effective_to >= as_of))
+
+    # Window overlap: "what was in force during [start, end]" — either bound
+    # may be omitted.
+    ws_raw = filters.get("effective_window_start")
+    we_raw = filters.get("effective_window_end")
+    if ws_raw is not None or we_raw is not None:
+        ws = _parse_filter_dt(ws_raw)
+        we = _parse_filter_dt(we_raw)
+        if ws_raw is not None and ws is None:
+            ignored.add("effective_window_start")
+        if we_raw is not None and we is None:
+            ignored.add("effective_window_end")
+        if we is not None:
+            applied = True
+            q = q.filter(Document.effective_from <= we)
+        if ws is not None:
+            applied = True
+            q = q.filter(or_(Document.effective_to.is_(None), Document.effective_to >= ws))
+
+    meta["ignored_keys"] = sorted(ignored)
+    if not applied:
+        return None, meta
+
+    # No cap: the caller passes doc_ids to Qdrant MatchAny / MySQL IN, both
+    # of which handle thousands of ids. total_matching tells the agent how
+    # selective its filter was.
+    doc_ids = [r[0] for r in q.all()]
+    meta["total_matching"] = len(doc_ids)
+    return doc_ids, meta
+
+
+def enrich_hits_with_authority(hits: list[dict], db: Any) -> list[dict]:
+    """Stamp document lifecycle metadata onto each hit so the LLM can reason
+    about authority — not just relevance.
+
+    document_status / effective_from / effective_to / version are mutable
+    post-ingestion (admins edit them on the documents table), so they are
+    resolved live from MySQL here rather than stamped into Qdrant payloads
+    or chunk_metadata at index time. Degrades gracefully: a DB failure
+    returns the hits untagged.
+    """
+    if not hits or db is None:
+        return hits
+    doc_ids = {
+        h.get("document_id") for h in hits
+        if isinstance(h, dict) and isinstance(h.get("document_id"), int)
+    }
+    if not doc_ids:
+        return hits
+    try:
+        from app.models.knowledge import Document
+        rows = db.query(
+            Document.id, Document.document_status,
+            Document.effective_from, Document.effective_to,
+            Document.version,
+        ).filter(Document.id.in_(doc_ids)).all()
+        by_id = {r.id: r for r in rows}
+    except Exception as exc:
+        logger.warning("[authority] doc metadata enrichment failed: %s", exc)
+        return hits
+    for hit in hits:
+        if not isinstance(hit, dict):
+            continue
+        row = by_id.get(hit.get("document_id"))
+        if row is None:
+            continue
+        hit["document_status"] = row.document_status
+        hit["effective_from"] = row.effective_from.isoformat() if row.effective_from else ""
+        hit["effective_to"] = row.effective_to.isoformat() if row.effective_to else ""
+        hit["version"] = row.version
+    return hits
 
 
 async def expand_synonyms(query: str, ctx: ToolContext) -> tuple[str, list[str]]:

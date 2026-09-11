@@ -606,7 +606,7 @@ const CitationLink: FC<CitationLinkProps> = (props) => {
           <Divider />
           <div className="text-foreground leading-relaxed prose prose-sm dark:prose-invert max-w-none">
             <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeHighlight, [rehypeKatex, { throwOnError: false }]]}>
-              {cleanChunkText(citationRef.quoted_text || citation.text)}
+              {cleanChunkText(citation.text || citationRef.quoted_text || "")}
             </Markdown>
           </div>
           <Divider />

@@ -19,7 +19,7 @@ from app.services.retrieval.retrieval import exact_search_docs, sparse_search_do
 from app.services.retrieval.reranker import rerank, soft_elbow_truncate
 from app.services.settings_service import get_setting
 
-from ._search_helpers import _emit_progress, expand_synonyms, inject_neighbor_context, resolve_filter_to_doc_ids
+from ._search_helpers import _emit_progress, enrich_hits_with_authority, expand_synonyms, inject_neighbor_context, resolve_filter_to_doc_ids
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,7 @@ class KeywordSearchInput(BaseModel):
     query: str = Field(description="Search query — keywords, terms, code, identifiers, or distinctive phrases.")
     kb_ids: List[int] = Field(default_factory=list, description="Knowledge base IDs to search.")
     document_ids: Optional[List[int]] = Field(default=None, description="Restrict to these document IDs.")
-    filters: Optional[dict] = Field(default=None, description="Metadata filters: title_contains, file_name_contains, content_type, file_modified_after, file_modified_before, file_created_after, file_created_before.")
+    filters: Optional[dict] = Field(default=None, description="Metadata filters: title_contains, file_name_contains, content_type, file_modified_after, file_modified_before, file_created_after, file_created_before, document_status (draft|active|superseded; 'obsolete' is accepted), exclude_status, effective_as_of (ISO date — document must be in force on that date), effective_window_start/effective_window_end (validity overlap), effective_from_after/before, effective_to_after/before, version, owner.")
     top_k: int = Field(default=20, description="Maximum hits to return after merge and dedup.")
 
 
@@ -40,17 +40,34 @@ class KeywordSearchTool(BaseAgentTool):
         "keyword_search: Best as the first search when the query contains identifiers, acronyms, code, error messages, jargon, or distinctive terminology. It runs strict MySQL FTS plus SPLADE sparse expansion, so it also captures related keyword overlaps.",
         "keyword_search: Prefer keyword_search over semantic_search when the query includes any specific technical term, even if the overall question is conceptual.",
         "keyword_search: Results are cross-encoder reranked and soft-elbow filtered before returning. No separate rerank call needed.",
+        "keyword_search: For 'current/latest/in-force' questions pass filters={\"document_status\":\"active\",\"effective_as_of\":\"<today>\"} (call current_datetime first if needed). Leave unfiltered for history or version comparisons — hits carry document_status/effective-window tags so you can reason about conflicting versions.",
         "keyword_search: Fall back to semantic_search if keyword_search returns weak or irrelevant results.",
     ]
     args_schema: type = KeywordSearchInput
     ui_label: str = "Searching (keyword)"
 
     def prepare_arguments(self, args: dict) -> dict:
-        """Normalize kb_ids to list of ints."""
-        kb_ids = args.get("kb_ids", [])
-        if isinstance(kb_ids, (str, int)):
-            kb_ids = [kb_ids]
-        args["kb_ids"] = [int(k) for k in kb_ids]
+        """Normalize kb_ids/document_ids to int lists; parse a stringified
+        filters dict (some LLMs serialize nested objects as JSON strings)."""
+        for key in ("kb_ids", "document_ids"):
+            val = args.get(key)
+            if val is None:
+                continue
+            if isinstance(val, (str, int)):
+                val = [val]
+            try:
+                args[key] = [int(k) for k in val]
+            except (TypeError, ValueError):
+                pass  # leave raw — schema validation reports the bad value
+        filt = args.get("filters")
+        if isinstance(filt, str):
+            try:
+                import json as _json
+                parsed = _json.loads(filt)
+                if isinstance(parsed, dict):
+                    args["filters"] = parsed
+            except (ValueError, TypeError):
+                pass  # leave — schema validation will report it
         return args
 
     async def _execute(self, input_obj: KeywordSearchInput) -> dict:
@@ -68,12 +85,20 @@ class KeywordSearchTool(BaseAgentTool):
         datastore_ids = get_effective_datastore_ids(kb_ids, ctx.org_id, ctx.db) if ctx.db else []
 
         doc_ids = input_obj.document_ids
+        filter_meta: dict = {}
         if input_obj.filters:
-            doc_ids = resolve_filter_to_doc_ids(ctx.db, kb_ids, input_obj.filters)
-            if doc_ids is not None:
+            filter_doc_ids, filter_meta = resolve_filter_to_doc_ids(ctx.db, kb_ids, input_obj.filters)
+            if filter_doc_ids is not None:
+                # Intersect with an explicit document_ids restriction —
+                # filters narrowing to zero searchable docs means zero hits,
+                # not an unfiltered search.
+                doc_ids = (
+                    sorted(set(filter_doc_ids) & set(input_obj.document_ids))
+                    if input_obj.document_ids else filter_doc_ids
+                )
                 _emit_progress("filtering", f"Filtering to {len(doc_ids)} matching documents …")
                 if not doc_ids:
-                    return {"ok": True, "result": {"hits": [], "query_used": input_obj.query, "search_type": "keyword", "count": 0}, "error": None, "tokens": 0, "terminate": False}
+                    return {"ok": True, "result": {"hits": [], "query_used": input_obj.query, "search_type": "keyword", "count": 0, "matched_documents": filter_meta.get("total_matching") or 0}, "error": None, "tokens": 0, "terminate": False}
 
         # Synonym expansion (Redis-cached) — keyword search benefits from variants
         query, extra_queries = await expand_synonyms(input_obj.query, ctx)
@@ -182,6 +207,7 @@ class KeywordSearchTool(BaseAgentTool):
                 "score": meta.get("score", 0.0),
                 "content_hash": meta.get("content_hash", ""),
                 "qdrant_point_id": meta.get("qdrant_point_id", ""),
+                "_is_neighbor": bool(meta.get("_is_neighbor")),
                 "citation_ref": {
                     "document_id": meta.get("document_id"),
                     "citation_kind": "chunk",
@@ -194,19 +220,29 @@ class KeywordSearchTool(BaseAgentTool):
             }
             hits.append(hit)
 
+        # Tag each hit with the document's lifecycle status / validity window
+        # (resolved live from MySQL — safe under post-ingestion edits).
+        hits = enrich_hits_with_authority(hits, ctx.db)
+
         write_audit(ctx, "keyword_search", input_obj.model_dump(),
                      {"hit_count": len(hits), "exact_count": len(exact_docs) if 'exact_docs' in dir() else 0,
                       "sparse_count": len(sparse_docs) if 'sparse_docs' in dir() else 0},
                      status="ok")
 
+        result_payload = {
+            "hits": hits,
+            "query_used": query,
+            "search_type": "keyword",
+            "count": len(hits),
+        }
+        if filter_meta.get("total_matching") is not None:
+            result_payload["matched_documents"] = filter_meta["total_matching"]
+        if filter_meta.get("ignored_keys"):
+            result_payload["ignored_filter_keys"] = filter_meta["ignored_keys"]
+
         return {
             "ok": True,
-            "result": {
-                "hits": hits,
-                "query_used": query,
-                "search_type": "keyword",
-                "count": len(hits),
-            },
+            "result": result_payload,
             "error": None,
             "tokens": sum(len(h["content"]) for h in hits) // 4,
             "terminate": False,

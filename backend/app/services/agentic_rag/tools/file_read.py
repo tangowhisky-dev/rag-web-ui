@@ -118,6 +118,10 @@ class FileReadTool(BaseAgentTool):
             file_id: Optional[int] = None
             title = doc.title or doc.file_name
             file_name = doc.file_name
+            doc_status = doc.document_status
+            doc_effective_from = doc.effective_from.isoformat() if doc.effective_from else None
+            doc_effective_to = doc.effective_to.isoformat() if doc.effective_to else None
+            doc_version = doc.version
         else:
             cf, error = _resolve_chat_file(ctx, input_obj.file_id)
             if error:
@@ -130,6 +134,10 @@ class FileReadTool(BaseAgentTool):
             file_id = cf.id
             title = cf.file_name
             file_name = cf.file_name
+            doc_status = None
+            doc_effective_from = None
+            doc_effective_to = None
+            doc_version = None
 
         # ── Line-range slicing (pi-style offset/limit) ─────────────────────
         lines = markdown.split("\n")
@@ -213,6 +221,10 @@ class FileReadTool(BaseAgentTool):
                 "file_id": file_id,
                 "title": title,
                 "file_name": file_name,
+                "document_status": doc_status,
+                "effective_from": doc_effective_from,
+                "effective_to": doc_effective_to,
+                "version": doc_version,
                 "content": content,
                 "total_tokens": tokens,
                 "truncated": truncated,

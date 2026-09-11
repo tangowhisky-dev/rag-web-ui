@@ -15,6 +15,46 @@ from app.services.infrastructure.reasoning_tags import (
 logger = logging.getLogger(__name__)
 
 
+def _format_effective_window(metadata: dict) -> str:
+    """Render 'start..end' from effective_from/effective_to ISO strings.
+
+    effective_from defaults to 1970-01-01 (sentinel for 'always valid') —
+    treated as an open start. An empty effective_to is an open end. Returns
+    '' when both ends are open (no meaningful window to communicate).
+    """
+    def _d(v) -> str:
+        return str(v)[:10] if v else ""
+
+    start = _d(metadata.get("effective_from"))
+    if start and start <= "1970-01-01":
+        start = ""
+    end = _d(metadata.get("effective_to"))
+    if not start and not end:
+        return ""
+    return f"{start}..{end}"
+
+
+def _authority_markers(metadata: dict) -> list[str]:
+    """Build status/validity/version markers for an evidence header.
+
+    'active' is the default lifecycle state and version '1' the default
+    version — both are omitted to save tokens so non-default documents
+    stand out. Superseded/draft documents and documents outside their
+    effective window are what the LLM needs to notice.
+    """
+    markers: list[str] = []
+    status = metadata.get("document_status")
+    if status and status != "active":
+        markers.append(f"status={status}")
+    window = _format_effective_window(metadata)
+    if window:
+        markers.append(f"effective={window}")
+    version = metadata.get("version")
+    if version is not None and str(version) not in ("", "1"):
+        markers.append(f"version={version}")
+    return markers
+
+
 def _format_doc_parts(pruned_docs: list[dict], file_markdown: str | None) -> list[str]:
     parts: list[str] = []
     for i, doc in enumerate(pruned_docs, 1):
@@ -43,6 +83,7 @@ def _format_doc_parts(pruned_docs: list[dict], file_markdown: str | None) -> lis
                 header_parts.append(f"line={citation_ref['match_line']}")
             if citation_ref.get("source_tool"):
                 header_parts.append(f"source={citation_ref['source_tool']}")
+            header_parts.extend(_authority_markers(metadata))
             header = f"[{citation_id}] " + ", ".join(header_parts)
             parts.append(f'{header}\n     "{content}"')
         else:
@@ -51,6 +92,9 @@ def _format_doc_parts(pruned_docs: list[dict], file_markdown: str | None) -> lis
                 header = f"[KB-{i}] {title} ({source})"
             else:
                 header = f"[KB-{i}]" + (f" ({source})" if source else "")
+            markers = _authority_markers(metadata)
+            if markers:
+                header += f" [{', '.join(markers)}]"
             parts.append(f"{header}\n{content}")
     if file_markdown:
         parts.append(f"[File Content]\n{file_markdown}")

@@ -37,6 +37,7 @@ class _V2LoopState:
         "think_iterations",
         "provider_usage",
         "usage",
+        "all_docs",
     )
 
     def __init__(self, message_id: Optional[int]) -> None:
@@ -45,6 +46,7 @@ class _V2LoopState:
         self.observations: list[dict] = []
         self.think_iterations = 0
         self.provider_usage: dict | None = None
+        self.all_docs: list[dict] = []
         self.usage = {"promptTokens": 0, "completionTokens": 0, "messageId": message_id}
 
 
@@ -68,6 +70,26 @@ def _handle_node_update(node: str, update: dict, state: _V2LoopState) -> Optiona
             for obs in update["observations"]:
                 obs_dict = obs.model_dump() if hasattr(obs, "model_dump") else obs
                 state.observations.append(obs_dict)
+        # retrieved_docs carries the full merged list each tool round —
+        # surface it as a context event (v1 parity: sources + confidence).
+        rd = update.get("retrieved_docs")
+        if isinstance(rd, list) and rd:
+            state.all_docs = rd
+            best = max(
+                (
+                    (d.get("metadata") or {}).get("_reranker_score", 0.0) or 0.0
+                    for d in rd if isinstance(d, dict)
+                ),
+                default=0.0,
+            )
+            conf = ("very_high" if best > 0.8 else "high" if best > 0.6
+                    else "medium" if best > 0.3 else "low" if best > 0 else "none")
+            return {
+                "event": "context",
+                "docs": list(rd),
+                "confidence": conf,
+                "score": int(best * 100),
+            }
         return None
     if node == "think":
         state.think_iterations = max(state.think_iterations, update.get("iteration", 0))

@@ -286,7 +286,7 @@ class TitleSearchTool(BaseAgentTool):
                     "citation_ref": {
                         "document_id": doc.id,
                         "citation_kind": "file",
-                        "quoted_text": (markdown or "")[:200],
+                        "quoted_text": (markdown or "")[:1000],
                         "source_tool": "title_search",
                         "citation_id": "",
                     },

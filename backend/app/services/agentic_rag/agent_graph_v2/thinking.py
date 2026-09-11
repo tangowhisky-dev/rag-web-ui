@@ -27,13 +27,13 @@ from app.services.infrastructure import is_cancelled
 from app.services.settings_service import get_setting
 
 from ..agent_graph.compaction import _compact_if_needed
-from ..agent_graph.helpers import _coerce_observation, _emit_timeline, _total_tool_budget, _wall_clock_exceeded, _writer
+from ..agent_graph.helpers import _coerce_observation, _emit_timeline, _total_tool_budget, _wall_clock_exceeded, _writer, debug_emit
 from ..agent_graph.observations import (
     _observations_metadata_text,
     _prune_contiguous_overlaps,
     _tried_search_queries,
 )
-from ..utils import group_docs_by_document
+from ..utils import _authority_markers, group_docs_by_document
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,9 @@ def _format_retrieved_docs_for_think(docs: list[dict], max_docs: int = 20, max_c
         title = meta.get("title") or meta.get("file_name") or "Unknown"
         score = meta.get("_reranker_score", meta.get("score", 0))
         score_str = f" score={score:.3f}" if score else ""
-        parts.append(f"[E{i}] {title}{score_str}\n  {content}")
+        markers = _authority_markers(meta)
+        marker_str = f" [{', '.join(markers)}]" if markers else ""
+        parts.append(f"[E{i}] {title}{score_str}{marker_str}\n  {content}")
     return "\n\n".join(parts)
 
 
@@ -221,6 +223,16 @@ async def think_node_v2(state, ctx) -> dict:
         if chat_id is not None and is_cancelled(chat_id):
             logger.debug("[think_v2] cancelled before LLM call | chat_id=%s", chat_id)
             return {"iteration": iteration, "tool_calls": [], "precomputed_answer": ""}
+
+        # Debug stream: the literal (post-compaction) prompt the think LLM
+        # consumes — obs_text, evidence preview, history — so evaluators can
+        # verify the agent saw what it needed.
+        debug_emit("think_input", {
+            "iteration": iteration,
+            "prompt": user[:12000],
+            "n_observations": len(observations),
+            "n_retrieved_docs": len(retrieved_docs),
+        })
 
         # Emit timeline thinking step — inline in the CoT at its actual position.
         writer = _writer()

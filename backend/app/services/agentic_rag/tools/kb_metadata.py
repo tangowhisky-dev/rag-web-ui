@@ -164,7 +164,8 @@ def _date_range(db, kb_ids: list[int], input_obj: KbMetadataInput) -> dict:
 def _list_documents(db, kb_ids: list[int], input_obj: KbMetadataInput) -> dict:
     """Return recent documents with metadata, optionally filtered by title."""
     q = (
-        db.query(Document.id, Document.title, Document.file_name, Document.content_type, Document.file_created_at, Document.file_modified_at)
+        db.query(Document.id, Document.title, Document.file_name, Document.content_type, Document.file_created_at, Document.file_modified_at,
+                 Document.document_status, Document.effective_from, Document.effective_to, Document.version, Document.owner)
         .filter(Document.knowledge_base_id.in_(kb_ids))
     )
     if input_obj.value_contains:

@@ -95,6 +95,11 @@ def _compute_profile(org_id: int, kb_id: int, db: Any) -> dict:
         has_file_names = any(d.file_name for d in docs)
         has_content_types = len(content_types) > 1  # only useful if there's variety
         has_dates = bool(date_range)
+        has_statuses = any(d.document_status for d in docs)
+        has_effective = any(d.effective_from or d.effective_to for d in docs)
+        has_versions = any(d.version for d in docs)
+        has_owners = any(d.owner for d in docs)
+        has_file_ts = any(d.file_created_at or d.file_modified_at for d in docs)
 
         fields = {}
         if has_titles:
@@ -106,6 +111,23 @@ def _compute_profile(org_id: int, kb_id: int, db: Any) -> dict:
         if has_dates:
             fields["created_after"] = True
             fields["created_before"] = True
+        if has_file_ts:
+            fields["file_created_after"] = True
+            fields["file_created_before"] = True
+            fields["file_modified_after"] = True
+            fields["file_modified_before"] = True
+        if has_statuses:
+            fields["document_status"] = True
+            fields["exclude_status"] = True
+        if has_effective:
+            fields["effective_as_of"] = True
+            fields["effective_window_start"] = True
+            fields["effective_window_end"] = True
+        if has_versions:
+            fields["version"] = True
+        if has_owners:
+            fields["owner"] = True
+        fields["document_ids"] = True
 
         return {
             "kb_id": kb_id,

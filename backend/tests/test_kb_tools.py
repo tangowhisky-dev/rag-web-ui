@@ -28,6 +28,11 @@ class _StubDoc:
         self.converted_markdown = converted_markdown
         self.knowledge_base_id = knowledge_base_id
         self.data_store_id = data_store_id
+        self.document_status = "active"
+        self.effective_from = None
+        self.effective_to = None
+        self.version = "1"
+        self.owner = None
 
 
 class _StubQuery:

@@ -51,9 +51,11 @@ You are a retrieval specialist. Your job: find the best evidence for a single\
 # Available Tools
 
 - keyword_search: Lexical keyword match. Best for identifiers, code, error\
- messages, jargon, exact terms. Args: {"query": "...", "top_k": 5}
+ messages, jargon, exact terms. Args: {"query": "...", "top_k": 5,\
+ "filters": {"document_status": "active", "effective_as_of": "YYYY-MM-DD"}}
 - semantic_search: Dense vector search. Best for conceptual or paraphrased\
- questions. Args: {"query": "...", "top_k": 5}
+ questions. Args: {"query": "...", "top_k": 5,\
+ "filters": {"document_status": "active", "effective_as_of": "YYYY-MM-DD"}}
 - title_search: Document-level metadata search by title, status, date.\
  Args: {"title_contains": "...", "document_status": "active", "metadata_only": true}
 - graph_expand: Find related entities/chunks through Neo4j graph relationships.\
@@ -166,8 +168,10 @@ def _format_evidence_for_prompt(observations: list[Observation], max_docs: int =
         title = (doc.get("title") or doc.get("file_name") or "Unknown")[:60]
         doc_id = doc.get("document_id", "")
         score = doc.get("score", 0.0)
+        status = doc.get("document_status") or ""
+        status_text = f", status={status}" if status and status != "active" else ""
         content = (doc.get("content") or "")[:max_chars].replace("\n", " ")
-        parts.append(f"[E{i}] {title} (doc_id={doc_id}, score={score:.2f})\n  {content}")
+        parts.append(f"[E{i}] {title} (doc_id={doc_id}, score={score:.2f}{status_text})\n  {content}")
     return "\n\n".join(parts)
 
 
@@ -208,6 +212,17 @@ def _build_retrieval_user_prompt(
                     doc_count = len(docs)
                     confidence = result.get("confidence", "N/A")
                     parts.append(f"     → doc_count={doc_count} confidence={confidence}\n")
+                    # Per-doc identity + status — the sub-agent must see WHICH
+                    # docs matched (and their lifecycle state) without probing.
+                    for d in docs[:10]:
+                        meta = d.get("metadata", {}) if isinstance(d, dict) else {}
+                        d_title = meta.get("title") or meta.get("file_name") or "?"
+                        d_status = meta.get("document_status")
+                        status_txt = f" status={d_status}" if d_status else ""
+                        has_content = "content" if d.get("page_content") else "metadata-only"
+                        parts.append(f"       • doc_id={meta.get('document_id')} \"{str(d_title)[:50]}\"{status_txt} {has_content}\n")
+                    if doc_count > 10:
+                        parts.append(f"       … +{doc_count - 10} more docs\n")
                 elif obs.tool == "file_read":
                     # Show line range + content preview + continuation hint
                     # so the LLM can use what it read and page further if needed.
@@ -288,6 +303,8 @@ def _extract_json_from_text(text: str) -> str:
 
 def _extract_evidence_from_observations(observations: list[Observation]) -> list[dict]:
     """Extract evidence chunks from search/read observations."""
+    from app.services.infrastructure import content_hash as _ch
+
     evidence: list[dict] = []
     seen_hashes: set[str] = set()
 
@@ -299,7 +316,10 @@ def _extract_evidence_from_observations(observations: list[Observation]) -> list
         # search_* tools return "hits"
         hits = result.get("hits", [])
         for hit in hits:
-            content_hash = hit.get("content_hash", "")
+            content = hit.get("content", "")
+            # Fall back to hashing content — neighbor-injected chunks lack
+            # content_hash in their stored chunk_metadata.
+            content_hash = hit.get("content_hash") or _ch(content)
             if content_hash and content_hash in seen_hashes:
                 continue
             if content_hash:
@@ -312,6 +332,10 @@ def _extract_evidence_from_observations(observations: list[Observation]) -> list
                 "file_name": hit.get("file_name", ""),
                 "content": hit.get("content", ""),
                 "score": hit.get("score", 0.0),
+                "document_status": hit.get("document_status"),
+                "effective_from": hit.get("effective_from"),
+                "effective_to": hit.get("effective_to"),
+                "version": hit.get("version"),
                 "citation_ref": hit.get("citation_ref", {}),
                 "source_tool": obs.tool,
             })
@@ -326,6 +350,11 @@ def _extract_evidence_from_observations(observations: list[Observation]) -> list
             title = meta.get("title") or meta.get("file_name") or doc.get("title") or doc.get("file_name") or ""
             file_name = meta.get("file_name") or doc.get("file_name", "")
             if content:
+                ch = meta.get("content_hash") or _ch(content[:2000])
+                if ch and ch in seen_hashes:
+                    continue
+                if ch:
+                    seen_hashes.add(ch)
                 evidence.append({
                     "document_id": doc_id,
                     "chunk_index": meta.get("chunk_index"),
@@ -334,6 +363,10 @@ def _extract_evidence_from_observations(observations: list[Observation]) -> list
                     "file_name": file_name,
                     "content": content[:2000],
                     "score": meta.get("_reranker_score", meta.get("score", 0.0)),
+                    "document_status": meta.get("document_status"),
+                    "effective_from": meta.get("effective_from"),
+                    "effective_to": meta.get("effective_to"),
+                    "version": meta.get("version"),
                     "citation_ref": {
                         "document_id": doc_id,
                         "citation_kind": "document",
@@ -348,6 +381,11 @@ def _extract_evidence_from_observations(observations: list[Observation]) -> list
         if obs.tool == "file_read":
             content = result.get("content", "")
             if content:
+                ch = _ch(content[:2000])
+                if ch and ch in seen_hashes:
+                    continue
+                if ch:
+                    seen_hashes.add(ch)
                 doc_id = obs.arguments.get("document_id")
                 evidence.append({
                     "document_id": doc_id,
@@ -357,6 +395,10 @@ def _extract_evidence_from_observations(observations: list[Observation]) -> list
                     "file_name": result.get("file_name", ""),
                     "content": content[:2000],
                     "score": 1.0,
+                    "document_status": result.get("document_status"),
+                    "effective_from": result.get("effective_from"),
+                    "effective_to": result.get("effective_to"),
+                    "version": result.get("version"),
                     "citation_ref": {
                         "document_id": doc_id,
                         "citation_kind": "document",
@@ -392,7 +434,7 @@ async def run_retrieval_subagent(
     from app.services.agentic_rag.agent_graph.observations import _tool_descriptions_text
     from app.services.agentic_rag.tools import build_tools
     from app.services.settings_service import get_setting
-    from app.services.agentic_rag.agent_graph.helpers import _emit_timeline
+    from app.services.agentic_rag.agent_graph.helpers import _compact_args, _emit_timeline, debug_emit
 
     # Build search/read tools only
     all_tools = build_tools(ctx)
@@ -428,6 +470,13 @@ async def run_retrieval_subagent(
         user = _build_retrieval_user_prompt(
             sub_query, tools_text, iteration, tool_budget, calls_used, observations,
         )
+        # Debug stream: the sub-agent's per-iteration input — tool inventory,
+        # prior observations, and the deduplicated evidence block.
+        debug_emit("subagent_think_input", {
+            "subagent_id": subagent_id,
+            "iteration": iteration,
+            "prompt": user[:12000],
+        })
 
         try:
             tool_temp = get_setting(ctx.db, "TOOL_CALL_TEMPERATURE", ctx.org_id)
@@ -519,7 +568,7 @@ async def run_retrieval_subagent(
             label = getattr(tool, "ui_label", name)
             tool_step = _emit_timeline(type="subagent_step", subagent_id=subagent_id,
                                        step_type="tool", tool=name, label=label,
-                                       status="active")
+                                       status="active", arguments=_compact_args(args))
 
             result = await _run_tool(tool, name, args)
             obs = Observation(

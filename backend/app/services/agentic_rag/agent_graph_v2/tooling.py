@@ -33,11 +33,14 @@ from app.services.settings_service import get_setting
 
 from ..agent_graph.helpers import (
     _coerce_observation,
+    _compact_args,
     _emit_timeline,
     _is_transient_error,
+    _result_brief,
     _tool_call_budget,
     _total_tool_budget,
     _writer,
+    debug_emit,
 )
 from ..agent_graph.tooling import (
     _hit_to_doc_dict,
@@ -101,6 +104,16 @@ async def _dispatch_v2(
         return count
 
     async def _reuse_prior(prior: Observation):
+        # Debug stream: dedup replays never reach _run_tool, so emit the
+        # replayed I/O explicitly — the agent still "saw" this output.
+        debug_emit("tool_observation", {
+            "tool": prior.tool,
+            "arguments": _compact_args(prior.arguments),
+            "result": _result_brief(prior.result),
+            "error": prior.error,
+            "dedup_replay": True,
+            "tokens": 0,
+        })
         return {
             "tool": prior.tool,
             "arguments": prior.arguments,
@@ -124,7 +137,8 @@ async def _dispatch_v2(
             args = tool_obj.prepare_arguments(args)
         label = getattr(tool_obj, "ui_label", None) if tool_obj else None
         ui_label = label or name
-        step_id = _emit_timeline(type="tool_call", tool=name, label=ui_label, status="active")
+        step_id = _emit_timeline(type="tool_call", tool=name, label=ui_label,
+                                 status="active", arguments=_compact_args(args))
         tool_step_ids.append(step_id)
         tool_labels.append(ui_label)
 

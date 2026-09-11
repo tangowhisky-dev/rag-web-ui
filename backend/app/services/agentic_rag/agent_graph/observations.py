@@ -18,6 +18,7 @@ from typing import Any
 
 from app.core.settings_registry import get_def
 from app.services.agentic_rag.schemas import Observation
+from app.services.agentic_rag.utils import _authority_markers
 
 from .helpers import _coerce_observation
 
@@ -287,7 +288,24 @@ def _observations_metadata_text(observations: list[Observation]) -> str:
             best_score = max((h.get("_reranker_score", h.get("score", 0)) or 0) for h in hits) if hits else 0
             search_type = result.get("search_type", "")
             type_text = f" type={search_type}" if search_type else ""
-            parts.append(f"  hit_count={hit_count} best_score={best_score:.3f}{type_text}")
+            # Surface mixed-authority results so think_node can decide to
+            # refine with a document_status/effective_as_of filter.
+            status_counts: dict[str, int] = {}
+            for h in hits:
+                s = h.get("document_status")
+                if s:
+                    status_counts[s] = status_counts.get(s, 0) + 1
+            status_text = ""
+            if any(s != "active" for s in status_counts):
+                status_text = f" status_counts={status_counts}"
+            # Surface filter feedback — how many documents the metadata
+            # filter matched (selectivity) and which keys were ignored —
+            # otherwise the agent can't tell "0 matches" from "filter not applied".
+            matched = result.get("matched_documents")
+            matched_text = f" matched_documents={matched}" if matched is not None else ""
+            ignored_keys = result.get("ignored_filter_keys")
+            ignored_text = f" ignored_filter_keys={ignored_keys}" if ignored_keys else ""
+            parts.append(f"  hit_count={hit_count} best_score={best_score:.3f}{type_text}{status_text}{matched_text}{ignored_text}")
             continue
         if "docs" not in result:
             # Non-retrieval tool — full result needed for next-step reasoning.
@@ -324,6 +342,23 @@ def _observations_metadata_text(observations: list[Observation]) -> str:
         rewritten = result.get("query_rewritten")
         rewrite_text = f" query_rewritten=true used={result.get('query_used', '')}" if rewritten else ""
         parts.append(f"  doc_count={doc_count} confidence={confidence}{sufficient_text}{missing_text}{rewrite_text}")
+        # List each matched doc's identity + authority markers — without
+        # them the think node only sees a count and must keep probing
+        # (title_search loops) to learn what it found.
+        docs = result.get("docs", [])
+        for d in docs[:10]:
+            meta = d.get("metadata", {}) if isinstance(d, dict) else {}
+            title = meta.get("title") or meta.get("file_name") or "?"
+            status = meta.get("document_status")
+            status_txt = f" status={status}" if status else ""
+            markers = _authority_markers(meta)
+            marker_txt = f" [{' '.join(m for m in markers if not m.startswith('status='))}]" \
+                if any(not m.startswith("status=") for m in markers) else ""
+            has_content = "content" if d.get("page_content") else "metadata-only"
+            parts.append(f"    - doc_id={meta.get('document_id')} \"{str(title)[:60]}\""
+                         f"{status_txt}{marker_txt} {has_content}")
+        if doc_count > 10:
+            parts.append(f"    … +{doc_count - 10} more docs")
     return "\n".join(parts)
 
 

@@ -219,6 +219,10 @@ The retrieved context consists of one or more evidence items labeled like:
 
 These evidence items are the authoritative source for document-specific information. Each item shows its source tool, citation kind (chunk, file, section, range, grep, outline, table), and relevant metadata.
 
+Evidence headers may also carry authority markers: `status=` (draft or superseded — omitted when the document is active), `effective=start..end` (the document's validity window; an open end `start..` means ongoing, an open start `..end` means it has always applied), and `version=` (omitted for the default version).
+
+For questions about the current state, prefer active evidence whose effective window covers today. Evidence marked `status=superseded`, `status=draft`, or an expired effective window is historical: it remains valid and citable for "what changed", history, or audit questions, but if your answer about the current state relies on it, say so explicitly. When evidence items conflict, prefer the active/current item and note the conflict.
+
 When answering:
 
 - Base your answer on the retrieved evidence whenever it is relevant.
@@ -342,7 +346,7 @@ Output a JSON object with this structure:
 
 Per-subtask retrieval parameters:
 - For each subtask with tool_hint "keyword_search", "semantic_search", "title_search", or "any", you SHOULD populate suggested_filters and suggested_query when the subtask has a clear retrieval strategy.
-- suggested_filters: Use {{"title_contains": "..."}} when the subtask targets a named document. Use {{"content_type": "application/pdf"}} when the subtask targets a file type. Use {{"file_modified_after": "2026-01-01", "file_modified_before": "2026-12-31"}} for date ranges.
+- suggested_filters: Use {{"title_contains": "..."}} when the subtask targets a named document. Use {{"content_type": "application/pdf"}} when the subtask targets a file type. Use {{"file_modified_after": "2026-01-01", "file_modified_before": "2026-12-31"}} for date ranges. For current-state subtasks ("latest/current/in-force"), use {{"document_status": "active", "effective_as_of": "<today>"}}; for history or version comparisons leave filters off — evidence carries status tags so old versions stay citable.
 - suggested_query: Set this when the subtask targets a specific aspect of a multi-part query. Example: for "compare encryption in satellite vs fiber optic", subtask a gets suggested_query="encryption methods in satellite communications", subtask b gets suggested_query="encryption methods in fiber optic networks".
 - suggested_top_n: For title_search. Use 3 for "latest" queries, 20-50+ for aggregate queries that need all matching documents. If null, defaults to 3.
 - suggested_metadata_only: Set to true for discovery subtasks that only need to know what documents exist (title, date, type) without loading full content. Follow up with a dependent subtask that reads specific documents.

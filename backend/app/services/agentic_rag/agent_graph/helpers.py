@@ -65,6 +65,26 @@ def _writer():
 
 _timeline_counter = 0
 
+# Per-request debug stream: when the chat message body carries debug=true,
+# stage internals (tool args, observation payloads, think/finalize prompts)
+# are emitted as `type="debug"` timeline events. Default off — production
+# streams carry nothing extra. Set per request via set_debug_stream() in
+# generate_response; propagates through asyncio.gather/create_task children.
+from contextvars import ContextVar
+
+_agent_debug_stream: ContextVar[bool] = ContextVar("agent_debug_stream", default=False)
+
+
+def set_debug_stream(enabled: bool) -> None:
+    _agent_debug_stream.set(enabled)
+
+
+def debug_emit(stage: str, data: dict) -> None:
+    """Emit a `type="debug"` timeline event when debug streaming is on."""
+    if not _agent_debug_stream.get():
+        return
+    _emit_timeline(type="debug", stage=stage, data=data)
+
 
 def _timeline_id(prefix: str = "s") -> str:
     """Generate a unique timeline step id."""
@@ -84,6 +104,80 @@ def _emit_timeline(**kwargs) -> str:
     payload = {"event": "timeline", "id": step_id, "ts": time.time(), **kwargs}
     writer(payload)
     return step_id
+
+
+def _compact_value(v, depth: int = 0):
+    """Truncate a tool-arg value for observability — keeps shape, bounds size."""
+    if isinstance(v, str):
+        return v if len(v) <= 200 else f"{v[:200]}…[{len(v)} chars]"
+    if isinstance(v, list):
+        items = [_compact_value(x, depth + 1) for x in v[:10]]
+        if len(v) > 10:
+            items.append(f"…[+{len(v) - 10} items]")
+        return items
+    if isinstance(v, dict):
+        if depth >= 2:
+            return "{…}"
+        return {k: _compact_value(x, depth + 1) for k, x in v.items()}
+    return v
+
+
+def _compact_args(args: dict | None) -> dict:
+    """Compact a tool-call arguments dict for timeline events.
+
+    Raw args can be huge (office tools carry full document content), so
+    strings/lists/dicts are bounded — consumers see *what* was passed
+    without hauling the payload over the SSE stream.
+    """
+    return {k: _compact_value(v) for k, v in (args or {}).items()}
+
+
+_HIT_BRIEF_KEYS = (
+    "document_id", "file_id", "chunk_index", "page", "title", "file_name",
+    "score", "_reranker_score", "_is_neighbor", "document_status",
+    "effective_from", "effective_to", "version", "owner", "content_hash",
+    "source",
+)
+
+
+def _hit_brief(item):
+    """Per-hit/doc brief for debug streams — identity + authority metadata,
+    content only as a short preview (the full text would flood the stream)."""
+    if not isinstance(item, dict):
+        return _compact_value(item)
+    meta = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    brief: dict = {}
+    for src in (item, meta):
+        for k in _HIT_BRIEF_KEYS:
+            if brief.get(k) is None and src.get(k) is not None:
+                brief[k] = src[k]
+    content = item.get("page_content") or item.get("content") or ""
+    if content:
+        brief["content_preview"] = content[:160]
+        brief["content_len"] = len(content)
+    return brief
+
+
+def _result_brief(result):
+    """Compact a tool result for debug streams — keeps the metadata that
+    matters (per-hit identity/authority fields, counts, errors) while
+    bounding content strings. Dict/list nesting otherwise collapses at
+    depth 2 in _compact_value and loses exactly the fields evaluators need."""
+    if not isinstance(result, dict):
+        return _compact_value(result)
+    out: dict = {}
+    for k, v in result.items():
+        if k in ("hits", "docs") and isinstance(v, list):
+            items = [_hit_brief(x) for x in v[:15]]
+            if len(v) > 15:
+                items.append(f"…[+{len(v) - 15} items]")
+            out[k] = items
+        elif k in ("content", "page_content", "markdown") and isinstance(v, str):
+            out[k] = f"{v[:300]}…[{len(v)} chars]" if len(v) > 300 else v
+            out[f"{k}_len"] = len(v)
+        else:
+            out[k] = _compact_value(v)
+    return out
 
 
 # Per-turn call caps are intentionally NOT enforced here except for

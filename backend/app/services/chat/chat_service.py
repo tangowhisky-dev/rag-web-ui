@@ -561,6 +561,13 @@ async def generate_response(
         )
         ctx.rewritten_q = display_query or query
 
+        # Debug stage streaming: `debug: true` in the message body turns on
+        # `type="debug"` timeline events carrying stage internals (tool args,
+        # observation payloads, think/finalize inputs) for the eval harness.
+        # Off by default — no extra payload in production streams.
+        from app.services.agentic_rag.agent_graph.helpers import set_debug_stream
+        set_debug_stream(bool(messages.get("debug")))
+
         # ── Agentic pipeline: single autonomous agent ───────────────────────
         # New agentic agent: rewrite -> search -> stream in real-time
         from app.services.agentic_rag import run_agentic_rag

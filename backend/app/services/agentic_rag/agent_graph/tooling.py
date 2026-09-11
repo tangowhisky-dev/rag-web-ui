@@ -80,20 +80,25 @@ _SEARCH_TOOLS = frozenset({"keyword_search", "semantic_search", "graph_expand", 
 
 def _hit_to_doc_dict(hit: dict) -> dict:
     """Convert a search tool hit (flat dict) to the standard doc dict shape."""
-    return {
-        "page_content": hit.get("content", ""),
-        "metadata": {
-            "document_id": hit.get("document_id"),
-            "chunk_index": hit.get("chunk_index"),
-            "page": hit.get("page"),
-            "title": hit.get("title", ""),
-            "file_name": hit.get("file_name", ""),
-            "content_hash": hit.get("content_hash", ""),
-            "qdrant_point_id": hit.get("qdrant_point_id", ""),
-            "_reranker_score": hit.get("_reranker_score", hit.get("score", 0.0)),
-            "citation_ref": hit.get("citation_ref", {}),
-        },
+    metadata = {
+        "document_id": hit.get("document_id"),
+        "chunk_index": hit.get("chunk_index"),
+        "page": hit.get("page"),
+        "title": hit.get("title", ""),
+        "file_name": hit.get("file_name", ""),
+        "content_hash": hit.get("content_hash", ""),
+        "qdrant_point_id": hit.get("qdrant_point_id", ""),
+        "_reranker_score": hit.get("_reranker_score", hit.get("score", 0.0)),
+        "citation_ref": hit.get("citation_ref", {}),
     }
+    # Authority markers stamped by enrich_hits_with_authority — carried into
+    # retrieved_docs so evidence headers can render status/validity.
+    for key in ("document_status", "effective_from", "effective_to", "version"):
+        if hit.get(key) is not None:
+            metadata[key] = hit[key]
+    if hit.get("_is_neighbor"):
+        metadata["_is_neighbor"] = True
+    return {"page_content": hit.get("content", ""), "metadata": metadata}
 
 
 def _merge_observation_docs(all_observations, seen_hashes, merged_docs):
@@ -166,6 +171,9 @@ def _merge_observation_docs(all_observations, seen_hashes, merged_docs):
                         "citation_ref": citation_ref,
                     },
                 }
+                for key in ("document_status", "effective_from", "effective_to", "version"):
+                    if obs.result.get(key) is not None:
+                        doc_dict["metadata"][key] = obs.result[key]
                 h = _ch(content)
                 if h not in seen_hashes:
                     seen_hashes.add(h)
@@ -194,6 +202,21 @@ def _merge_retrieved_docs(
 
 
 async def _run_tool(tool, name: str, args: dict) -> dict:
+    from .helpers import _compact_args, _result_brief, debug_emit
+
+    def _obs(out_args, result, error, terminate=False, tokens=0):
+        # Debug stream: the tool's normalized input + compacted output —
+        # what the agent actually sent and received at this stage.
+        debug_emit("tool_observation", {
+            "tool": name,
+            "arguments": _compact_args(out_args),
+            "result": _result_brief(result),
+            "error": error,
+            "tokens": tokens,
+        })
+        return {"tool": name, "arguments": out_args, "result": result,
+                "error": error, "tokens": tokens, "terminate": terminate}
+
     try:
         # Normalize nested dict keys — some LLM providers return keys with
         # extra quotes (e.g. '"title"' instead of 'title'). Call the tool's
@@ -204,15 +227,10 @@ async def _run_tool(tool, name: str, args: dict) -> dict:
         # Tools return {"ok": bool, "result": {...}, "error": str|None, "tokens": int, "terminate": bool}.
         # Unwrap the envelope so obs.result is the inner payload (e.g. {"docs": [...], ...}).
         if isinstance(raw, dict) and "result" in raw:
-            return {
-                "tool": name,
-                "arguments": args,
-                "result": raw.get("result", {}),
-                "error": raw.get("error"),
-                "tokens": raw.get("tokens", 0),
-                "terminate": raw.get("terminate", False),
-            }
-        return {"tool": name, "arguments": args, "result": raw, "error": None, "tokens": 0, "terminate": False}
+            return _obs(args, raw.get("result", {}), raw.get("error"),
+                      terminate=raw.get("terminate", False),
+                      tokens=raw.get("tokens", 0))
+        return _obs(args, raw, None)
     except Exception as exc:
         # GraphInterrupt must propagate to LangGraph so it can checkpoint
         # and pause the graph. Do not turn it into an error observation.
@@ -220,4 +238,4 @@ async def _run_tool(tool, name: str, args: dict) -> dict:
         if isinstance(exc, GraphInterrupt):
             raise
         logger.warning("[_run_tool] %s failed: %s", name, exc)
-        return {"tool": name, "arguments": args, "result": {}, "error": str(exc), "tokens": 0, "terminate": False}
+        return _obs(args, {}, str(exc))

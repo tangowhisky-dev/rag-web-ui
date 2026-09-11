@@ -13,6 +13,8 @@ from app.services.agentic_rag.tools.base import BaseAgentTool
 from app.services.graph.expand import expand_docs_via_graph
 from app.services.retrieval import get_effective_datastore_ids
 
+from ._search_helpers import enrich_hits_with_authority
+
 logger = logging.getLogger(__name__)
 
 
@@ -163,6 +165,8 @@ class GraphExpandTool(BaseAgentTool):
                 },
             }
             hits.append(hit)
+
+        hits = enrich_hits_with_authority(hits, ctx.db)
 
         write_audit(ctx, "graph_expand", input_obj.model_dump(),
                      {"hit_count": len(hits)}, status="ok")
