@@ -30,6 +30,7 @@ from app.db.session import SessionLocal as _SessionLocal
 from app.core.security import require_admin, require_super_admin, get_admin_org_ids
 from app.db.session import get_db
 from app.models.datastore import DataStore
+from app.models.knowledge import Document, ProcessingTask
 from app.models.user import User
 from app.services.datastore_watcher import DataStoreWatcher
 
@@ -231,6 +232,26 @@ def _build_scan_event_from_db(db: Session, datastore_id: int, scan_info: dict | 
     }
     if error_message:
         event["error_message"] = error_message
+    if counts["failed"] > 0:
+        # Per-file failures for stacked error notifications — latest failed
+        # task per document, newest first, capped at 50.
+        rows = (
+            db.query(Document.file_name, ProcessingTask.error_message)
+            .join(ProcessingTask, ProcessingTask.document_id == Document.id)
+            .filter(
+                ProcessingTask.data_store_id == datastore_id,
+                ProcessingTask.status == "failed",
+            )
+            .order_by(ProcessingTask.id.desc())
+            .limit(50)
+            .all()
+        )
+        seen_files: set = set()
+        event["failed_files"] = [
+            {"file": fn, "error": err or "ingestion failed"}
+            for fn, err in rows
+            if not (fn in seen_files or seen_files.add(fn))
+        ]
     return event
 
 

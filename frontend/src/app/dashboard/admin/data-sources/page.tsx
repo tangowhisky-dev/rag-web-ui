@@ -25,7 +25,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { useToast } from '@/components/ui/use-toast';
 import { LoadingDots } from '@/components/ui/loading-dots';
-import { Loader2, CheckCircle2, AlertCircle, Pause } from 'lucide-react';
+import { Loader2, CheckCircle2, AlertCircle, Pause, ChevronLeft, ChevronRight, X } from 'lucide-react';
 
 interface Org {
   id: number;
@@ -84,6 +84,7 @@ interface ScanProgress {
   skipped: number;
   status: string;
   error_message?: string;
+  failed_files?: { file: string; error: string | null }[];
 }
 
 interface RecoveryProgress {
@@ -144,6 +145,9 @@ export default function DataSourcesPage() {
   const [triggering, setTriggering] = useState<Set<number>>(new Set());
   const [flushing, setFlushing] = useState<Set<number>>(new Set());
   const [scanProgress, setScanProgress] = useState<Record<number, ScanProgress | undefined>>({});
+  // Stacked per-file ingestion-error notifications — persist until dismissed
+  const [errorNotifs, setErrorNotifs] = useState<{ dsId: number; file: string; error: string }[]>([]);
+  const [errorNotifIdx, setErrorNotifIdx] = useState(0);
   const [recoveryProgress, setRecoveryProgress] = useState<Record<number, RecoveryProgress | undefined>>({});
   const [recoveryStatuses, setRecoveryStatuses] = useState<Record<number, RecoveryStatus>>({});
   const pollingRef = useRef<NodeJS.Timeout | null>(null);
@@ -436,8 +440,18 @@ export default function DataSourcesPage() {
             cleanup();
             fetchData();
           } else if (data.status === 'error') {
-            const errorMsg = data.error_message || `Failed: ${data.failed || 1}`;
-            toast({ title: 'Processing failed', description: errorMsg, variant: 'destructive' });
+            const failedFiles = data.failed_files || [];
+            if (failedFiles.length) {
+              // Per-file failures → dismissible notification stack (bottom-right)
+              setErrorNotifs((prev) => [
+                ...prev,
+                ...failedFiles.map((f) => ({ dsId, file: f.file, error: f.error || 'ingestion failed' })),
+              ]);
+              setErrorNotifIdx(0);
+            } else {
+              const errorMsg = data.error_message || `Failed: ${data.failed || 1}`;
+              toast({ title: 'Processing failed', description: errorMsg, variant: 'destructive' });
+            }
             setScanProgress((prev) => ({ ...prev, [dsId]: undefined }));
             cleanup();
             fetchData();
@@ -665,10 +679,10 @@ export default function DataSourcesPage() {
                     <div className="flex items-center gap-1">
                       <StatusBadge status={ds.last_scan_status} isRunning={ds.last_scan_status === 'running'} />
                       {ds.processing && (
-                        <span className="inline-flex items-center gap-1 text-[10px] text-orange-600">
-                          <span className="w-1.5 h-1.5 rounded-full bg-orange-500 animate-pulse"></span>
-                          Processing
-                        </span>
+                        <span
+                          className="w-1.5 h-1.5 rounded-full bg-orange-500 animate-pulse"
+                          title="Processing"
+                        />
                       )}
                       {ds.pending_changes > 0 && ds.last_scan_status !== 'running' && ds.last_scan_status !== 'idle' && (
                         <span className="inline-flex items-center gap-1 text-[10px] text-yellow-600">
@@ -763,12 +777,17 @@ export default function DataSourcesPage() {
                         );
                       }
                       if (ds.last_scan_status === 'error') {
+                        const total = ds.last_scan_total_files || ds.selected_files || 0;
+                        const ok = ds.last_scan_processed ?? ds.processed_files ?? 0;
+                        const errs = ds.last_scan_errors || 0;
                         return (
                           <div className="space-y-1">
-                            <div className="text-xs text-red-600">Error</div>
-                            <div className="text-xs text-muted-foreground truncate max-w-[180px]" title={ds.last_scan_error || ''}>
-                              {ds.last_scan_error}
+                            <div className="text-xs text-muted-foreground">
+                              {ok} / {total} ingested
                             </div>
+                            {errs > 0 && (
+                              <div className="text-xs text-red-500">{errs} errors</div>
+                            )}
                           </div>
                         );
                       }
@@ -1174,6 +1193,57 @@ export default function DataSourcesPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Stacked ingestion-error notifications — page through with < >,
+          persist until each is dismissed */}
+      {errorNotifs.length > 0 && (() => {
+        const idx = Math.min(errorNotifIdx, errorNotifs.length - 1);
+        const n = errorNotifs[idx];
+        const dsName = datastores.find((d) => d.id === n.dsId)?.name;
+        return (
+          <div className="fixed bottom-4 right-4 z-50 w-80">
+            <div className="rounded-lg border border-red-200 bg-background p-3 shadow-lg">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-medium text-red-600 truncate">
+                  Ingestion error{dsName ? ` — ${dsName}` : ''} ({idx + 1}/{errorNotifs.length})
+                </span>
+                <div className="flex items-center gap-0.5 shrink-0">
+                  <button
+                    className="p-0.5 rounded text-muted-foreground hover:text-foreground disabled:opacity-30"
+                    onClick={() => setErrorNotifIdx(Math.max(0, idx - 1))}
+                    disabled={idx === 0}
+                    aria-label="Previous error"
+                  >
+                    <ChevronLeft className="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    className="p-0.5 rounded text-muted-foreground hover:text-foreground disabled:opacity-30"
+                    onClick={() => setErrorNotifIdx(Math.min(errorNotifs.length - 1, idx + 1))}
+                    disabled={idx === errorNotifs.length - 1}
+                    aria-label="Next error"
+                  >
+                    <ChevronRight className="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    className="p-0.5 rounded text-muted-foreground hover:text-foreground"
+                    onClick={() => {
+                      setErrorNotifs((prev) => prev.filter((_, i) => i !== idx));
+                      setErrorNotifIdx((i) => Math.max(0, Math.min(i, errorNotifs.length - 2)));
+                    }}
+                    aria-label="Dismiss"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+              <div className="mt-1.5 text-xs font-medium truncate" title={n.file}>{n.file}</div>
+              <div className="mt-0.5 text-xs text-muted-foreground line-clamp-3" title={n.error}>
+                {n.error}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
