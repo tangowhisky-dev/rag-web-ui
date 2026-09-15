@@ -17,6 +17,7 @@ old finalize node — but this is the fallback path, not the primary one.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -177,6 +178,7 @@ async def post_process_node_v2(state, ctx) -> dict:
     if office_files and office_summary:
         precomputed = office_summary
 
+    is_fast = bool(state.get("fast_plan"))
     if precomputed and precomputed.strip():
         # The LLM wrote the answer in the think node. Use it directly.
         # Do NOT group docs here: the model's [E-N] citations refer to
@@ -190,6 +192,14 @@ async def post_process_node_v2(state, ctx) -> dict:
         # Emit "Finalizing answer" phase here since the think node didn't
         # stream any content tokens (no precomputed answer).
         from ..agent_graph.helpers import _emit_timeline
+        # Fast pipeline: the answer-model reasoning step opens BEFORE the
+        # "Finalizing answer" phase so persisted (completion-ordered) and
+        # live (emission-ordered) timelines agree — reasoning precedes the
+        # phase that wraps answer generation.
+        reasoning_step_id = None
+        reasoning_start = time.monotonic()
+        if is_fast:
+            reasoning_step_id = _emit_timeline(type="thinking", content="", status="active")
         _finalize_phase = _emit_timeline(type="phase", label="Finalizing answer", status="active")
         docs = group_docs_by_document(docs)
         from app.services.agentic_rag.nodes import history_to_text, select_recent_history
@@ -199,25 +209,33 @@ async def post_process_node_v2(state, ctx) -> dict:
         )
         history_text = history_to_text(recent)
         summary_text = state.get("compaction_summary") or ""
-        if (state.get("fast_plan") or {}).get("intent") == "direct":
-            # Direct intent: no retrieval by design — answer from knowledge +
-            # history. Skip the evidence-guardrail finalize prompt entirely
-            # (it would force a "no information" response).
-            system = (
-                "You are a helpful AI assistant. Answer the user's question "
-                "directly and concisely from the conversation history and "
-                "your own knowledge. Do not invent document citations.\n\n"
-                f"Today's date: {datetime.now(timezone.utc).date().isoformat()}"
-            )
-            user = (
-                (f"Conversation so far:\n{history_text}\n\n" if history_text else "")
-                + f"User: {state.get('fast_plan', {}).get('resolved_query') or query}"
-            )
-        else:
-            system, user = _build_finalize_prompt(
+        resolved_q = state.get("fast_plan", {}).get("resolved_query") or query
+        is_direct = (state.get("fast_plan") or {}).get("intent") == "direct"
+
+        def _answer_prompts():
+            if is_direct:
+                # Direct intent: no retrieval by design — answer from knowledge +
+                # history. Skip the evidence-guardrail finalize prompt entirely
+                # (it would force a "no information" response).
+                sys_ = (
+                    "You are a helpful AI assistant. Answer the user's question "
+                    "directly and concisely from the conversation history and "
+                    "your own knowledge. Do not invent document citations.\n\n"
+                    f"Today's date: {datetime.now(timezone.utc).date().isoformat()}"
+                )
+                usr_ = (
+                    (f"Conversation so far:\n{history_text}\n\n" if history_text else "")
+                    + f"User: {resolved_q}"
+                )
+                return sys_, usr_
+            # retrieval_query carries the planner's disambiguated rewrite —
+            # the answer model sees it alongside the raw user query.
+            return _build_finalize_prompt(
                 docs, state.get("file_markdown"), Plan(), chart_options,
-                query, query, summary_text, history_text, observations, ctx, None,
+                query, resolved_q, summary_text, history_text, observations, ctx, None,
             )
+
+        system, user = _answer_prompts()
         compaction_updates, compaction_local = await _compact_if_needed(
             state, user, system_overhead=count_tokens(system), ctx=ctx, trim_docs=True,
         )
@@ -230,11 +248,27 @@ async def post_process_node_v2(state, ctx) -> dict:
             )
             history_text = history_to_text(recent)
             summary_text = state.get("compaction_summary") or ""
-            system, user = _build_finalize_prompt(
-                docs, state.get("file_markdown"), Plan(), chart_options,
-                query, query, summary_text, history_text, observations, ctx, None,
-            )
-        final, answer_usage, fallback_reasoning = await _stream_final_answer(ctx, system, user, writer, docs)
+            system, user = _answer_prompts()
+        # Fast pipeline: answer-model reasoning renders as a timeline
+        # ThinkingStep (fixed height, same component as the agentic think
+        # node's) instead of the th: reasoning panel — opened above.
+        final, answer_usage, fallback_reasoning = await _stream_final_answer(
+            ctx, system, user, writer, docs, reasoning_step_id=reasoning_step_id)
+        # Reasoning may arrive inline as <think> tags in content (some
+        # providers don't expose reasoning_content) — extract it so the
+        # answer text never carries an unclosed think block, and feed it to
+        # the timeline step when streaming kwargs produced nothing.
+        from app.services.infrastructure.reasoning_tags import extract_reasoning
+        tag_reasoning, clean_final, _closed = extract_reasoning(final)
+        if tag_reasoning is not None:
+            final = clean_final
+            if tag_reasoning and not fallback_reasoning:
+                fallback_reasoning = tag_reasoning
+        if is_fast and reasoning_step_id is not None:
+            _emit_timeline(
+                id=reasoning_step_id, type="thinking",
+                content=fallback_reasoning or reasoning_content or "",
+                status="complete", elapsed=round(time.monotonic() - reasoning_start, 1))
         # Use fallback reasoning if the think node didn't produce any.
         if fallback_reasoning and not reasoning_content:
             reasoning_content = fallback_reasoning
@@ -245,7 +279,10 @@ async def post_process_node_v2(state, ctx) -> dict:
     # final-answer reasoning panel. Without this, the UI stays stuck
     # on "Thinking..." because _stream_final_answer only emits
     # done=False chunks, and the precomputed path emits no th: events.
-    writer({"event": "thinking", "content": reasoning_content, "done": True, "phase": "answer"})
+    # Fast mode routes reasoning to the timeline step instead — emit an
+    # empty done event so any pre-existing th: state closes cleanly.
+    writer({"event": "thinking", "content": "" if is_fast else reasoning_content,
+            "done": True, "phase": "answer"})
 
     # Substitute chart and office markers.
     final = _substitute_chart_markers(final, chart_options)

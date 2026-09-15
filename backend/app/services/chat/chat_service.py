@@ -193,6 +193,10 @@ async def _handle_done(event, ctx):
 
 
 async def _handle_plan(event, ctx):
+    plan = event.get("plan") or {}
+    resolved = (plan.get("resolved_query") or "").strip()
+    if resolved and resolved != (ctx.query or "").strip():
+        ctx.rewritten_q = resolved
     yield f'pl:{json.dumps({k: v for k, v in event.items() if k != "event"})}\n'
     await asyncio.sleep(0)
 
@@ -335,6 +339,10 @@ def _persist_response_metadata(
         bot_message.completeness = ctx.completeness
     if ctx.retrieval_score is not None:
         bot_message.retrieval_score = ctx.retrieval_score
+    # Planner-rewritten query — persisted only when it differs from the
+    # raw user text; the UI shows it via an info button on the user bubble.
+    if ctx.rewritten_q and ctx.rewritten_q.strip() != (ctx.user_message.content or "").strip():
+        bot_message.rewritten_query = ctx.rewritten_q
     try:
         db.commit()
         logger.debug(

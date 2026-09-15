@@ -74,12 +74,16 @@ KB profile:
 
 Today's date: {today}
 
+Abbreviations in the question (expand these in sub_queries — use BOTH the
+short form and the full form, they embed and keyword-match differently):
+{abbreviations}
+
 User question: {query}
 
 Output ONLY:
 {{
   "intent": "retrieve" | "answer_from_history" | "direct",
-  "resolved_query": "the question with pronouns/references resolved using history",
+  "resolved_query": "the question rewritten standalone (see rewrite rules)",
   "steps": [
     {{"tool": "search", "sub_queries": [
       {{"query": "...", "tool_hint": "any|title_search|file_read",
@@ -98,8 +102,11 @@ Intent rules:
 - "retrieve": needs documents — emit steps.
 
 Step rules:
-- steps[0] is normally a "search" round with 1-{_MAX_SUB_QUERIES} sub_queries;
-  each becomes keyword_search + semantic_search (hybrid). tool_hint narrows it:
+- steps[0] is normally a "search" round with 1-{_MAX_SUB_QUERIES} sub_queries.
+  Use ONE sub_query for single-topic questions — only split when the question
+  has genuinely independent facets (e.g. comparing two different things).
+  Each sub_query becomes keyword_search + semantic_search (hybrid).
+  tool_hint narrows it:
   "title_search" only as a companion (titles, not content — searches still run);
   "file_read" only with a known document_id (e.g. previously cited docs).
 - Later steps may use: extract_data, chart_generate, code_execute, summarize,
@@ -115,7 +122,11 @@ Step rules:
   questions use {{"document_status":"active","effective_as_of":"<today>"}};
   leave filters empty for history/comparison questions — evidence carries
   status tags so old versions stay citable.
-- resolved_query is always required.
+- resolved_query is always required. Rewrite rules: resolve pronouns and
+  references ("it", "that report", "the company") using conversation history;
+  expand abbreviations using the glossary above; make relative dates/times
+  absolute using today's date; preserve the user's intent — a reader seeing
+  ONLY resolved_query must understand the question. Do not answer it.
 
 Example — "extract the X values, compute Y, and chart them":
 {{
@@ -194,10 +205,18 @@ def _search_step_calls(step: dict, kb_ids: list[int]) -> list[dict]:
         seen.add(sig)
         calls.append({"tool": tool, "arguments": args})
 
+    # Drop token-identical sub-queries — the planner sometimes emits
+    # reorderings of the same terms ("GMR-2 attacks" / "attacks on GMR-2"),
+    # each fanning out to keyword+semantic for near-duplicate hits.
+    seen_sq_keys: set = set()
     for sq in (step.get("sub_queries") or [])[:_MAX_SUB_QUERIES]:
         if not isinstance(sq, dict):
             continue
         query = (sq.get("query") or "").strip()
+        sq_key = " ".join(sorted(query.lower().split()))
+        if sq_key in seen_sq_keys:
+            continue
+        seen_sq_keys.add(sq_key)
         hint = (sq.get("tool_hint") or sq.get("tool") or "").strip()
         filters = sq.get("filters") if isinstance(sq.get("filters"), dict) else None
         doc_ids = [d for d in (sq.get("document_ids") or []) if isinstance(d, int)][: _MAX_FILE_READS]
@@ -287,9 +306,13 @@ async def _compile_step_args(step: dict, state, ctx, error_context: str = "") ->
         f"Arguments schema:\n{_tool_args_schema_text(tool, ctx, state)}\n"
         f"Step spec: {json.dumps(spec, default=str)[:1500]}\n"
         f"User question: {state.get('original_query','')}\n"
-        f"Attached file present: {has_file}\n"
-        f"Previous answer summary: {last_summary or '(none)'}\n"
-        f"Prior tool observations:\n" + ("\n".join(obs_briefs) or "(none)") + "\n"
+        + (f"Resolved question: {(state.get('fast_plan') or {}).get('resolved_query')}\n"
+           if (state.get('fast_plan') or {}).get('resolved_query')
+           and (state.get('fast_plan') or {}).get('resolved_query') != state.get('original_query')
+           else "")
+        + f"Attached file present: {has_file}\n"
+        + f"Previous answer summary: {last_summary or '(none)'}\n"
+        + f"Prior tool observations:\n" + ("\n".join(obs_briefs) or "(none)") + "\n"
         + ("Extracted data (use these values in code/data args):\n" + "\n".join(data_blocks) + "\n" if data_blocks else "")
         + (f"Previous attempt failed with: {error_context}\nFix the arguments.\n" if error_context else "")
         + f"\nToday's date: {datetime.now(timezone.utc).date().isoformat()}\n"
@@ -363,6 +386,25 @@ async def fast_plan_node(state, ctx) -> dict:
         kb_profile_text = format_profile_summary(state.get("kb_profile", {}))
         today = datetime.now(timezone.utc).date().isoformat()
 
+        # Abbreviation glossary for the raw question — the planner phrases
+        # sub_queries with canonical forms (semantic rewards fluent terms;
+        # keyword_search also expands deterministically at match time).
+        abbr_text = "(none)"
+        try:
+            from app.services.abbreviation_service import (
+                build_lookup, find_abbrs_in_text, find_forms_in_text)
+            _lk = build_lookup(ctx.db, ctx.org_id)
+            if not _lk.is_empty:
+                _merged = dict(find_abbrs_in_text(query, _lk))
+                for _a, _fs in find_forms_in_text(query, _lk).items():
+                    _merged.setdefault(_a, _fs)
+                if _merged:
+                    abbr_text = "\n".join(
+                        f"{a} = {', '.join(fs)}"
+                        for a, fs in sorted(_merged.items(), key=lambda kv: kv[0].lower()))
+        except Exception as exc:
+            logger.debug("[fast_plan] abbreviation lookup failed: %s", exc)
+
         prompt = FAST_PLAN_PROMPT.format(
             history=history_text,
             last_answer_summary=last_summary or "(none)",
@@ -370,6 +412,7 @@ async def fast_plan_node(state, ctx) -> dict:
             has_file="yes" if state.get("file_markdown") else "no",
             kb_profile=kb_profile_text or "(empty)",
             today=today,
+            abbreviations=abbr_text,
             query=query,
             _MAX_SUB_QUERIES=_MAX_SUB_QUERIES,
         )

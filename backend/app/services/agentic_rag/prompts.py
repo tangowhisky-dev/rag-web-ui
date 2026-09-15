@@ -181,6 +181,8 @@ Critical rules:
 - Be concise and follow the user's formatting instructions exactly.
 - If a [Abbreviation Glossary] section is provided in the context, use it to interpret \
 abbreviations in the user query and retrieved evidence. Do not echo the glossary in your output.
+- Start with the answer itself. Do not open with framing clauses like \
+"Based on the provided documents" or "According to the context".
 """
 
 # Answer-generation prompt for finalize_node.

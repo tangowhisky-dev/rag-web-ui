@@ -103,6 +103,19 @@ class KeywordSearchTool(BaseAgentTool):
         # Synonym expansion (Redis-cached) — keyword search benefits from variants
         query, extra_queries = await expand_synonyms(input_obj.query, ctx)
 
+        # Abbreviation expansion — "GMR-2" also searches its full forms and
+        # vice versa, added as extra query variants alongside the synonyms.
+        try:
+            from app.services.abbreviation_service import build_lookup, find_abbrs_in_text, find_forms_in_text
+            _abbr_lookup = build_lookup(ctx.db, ctx.org_id)
+            if not _abbr_lookup.is_empty:
+                _exp_terms = [f for forms in find_abbrs_in_text(query, _abbr_lookup).values() for f in forms]
+                _exp_terms += list(find_forms_in_text(query, _abbr_lookup).keys())
+                _seen = {q.lower() for q in extra_queries} | {query.lower()}
+                extra_queries += [t for t in _exp_terms if t.lower() not in _seen]
+        except Exception as exc:
+            logger.warning("[keyword_search] abbreviation expansion failed: %s", exc)
+
         # Run both backends
         exact_min = get_setting(ctx.db, "EXACT_MIN_SCORE", ctx.org_id)
         sparse_min = get_setting(ctx.db, "SPARSE_MIN_SCORE", ctx.org_id)

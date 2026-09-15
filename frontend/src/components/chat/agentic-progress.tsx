@@ -227,6 +227,16 @@ const ThinkingStep = ({
 }: ThinkingStepProps) => {
   const [isOpen, setIsOpen] = useState(isActive);
   const [expanded, setExpanded] = useState(false);
+  const contentRef = useRef<HTMLDivElement | null>(null);
+
+  // Keep the latest streamed reasoning visible — pin the capped-height
+  // scroll box to the bottom while the step is active (same tail-follow
+  // behavior as the th: reasoning panel's last-N-lines view).
+  useEffect(() => {
+    if (isActive && !expanded && contentRef.current) {
+      contentRef.current.scrollTop = contentRef.current.scrollHeight;
+    }
+  }, [content, isActive, expanded]);
 
   // Auto-open when streaming starts, auto-close 1s after streaming ends.
   useEffect(() => {
@@ -262,6 +272,7 @@ const ThinkingStep = ({
         <CollapsibleContent className="text-xs text-muted-foreground overflow-hidden">
           <div className="mt-2 relative">
             <div
+              ref={contentRef}
               className="reasoning-content data-[state=closed]:fade-out-0 data-[state=open]:slide-in-from-top-2 data-[state=closed]:animate-out data-[state=open]:animate-in outline-none overflow-y-auto"
               style={{ maxHeight: expanded ? undefined : MAX_REASONING_HEIGHT }}
             >

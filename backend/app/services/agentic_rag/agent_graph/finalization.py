@@ -30,7 +30,7 @@ from app.services.infrastructure import is_cancelled
 from app.services.settings_service import get_setting
 
 from .compaction import _compact_if_needed
-from .helpers import _coerce_observation, _substitute_chart_markers, _substitute_office_markers, _writer, debug_emit
+from .helpers import _coerce_observation, _emit_timeline, _substitute_chart_markers, _substitute_office_markers, _writer, debug_emit
 from .observations import _non_retrieval_observations_text
 
 logger = logging.getLogger(__name__)
@@ -141,6 +141,7 @@ async def _stream_final_answer(
     user: str,
     writer,
     docs: list | None = None,
+    reasoning_step_id: str | None = None,
 ) -> tuple[str, Optional[dict], str]:
     """Stream the final answer from the LLM. Returns (final, answer_usage, reasoning).
 
@@ -184,7 +185,14 @@ async def _stream_final_answer(
                 chunk_reasoning = chunk.additional_kwargs.get("reasoning_content", "") or ""
             if chunk_reasoning:
                 reasoning_accumulated += chunk_reasoning
-                writer({"event": "thinking", "content": reasoning_accumulated, "done": False, "phase": "answer"})
+                if reasoning_step_id is not None:
+                    # Fast pipeline: reasoning renders as a timeline
+                    # ThinkingStep (fixed height, auto-collapse) — same
+                    # component the agentic think node uses.
+                    _emit_timeline(id=reasoning_step_id, type="thinking",
+                                   content=reasoning_accumulated, status="active")
+                else:
+                    writer({"event": "thinking", "content": reasoning_accumulated, "done": False, "phase": "answer"})
         if not final:
             final = "I'm sorry, I couldn't generate a response at this time."
     except Exception as exc:

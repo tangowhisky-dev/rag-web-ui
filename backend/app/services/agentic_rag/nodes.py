@@ -82,10 +82,12 @@ def _messages_to_conversation_text(messages: list) -> str:
 # "tool" is omitted — tool calls show as tool_call/tool_result events.
 # "post_process" is omitted — "Finalizing answer" is emitted by the think
 # node when content starts streaming (or by post_process for the fallback path).
+# Labels have no trailing dots — the UI appends "…" while a phase is active.
+# fast_step is intentionally unlisted — tool_call entries carry the step
+# names; a separate phase just duplicated them ("Summarizing / Summarizing").
 NODE_PHASE_LABEL: dict[str, str] = {
-    "load_context": "Analyzing query",
-    "fast_plan": "Planning retrieval",
-    "fast_step": "Preparing next step",
+    "load_context": "Analyzing",
+    "fast_plan": "Planning",
 }
 
 

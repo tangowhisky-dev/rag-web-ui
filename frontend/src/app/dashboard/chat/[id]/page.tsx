@@ -16,7 +16,8 @@ import { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback, use
 
 import { useRouter } from "next/navigation";
 import Image from "next/image";
-import { Copy, Check, Trash2, ChevronDown } from "lucide-react";
+import { Copy, Check, Trash2, ChevronDown, Info } from "lucide-react";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { useChatContext } from "@/contexts/chat-context";
 import { api, ApiError, handleAuthRedirect } from "@/lib/api";
 import { APP_LOGO_SRC } from "@/lib/app-config";
@@ -91,6 +92,9 @@ interface Message {
   retrievalScore?: number;
   faithfulness?: number;
   completeness?: number;
+  // Planner-rewritten/expanded form of this turn's query (info button on
+  // the preceding user bubble); persisted on the assistant row.
+  rewritten_query?: string;
   // Enterprise agent loop per-turn state
   plan?: Record<string, unknown>;
   timelineEvents?: TimelineEvent[];
@@ -130,6 +134,7 @@ interface ChatMessage {
   file_id?: number;
   citations?: Citation[];
   office_files?: OfficeFileRef[];
+  rewritten_query?: string;
 }
 
 interface ChatMeta {
@@ -142,6 +147,52 @@ interface Citation {
   id: number;
   text: string;
   metadata: Record<string, unknown>;
+}
+
+// ~5 lines at text-sm — long user messages collapse with a gradient fade
+// + "Show all" toggle, same pattern as the ThinkingStep component.
+const MAX_USER_BUBBLE_HEIGHT = 105;
+
+function ExpandableBubbleText({ content }: { content: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const [overflowing, setOverflowing] = useState(false);
+  const textRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const el = textRef.current;
+    if (el) setOverflowing(el.scrollHeight > MAX_USER_BUBBLE_HEIGHT + 4);
+  }, [content]);
+
+  return (
+    <div className="relative">
+      <div
+        ref={textRef}
+        className="whitespace-pre-wrap break-words overflow-hidden"
+        style={{ maxHeight: expanded || !overflowing ? undefined : MAX_USER_BUBBLE_HEIGHT }}
+      >
+        {content}
+      </div>
+      {overflowing && !expanded && (
+        <div
+          className="pointer-events-none absolute bottom-0 left-0 right-0 h-10"
+          style={{ background: "linear-gradient(to bottom, transparent, hsl(var(--primary)))" }}
+        />
+      )}
+      {overflowing && (
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          className="w-full flex items-center justify-center gap-1 text-primary-foreground/70 hover:text-primary-foreground transition-colors text-[11px] pt-1"
+        >
+          <ChevronDown
+            className="size-3 transition-transform"
+            style={{ transform: expanded ? "rotate(180deg)" : "rotate(0deg)" }}
+          />
+          {expanded ? "Show less" : "Show all"}
+        </button>
+      )}
+    </div>
+  );
 }
 
 function ChatPageInner({ params }: { params: { id: string } }) {
@@ -323,6 +374,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       file_name: msg.file_name ?? undefined,
       file_id: msg.file_id ?? undefined,
       officeFiles: msg.office_files ?? [],
+      rewritten_query: msg.rewritten_query ?? undefined,
     };
   }, []);
 
@@ -712,9 +764,11 @@ function ChatPageInner({ params }: { params: { id: string } }) {
     if (trimmedLine.startsWith("pl:")) {
       try {
         const payload = JSON.parse(trimmedLine.slice(3)) as { plan?: Record<string, unknown> };
+        const resolved = payload.plan?.resolved_query as string | undefined;
         appendAssistantChunk(assistantId, (message) => ({
           ...message,
           plan: payload.plan,
+          ...(resolved ? { rewritten_query: resolved } : {}),
         }));
       } catch (e) {
         console.error("Failed to parse plan event:", e);
@@ -1330,7 +1384,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
             </div>
           ) : (
             <div className="max-w-3xl mx-auto px-4 py-6 space-y-6 pb-8">
-              {messages.map((message) =>
+              {messages.map((message, msgIdx) =>
                 message.role === "assistant" ? (
                   <div key={message.clientId} className="flex items-start gap-3">
                     {/* Avatar */}
@@ -1388,6 +1442,29 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                   <div key={message.clientId} className="flex justify-end items-start gap-2 group">
                     <div className="flex flex-col items-end gap-1 max-w-[70%]">
                       <div className="flex flex-row items-center gap-2">
+                        {(() => {
+                          const next = messages[msgIdx + 1];
+                          const rw = next?.role === "assistant" ? next.rewritten_query : undefined;
+                          return rw && rw.trim() !== message.content.trim() ? (
+                            <Popover>
+                              <PopoverTrigger asChild>
+                                <button
+                                  type="button"
+                                  title="Rewritten query"
+                                  className="rounded-full p-0.5 text-muted-foreground hover:text-foreground transition-colors"
+                                >
+                                  <Info className="h-3.5 w-3.5" />
+                                </button>
+                              </PopoverTrigger>
+                              <PopoverContent side="bottom" align="end" className="max-w-md w-80 text-xs">
+                                <div className="space-y-1.5">
+                                  <div className="font-medium text-muted-foreground">Rewritten query</div>
+                                  <div className="whitespace-pre-wrap">{rw}</div>
+                                </div>
+                              </PopoverContent>
+                            </Popover>
+                          ) : null;
+                        })()}
                         {message.file_name && message.file_id && (
                           <MessageFileChip
                             fileName={message.file_name}
@@ -1396,7 +1473,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
                           />
                         )}
                         <div className="bg-primary text-primary-foreground rounded-2xl rounded-tr-sm px-4 py-2.5 text-sm">
-                          {message.content}
+                          <ExpandableBubbleText content={message.content} />
                         </div>
                       </div>{/* end flex-row bubble+chip */}
                       {/* Hover actions */}
