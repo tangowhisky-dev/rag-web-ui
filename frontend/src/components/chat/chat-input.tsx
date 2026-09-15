@@ -45,8 +45,8 @@ interface InputBarProps {
 }
 
 const CHAT_MODES = [
-  { id: "fast" as const, label: "Fast", hint: "Single retrieval round — faster answers" },
-  { id: "agentic" as const, label: "Agentic", hint: "Full agentic loop — iterative retrieval, tools, sub-agents" },
+  { id: "fast" as const, label: "Fast", hint: "Fixed/ shorter pipeline — faster answers" },
+  { id: "agentic" as const, label: "Agentic", hint: "Agentic/ iterative retrieval, tools, sub-agents — in-depth reasoning but slower answers" },
 ];
 
 const LINE_HEIGHT_PX = 24;
