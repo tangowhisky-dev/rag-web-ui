@@ -17,6 +17,7 @@ old finalize node — but this is the fallback path, not the primary one.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 
 from langchain_core.messages import AIMessage
@@ -198,10 +199,25 @@ async def post_process_node_v2(state, ctx) -> dict:
         )
         history_text = history_to_text(recent)
         summary_text = state.get("compaction_summary") or ""
-        system, user = _build_finalize_prompt(
-            docs, state.get("file_markdown"), Plan(), chart_options,
-            query, query, summary_text, history_text, observations, ctx, None,
-        )
+        if (state.get("fast_plan") or {}).get("intent") == "direct":
+            # Direct intent: no retrieval by design — answer from knowledge +
+            # history. Skip the evidence-guardrail finalize prompt entirely
+            # (it would force a "no information" response).
+            system = (
+                "You are a helpful AI assistant. Answer the user's question "
+                "directly and concisely from the conversation history and "
+                "your own knowledge. Do not invent document citations.\n\n"
+                f"Today's date: {datetime.now(timezone.utc).date().isoformat()}"
+            )
+            user = (
+                (f"Conversation so far:\n{history_text}\n\n" if history_text else "")
+                + f"User: {state.get('fast_plan', {}).get('resolved_query') or query}"
+            )
+        else:
+            system, user = _build_finalize_prompt(
+                docs, state.get("file_markdown"), Plan(), chart_options,
+                query, query, summary_text, history_text, observations, ctx, None,
+            )
         compaction_updates, compaction_local = await _compact_if_needed(
             state, user, system_overhead=count_tokens(system), ctx=ctx, trim_docs=True,
         )

@@ -285,16 +285,21 @@ class Client:
         r.raise_for_status()
         return r.json()["id"]
 
-    def chat_message_stream(self, chat_id, question, debug=True):
+    def chat_message_stream(self, chat_id, question, debug=True, mode=None):
         """POST a user message; yields parsed SSE data-channel lines.
 
         debug=true turns on `type="debug"` timeline events: tool_observation
         (tool input/output), think_input (the think-node prompt), and
         finalize_context (the exact evidence block the answer LLM cites).
+        mode="fast" selects the single-round pipeline; "agentic" (default)
+        selects the full ReAct loop.
         """
+        body = {"messages": [{"role": "user", "content": question}],
+                "debug": debug}
+        if mode:
+            body["mode"] = mode
         r = self.s.post(f"{self.base}/chat/{chat_id}/messages",
-                        json={"messages": [{"role": "user", "content": question}],
-                              "debug": debug},
+                        json=body,
                         headers=self._h(), timeout=None, stream=True)
         r.raise_for_status()
         for raw in r.iter_lines(decode_unicode=True):
@@ -314,7 +319,7 @@ class Client:
 # ── SSE scenario runner ───────────────────────────────────────────────────────
 
 
-def run_scenario(client, chat_id, scenario, max_wait=900):
+def run_scenario(client, chat_id, scenario, max_wait=900, mode=None):
     """Run one query, collecting per-stage events from the SSE stream."""
     timeline = []          # tl: events
     context_events = []    # 2: events (retrieved docs + confidence)
@@ -327,7 +332,7 @@ def run_scenario(client, chat_id, scenario, max_wait=900):
     debug_events = []      # tl: type="debug" stage internals
 
     t0 = time.time()
-    for channel, data in client.chat_message_stream(chat_id, scenario["question"]):
+    for channel, data in client.chat_message_stream(chat_id, scenario["question"], mode=mode):
         if time.time() - t0 > max_wait:
             return {"error": f"timeout after {max_wait}s"}
         if channel == "tl":
@@ -628,6 +633,10 @@ def main():
     p.add_argument("--kb-id", type=int, default=None,
                    help="reuse an existing KB that already has the eval docs tagged")
     p.add_argument("--only", default=None, help="run a single scenario id, e.g. S6_neighbors")
+    p.add_argument("--mode", choices=["agentic", "fast"], default=None,
+                   help="pipeline mode sent in the message body (default: backend default)")
+    p.add_argument("--followup", action="store_true",
+                   help="run the two-turn follow-up scenario (ask S1, then 'summarize this' in the same chat)")
     args = p.parse_args()
 
     client = Client(args.base_url)
@@ -696,17 +705,52 @@ def main():
 
     print("\n5. Running scenarios…")
     scenarios = [s for s in SCENARIOS if args.only is None or s["id"] == args.only]
-    if not scenarios:
+    if not scenarios and not args.followup:
         print(f"   !! --only {args.only} matched nothing")
         sys.exit(1)
     all_results = []
     for scenario in scenarios:
         chat_id = client.create_chat(f"eval-{scenario['id']}", [kb_id])
         print(f"\n   {scenario['id']} → chat {chat_id}: {scenario['question'][:70]}…")
-        result = run_scenario(client, chat_id, scenario)
+        result = run_scenario(client, chat_id, scenario, mode=args.mode)
         checks, notes = evaluate(scenario, result, doc_map)
         print_scenario_report(scenario, result, checks, notes, verbose=args.verbose)
         all_results.append((scenario["id"], checks, result))
+
+    # Two-turn follow-up: ask a real question, then "summarize this" — the
+    # fast planner must resolve the reference from history/last answer.
+    if args.followup:
+        chat_id = client.create_chat("eval-S7_followup", [kb_id])
+        t1 = {"id": "S7a_ask", "question": SCENARIOS[0]["question"],
+              "expect_answer_contains": SCENARIOS[0].get("expect_answer_contains", []),
+              "expect_status_in_context": set(), "note": "turn 1 — seeds history"}
+        print(f"\n   S7a_ask → chat {chat_id}: {t1['question'][:70]}…")
+        r1 = run_scenario(client, chat_id, t1, mode=args.mode)
+        c1, n1 = evaluate(t1, r1, doc_map)
+        print_scenario_report(t1, r1, c1, n1, verbose=args.verbose)
+        all_results.append((t1["id"], c1, r1))
+
+        t2 = {"id": "S7b_summarize",
+              "question": "Summarize the answer you just gave.",
+              "expect_answer_contains": ["60"],
+              "expect_status_in_context": set(),
+              "note": "follow-up — fast mode should answer from history (no retrieval)"}
+        print(f"\n   S7b_summarize → chat {chat_id}: {t2['question'][:70]}…")
+        r2 = run_scenario(client, chat_id, t2, mode=args.mode)
+        c2, n2 = evaluate(t2, r2, doc_map)
+        # In fast mode, plan.intent should be answer_from_history (or at least
+        # no retrieval tool calls fired).
+        plan = r2.get("plan") or {}
+        if args.mode == "fast":
+            fast_plan = plan.get("plan") if isinstance(plan.get("plan"), dict) else plan
+            intent = fast_plan.get("intent")
+            tools_used = [e.get("tool") for e in r2.get("timeline", [])
+                          if e.get("type") == "tool_call"]
+            c2.append(("intent_history_resolved",
+                       intent == "answer_from_history" or not tools_used,
+                       f"intent={intent!r} tools={tools_used}"))
+        print_scenario_report(t2, r2, c2, n2, verbose=args.verbose)
+        all_results.append((t2["id"], c2, r2))
 
     # ── Summary ───────────────────────────────────────────────────────────
     print(f"\n{'=' * 70}\nSUMMARY\n{'=' * 70}")

@@ -218,8 +218,14 @@ async def run_agent_loop_v2(
     user_id: Optional[int] = None,
     message_id: Optional[int] = None,
     display_query: Optional[str] = None,
+    fast: bool = False,
 ) -> AsyncGenerator[dict, None]:
-    """Run the agentic-v2 loop and stream SSE-style events."""
+    """Run the agentic-v2 loop and stream SSE-style events.
+
+    fast=True swaps the ReAct graph for the linear fast pipeline
+    (load_context → fast_plan → tool? → post_process); everything else —
+    stream handling, cancellation, context emission — is identical.
+    """
     memory = await get_redis_memory()
     thread_id = f"chat-{chat_id}" if chat_id else f"anon-{uuid.uuid4().hex}"
     config = {"configurable": {"thread_id": thread_id}}
@@ -237,7 +243,11 @@ async def run_agent_loop_v2(
         state=None,
     )
 
-    graph = build_agent_graph_v2(ctx)
+    if fast:
+        from .agent_graph_v2.build import build_agent_graph_fast
+        graph = build_agent_graph_fast(ctx)
+    else:
+        graph = build_agent_graph_v2(ctx)
 
     initial_state = AgentState(
         messages=[HumanMessage(content=query)],

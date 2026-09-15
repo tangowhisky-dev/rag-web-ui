@@ -37,3 +37,31 @@ async def run_agentic_rag(
         display_query=display_query,
     ):
         yield event
+
+
+async def run_fast_rag(
+    query: str,
+    chat_id: int,
+    knowledge_base_ids: List[int],
+    db: Any,
+    file_markdown: Optional[str] = None,
+    display_query: Optional[str] = None,
+    org_id: Optional[int] = None,
+    user_id: Optional[int] = None,
+    message_id: Optional[int] = None,
+) -> AsyncGenerator[dict, None]:
+    """Run the fast pipeline (single retrieval round) and stream SSE events."""
+    from .agent_runner_v2 import run_agent_loop_v2
+    async for event in run_agent_loop_v2(
+        query=query,
+        kb_ids=knowledge_base_ids,
+        db=db,
+        file_markdown=file_markdown,
+        org_id=org_id,
+        chat_id=chat_id,
+        user_id=user_id,
+        message_id=message_id,
+        display_query=display_query,
+        fast=True,
+    ):
+        yield event

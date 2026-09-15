@@ -84,6 +84,8 @@ def _messages_to_conversation_text(messages: list) -> str:
 # node when content starts streaming (or by post_process for the fallback path).
 NODE_PHASE_LABEL: dict[str, str] = {
     "load_context": "Analyzing query",
+    "fast_plan": "Planning retrieval",
+    "fast_step": "Preparing next step",
 }
 
 

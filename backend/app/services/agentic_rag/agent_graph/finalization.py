@@ -11,6 +11,7 @@ and tool calls to the DB message row.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 
 from langchain_core.messages import AIMessage
@@ -103,7 +104,12 @@ def _build_finalize_prompt(
         from app.services.prompts.loader import append_office_placeholder_instructions
         answer_prompt = append_office_placeholder_instructions(answer_prompt, office_files)
 
-    system = FINALIZE_GUARDRAIL_PROMPT + "\n\n" + answer_prompt
+    # The answer model must know "now" to judge effective windows — status=
+    # is a lifecycle flag, effective=start..end needs today's date to compare.
+    system = (
+        FINALIZE_GUARDRAIL_PROMPT + "\n\n" + answer_prompt
+        + f"\n\nToday's date: {datetime.now(timezone.utc).date().isoformat()}"
+    )
 
     # Order: stable → volatile for prefix cache reuse.
     # Compaction summary changes rarely (only when compaction fires).

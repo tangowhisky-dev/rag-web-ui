@@ -38,7 +38,16 @@ interface InputBarProps {
   onKbToggle?: (kbId: number) => void;
   /** When true, KB pills are disabled (PATCH in-flight) */
   kbToggling?: boolean;
+  /** Retrieval pipeline mode — fast = single retrieval round, agentic = full ReAct loop */
+  chatMode?: "fast" | "agentic";
+  /** Called when user switches pipeline mode */
+  onChatModeChange?: (mode: "fast" | "agentic") => void;
 }
+
+const CHAT_MODES = [
+  { id: "fast" as const, label: "Fast", hint: "Single retrieval round — faster answers" },
+  { id: "agentic" as const, label: "Agentic", hint: "Full agentic loop — iterative retrieval, tools, sub-agents" },
+];
 
 const LINE_HEIGHT_PX = 24;
 const MIN_HEIGHT_PX = 2 * LINE_HEIGHT_PX;  // 2 lines default
@@ -72,6 +81,8 @@ export function InputBar({
   selectedKbIds = [],
   onKbToggle,
   kbToggling = false,
+  chatMode = "fast",
+  onChatModeChange,
 }: InputBarProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   useAutoResize(textareaRef, value);
@@ -132,11 +143,32 @@ export function InputBar({
     <div
       {...getRootProps()}
       className={cn(
-        "flex flex-col rounded-2xl border border-border bg-background/80 backdrop-blur-sm shadow-md",
+        "relative flex flex-col rounded-2xl border border-border bg-background/80 backdrop-blur-sm shadow-md",
         isDragActive && "ring-2 ring-primary ring-offset-1"
       )}
       data-testid="chat-input-container"
     >
+      {/* Pipeline mode — pills floating above the composer's top-left edge */}
+      <div className="absolute -top-4 left-3 flex items-center gap-1">
+        {CHAT_MODES.map((m) => (
+          <button
+            key={m.id}
+            type="button"
+            onClick={() => onChatModeChange?.(m.id)}
+            className={cn(
+              "h-6 rounded-full border px-2.5 text-xs font-medium transition-colors shadow-sm",
+              chatMode === m.id
+                ? "border-primary bg-primary text-primary-foreground"
+                : "border-border bg-background text-muted-foreground/70 hover:text-muted-foreground hover:bg-muted"
+            )}
+            title={m.hint}
+            data-testid={`chat-input-mode-${m.id}`}
+          >
+            {m.label}
+          </button>
+        ))}
+      </div>
+
       {uploadedFile && (
         <div className="px-3 pt-3">
           <FileChip uploadedFile={uploadedFile} onRemove={handleFileRemove} />

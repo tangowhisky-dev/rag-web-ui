@@ -101,6 +101,9 @@ class AgentState(MessagesState):
 
     # ── Agent loop state ────────────────────────────────────────────────
     plan: Annotated[Optional[Plan], _last_value] = None
+    # Fast-pipeline plan artifact: {intent, resolved_query, raw} written by
+    # fast_plan_node; informational — downstream nodes read tool_calls.
+    fast_plan: Annotated[dict, _last_value] = {}
     observations: Annotated[List[Observation], accumulate] = []
     iteration: Annotated[int, _last_value] = 0
     tool_calls: Annotated[List[dict], _last_value] = []

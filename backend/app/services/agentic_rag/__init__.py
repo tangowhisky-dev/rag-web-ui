@@ -51,6 +51,6 @@ SSE Event Protocol:
   d:  done             - finish reason + usage
 """
 
-from .pipeline import run_agentic_rag
+from .pipeline import run_agentic_rag, run_fast_rag
 
-__all__ = ["run_agentic_rag"]
+__all__ = ["run_agentic_rag", "run_fast_rag"]

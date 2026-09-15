@@ -568,10 +568,15 @@ async def generate_response(
         from app.services.agentic_rag.agent_graph.helpers import set_debug_stream
         set_debug_stream(bool(messages.get("debug")))
 
-        # ── Agentic pipeline: single autonomous agent ───────────────────────
-        # New agentic agent: rewrite -> search -> stream in real-time
+        # ── Pipeline selection: "fast" runs a single retrieval round
+        # (plan → parallel hybrid search → answer); default is the full
+        # agentic ReAct loop. Everything downstream of retrieval — answer
+        # generation, citations, persistence — is identical either way.
+        mode = (messages.get("mode") or "agentic").lower()
         from app.services.agentic_rag import run_agentic_rag
-        stream_iter = run_agentic_rag(
+        from app.services.agentic_rag.pipeline import run_fast_rag
+        pipeline_fn = run_fast_rag if mode == "fast" else run_agentic_rag
+        stream_iter = pipeline_fn(
             query=query,
             file_markdown=file_markdown,
             db=db,

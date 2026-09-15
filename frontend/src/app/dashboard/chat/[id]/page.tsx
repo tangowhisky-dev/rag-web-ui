@@ -154,6 +154,11 @@ function ChatPageInner({ params }: { params: { id: string } }) {
   const [associatedKbIds, setAssociatedKbIds] = useState<number[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
+  const [chatMode, setChatMode] = useState<"fast" | "agentic">(() =>
+    typeof window !== "undefined"
+      ? ((localStorage.getItem("chat-pipeline-mode") as "fast" | "agentic") || "fast")
+      : "fast"
+  );
   const [isLoading, setIsLoading] = useState(false);
   const [uploadedFile, setUploadedFile] = useState<UploadedFile | null>(null);
   const [fileError, setFileError] = useState<string>("");
@@ -905,6 +910,7 @@ function ChatPageInner({ params }: { params: { id: string } }) {
       },
       body: JSON.stringify({
         messages: requestMessages,
+        mode: chatMode,
         ...(fileId ? { file_id: fileId } : {}),
         ...(parentMessageId ? { parent_message_id: parentMessageId } : {}),
       }),
@@ -1477,6 +1483,11 @@ function ChatPageInner({ params }: { params: { id: string } }) {
               selectedKbIds={associatedKbIds}
               onKbToggle={handleKbToggle}
               kbToggling={kbToggling}
+              chatMode={chatMode}
+              onChatModeChange={(m) => {
+                setChatMode(m);
+                try { localStorage.setItem("chat-pipeline-mode", m); } catch {}
+              }}
             />
           </div>
         </div>
