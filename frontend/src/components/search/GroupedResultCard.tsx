@@ -14,6 +14,7 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
 import { cn } from "@/lib/utils";
+import { highlightInMarkdown } from "@/lib/highlight";
 
 // The result card is wrapped in an <a download> link. Markdown content may
 // contain raw URLs / mailto: links that render as nested <a> tags, causing
@@ -83,55 +84,6 @@ function scoreTier(score: number): { label: string; className: string } {
 function cleanFilename(name: string): string {
   const stem = name.replace(/\.[^.]+$/, "").replace(/[_-]/g, " ").replace(/\./g, " ");
   return stem.replace(/\s+/g, " ").trim();
-}
-
-const STOP_WORDS = new Set([
-  "the", "a", "an", "and", "or", "but", "is", "are", "was", "were", "be",
-  "been", "being", "have", "has", "had", "do", "does", "did", "will",
-  "would", "could", "should", "may", "might", "must", "can", "of", "in",
-  "on", "at", "to", "for", "with", "by", "from", "as", "that", "this",
-  "these", "those", "it", "its", "if", "then", "than", "so", "no", "not",
-]);
-
-function buildHighlightPatterns(query: string): string[] {
-  const raw = query.split(/\s+/).filter(Boolean);
-  if (raw.length === 0) return [];
-
-  // Strip leading and trailing stop words, keep stop words between keywords.
-  let start = 0;
-  let end = raw.length;
-  while (start < end && STOP_WORDS.has(raw[start].toLowerCase())) start++;
-  while (end > start && STOP_WORDS.has(raw[end - 1].toLowerCase())) end--;
-  const trimmed = raw.slice(start, end);
-  if (trimmed.length === 0) return [];
-
-  const esc = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-  const patterns: string[] = [];
-  // Full phrase (stop words kept between keywords).
-  patterns.push(esc(trimmed.join(" ")));
-  // Individual non-stop terms (length >= 2).
-  for (const t of trimmed) {
-    if (t.length >= 2 && !STOP_WORDS.has(t.toLowerCase())) {
-      patterns.push(esc(t));
-    }
-  }
-  return patterns;
-}
-
-function highlightInMarkdown(text: string, query: string): string {
-  // Strip markdown links — keep only the link text so the result card's
-  // outer <a> wrapper doesn't get nested <a> tags from rendered markdown.
-  text = text.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
-
-  const patterns = buildHighlightPatterns(query);
-  if (patterns.length === 0) return text;
-
-  // Longer patterns first so the regex engine matches the full phrase
-  // before falling back to individual terms at the same position.
-  patterns.sort((a, b) => b.length - a.length);
-  const regex = new RegExp(`\\b(${patterns.join("|")})\\b`, "gi");
-  return text.replace(regex, '<mark class="search-hit">$1</mark>');
 }
 
 export function groupResultsByDocument(results: SearchResult[]): GroupedSearchResult[] {

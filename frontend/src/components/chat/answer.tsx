@@ -16,6 +16,7 @@ import { AgentLoopPanel } from "./agent-loop-panel";
 import { GeneratedFileChip } from "./generated-file-chip";
 import { SelectionActions } from "./selection-actions";
 import { preprocessCitations } from "./citation-utils";
+import { extractCitedContext, highlightInMarkdown, buildCitationPatterns } from "@/lib/highlight";
 import {
   Reasoning,
   ReasoningTrigger,
@@ -39,6 +40,7 @@ import { Divider } from "@/components/ui/divider";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
+import rehypeRaw from "rehype-raw";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
@@ -504,13 +506,14 @@ const CitationLinkContext = createContext<{
   citations: Citation[];
   citationInfoMap: Record<string, CitationInfo>;
   genericDocMap: Record<string, GenericDocInfo>;
+  citedSentences: Record<number, string>;
 }>(null as any);
 
 type CitationLinkProps = ClassAttributes<HTMLAnchorElement> &
   AnchorHTMLAttributes<HTMLAnchorElement>;
 
 const CitationLink: FC<CitationLinkProps> = (props) => {
-  const { citations, citationInfoMap, genericDocMap } = useContext(CitationLinkContext);
+  const { citations, citationInfoMap, genericDocMap, citedSentences } = useContext(CitationLinkContext);
 
   const citationId = props.href?.match(/^(\d+)$/)?.[1];
   const citation = citationId
@@ -605,8 +608,15 @@ const CitationLink: FC<CitationLinkProps> = (props) => {
           <CitationRankBreakdown citation={citation} />
           <Divider />
           <div className="text-foreground leading-relaxed prose prose-sm dark:prose-invert max-w-none">
-            <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeHighlight, [rehypeKatex, { throwOnError: false }]]}>
-              {cleanChunkText(citation.text || citationRef.quoted_text || "")}
+            <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeRaw, rehypeHighlight, [rehypeKatex, { throwOnError: false }]]}>
+              {(() => {
+                const sourceText = cleanChunkText(citation.text || citationRef.quoted_text || "");
+                const citedQuery = citedSentences[citation.id];
+                if (!citedQuery) return sourceText;
+                const patterns = buildCitationPatterns(citedQuery);
+                if (patterns.length === 0) return sourceText;
+                return highlightInMarkdown(sourceText, citedQuery, { stripMarkdownLinks: false, patterns });
+              })()}
             </Markdown>
           </div>
           <Divider />
@@ -754,11 +764,22 @@ export const Answer: FC<{
     return () => { cancelled = true; controller.abort(); };
   }, [debouncedCitations]);
 
+  // Extract cited context from the answer text — maps citation ID to the
+  // answer text segment preceding each citation marker. Used by CitationLink
+  // to highlight the relevant keywords in the source text shown in the
+  // citation popover. Works on both streaming ([N]) and reloaded ([N](N))
+  // citation formats.
+  const citedSentences = useMemo(
+    () => extractCitedContext(parsedContent.answerText),
+    [parsedContent.answerText],
+  );
+
   const citationCtxValue = useMemo(() => ({
     citations,
     citationInfoMap,
     genericDocMap,
-  }), [citations, citationInfoMap, genericDocMap]);
+    citedSentences,
+  }), [citations, citationInfoMap, genericDocMap, citedSentences]);
 
   const markdownComponents = useMemo(() => ({ a: CitationLink, code: CodeBlock }), []);
 
