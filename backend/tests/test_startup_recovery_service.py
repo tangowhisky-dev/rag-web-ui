@@ -515,25 +515,29 @@ class TestRecoveryDeletedFileCleanedUp:
         gracefully without error."""
         from app.services.discovery import StartupRecoveryService
 
-        ds_id = create_datastore(TestingSessionLocal(), "/nonexistent/path_skip", auto_process=True)
+        with tempfile.TemporaryDirectory() as tmp_str:
+            tmp_path = Path(tmp_str)
+            folder = tmp_path / "store_skip"
+            folder.mkdir()
+            ds_id = create_datastore(TestingSessionLocal(), str(folder), auto_process=True)
 
-        service = StartupRecoveryService()
-        discovery_result = make_discovery_result(deleted_count=1)
-        discovery_result.deleted_files[0]["file_path"] = "/fake/ghost_file.txt"
+            service = StartupRecoveryService()
+            discovery_result = make_discovery_result(deleted_count=1)
+            discovery_result.deleted_files[0]["file_path"] = "/fake/ghost_file.txt"
 
-        with patch("app.services.discovery.startup_recovery_service.SessionLocal", side_effect=TestingSessionLocal):
-            with patch(
-                "app.services.discovery.discover_datastore",
-                return_value=discovery_result,
-            ):
-                # Should not raise — just logs and returns
-                service.start()
-                time.sleep(1)
+            with patch("app.services.discovery.startup_recovery_service.SessionLocal", side_effect=TestingSessionLocal):
+                with patch(
+                    "app.services.discovery.discover_datastore",
+                    return_value=discovery_result,
+                ):
+                    # Should not raise — just logs and returns
+                    service.start()
+                    time.sleep(1)
 
-        # Status should be complete (not error)
-        scan = service.get_status(ds_id)
-        assert scan["status"] == "complete"
-        service.stop()
+            # Status should be complete (not error)
+            scan = service.get_status(ds_id)
+            assert scan["status"] == "complete"
+            service.stop()
 
 
 # ---------------------------------------------------------------------------

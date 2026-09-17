@@ -99,6 +99,21 @@ class StartupRecoveryService:
             return
 
         for ds in active:
+            # Folder accessibility check — if the datastore folder is not
+            # accessible (e.g. network mount is down), skip recovery entirely
+            # for this datastore. Running discovery on an inaccessible folder
+            # would classify every manifest entry as "deleted" and destroy
+            # all ingested data.
+            if not ds.folder_path or not os.path.isdir(ds.folder_path) or not os.access(ds.folder_path, os.R_OK):
+                logger.warning(
+                    "[RECOVERY] skip_inaccessible_folder datastore_id=%s name=%s folder_path=%s "
+                    "isdir=%s readable=%s — skipping recovery to prevent data loss",
+                    ds.id, ds.name, ds.folder_path,
+                    os.path.isdir(ds.folder_path) if ds.folder_path else False,
+                    os.access(ds.folder_path, os.R_OK) if ds.folder_path else False,
+                )
+                continue
+
             # Backfill conversion_status for legacy documents (pre-pipeline-split).
             # Runs for every datastore regardless of discovery path. Best-effort —
             # failures here should not block recovery.
