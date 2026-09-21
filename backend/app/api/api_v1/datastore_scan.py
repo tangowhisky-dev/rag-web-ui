@@ -9,6 +9,7 @@ Endpoints:
     POST   /api/admin/datastores/{id}/flush               — flush pending changes
     POST   /api/admin/datastores/{id}/graph-pause         — pause graph ingestion
     POST   /api/admin/datastores/{id}/graph-resume        — resume graph ingestion
+    POST   /api/admin/datastores/{id}/retry-failed        — re-queue failed tasks
 """
 
 import asyncio
@@ -498,6 +499,63 @@ def resume_graph_ingestion(
         "message": "Graph ingestion resumed",
         "datastore_id": datastore_id,
         "reset_failed_graph_builds": reset_count,
+    }
+
+
+@router.post("/datastores/{datastore_id}/retry-failed")
+def retry_failed_documents(
+    datastore_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_super_admin),
+):
+    """Reset failed ingestion tasks to pending.
+
+    Failed tasks are a terminal verdict — scans, the watcher tick, and
+    startup recovery all skip them.  This endpoint re-queues them
+    explicitly; the next ingestion session (manual scan, auto-process
+    tick, or startup recovery) picks them up in routine.
+    """
+    ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
+    if ds is None:
+        raise HTTPException(status_code=404, detail="DataStore not found")
+    _check_datastore_scope(db, datastore_id, current_user)
+
+    failed_tasks = (
+        db.query(ProcessingTask)
+        .join(Document, ProcessingTask.document_id == Document.id)
+        .filter(
+            ProcessingTask.data_store_id == datastore_id,
+            ProcessingTask.status == "failed",
+            Document.is_selected == True,  # noqa: E712
+            ~Document.chunks.any(),
+            ~Document.processing_tasks.any(
+                ProcessingTask.status.in_(["pending", "processing"])
+            ),
+        )
+        .all()
+    )
+    # A failed task still holding a claim has a live (probably zombie)
+    # worker — don't flip it under a running future.
+    from app.services.infrastructure.ingest_claims import get_claimed_task_ids
+    claimed = get_claimed_task_ids(t.id for t in failed_tasks)
+    to_retry = [t for t in failed_tasks if t.id not in claimed]
+
+    for t in to_retry:
+        t.status = "pending"
+        t.progress = 0
+        t.progress_message = "Queued by admin retry"
+        t.error_message = None
+    if to_retry:
+        db.commit()
+
+    logger.debug(
+        "[DATASTORE] retry_failed id=%d requeued=%d skipped_claimed=%d",
+        datastore_id, len(to_retry), len(claimed),
+    )
+    return {
+        "message": f"{len(to_retry)} failed document(s) re-queued",
+        "datastore_id": datastore_id,
+        "retried": len(to_retry),
     }
 
 

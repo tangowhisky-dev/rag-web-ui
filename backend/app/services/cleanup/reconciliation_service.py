@@ -40,7 +40,7 @@ def run_reconciliation() -> dict:
     """
     summary: dict = {
         "mysql": {"orphan_chunks": 0, "orphan_tasks": 0},
-        "qdrant": {"dropped_collections": 0, "orphan_points": 0},
+        "qdrant": {"dropped_collections": 0, "orphan_points": 0, "missing_vector_docs": 0},
         "neo4j": {"purged_kbs": 0, "purged_datastores": 0},
     }
 
@@ -194,9 +194,115 @@ def _delete_orphan_points_for_active(
         _delete_orphan_points(qdrant, db, cname, summary=summary, **{scope_kwarg: id})
 
 
+def _requeue_docs_missing_vectors_for_active(
+    qdrant,
+    db: Session,
+    collections: list,
+    active_ids: list,
+    prefix: str,
+    scope_kwarg: str,
+    summary: dict,
+) -> None:
+    for id in active_ids:
+        cname = f"{prefix}{id}"
+        if cname not in collections:
+            continue
+        _requeue_docs_missing_vectors(qdrant, db, cname, summary=summary, **{scope_kwarg: id})
+
+
+def _requeue_docs_missing_vectors(
+    qdrant,
+    db: Session,
+    collection_name: str,
+    summary: dict,
+    kb_id: int | None = None,
+    data_store_id: int | None = None,
+) -> None:
+    """Re-ingest documents whose MySQL chunks have no Qdrant point.
+
+    Each chunk maps to exactly one point — ``uuid5(chunk_id)`` — carrying
+    the dense AND sparse vectors atomically, so a missing point means both
+    vectors are absent.  A worker that dies between the chunk insert and
+    the vector upsert leaves a doc that looks ingested (chunks exist) but
+    is invisible to dense and sparse search.  Every chunk-based requeue
+    check skips it because ``chunks.any()`` is true.
+
+    For each affected document we delete its chunks and reset its task to
+    ``pending`` so the ordinary requeue paths (startup recovery, manual
+    scan, auto-process tick) re-ingest it whole.  Must run BEFORE the
+    orphan-point pass so the doc's leftover partial points become orphans
+    and are deleted in the same sweep.
+    """
+    from app.services.ingestion import _chunk_id_to_point_id
+
+    try:
+        # Every point ID in the collection (payload-free scroll)
+        point_ids: set[str] = set()
+        offset = None
+        while True:
+            results, offset = qdrant.scroll(
+                collection_name=collection_name,
+                limit=500,
+                offset=offset,
+                with_payload=False,
+                with_vectors=False,
+            )
+            if not results:
+                break
+            point_ids.update(str(p.id) for p in results)
+            if offset is None:
+                break
+
+        # DB chunks for this collection's scope, mapped to expected point IDs
+        query = db.query(DocumentChunk.document_id, DocumentChunk.id).filter(
+            DocumentChunk.document_id.isnot(None)
+        )
+        if kb_id is not None:
+            query = query.filter(DocumentChunk.kb_id == kb_id)
+        elif data_store_id is not None:
+            query = query.filter(DocumentChunk.data_store_id == data_store_id)
+
+        broken_doc_ids: set[int] = set()
+        for doc_id, chunk_id in query.all():
+            if str(_chunk_id_to_point_id(chunk_id)) not in point_ids:
+                broken_doc_ids.add(doc_id)
+
+        if not broken_doc_ids:
+            return
+
+        for doc_id in broken_doc_ids:
+            # Delete ALL the doc's chunks (not just the missing ones) so
+            # every "has chunks → already ingested" shortcut lets the
+            # requeue paths pick it up.
+            db.query(DocumentChunk).filter(
+                DocumentChunk.document_id == doc_id
+            ).delete(synchronize_session=False)
+            task = (
+                db.query(ProcessingTask)
+                .filter(ProcessingTask.document_id == doc_id)
+                .order_by(ProcessingTask.id.desc())
+                .first()
+            )
+            if task is not None:
+                task.status = "pending"
+                task.progress = 0
+                task.progress_message = "Re-queued: vectors missing (reconciliation)"
+                task.error_message = None
+        db.commit()
+        summary["qdrant"]["missing_vector_docs"] += len(broken_doc_ids)
+        logger.info(
+            "[RECONCILE] Qdrant: %d doc(s) in %s had chunks without points — "
+            "chunks deleted, tasks reset to pending",
+            len(broken_doc_ids), collection_name,
+        )
+    except Exception as e:
+        logger.warning("[RECONCILE] Qdrant: missing-vector scan failed for %s: %s", collection_name, e)
+
+
 def _reconcile_qdrant(summary: dict, active_kb_ids: List[int], active_ds_ids: List[int]) -> None:
-    """Drop Qdrant collections for deleted KBs/DataStores and delete
-    orphaned points within active collections."""
+    """Drop Qdrant collections for deleted KBs/DataStores, repair docs
+    whose chunks lack vector points, and delete orphaned points within
+    active collections."""
     from app.services.infrastructure.utils import get_qdrant_client
     from app.services.ingestion import _chunk_id_to_point_id
 
@@ -215,6 +321,11 @@ def _reconcile_qdrant(summary: dict, active_kb_ids: List[int], active_ds_ids: Li
 
     db = SessionLocal()
     try:
+        # Missing-vector pass runs FIRST: deleting the broken docs' chunks
+        # turns their leftover points into orphans, which the pass below
+        # then removes in the same sweep.
+        _requeue_docs_missing_vectors_for_active(qdrant, db, collections, active_kb_ids, "kb_", "kb_id", summary)
+        _requeue_docs_missing_vectors_for_active(qdrant, db, collections, active_ds_ids, "ds_", "data_store_id", summary)
         _delete_orphan_points_for_active(qdrant, db, collections, active_kb_ids, "kb_", "kb_id", summary)
         _delete_orphan_points_for_active(qdrant, db, collections, active_ds_ids, "ds_", "data_store_id", summary)
     finally:

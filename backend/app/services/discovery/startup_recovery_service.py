@@ -422,44 +422,85 @@ class StartupRecoveryService:
         finally:
             db.close()
 
-    def _requeue_failed_tasks(self, datastore_id: int) -> list:
-        """Re-queue selected documents with failed/pending tasks and no chunks.
+    def _requeue_interrupted_tasks(self, datastore_id: int) -> list:
+        """Re-submit pending/processing tasks whose executor futures are gone.
 
         These are files that haven't changed on disk (so discovery doesn't
-        classify them as new/modified) but whose ingestion failed.  Without
-        this, they would never be retried by recovery.
+        classify them as new/modified) but whose ingestion was interrupted —
+        queued or claimed by a worker that died before recording a verdict.
+        A task without a live Redis claim has no future; claiming is
+        cleared at startup so every leftover task here is an orphan.
+
+        ``failed`` tasks are deliberately excluded: a failed task is a
+        completed attempt with a recorded error, retried only via the
+        admin retry-failed action.  Docs with chunks are NOT excluded —
+        chunks without Qdrant points are a valid reason to re-ingest
+        (reconciliation resets them to pending), and re-ingestion is
+        idempotent for fully-ingested docs.
+
+        Submits via ``_submit_ingestion`` directly — ``process_new_file``
+        skips pending/processing tasks by design.
         """
-        from concurrent.futures import Future
+        from app.services.infrastructure.ingest_claims import get_claimed_task_ids
+
         db = SessionLocal()
         try:
-            # Selected docs with failed or pending tasks and no chunks
-            stuck = (
-                db.query(Document)
+            rows = (
+                db.query(Document, ProcessingTask)
                 .join(ProcessingTask, ProcessingTask.document_id == Document.id)
                 .filter(
                     Document.data_store_id == datastore_id,
                     Document.is_selected == True,  # noqa: E712
-                    ProcessingTask.status.in_(("pending", "failed")),
-                    ~Document.chunks.any(),
+                    ProcessingTask.status.in_(("pending", "processing")),
                 )
                 .all()
             )
+            claimed = get_claimed_task_ids(t.id for _, t in rows)
+            interrupted = [
+                (
+                    doc.id, doc.file_path, doc.file_name,
+                    doc.file_hash or "", doc.file_size or 0,
+                    doc.content_type, task.id,
+                )
+                for doc, task in rows
+                if task.id not in claimed
+            ]
+            if interrupted:
+                task_ids = [r[6] for r in interrupted]
+                db.query(ProcessingTask).filter(
+                    ProcessingTask.id.in_(task_ids)
+                ).update(
+                    {
+                        ProcessingTask.status: "pending",
+                        ProcessingTask.progress: 0,
+                        ProcessingTask.progress_message: "Re-queued by startup recovery",
+                        ProcessingTask.error_message: None,
+                    },
+                    synchronize_session=False,
+                )
+                db.commit()
+                logger.debug(
+                    "[RECOVERY] interrupted_tasks_found datastore_id=%s count=%d",
+                    datastore_id, len(interrupted),
+                )
         finally:
             db.close()
 
-        if not stuck:
-            return []
-
         futures = []
-        for doc in stuck:
+        for doc_id, file_path, file_name, file_hash, file_size, content_type, task_id in interrupted:
             try:
-                future = self.process_new_file(doc.file_path, datastore_id)
+                if not file_path or not os.path.exists(file_path):
+                    continue
+                future = self._submit_ingestion(
+                    file_path, file_name, datastore_id,
+                    doc_id, content_type, file_hash, file_size, task_id,
+                )
                 if future is not None:
-                    futures.append((future, doc.file_path))
+                    futures.append((future, file_path))
             except Exception as e:
                 logger.error(
                     "[RECOVERY] requeue_error doc_id=%s path=%s: %s",
-                    doc.id, doc.file_path, e,
+                    doc_id, file_path, e,
                 )
         return futures
 
@@ -573,11 +614,12 @@ class StartupRecoveryService:
             ingestion_futures = self._queue_ingestion_files(result, datastore_id)
             deleted_count = self._handle_deletions_phase(result, datastore_id, scan_id)
 
-            # Re-queue selected documents with failed/pending tasks and no
-            # chunks — these are unchanged files whose ingestion failed
-            # (API down, OOM, conversion error) and were not picked up by
-            # discovery because the file hasn't changed on disk.
-            requeued_futures = self._requeue_failed_tasks(datastore_id)
+            # Re-queue selected documents with interrupted (pending/processing)
+            # tasks and no chunks — files unchanged on disk whose ingestion was
+            # cut off by a crash/restart before recording a verdict.  Failed
+            # tasks are excluded: they are completed attempts retried by
+            # manual scans, not by recovery.
+            requeued_futures = self._requeue_interrupted_tasks(datastore_id)
             ingestion_futures.extend(requeued_futures)
             if requeued_futures:
                 total_to_process += len(requeued_futures)
@@ -752,7 +794,10 @@ class StartupRecoveryService:
                 task_id = task.id
 
             # Submit to background processor (async)
-            future = self._submit_ingestion(file_path, file_name, datastore_id, doc, file_hash, file_size, task_id)
+            future = self._submit_ingestion(
+                file_path, file_name, datastore_id,
+                doc.id, doc.content_type, file_hash, file_size, task_id,
+            )
             return future
 
         except Exception as e:
@@ -770,7 +815,8 @@ class StartupRecoveryService:
         file_path: str,
         file_name: str,
         datastore_id: int,
-        doc: Document,
+        document_id: int,
+        content_type: Optional[str],
         file_hash: str,
         file_size: int,
         task_id: int,
@@ -779,16 +825,32 @@ class StartupRecoveryService:
 
         Returns the Future so callers can wait for completion.
         """
-        future = self.executor.submit(
-            self._run_ingestion,
-            file_path,
-            file_name,
-            datastore_id,
-            doc.id,
-            task_id,
-            file_hash,
-            file_size,
-            doc.content_type,
+        from app.services.infrastructure.ingest_claims import (
+            claim_ingestion, release_ingestion_claim,
+        )
+        if not claim_ingestion(task_id):
+            logger.debug(
+                "[RECOVERY] submit_skipped_claimed task_id=%s doc_id=%s",
+                task_id, document_id,
+            )
+            return None
+        try:
+            future = self.executor.submit(
+                self._run_ingestion,
+                file_path,
+                file_name,
+                datastore_id,
+                document_id,
+                task_id,
+                file_hash,
+                file_size,
+                content_type,
+            )
+        except Exception:
+            release_ingestion_claim(task_id)
+            raise
+        future.add_done_callback(
+            lambda f, tid=task_id: release_ingestion_claim(tid)
         )
         future.add_done_callback(
             lambda f: self._on_ingestion_done(f, task_id, file_path)
@@ -1053,6 +1115,15 @@ class StartupRecoveryService:
 
         This handles the case where a graph build was interrupted (app crash,
         LLM API down) after the document was successfully ingested to Qdrant.
+
+        NOTE: unlike document-ingestion retry (``_requeue_interrupted_tasks``,
+        which excludes ``failed``), ``graph_status='failed'`` IS retried here.
+        Rationale: graph builds fail mostly on transient infrastructure —
+        Neo4j or the LLM being down during the same restart window that
+        triggered recovery — and no other path retries genuine graph
+        failures.  Manual scans only reset graph builds whose error says
+        "Cancelled" (pause-cancelled), so dropping ``failed`` here would
+        strand real graph failures permanently.
 
         Skips datastores where graph ingestion is paused.
         """

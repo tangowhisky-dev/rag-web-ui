@@ -128,6 +128,19 @@ class IngestMixin:
                 )
                 return None
             else:
+                # A failed task is a terminal verdict — skip until the admin
+                # re-queues it via retry-failed (failed → pending).
+                task = (
+                    db.query(ProcessingTask)
+                    .filter(ProcessingTask.document_id == existing.id)
+                    .first()
+                )
+                if task is not None and task.status == "failed":
+                    logger.debug(
+                        "[WATCHER] skip_failed_task path=%s doc_id=%s datastore_id=%s",
+                        event_path, existing.id, datastore_id,
+                    )
+                    return None
                 logger.debug(
                     "[WATCHER] re_ingest_no_chunks path=%s doc_id=%s datastore_id=%s",
                     event_path,
@@ -410,18 +423,34 @@ class IngestMixin:
             )
 
             # Enqueue background processing
-            future = self._executor.submit(
-                self._run_ingestion,
-                event_path,
-                fname,
-                None,  # kb_id (DataStore files have no KB)
-                task.id,
-                doc.id,
-                datastore_id,
-                None,
-                file_hash=file_hash,
-                file_size=file_size,
-                content_type=content_type,
+            from app.services.infrastructure.ingest_claims import (
+                claim_ingestion, release_ingestion_claim,
+            )
+            if not claim_ingestion(task.id):
+                logger.debug(
+                    "[WATCHER] submit_skipped_claimed task_id=%s doc_id=%s",
+                    task.id, doc.id,
+                )
+                return None
+            try:
+                future = self._executor.submit(
+                    self._run_ingestion,
+                    event_path,
+                    fname,
+                    None,  # kb_id (DataStore files have no KB)
+                    task.id,
+                    doc.id,
+                    datastore_id,
+                    None,
+                    file_hash=file_hash,
+                    file_size=file_size,
+                    content_type=content_type,
+                )
+            except Exception:
+                release_ingestion_claim(task.id)
+                raise
+            future.add_done_callback(
+                lambda f, tid=task.id: release_ingestion_claim(tid)
             )
             future.add_done_callback(
                 lambda f: self._on_ingestion_done(f, task.id, event_path)
@@ -522,18 +551,34 @@ class IngestMixin:
             )
 
             # Enqueue background re-processing
-            future = self._executor.submit(
-                self._run_ingestion,
-                event_path,
-                fname,
-                None,  # kb_id (DataStore files have no KB)
-                task.id,
-                document_id,
-                datastore_id,
-                None,
-                file_hash=file_hash,
-                file_size=file_size,
-                content_type=content_type,
+            from app.services.infrastructure.ingest_claims import (
+                claim_ingestion, release_ingestion_claim,
+            )
+            if not claim_ingestion(task.id):
+                logger.debug(
+                    "[WATCHER] submit_skipped_claimed task_id=%s doc_id=%s",
+                    task.id, document_id,
+                )
+                return None
+            try:
+                future = self._executor.submit(
+                    self._run_ingestion,
+                    event_path,
+                    fname,
+                    None,  # kb_id (DataStore files have no KB)
+                    task.id,
+                    document_id,
+                    datastore_id,
+                    None,
+                    file_hash=file_hash,
+                    file_size=file_size,
+                    content_type=content_type,
+                )
+            except Exception:
+                release_ingestion_claim(task.id)
+                raise
+            future.add_done_callback(
+                lambda f, tid=task.id: release_ingestion_claim(tid)
             )
             future.add_done_callback(
                 lambda f: self._on_ingestion_done(f, task.id, event_path)

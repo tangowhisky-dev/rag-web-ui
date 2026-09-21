@@ -500,19 +500,22 @@ class ScanMixin:
 
             seen_paths = {fmeta["file_path"] for fmeta in files_to_process}
 
-            # Re-queue documents with pending or failed tasks that were not
-            # in the new/modified set.  This handles the pause/resume case:
+            # Re-queue documents with pending or interrupted tasks that were
+            # not in the new/modified set.  This handles the pause/resume case:
             # after a pause, Document records exist but their ProcessingTasks
-            # may be stuck in "pending" (never started) or "failed" (interrupted).
-            # Without this, a resume scan finds 0 new files and exits immediately,
-            # leaving those tasks orphaned.
+            # may be stuck in "pending" (never started) or "processing"
+            # (worker died mid-flight).  Without this, a resume scan finds 0
+            # new files and exits immediately, leaving those tasks orphaned.
+            # "failed" tasks are excluded — a failed task is a completed
+            # attempt with a recorded error; admins re-queue them explicitly
+            # via retry-failed (failed → pending).
             stuck_docs = (
                 db.query(Document, ProcessingTask)
                 .join(ProcessingTask, ProcessingTask.document_id == Document.id)
                 .filter(
                     Document.data_store_id == datastore_id,
                     Document.is_selected == True,  # noqa: E712
-                    ProcessingTask.status.in_(("pending", "failed", "processing")),
+                    ProcessingTask.status.in_(("pending", "processing")),
                 )
                 .all()
             )

@@ -153,6 +153,14 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logging.getLogger(__name__).warning("Sparse embedder preload failed: %s", exc)
 
+    # Clear stale ingestion claims — every executor future from the
+    # previous process died with it, so all claims are orphans.
+    try:
+        from app.services.infrastructure.ingest_claims import clear_ingestion_claims
+        clear_ingestion_claims()
+    except Exception as e:
+        logging.getLogger(__name__).warning("Failed to clear ingest claims: %s", e)
+
     # Start the startup recovery service FIRST
     try:
         _services["recovery"] = StartupRecoveryService()

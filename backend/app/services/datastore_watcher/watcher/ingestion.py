@@ -51,29 +51,45 @@ class IngestionMixin:
         summary: Dict[str, Any],
         ingestion_futures: List[Future],
     ) -> None:
-        """Re-queue documents with pending/failed/processing tasks."""
+        """Re-queue documents with pending/processing tasks.
+
+        Tasks holding a live Redis claim already have an executor future —
+        leave them alone.  For the rest, heal to ``completed`` only when the
+        document's chunks are fully backed by Qdrant points (exact
+        point-id check, not just "has chunks"); anything else is
+        re-ingested.
+        """
+        from app.services.infrastructure.ingest_claims import get_claimed_task_ids
+        from app.services.ingestion.document_qdrant import doc_chunks_have_vectors
+
+        claimed = get_claimed_task_ids(task.id for _, task in stuck_docs)
         requeued = 0
         for doc, task in stuck_docs:
             if doc.file_path in seen_paths:
                 continue  # already handled above
+            if task.id in claimed:
+                continue  # a live future owns this task
             if self._is_scan_cancelled(datastore_id):
                 break
-            # Check if chunks already exist (task may have completed
-            # before the pause took effect).  If chunks exist, mark
-            # the task as completed and skip re-ingestion.
-            chunk_count = (
-                db.query(DocumentChunk)
+            # If ingestion actually finished (chunks AND vector points) but
+            # the task status never landed (pause, crash), heal the status.
+            # Chunks without matching points → falls through to re-ingest.
+            chunk_ids = [
+                r[0] for r in
+                db.query(DocumentChunk.id)
                 .filter(DocumentChunk.document_id == doc.id)
-                .count()
-            )
-            if chunk_count > 0:
+                .all()
+            ]
+            if chunk_ids and doc_chunks_have_vectors(
+                f"ds_{datastore_id}", chunk_ids
+            ):
                 task.status = "completed"
                 task.progress = 100
                 db.commit()
                 continue
-            # No chunks — re-ingest using _update_document_in_scan
-            # which reuses the existing Document, resets the task,
-            # and submits to the executor.
+            # No chunks or missing vectors — re-ingest using
+            # _update_document_in_scan which reuses the existing Document,
+            # resets the task, and submits to the executor.
             try:
                 future = self._update_document_in_scan(
                     doc.id, doc.file_path, doc.file_hash or "",
@@ -259,6 +275,19 @@ class IngestionMixin:
                         # File unchanged and chunks exist - skip
                         return
                     else:
+                        # A failed task is a terminal verdict — skip until the
+                        # admin re-queues it via retry-failed (failed → pending).
+                        task = (
+                            db.query(ProcessingTask)
+                            .filter(ProcessingTask.document_id == existing.id)
+                            .first()
+                        )
+                        if task is not None and task.status == "failed":
+                            logger.debug(
+                                "[WATCHER] skip_failed_task path=%s doc_id=%s datastore_id=%s",
+                                event_path, existing.id, datastore_id,
+                            )
+                            return
                         # File unchanged but no chunks - re-ingest (ingestion likely failed)
                         logger.debug(
                             "[WATCHER] re_ingest_no_chunks path=%s doc_id=%s datastore_id=%s",
@@ -339,19 +368,35 @@ class IngestionMixin:
         skip_conversion: bool = False,
     ) -> Future:
         """Submit ingestion to executor and track the future for scan_id."""
-        future = self._executor.submit(
-            self._run_ingestion,
-            event_path,
-            fname,
-            None,
-            task_id,
-            document_id,
-            datastore_id,
-            None,
-            file_hash=file_hash,
-            file_size=file_size,
-            content_type=content_type,
-            skip_conversion=skip_conversion,
+        from app.services.infrastructure.ingest_claims import (
+            claim_ingestion, release_ingestion_claim,
+        )
+        if not claim_ingestion(task_id):
+            logger.debug(
+                "[WATCHER] submit_skipped_claimed task_id=%s doc_id=%s",
+                task_id, document_id,
+            )
+            return None
+        try:
+            future = self._executor.submit(
+                self._run_ingestion,
+                event_path,
+                fname,
+                None,
+                task_id,
+                document_id,
+                datastore_id,
+                None,
+                file_hash=file_hash,
+                file_size=file_size,
+                content_type=content_type,
+                skip_conversion=skip_conversion,
+            )
+        except Exception:
+            release_ingestion_claim(task_id)
+            raise
+        future.add_done_callback(
+            lambda f, tid=task_id: release_ingestion_claim(tid)
         )
         future.add_done_callback(
             lambda f, ds=datastore_id: self._on_scan_ingestion_done(f, task_id, event_path, ds)

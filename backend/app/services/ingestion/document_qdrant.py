@@ -97,6 +97,39 @@ def _chunk_id_to_point_id(chunk_id: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_OID, chunk_id))
 
 
+def doc_chunks_have_vectors(collection_name: str, chunk_ids: List[str]) -> bool:
+    """True iff every chunk has its point in *collection_name*.
+
+    Point ids are ``uuid5(chunk_id)`` and each point carries the dense and
+    sparse vectors atomically, so point presence is sufficient proof that
+    both vectors exist.  ``HasIdCondition`` counts how many of the doc's
+    *specific* expected point ids are present — an exact check, not a
+    count comparison that orphan points could spoof.
+
+    Fail-open: on any Qdrant error (collection missing, unreachable) we
+    return True so a transient outage doesn't trigger mass re-ingestion.
+    Startup reconciliation is the authoritative repair path.
+    """
+    from qdrant_client.models import Filter, HasIdCondition
+
+    if not chunk_ids:
+        return False
+    try:
+        expected = [_chunk_id_to_point_id(cid) for cid in chunk_ids]
+        res = get_qdrant_client().count(
+            collection_name=collection_name,
+            count_filter=Filter(must=[HasIdCondition(has_id=expected)]),
+            exact=True,
+        )
+        return res.count == len(expected)
+    except Exception as e:
+        logger.warning(
+            "[QDRANT] parity_check_failed collection=%s chunks=%d: %s",
+            collection_name, len(chunk_ids), e,
+        )
+        return True
+
+
 async def _embed_texts_batch(
     texts: List[str],
     progress_cb=None,

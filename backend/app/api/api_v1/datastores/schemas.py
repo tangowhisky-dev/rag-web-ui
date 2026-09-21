@@ -115,6 +115,9 @@ class DataStoreResponse(BaseModel):
     graph_summary: Optional[dict] = None
     # Whether Neo4j graph ingestion is paused for this datastore
     graph_ingestion_paused: bool = False
+    # DB-derived ingestion rollup for the Files column:
+    # {total, selected, skipped, ingested, failed, pending, graph_done, running}
+    file_stats: Optional[dict] = None
 
     model_config = ConfigDict(from_attributes=True)
 

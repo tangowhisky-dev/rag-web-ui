@@ -914,6 +914,10 @@ async def process_document_full(
                     ptask.progress_message = msg
                     progress_db.commit()
                 pt.ping()
+                # Refresh the Redis submission claim so a live task is
+                # never mistaken for an orphaned one by requeue paths.
+                from app.services.infrastructure.ingest_claims import touch_ingestion_claim
+                touch_ingestion_claim(task_id)
             except Exception:
                 try:
                     progress_db.rollback()

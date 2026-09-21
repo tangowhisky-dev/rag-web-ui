@@ -223,16 +223,18 @@ class ChangesMixin:
         Picks up two categories:
         1. Selected documents with no ProcessingTask and no chunks — files
            selected via the datastore browser that were never ingested.
-        2. Selected documents with a failed ProcessingTask and no chunks —
-           files whose ingestion failed (API down, OOM, conversion error)
-           and need retry.  Without this, failed tasks on auto-process
-           datastores are never retried because the manual scan path
-           (which has _requeue_stuck_documents) is blocked for auto-process
-           datastores.
+        2. Selected documents with a "pending" task, no chunks, and no
+           Redis claim — queued work whose executor future was lost (scan
+           cancelled, app restart, or an admin's retry-failed flip).  The
+           claim registry answers "is anyone holding this task" exactly,
+           so no age heuristics are needed.  "failed" tasks are deliberately
+           excluded — they are terminal verdicts retried only via
+           retry-failed.
 
         Called by the batch timer on each interval tick.
         """
         from app.models.knowledge import Document, ProcessingTask
+        from app.services.infrastructure.ingest_claims import get_claimed_task_ids
         from sqlalchemy.orm import Session as _Session
 
         db: _Session = SessionLocal()
@@ -250,26 +252,28 @@ class ChangesMixin:
                 .all()
             )
 
-            # Category 2: has a failed task, no chunks
-            failed_docs = (
-                db.query(Document)
+            # Category 2: pending task with no chunks and no live claim —
+            # the task's executor future is gone, so it's safe to re-submit.
+            pending_rows = (
+                db.query(Document, ProcessingTask)
                 .join(ProcessingTask, ProcessingTask.document_id == Document.id)
                 .filter(
                     Document.data_store_id == datastore_id,
                     Document.is_selected == True,  # noqa: E712
-                    ProcessingTask.status == "failed",
+                    ProcessingTask.status == "pending",
                     ~Document.chunks.any(),
                 )
                 .all()
             )
+            claimed = get_claimed_task_ids(t.id for _, t in pending_rows)
+            pending_docs = [doc for doc, t in pending_rows if t.id not in claimed]
         finally:
             db.close()
 
-        # Deduplicate by document id (a doc could theoretically appear in
-        # both queries if it has a failed task that was deleted and recreated)
+        # Deduplicate by document id
         seen_ids: set = set()
         to_process = []
-        for doc in [*orphans, *failed_docs]:
+        for doc in [*orphans, *pending_docs]:
             if doc.id not in seen_ids:
                 seen_ids.add(doc.id)
                 to_process.append(doc)
@@ -278,8 +282,8 @@ class ChangesMixin:
             return
 
         logger.debug(
-            "[WATCHER] orphan_selected_found datastore_id=%d orphans=%d failed=%d",
-            datastore_id, len(orphans), len(failed_docs),
+            "[WATCHER] orphan_selected_found datastore_id=%d orphans=%d pending=%d",
+            datastore_id, len(orphans), len(pending_docs),
         )
 
         futures = []
@@ -298,8 +302,8 @@ class ChangesMixin:
         # complete.  Futures run in the executor's thread pool; the UI
         # polls for processing/pending_ingestion status every 3 seconds.
         # Blocking here prevents the next interval tick from firing and
-        # delays processing of new filesystem events.  Failed files are
-        # retried on the next tick via the failed-task query above.
+        # delays processing of new filesystem events.  Orphaned pending
+        # tasks are retried on the next tick via the query above.
         if futures:
             logger.debug(
                 "[WATCHER] orphan_ingestion_submitted datastore_id=%d count=%d",

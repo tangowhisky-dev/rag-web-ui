@@ -338,6 +338,9 @@ def run_ingestion_in_thread(
         # Unregister this ingestion so delete can proceed
         if ds_id_for_tracking is not None:
             unregister_ingestion(ds_id_for_tracking, task_id)
+        # Release the submit-time claim so requeue paths can retry this task
+        from app.services.infrastructure.ingest_claims import release_ingestion_claim
+        release_ingestion_claim(task_id)
 
     _maybe_start_graph_build(graph_request, task_id)
 

@@ -209,6 +209,84 @@ class TestQdrantReconciliation:
         mock_qdrant.delete_collection.assert_not_called()
         assert summary["qdrant"]["dropped_collections"] == 0
 
+    def test_missing_vector_doc_requeued(self, db_session):
+        """A doc whose chunks have no Qdrant points: chunks deleted,
+        task reset to pending, counted in summary."""
+        from types import SimpleNamespace
+        from app.services.cleanup.reconciliation_service import _requeue_docs_missing_vectors
+        from app.models.knowledge import DocumentChunk, Document, ProcessingTask
+
+        doc = Document(
+            file_path="/test/f.txt", file_name="f.txt", file_size=10,
+            content_type="text/plain", is_selected=True, data_store_id=1,
+        )
+        db_session.add(doc)
+        db_session.commit()
+        chunk = DocumentChunk(
+            id="chunk_missing_vec", document_id=doc.id, file_name="f.txt",
+            chunk_text="text", hash="h1", data_store_id=1,
+        )
+        task = ProcessingTask(
+            document_id=doc.id, data_store_id=1, status="completed", progress=100,
+        )
+        db_session.add_all([chunk, task])
+        db_session.commit()
+
+        mock_qdrant = MagicMock()
+        mock_qdrant.scroll.return_value = ([], None)  # collection has no points
+
+        summary: dict = {"qdrant": {"missing_vector_docs": 0}}
+        _requeue_docs_missing_vectors(
+            mock_qdrant, db_session, "ds_1", summary, data_store_id=1,
+        )
+
+        assert summary["qdrant"]["missing_vector_docs"] == 1
+        assert db_session.query(DocumentChunk).filter(
+            DocumentChunk.document_id == doc.id
+        ).count() == 0
+        db_session.refresh(task)
+        assert task.status == "pending"
+        assert task.error_message is None
+
+    def test_doc_with_vectors_untouched(self, db_session):
+        """A doc whose chunks all have Qdrant points is left alone."""
+        from types import SimpleNamespace
+        from app.services.cleanup.reconciliation_service import _requeue_docs_missing_vectors
+        from app.services.ingestion import _chunk_id_to_point_id
+        from app.models.knowledge import DocumentChunk, Document, ProcessingTask
+
+        doc = Document(
+            file_path="/test/g.txt", file_name="g.txt", file_size=10,
+            content_type="text/plain", is_selected=True, data_store_id=1,
+        )
+        db_session.add(doc)
+        db_session.commit()
+        chunk = DocumentChunk(
+            id="chunk_has_vec", document_id=doc.id, file_name="g.txt",
+            chunk_text="text", hash="h2", data_store_id=1,
+        )
+        task = ProcessingTask(
+            document_id=doc.id, data_store_id=1, status="completed", progress=100,
+        )
+        db_session.add_all([chunk, task])
+        db_session.commit()
+
+        point = SimpleNamespace(id=_chunk_id_to_point_id("chunk_has_vec"))
+        mock_qdrant = MagicMock()
+        mock_qdrant.scroll.return_value = ([point], None)
+
+        summary: dict = {"qdrant": {"missing_vector_docs": 0}}
+        _requeue_docs_missing_vectors(
+            mock_qdrant, db_session, "ds_1", summary, data_store_id=1,
+        )
+
+        assert summary["qdrant"]["missing_vector_docs"] == 0
+        assert db_session.query(DocumentChunk).filter(
+            DocumentChunk.id == "chunk_has_vec"
+        ).first() is not None
+        db_session.refresh(task)
+        assert task.status == "completed"
+
 
 class TestNeo4jReconciliation:
     """Test Neo4j reconciliation with mocked driver."""

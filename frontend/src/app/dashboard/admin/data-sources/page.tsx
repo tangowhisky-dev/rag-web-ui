@@ -25,7 +25,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { useToast } from '@/components/ui/use-toast';
 import { LoadingDots } from '@/components/ui/loading-dots';
-import { Loader2, CheckCircle2, AlertCircle, Pause, ChevronLeft, ChevronRight, X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, X } from 'lucide-react';
 
 interface Org {
   id: number;
@@ -74,6 +74,17 @@ interface DataStore {
     status: string; // "idle" | "running" | "completed" | "failed"
   } | null;
   graph_ingestion_paused: boolean;
+  // DB-derived ingestion rollup for the Files column
+  file_stats?: {
+    total: number;
+    selected: number;
+    skipped: number;
+    ingested: number;
+    failed: number;
+    pending: number;
+    graph_done: number;
+    running: boolean;
+  } | null;
 }
 
 interface ScanProgress {
@@ -227,7 +238,8 @@ export default function DataSourcesPage() {
       );
       const hasRunningGraph = ds.some((d) => d.graph_summary?.status === 'running');
       const hasPendingIngestion = ds.some((d) => d.pending_ingestion > 0);
-      if (hasProcessing || hasRunningScan || hasRunningGraph || hasPendingIngestion) {
+      const hasActiveIngestion = ds.some((d) => d.file_stats?.running);
+      if (hasProcessing || hasRunningScan || hasRunningGraph || hasPendingIngestion || hasActiveIngestion) {
         fetchDataRef.current();
       }
     };
@@ -544,6 +556,25 @@ export default function DataSourcesPage() {
     }
   }
 
+  async function handleRetryFailed(dsId: number) {
+    try {
+      const resp = (await api.post(
+        `/api/admin/datastores/${dsId}/retry-failed`,
+      )) as { retried: number };
+      toast({
+        title: 'Retry queued',
+        description: `${resp.retried} failed document(s) will be ingested on the next run`,
+      });
+      await fetchData();
+    } catch (err) {
+      toast({
+        title: 'Error',
+        description: (err as ApiError).message ?? 'Failed to re-queue failed documents',
+        variant: 'destructive',
+      });
+    }
+  }
+
   async function handleGraphToggle(dsId: number, isPaused: boolean) {
     const endpoint = isPaused ? 'graph-resume' : 'graph-pause';
     try {
@@ -700,162 +731,48 @@ export default function DataSourcesPage() {
                   </TableCell>
                   <TableCell>
                     {(() => {
-                      const progress = scanProgress[ds.id];
-                      if (progress && progress.status !== 'completed' && progress.status !== 'paused') {
-                        const pct = progress.total > 0
-                          ? Math.min((progress.ingested / Math.max(progress.total, 1)) * 100, 100)
-                          : 0;
-                        const finalizing = pct >= 100 && progress.status === 'running';
-                        return (
-                          <div className="space-y-2">
-                            <div className="flex items-center gap-2">
-                              <LoadingDots size="sm" />
-                              <span className="text-xs text-blue-600">{finalizing ? 'Finalizing ingestion...' : 'Processing...'}</span>
-                            </div>
-                            <div className="w-full bg-gray-200 rounded-full h-2">
-                              <div
-                                className="bg-blue-500 h-2 rounded-full transition-all duration-300"
-                                style={{ width: `${pct}%` }}
-                              ></div>
-                            </div>
-                            <div className="flex justify-between text-xs text-muted-foreground">
-                              <span>{progress.ingested} / {progress.total}</span>
-                              <span>{pct.toFixed(0)}%</span>
-                            </div>
-                            <div className="flex flex-wrap gap-2 text-[10px] text-muted-foreground">
-                              {progress.pending > 0 && <span>Pending: {progress.pending}</span>}
-                              {progress.skipped > 0 && <span>Skipped: {progress.skipped}</span>}
-                              {progress.failed > 0 && <span className="text-red-500">Failed: {progress.failed}</span>}
-                            </div>
-                          </div>
-                        );
+                      const fs = ds.file_stats;
+                      if (!fs) {
+                        return <span className="text-xs text-muted-foreground">—</span>;
                       }
-                      if (ds.last_scan_status === 'paused') {
-                        const denom = ds.selected_files || 1;
-                        const ingested = ds.processed_files || 0;
-                        const pct = Math.min((ingested / Math.max(denom, 1)) * 100, 100);
-                        return (
-                          <div className="space-y-2">
-                            <div className="flex items-center gap-2">
-                              <span className="text-xs text-amber-600 font-medium">Paused</span>
-                            </div>
-                            <div className="w-full bg-gray-200 rounded-full h-2">
-                              <div
-                                className="bg-amber-500 h-2 rounded-full"
-                                style={{ width: `${pct}%` }}
-                              ></div>
-                            </div>
-                            <div className="flex justify-between text-xs text-muted-foreground">
-                              <span>{ingested} / {denom}</span>
-                              <span>{pct.toFixed(0)}%</span>
-                            </div>
-                          </div>
-                        );
-                      }
-                      if (ds.last_scan_status === 'running') {
-                        const denom = ds.selected_files || 1;
-                        const ingested = ds.processed_files || 0;
-                        const pct = Math.min((ingested / Math.max(denom, 1)) * 100, 100);
-                        const finalizing = pct >= 100;
-                        return (
-                          <div className="space-y-2">
-                            <div className="flex items-center gap-2">
-                              <LoadingDots size="sm" />
-                              <span className="text-xs text-blue-600">{finalizing ? 'Finalizing ingestion...' : 'Processing...'}</span>
-                            </div>
-                            <div className="w-full bg-gray-200 rounded-full h-2">
-                              <div
-                                className="bg-blue-500 h-2 rounded-full transition-all duration-300"
-                                style={{ width: `${pct}%` }}
-                              ></div>
-                            </div>
-                            <div className="flex justify-between text-xs text-muted-foreground">
-                              <span>{ingested} / {denom}</span>
-                              <span>{pct.toFixed(0)}%</span>
-                            </div>
-                          </div>
-                        );
-                      }
-                      if (ds.last_scan_status === 'error') {
-                        const total = ds.last_scan_total_files || ds.selected_files || 0;
-                        const ok = ds.last_scan_processed ?? ds.processed_files ?? 0;
-                        const errs = ds.last_scan_errors || 0;
-                        return (
-                          <div className="space-y-1">
-                            <div className="text-xs text-muted-foreground">
-                              {ok} / {total} ingested
-                            </div>
-                            {errs > 0 && (
-                              <div className="text-xs text-red-500">{errs} errors</div>
-                            )}
-                          </div>
-                        );
-                      }
+                      const pctIngested = fs.selected > 0
+                        ? Math.min((fs.ingested / fs.selected) * 100, 100)
+                        : 0;
+                      const pctFailed = fs.selected > 0
+                        ? Math.min((fs.failed / fs.selected) * 100, 100)
+                        : 0;
                       return (
-                        <div className="text-xs">
-                          {ds.processed_files} ingested
-                          <br />
-                          {ds.selected_files} selected
-                          <br />
-                          {ds.last_scan_total_files} total
-                          {ds.processing && (
-                            <div className="mt-1 flex items-center gap-1">
-                              <div className="w-2 h-2 rounded-full bg-orange-500 animate-pulse"></div>
-                              <span className="text-orange-600">Processing changes...</span>
+                        <div className="space-y-1.5 min-w-[150px]">
+                          {fs.running && (
+                            <div className="space-y-1">
+                              <div className="flex items-center gap-1.5">
+                                <LoadingDots size="sm" />
+                                <span className="text-xs text-blue-600">Processing...</span>
+                              </div>
+                              <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden flex">
+                                <div
+                                  className="bg-blue-500 h-2 transition-all duration-300"
+                                  style={{ width: `${pctIngested}%` }}
+                                />
+                                <div
+                                  className="bg-red-400 h-2 transition-all duration-300"
+                                  style={{ width: `${pctFailed}%` }}
+                                />
+                              </div>
+                              <div className="flex justify-between text-xs text-muted-foreground">
+                                <span>{fs.ingested + fs.failed} / {fs.selected}</span>
+                                <span>{(pctIngested + pctFailed).toFixed(0)}%</span>
+                              </div>
                             </div>
                           )}
-                          {ds.pending_changes > 0 && (
-                            <div className="mt-1 flex items-center gap-1">
-                              <div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse"></div>
-                              <span className="text-yellow-600">{ds.pending_changes} pending</span>
-                            </div>
-                          )}
-                          {ds.pending_ingestion > 0 && (
-                            <div className="mt-1 flex items-center gap-1">
-                              <div className="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></div>
-                              <span className="text-blue-600">{ds.pending_ingestion} queued for ingestion</span>
-                            </div>
-                          )}
+                          <div className="text-xs text-muted-foreground leading-5">
+                            <div>Total: {fs.total}, Skipped: {fs.skipped}</div>
+                            <div className={fs.failed > 0 ? 'text-red-500' : ''}>Failed: {fs.failed}</div>
+                            <div>Pending: {fs.pending}, Graph: {fs.graph_done}/{fs.selected}</div>
+                          </div>
                         </div>
                       );
                     })()}
-                    {ds.graph_summary && ds.graph_summary.total > 0 && (
-                      <div className="mt-2 flex items-center gap-1.5 text-xs">
-                        {ds.graph_ingestion_paused && (
-                          <>
-                            <Pause className="h-3 w-3 text-amber-500" />
-                            <span className="text-amber-600">
-                              Graph paused ({ds.graph_summary.pending} pending)
-                            </span>
-                          </>
-                        )}
-                        {!ds.graph_ingestion_paused && ds.graph_summary.status === 'running' && (
-                          <>
-                            <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
-                            <span className="text-muted-foreground">
-                              Graph {ds.graph_summary.completed}/{ds.graph_summary.total}
-                            </span>
-                          </>
-                        )}
-                        {ds.graph_summary.status === 'completed' && (
-                          <>
-                            <CheckCircle2 className="h-3 w-3 text-muted-foreground" />
-                            <span className="text-muted-foreground">
-                              Graph {ds.graph_summary.completed}/{ds.graph_summary.total}
-                            </span>
-                          </>
-                        )}
-                        {ds.graph_summary.status === 'failed' && (
-                          <>
-                            <AlertCircle className="h-3 w-3 text-amber-500" />
-                            <span className="text-muted-foreground">
-                              Graph {ds.graph_summary.completed}/{ds.graph_summary.total}
-                              {ds.graph_summary.failed > 0 && ` (${ds.graph_summary.failed} failed)`}
-                            </span>
-                          </>
-                        )}
-                      </div>
-                    )}
                   </TableCell>
                   <TableCell>
                     {(() => {
@@ -957,6 +874,16 @@ export default function DataSourcesPage() {
                             title={ds.graph_ingestion_paused ? 'Resume graph ingestion' : 'Pause graph ingestion'}
                           >
                             {ds.graph_ingestion_paused ? 'Resume Graph' : 'Pause Graph'}
+                          </Button>
+                        )}
+                        {(ds.file_stats?.failed ?? 0) > 0 && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => handleRetryFailed(ds.id)}
+                            title="Re-queue failed documents — ingested on the next scan or processing tick"
+                          >
+                            Retry Failed
                           </Button>
                         )}
                         {ds.pending_changes > 0 && (

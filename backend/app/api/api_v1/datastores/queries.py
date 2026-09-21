@@ -122,6 +122,108 @@ def _fetch_pending_ingestion_counts(
     return {r[0]: int(r[1]) for r in rows}
 
 
+def _fetch_file_stats(db: Session, ds_ids: list[int]) -> dict[int, dict[str, int]]:
+    """Per-datastore ingestion rollup for the data-sources Files column.
+
+    Returns ``{ds_id: {total, selected, ingested, failed, graph_done,
+    pending_tasks, processing_tasks}}``.
+
+    - total:      all Document rows (selected + unselected files detected)
+    - selected:   is_selected=True
+    - ingested:   selected documents that have chunks
+    - failed:     selected documents whose task failed, never produced chunks,
+                  and have no task currently queued/running (a re-queue
+                  supersedes the failed state)
+    - graph_done: distinct selected documents with a completed graph build
+    - pending_tasks / processing_tasks: raw task counts used to derive the
+      "ingestion running" flag
+    """
+    if not ds_ids:
+        return {}
+    from app.models.knowledge import Document, ProcessingTask
+    from sqlalchemy import func, case, distinct
+
+    stats = {
+        ds_id: {
+            "total": 0, "selected": 0, "ingested": 0, "failed": 0,
+            "graph_done": 0, "pending_tasks": 0, "processing_tasks": 0,
+        }
+        for ds_id in ds_ids
+    }
+
+    for ds_id, total, selected in (
+        db.query(
+            Document.data_store_id,
+            func.count(Document.id),
+            func.sum(case((Document.is_selected == True, 1), else_=0)),  # noqa: E712
+        )
+        .filter(Document.data_store_id.in_(ds_ids))
+        .group_by(Document.data_store_id)
+        .all()
+    ):
+        stats[ds_id]["total"] = int(total or 0)
+        stats[ds_id]["selected"] = int(selected or 0)
+
+    for ds_id, n in (
+        db.query(Document.data_store_id, func.count(Document.id))
+        .filter(
+            Document.data_store_id.in_(ds_ids),
+            Document.is_selected == True,  # noqa: E712
+            Document.chunks.any(),
+        )
+        .group_by(Document.data_store_id)
+        .all()
+    ):
+        stats[ds_id]["ingested"] = int(n or 0)
+
+    for ds_id, n in (
+        db.query(Document.data_store_id, func.count(distinct(Document.id)))
+        .join(ProcessingTask, ProcessingTask.document_id == Document.id)
+        .filter(
+            Document.data_store_id.in_(ds_ids),
+            Document.is_selected == True,  # noqa: E712
+            ProcessingTask.status == "failed",
+            ~Document.chunks.any(),
+            ~Document.processing_tasks.any(
+                ProcessingTask.status.in_(["pending", "processing"])
+            ),
+        )
+        .group_by(Document.data_store_id)
+        .all()
+    ):
+        stats[ds_id]["failed"] = int(n or 0)
+
+    for ds_id, n in (
+        db.query(ProcessingTask.data_store_id, func.count(distinct(ProcessingTask.document_id)))
+        .join(Document, ProcessingTask.document_id == Document.id)
+        .filter(
+            ProcessingTask.data_store_id.in_(ds_ids),
+            ProcessingTask.graph_status == "completed",
+            Document.is_selected == True,  # noqa: E712
+        )
+        .group_by(ProcessingTask.data_store_id)
+        .all()
+    ):
+        stats[ds_id]["graph_done"] = int(n or 0)
+
+    for ds_id, status, n in (
+        db.query(
+            ProcessingTask.data_store_id,
+            ProcessingTask.status,
+            func.count(ProcessingTask.id),
+        )
+        .filter(
+            ProcessingTask.data_store_id.in_(ds_ids),
+            ProcessingTask.status.in_(["pending", "processing"]),
+        )
+        .group_by(ProcessingTask.data_store_id, ProcessingTask.status)
+        .all()
+    ):
+        stats[ds_id][f"{status}_tasks"] = int(n or 0)
+
+    return stats
+
+
 def _graph_status_from_counts(total: int, pending: int, completed: int, failed: int) -> str:
     if pending > 0:
         return "running"

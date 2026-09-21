@@ -39,6 +39,7 @@ from app.api.api_v1.datastores.queries import (
     _fetch_document_counts,
     _fetch_pending_ingestion_counts,
     _fetch_graph_counts,
+    _fetch_file_stats,
     _apply_watcher_status,
     _fetch_assigned_orgs,
     _compute_graph_summary_for_ds,
@@ -85,6 +86,7 @@ def list_datastores(
     selected_counts, processed_counts = _fetch_document_counts(db, ds_ids)
     pending_ingestion_counts = _fetch_pending_ingestion_counts(db, ds_ids)
     graph_counts = _fetch_graph_counts(db, ds_ids)
+    file_stats = _fetch_file_stats(db, ds_ids)
 
     result = []
     for ds in datastores:
@@ -96,6 +98,32 @@ def list_datastores(
         resp["selected_files"] = selected_counts.get(ds.id, 0)
         resp["processed_files"] = processed_counts.get(ds.id, 0)
         resp["pending_ingestion"] = pending_ingestion_counts.get(ds.id, 0)
+        fs = file_stats.get(ds.id, {})
+        selected = fs.get("selected", 0)
+        ingested = fs.get("ingested", 0)
+        failed = fs.get("failed", 0)
+        resp["file_stats"] = {
+            "total": fs.get("total", 0),
+            "selected": selected,
+            "skipped": fs.get("total", 0) - selected,
+            "ingested": ingested,
+            "failed": failed,
+            "pending": max(selected - ingested - failed, 0),
+            "graph_done": fs.get("graph_done", 0),
+            # Ingestion is "running" when a manual scan is active, a worker
+            # is processing a task right now, or queued tasks exist on an
+            # auto-process datastore (the watcher will consume them).
+            # Paused scans suppress the flag — the user explicitly stopped.
+            "running": (
+                ds.last_scan_status == "running"
+                or fs.get("processing_tasks", 0) > 0
+                or (
+                    fs.get("pending_tasks", 0) > 0
+                    and ds.auto_process_enabled
+                    and ds.last_scan_status != "paused"
+                )
+            ),
+        }
         result.append(DataStoreResponse(**resp))
     return DataStoreListResponse(items=result, total=total, skip=skip, limit=limit)
 
