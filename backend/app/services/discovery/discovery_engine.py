@@ -616,6 +616,29 @@ def discover_datastore(
             len(file_paths),
         )
 
+        # Empty-folder sanity: a literally empty directory while the
+        # manifest has entries almost always means the mount dropped —
+        # a dead mountpoint survives isdir/access but lists nothing.
+        # Classifying here would mark every known file deleted and wipe
+        # all ingested data, so refuse the classification.
+        try:
+            folder_empty = not os.listdir(ds.folder_path)
+        except OSError:
+            folder_empty = True
+        if not file_paths and manifest_map and folder_empty:
+            logger.warning(
+                "[DISCOVERY] empty_folder_abort datastore_id=%d folder=%s manifest_entries=%d — "
+                "folder is empty but manifest has entries; skipping classification",
+                datastore_id, ds.folder_path, len(manifest_map),
+            )
+            return DiscoveryResult(
+                datastore_id=ds.id,
+                datastore_name=ds.name,
+                folder_path=ds.folder_path,
+                total_files_discovered=0,
+                elapsed_ms=(time.monotonic() - start) * 1000,
+            )
+
         config = DiscoveryConfig()
 
         if force_full_hash:

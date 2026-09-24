@@ -365,6 +365,58 @@ class TestDiscoverDatastore:
         assert len(r2.new_files) == 1
         assert r2.total_files_discovered == 2  # modified + new
 
+    def test_empty_folder_with_manifest_aborts_classification(self, tmp_datastore_dir, db):
+        """A literally empty folder + non-empty manifest must NOT classify
+        all entries as deleted — that is the dead-mountpoint signature
+        (isdir/access pass on the leftover dir, but the share is gone)."""
+        from app.services.discovery import discover_datastore
+
+        folder_path, ds = tmp_datastore_dir
+
+        f = os.path.join(folder_path, "doc.pdf")
+        g = os.path.join(folder_path, "other.txt")
+        for p in (f, g):
+            with open(p, "wb") as fh:
+                fh.write(b"content")
+
+        r1 = discover_datastore(ds.id)
+        assert len(r1.new_files) == 2
+        _populate_manifest(ds.id, [f, g])
+
+        # Simulate mount drop: directory exists but is literally empty
+        os.remove(f)
+        os.remove(g)
+
+        r2 = discover_datastore(ds.id)
+
+        assert len(r2.deleted_files) == 0
+        assert len(r2.new_files) == 0
+        assert r2.total_files_discovered == 0
+
+    def test_partial_delete_still_detected(self, tmp_datastore_dir, db):
+        """The empty-folder guard must not suppress real deletions when the
+        folder still has entries (mount is alive, files genuinely removed)."""
+        from app.services.discovery import discover_datastore
+
+        folder_path, ds = tmp_datastore_dir
+
+        f = os.path.join(folder_path, "keep.pdf")
+        g = os.path.join(folder_path, "remove.txt")
+        for p in (f, g):
+            with open(p, "wb") as fh:
+                fh.write(b"content")
+
+        discover_datastore(ds.id)
+        _populate_manifest(ds.id, [f, g])
+
+        os.remove(g)
+        # Leave a leftover file so the dir is not literally empty
+        with open(os.path.join(folder_path, ".DS_Store"), "wb") as fh:
+            fh.write(b"x")
+
+        r2 = discover_datastore(ds.id)
+        assert len(r2.deleted_files) == 1
+
     def test_inactive_datastore_returns_0(self, tmp_datastore_dir):
         """Discovery on an inactive datastore must return zero files."""
         from app.services.discovery import discover_datastore

@@ -20,6 +20,7 @@ Methods:
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -28,7 +29,7 @@ from qdrant_client.models import PointIdsList
 from qdrant_client.http.exceptions import UnexpectedResponse
 
 from app.db.session import SessionLocal
-from app.models.datastore import DataStoreFileManifest
+from app.models.datastore import DataStore, DataStoreFileManifest
 from app.models.knowledge import Document, ProcessingTask, DocumentChunk, KnowledgeBase
 from app.services.ingestion import _chunk_id_to_point_id
 from app.services.infrastructure import get_qdrant_client
@@ -221,9 +222,33 @@ class DeleteMixin:
             datastore_id,
         )
 
+        # Verify the deletion is real before destroying data — a spurious
+        # event (observer quirk, atomic-save rename storm, mount drop) must
+        # not delete the document, its chunks, and its vectors.
+        if os.path.exists(event_path):
+            logger.debug(
+                "[WATCHER] delete_ignored_file_exists path=%s datastore_id=%s",
+                event_path, datastore_id,
+            )
+            return
+
         db: Session = SessionLocal()
         try:
             if datastore_id is not None:
+                # Folder-level guard: if the datastore root is inaccessible
+                # (mount dropped), no file under it can be confirmed
+                # deleted — skip rather than trust the event.
+                entry = self.folder_paths.get(datastore_id)
+                folder_path = entry[1] if entry else None
+                if folder_path is None:
+                    ds = db.query(DataStore).filter(DataStore.id == datastore_id).first()
+                    folder_path = ds.folder_path if ds else None
+                if not folder_path or not os.path.isdir(folder_path):
+                    logger.warning(
+                        "[WATCHER] delete_skipped_folder_inaccessible path=%s datastore_id=%s folder=%s",
+                        event_path, datastore_id, folder_path,
+                    )
+                    return
                 self._handle_datastore_deletion(db, event_path, datastore_id)
                 return
 
