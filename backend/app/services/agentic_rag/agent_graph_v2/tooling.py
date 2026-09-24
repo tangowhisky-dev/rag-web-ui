@@ -234,6 +234,7 @@ async def _dispatch_v2(
             details=obs.result.get("ui_details") if isinstance(obs.result, dict) else None,
             error=obs.error,
             status="complete",
+            elapsed=res.get("elapsed") if isinstance(res, dict) else None,
         )
         if executed_flags[i]:
             counts[obs.tool] = counts.get(obs.tool, 0) + 1

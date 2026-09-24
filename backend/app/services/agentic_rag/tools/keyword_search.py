@@ -7,6 +7,7 @@ expanded keyword matching — it just asks for keyword matches.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, List, Optional
 
@@ -19,7 +20,7 @@ from app.services.retrieval.retrieval import exact_search_docs, sparse_search_do
 from app.services.retrieval.reranker import rerank, soft_elbow_truncate
 from app.services.settings_service import get_setting
 
-from ._search_helpers import _emit_progress, enrich_hits_with_authority, expand_synonyms, inject_neighbor_context, resolve_filter_to_doc_ids
+from ._search_helpers import _emit_progress, _run_sync, enrich_hits_with_authority, expand_synonyms, inject_neighbor_context, resolve_filter_to_doc_ids
 
 logger = logging.getLogger(__name__)
 
@@ -82,12 +83,12 @@ class KeywordSearchTool(BaseAgentTool):
         if not kb_ids:
             return {"ok": True, "result": {"hits": [], "query_used": input_obj.query, "search_type": "keyword", "count": 0}, "error": None, "tokens": 0, "terminate": False}
 
-        datastore_ids = get_effective_datastore_ids(kb_ids, ctx.org_id, ctx.db) if ctx.db else []
+        datastore_ids = await _run_sync(lambda db: get_effective_datastore_ids(kb_ids, ctx.org_id, db)) if ctx.db else []
 
         doc_ids = input_obj.document_ids
         filter_meta: dict = {}
         if input_obj.filters:
-            filter_doc_ids, filter_meta = resolve_filter_to_doc_ids(ctx.db, kb_ids, input_obj.filters)
+            filter_doc_ids, filter_meta = await _run_sync(lambda db: resolve_filter_to_doc_ids(db, kb_ids, input_obj.filters))
             if filter_doc_ids is not None:
                 # Intersect with an explicit document_ids restriction —
                 # filters narrowing to zero searchable docs means zero hits,
@@ -107,7 +108,7 @@ class KeywordSearchTool(BaseAgentTool):
         # vice versa, added as extra query variants alongside the synonyms.
         try:
             from app.services.abbreviation_service import build_lookup, find_abbrs_in_text, find_forms_in_text
-            _abbr_lookup = build_lookup(ctx.db, ctx.org_id)
+            _abbr_lookup = await _run_sync(lambda db: build_lookup(db, ctx.org_id))
             if not _abbr_lookup.is_empty:
                 _exp_terms = [f for forms in find_abbrs_in_text(query, _abbr_lookup).values() for f in forms]
                 _exp_terms += list(find_forms_in_text(query, _abbr_lookup).keys())
@@ -123,39 +124,38 @@ class KeywordSearchTool(BaseAgentTool):
         all_docs: list = []
         errors: list[str] = []
 
-        try:
-            exact_docs = exact_search_docs(
-                query=query,
-                kb_ids=kb_ids,
-                datastore_ids=datastore_ids,
-                db=ctx.db,
-                org_id=ctx.org_id,
-                top_k=input_obj.top_k,
-                min_score=exact_min,
-                doc_ids=doc_ids,
-                extra_queries=extra_queries,
-            )
-            all_docs.extend(exact_docs)
-        except Exception as exc:
-            logger.warning("[keyword_search] exact leg failed: %s", exc)
-            errors.append(f"exact: {exc}")
+        # Run both legs concurrently on worker threads — they are synchronous
+        # (MySQL FTS, SPLADE embed, per-collection Qdrant calls) and would
+        # otherwise serialize on the event loop.
+        exact_res, sparse_res = await asyncio.gather(
+            _run_sync(lambda db: exact_search_docs(
+                query=query, kb_ids=kb_ids, datastore_ids=datastore_ids, db=db,
+                org_id=ctx.org_id, top_k=input_obj.top_k, min_score=exact_min,
+                doc_ids=doc_ids, extra_queries=extra_queries,
+            )),
+            _run_sync(lambda db: sparse_search_docs(
+                query=query, kb_ids=kb_ids, datastore_ids=datastore_ids, db=db,
+                org_id=ctx.org_id, top_k=input_obj.top_k, min_score=sparse_min,
+                doc_ids=doc_ids, extra_queries=extra_queries,
+            )),
+            return_exceptions=True,
+        )
 
-        try:
-            sparse_docs = sparse_search_docs(
-                query=query,
-                kb_ids=kb_ids,
-                datastore_ids=datastore_ids,
-                db=ctx.db,
-                org_id=ctx.org_id,
-                top_k=input_obj.top_k,
-                min_score=sparse_min,
-                doc_ids=doc_ids,
-                extra_queries=extra_queries,
-            )
+        if isinstance(exact_res, Exception):
+            logger.warning("[keyword_search] exact leg failed: %s", exact_res)
+            errors.append(f"exact: {exact_res}")
+            exact_docs: list = []
+        else:
+            exact_docs = exact_res
+            all_docs.extend(exact_docs)
+
+        if isinstance(sparse_res, Exception):
+            logger.warning("[keyword_search] sparse leg failed: %s", sparse_res)
+            errors.append(f"sparse: {sparse_res}")
+            sparse_docs: list = []
+        else:
+            sparse_docs = sparse_res
             all_docs.extend(sparse_docs)
-        except Exception as exc:
-            logger.warning("[keyword_search] sparse leg failed: %s", exc)
-            errors.append(f"sparse: {exc}")
 
         if not all_docs and errors:
             return {"ok": False, "result": {}, "error": "; ".join(errors), "tokens": 0, "terminate": False}
@@ -184,11 +184,12 @@ class KeywordSearchTool(BaseAgentTool):
                     LangchainDocument(page_content=d.page_content, metadata=d.metadata)
                     for d in merged
                 ]
-                reranked = rerank(
+                reranked = await asyncio.to_thread(
+                    rerank,
                     query=query,
                     docs=lc_docs,
                     score_threshold=score_threshold,
-                    db=ctx.db,
+                    db=None,
                     org_id=ctx.org_id,
                 )
                 if elbow_enabled:
@@ -203,7 +204,7 @@ class KeywordSearchTool(BaseAgentTool):
 
         # Inject prev/next chunks for top evidence and reorder by file position.
         try:
-            merged = inject_neighbor_context(merged, ctx.db)
+            merged = await _run_sync(lambda db: inject_neighbor_context(merged, db))
         except Exception as exc:
             logger.warning("[keyword_search] neighbor injection failed: %s", exc)
 
@@ -235,7 +236,7 @@ class KeywordSearchTool(BaseAgentTool):
 
         # Tag each hit with the document's lifecycle status / validity window
         # (resolved live from MySQL — safe under post-ingestion edits).
-        hits = enrich_hits_with_authority(hits, ctx.db)
+        hits = await _run_sync(lambda db: enrich_hits_with_authority(hits, db))
 
         write_audit(ctx, "keyword_search", input_obj.model_dump(),
                      {"hit_count": len(hits), "exact_count": len(exact_docs) if 'exact_docs' in dir() else 0,

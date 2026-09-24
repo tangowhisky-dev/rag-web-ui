@@ -120,6 +120,7 @@ interface SubagentItem {
   hitCount?: number;
   error?: boolean;
   summary?: string;
+  elapsed?: number;
 }
 
 type RenderEntry =
@@ -167,6 +168,7 @@ function buildRenderEntries(events: TimelineEvent[]): RenderEntry[] {
             existing.hitCount = ev.hit_count ?? existing.hitCount;
             existing.error = ev.error ? true : existing.error;
             existing.summary = ev.summary ?? existing.summary;
+            existing.elapsed = ev.elapsed ?? existing.elapsed;
           } else {
             currentSubagent.steps.push({
               id: ev.id,
@@ -176,6 +178,7 @@ function buildRenderEntries(events: TimelineEvent[]): RenderEntry[] {
               hitCount: ev.hit_count,
               error: ev.error ? true : false,
               summary: ev.summary,
+              elapsed: ev.elapsed,
             });
           }
         }
@@ -449,6 +452,9 @@ export const AgenticProgress = ({
               const ToolIcon = TOOL_ICONS[toolName] ?? WrenchIcon;
               const summary = ev.summary;
               const obsError = ev.error;
+              const elapsedLabel = ev.elapsed != null && ev.elapsed > 0
+                ? ` (${ev.elapsed < 1 ? ev.elapsed.toFixed(1) : Math.round(ev.elapsed)}s)`
+                : "";
 
               return (
                 <ChainOfThoughtStep
@@ -460,6 +466,7 @@ export const AgenticProgress = ({
                     ) : (
                       <span>
                         {label}
+                        {elapsedLabel && <span className="text-muted-foreground">{elapsedLabel}</span>}
                         {summary ? <span className="text-muted-foreground"> · {summary}</span> : null}
                       </span>
                     )
@@ -529,6 +536,9 @@ export const AgenticProgress = ({
                       // alone is sufficient ("Generating/Updating Office document").
                       // For retrieval subagents, show summary or hit count.
                       const isOffice = subagentType === "office";
+                      const elapsedSuffix = item.elapsed != null && item.elapsed > 0
+                        ? ` (${item.elapsed < 1 ? item.elapsed.toFixed(1) : Math.round(item.elapsed)}s)`
+                        : "";
                       const resultSuffix = isOffice ? "" : (
                         item.summary
                           ? ` · ${item.summary}`
@@ -538,7 +548,7 @@ export const AgenticProgress = ({
                         <TaskItem key={item.id ?? i}>
                           <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
                             <span>—</span>
-                            {item.label}{resultSuffix}
+                            {item.label}{elapsedSuffix}{resultSuffix}
                           </span>
                         </TaskItem>
                       );

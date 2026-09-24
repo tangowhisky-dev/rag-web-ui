@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, List, Optional
 
@@ -14,7 +15,7 @@ from app.services.retrieval.retrieval import dense_search_docs
 from app.services.retrieval.reranker import rerank, soft_elbow_truncate
 from app.services.settings_service import get_setting
 
-from ._search_helpers import _emit_progress, enrich_hits_with_authority, inject_neighbor_context, resolve_filter_to_doc_ids
+from ._search_helpers import _emit_progress, _run_sync, enrich_hits_with_authority, inject_neighbor_context, resolve_filter_to_doc_ids
 
 logger = logging.getLogger(__name__)
 
@@ -76,12 +77,12 @@ class SemanticSearchTool(BaseAgentTool):
         if not kb_ids:
             return {"ok": True, "result": {"hits": [], "query_used": input_obj.query, "search_type": "semantic", "count": 0}, "error": None, "tokens": 0, "terminate": False}
 
-        datastore_ids = get_effective_datastore_ids(kb_ids, ctx.org_id, ctx.db) if ctx.db else []
+        datastore_ids = await _run_sync(lambda db: get_effective_datastore_ids(kb_ids, ctx.org_id, db)) if ctx.db else []
 
         doc_ids = input_obj.document_ids
         filter_meta: dict = {}
         if input_obj.filters:
-            filter_doc_ids, filter_meta = resolve_filter_to_doc_ids(ctx.db, kb_ids, input_obj.filters)
+            filter_doc_ids, filter_meta = await _run_sync(lambda db: resolve_filter_to_doc_ids(db, kb_ids, input_obj.filters))
             if filter_doc_ids is not None:
                 # Intersect with an explicit document_ids restriction —
                 # filters narrowing to zero searchable docs means zero hits,
@@ -97,16 +98,16 @@ class SemanticSearchTool(BaseAgentTool):
         min_score = get_setting(ctx.db, "DENSE_MIN_SCORE", ctx.org_id)
 
         try:
-            docs = dense_search_docs(
+            docs = await _run_sync(lambda db: dense_search_docs(
                 query=input_obj.query,
                 kb_ids=kb_ids,
                 datastore_ids=datastore_ids,
-                db=ctx.db,
+                db=db,
                 org_id=ctx.org_id,
                 top_k=input_obj.top_k,
                 min_score=min_score,
                 doc_ids=doc_ids,
-            )
+            ))
         except Exception as exc:
             logger.warning("[semantic_search] failed: %s", exc)
             return {"ok": False, "result": {}, "error": str(exc), "tokens": 0, "terminate": False}
@@ -118,11 +119,12 @@ class SemanticSearchTool(BaseAgentTool):
             score_threshold = get_setting(ctx.db, "RERANKER_SCORE_THRESHOLD", ctx.org_id)
             elbow_enabled = get_setting(ctx.db, "ELBOW_CUT_ENABLED", ctx.org_id)
             try:
-                docs = rerank(
+                docs = await asyncio.to_thread(
+                    rerank,
                     query=input_obj.query,
                     docs=docs,
                     score_threshold=score_threshold,
-                    db=ctx.db,
+                    db=None,
                     org_id=ctx.org_id,
                 )
                 if elbow_enabled:
@@ -133,7 +135,7 @@ class SemanticSearchTool(BaseAgentTool):
 
         # Inject prev/next chunks for top evidence and reorder by file position.
         try:
-            docs = inject_neighbor_context(docs, ctx.db)
+            docs = await _run_sync(lambda db: inject_neighbor_context(docs, db))
         except Exception as exc:
             logger.warning("[semantic_search] neighbor injection failed: %s", exc)
 
@@ -165,7 +167,7 @@ class SemanticSearchTool(BaseAgentTool):
 
         # Tag each hit with the document's lifecycle status / validity window
         # (resolved live from MySQL — safe under post-ingestion edits).
-        hits = enrich_hits_with_authority(hits, ctx.db)
+        hits = await _run_sync(lambda db: enrich_hits_with_authority(hits, db))
 
         write_audit(ctx, "semantic_search", input_obj.model_dump(),
                      {"hit_count": len(hits)}, status="ok")

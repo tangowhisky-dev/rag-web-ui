@@ -7,15 +7,33 @@ synonym expansion logic.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
 
 from app.core.config import settings
 from app.services.agentic_rag.tool_context import ToolContext
 
 logger = logging.getLogger(__name__)
+
+
+async def _run_sync(fn: Callable[[Any], Any]) -> Any:
+    """Run a blocking DB-touching callable on a worker thread.
+
+    The callable receives a fresh ``SessionLocal`` — the shared ``ctx.db``
+    session must never be used concurrently (SQLAlchemy Sessions are not
+    thread-safe), and running on a thread keeps sync MySQL/HTTP work off the
+    event loop so asyncio.gather'd tools actually run in parallel.
+    """
+    from app.db.session import SessionLocal
+
+    db = SessionLocal()
+    try:
+        return await asyncio.to_thread(fn, db)
+    finally:
+        db.close()
 
 
 def _safe_writer():

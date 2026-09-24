@@ -509,7 +509,7 @@ async def run_office_subagent(
                            step_type="tool", tool=obs.tool, label=label,
                            hit_count=1 if file_created else 0,
                            error=bool(obs.error), summary=summary_text,
-                           status="complete")
+                           status="complete", elapsed=result.get("elapsed"))
 
     # Collect results from state — only files generated during THIS run count.
     generated_files = ctx.state.get("generated_files", []) if ctx.state else []

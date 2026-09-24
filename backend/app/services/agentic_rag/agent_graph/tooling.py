@@ -9,7 +9,9 @@ Provides utility functions used by v2 tooling and subagents:
 
 from __future__ import annotations
 
+import json
 import logging
+import time
 
 from app.services.agentic_rag.schemas import Observation
 
@@ -204,7 +206,10 @@ def _merge_retrieved_docs(
 async def _run_tool(tool, name: str, args: dict) -> dict:
     from .helpers import _compact_args, _result_brief, debug_emit
 
+    started = time.monotonic()
+
     def _obs(out_args, result, error, terminate=False, tokens=0):
+        elapsed = time.monotonic() - started
         # Debug stream: the tool's normalized input + compacted output —
         # what the agent actually sent and received at this stage.
         debug_emit("tool_observation", {
@@ -214,8 +219,27 @@ async def _run_tool(tool, name: str, args: dict) -> dict:
             "error": error,
             "tokens": tokens,
         })
+        # Completion log: identifies the tool call (name + compacted args),
+        # its wall time, outcome, and result size — correlates log lines
+        # with the elapsed shown on the UI timeline.
+        size = ""
+        if isinstance(result, dict):
+            for key in ("hits", "docs", "matches"):
+                if isinstance(result.get(key), list):
+                    size = f" {key}={len(result[key])}"
+                    break
+            else:
+                if result.get("count") is not None:
+                    size = f" count={result['count']}"
+        logger.info(
+            "[tool_done] tool=%s elapsed_s=%.2f%s%s args=%s",
+            name, round(elapsed, 2), size,
+            f" error={error[:160]}" if error else "",
+            json.dumps(_compact_args(out_args), default=str)[:300],
+        )
         return {"tool": name, "arguments": out_args, "result": result,
-                "error": error, "tokens": tokens, "terminate": terminate}
+                "error": error, "tokens": tokens, "terminate": terminate,
+                "elapsed": elapsed}
 
     try:
         # Normalize nested dict keys — some LLM providers return keys with

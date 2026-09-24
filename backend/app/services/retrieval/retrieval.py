@@ -19,13 +19,14 @@ Configuration (.env / settings):
 
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import List, Dict, Optional
 
 from langchain_core.documents import Document as LangchainDocument
 from openai import OpenAI as SyncOpenAI
 from qdrant_client import QdrantClient
-from qdrant_client.models import SparseVector, NearestQuery, Mmr, Filter, FieldCondition, MatchAny
+from qdrant_client.models import SparseVector, NearestQuery, Mmr, Filter, FieldCondition, MatchAny, QueryRequest
 from fastembed import SparseTextEmbedding
 from sqlalchemy import text, bindparam
 from sqlalchemy.orm import Session
@@ -203,31 +204,16 @@ def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
         if filtered:
             logger.debug("[DENSE] %s | filtered_by_score=%d", collection_name, filtered)
 
-    # Search KB collections
-    for kb_id in kb_ids:
-        logger.debug("[DENSE] qdrant query | collection=kb_%d | using=dense | limit=%d", kb_id, candidates)
-        try:
-            hits = get_qdrant_client().query_points(
-                collection_name=f"kb_{kb_id}",
-                query=query_obj,
-                using="dense",
-                limit=candidates,
-                with_payload=True,
-                with_vectors=True,
-                query_filter=qdrant_filter,
-            ).points
-        except Exception as e:
-            logger.warning("dense_search: Qdrant query failed for kb_%d: %s", kb_id, e)
-            continue
-        logger.debug("[DENSE] qdrant response | kb_%d | hits=%d", kb_id, len(hits))
-        _process_hits(hits, f"kb_{kb_id}")
+    # Search KB + DataStore collections — independent per-collection queries
+    # are fanned out across a small thread pool (the Qdrant client is
+    # thread-safe); executor.map preserves submission order so hit ranks
+    # stay identical to the old sequential loop.
+    collections = [f"kb_{kb_id}" for kb_id in kb_ids] + [f"ds_{ds_id}" for ds_id in datastore_ids]
 
-    # Search DataStore collections
-    for ds_id in datastore_ids:
-        logger.debug("[DENSE] qdrant query | collection=ds_%d | using=dense | limit=%d", ds_id, candidates)
+    def _query_collection(collection_name: str):
         try:
-            hits = get_qdrant_client().query_points(
-                collection_name=f"ds_{ds_id}",
+            return collection_name, get_qdrant_client().query_points(
+                collection_name=collection_name,
                 query=query_obj,
                 using="dense",
                 limit=candidates,
@@ -236,47 +222,53 @@ def _dense_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
                 query_filter=qdrant_filter,
             ).points
         except Exception as e:
-            logger.warning("dense_search: Qdrant query failed for ds_%d: %s", ds_id, e)
-            continue
-        logger.debug("[DENSE] qdrant response | ds_%d | hits=%d", ds_id, len(hits))
-        _process_hits(hits, f"ds_{ds_id}")
+            logger.warning("dense_search: Qdrant query failed for %s: %s", collection_name, e)
+            return collection_name, []
+
+    if collections:
+        with ThreadPoolExecutor(max_workers=min(8, len(collections))) as ex:
+            for collection_name, hits in ex.map(_query_collection, collections):
+                logger.debug("[DENSE] qdrant response | %s | hits=%d", collection_name, len(hits))
+                _process_hits(hits, collection_name)
 
     logger.debug("[DENSE] unique candidates=%d", len(result))
     return result
 
 
 @with_retry_sync(max_attempts=3)
-def _sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: Session, candidates: int, org_id: Optional[int] = None, min_score: Optional[float] = None, doc_ids: Optional[List[int]] = None) -> Dict[str, _Candidate]:
+def _sparse_search(queries: List[str], kb_ids: List[int], datastore_ids: List[int], db: Session, candidates: int, org_id: Optional[int] = None, min_score: Optional[float] = None, doc_ids: Optional[List[int]] = None) -> List[Dict[str, _Candidate]]:
     """Qdrant learned-sparse search (SPLADE via FastEmbed).
 
-    Searches both KB collections (kb_{kb_id}) and DataStore collections (ds_{datastore_id}).
-    Uses native Qdrant MMR when QDRANT_MMR_DIVERSITY > 0 to diversify results.
-    Returns dense vectors in metadata for downstream semantic dedup.
+    Searches both KB collections (kb_{kb_id}) and DataStore collections
+    (ds_{datastore_id}) for every query variant. All variants are embedded in
+    a single batched SPLADE call, then each collection is queried once via
+    ``query_batch_points`` (one HTTP round trip per collection instead of one
+    per variant). Collections are fanned out over a small thread pool — the
+    Qdrant client is thread-safe.
+
+    Returns one candidate dict per query (aligned with ``queries``) — the
+    caller RRF-fuses the per-query ranked lists.
     ``min_score`` overrides settings.SPARSE_MIN_SCORE for this call (used by the
     graduated relaxation ladder in atomic search tools).
     """
-    logger.debug("[SPARSE] SPLADE embed | model=%s | query=%r", settings.SPLADE_MODEL, query[:120])
-    sparse_emb = next(iter(get_sparse_embedder().embed([query])))
-    query_sparse = SparseVector(
-        indices=sparse_emb.indices.tolist(),
-        values=sparse_emb.values.tolist(),
-    )
-    logger.debug("[SPARSE] SPLADE response | nnz=%d | top_terms_indices=%s | top_values=%s",
-                len(sparse_emb.indices),
-                sparse_emb.indices[:5].tolist(),
-                [round(v, 4) for v in sparse_emb.values[:5].tolist()])
+    logger.debug("[SPARSE] SPLADE embed | model=%s | queries=%d", settings.SPLADE_MODEL, len(queries))
+    sparse_embs = list(get_sparse_embedder().embed(queries))
+    query_vectors = [
+        SparseVector(indices=e.indices.tolist(), values=e.values.tolist())
+        for e in sparse_embs
+    ]
+    logger.debug("[SPARSE] SPLADE response | variants=%d | nnz=%s",
+                len(query_vectors), [len(e.indices) for e in sparse_embs])
 
     # Build MMR-wrapped query if diversity > 0.
     # QDRANT_MMR_DIVERSITY=0.0 means pure relevance (no MMR).
     diversity = get_setting(db, "QDRANT_MMR_DIVERSITY", org_id)
     if diversity > 0.0:
-        query_obj = NearestQuery(nearest=query_sparse, mmr=Mmr(diversity=diversity))
+        query_objs = [NearestQuery(nearest=sv, mmr=Mmr(diversity=diversity)) for sv in query_vectors]
         logger.debug("[SPARSE] using native MMR | diversity=%.2f", diversity)
     else:
-        query_obj = query_sparse
+        query_objs = list(query_vectors)
 
-    result: Dict[str, _Candidate] = {}
-    rank = 0
     min_score = get_setting(db, "SPARSE_MIN_SCORE", org_id) if min_score is None else min_score
     if min_score > -float("inf"):
         logger.debug("[SPARSE] applying min_score=%.2f", min_score)
@@ -286,8 +278,11 @@ def _sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: 
     if qdrant_filter:
         logger.debug("[SPARSE] filtering to %d document_ids", len(doc_ids))
 
-    def _process_hits(hits, collection_name: str):
-        nonlocal rank
+    results: List[Dict[str, _Candidate]] = [dict() for _ in queries]
+
+    def _process_hits(hits, qi: int, collection_name: str):
+        result = results[qi]
+        rank = len(result)
         filtered = 0
         for hit in hits:
             score = getattr(hit, 'score', -1)
@@ -312,50 +307,45 @@ def _sparse_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: 
                 content_hash=h,
                 sparse_rank=rank,
             )
-            logger.debug("[SPARSE]   rank=%d score=%.4f text=%r", rank, score, doc.page_content[:80])
+            logger.debug("[SPARSE]   q=%d rank=%d score=%.4f text=%r", qi, rank, score, doc.page_content[:80])
             rank += 1
         if filtered:
-            logger.debug("[SPARSE] %s | filtered_by_score=%d", collection_name, filtered)
+            logger.debug("[SPARSE] %s | q=%d filtered_by_score=%d", collection_name, qi, filtered)
 
-    # Search KB collections
-    for kb_id in kb_ids:
-        logger.debug("[SPARSE] qdrant query | collection=kb_%d | using=sparse | limit=%d", kb_id, candidates)
-        try:
-            hits = get_qdrant_client().query_points(
-                collection_name=f"kb_{kb_id}",
-                query=query_obj,
+    # One batched request per collection (all query variants in a single
+    # HTTP call), collections fanned out over a small thread pool.
+    collections = [f"kb_{kb_id}" for kb_id in kb_ids] + [f"ds_{ds_id}" for ds_id in datastore_ids]
+
+    def _query_collection(collection_name: str):
+        requests = [
+            QueryRequest(
+                query=qo,
                 using="sparse",
                 limit=candidates,
                 with_payload=True,
-                with_vectors=True,
-                query_filter=qdrant_filter,
-            ).points
-        except Exception as e:
-            logger.warning("sparse_search: Qdrant query failed for kb_%d: %s", kb_id, e)
-            continue
-        _process_hits(hits, f"kb_{kb_id}")
-
-    # Search DataStore collections
-    for ds_id in datastore_ids:
-        logger.debug("[SPARSE] qdrant query | collection=ds_%d | using=sparse | limit=%d", ds_id, candidates)
+                with_vector=True,
+                filter=qdrant_filter,
+            )
+            for qo in query_objs
+        ]
         try:
-            hits = get_qdrant_client().query_points(
-                collection_name=f"ds_{ds_id}",
-                query=query_obj,
-                using="sparse",
-                limit=candidates,
-                with_payload=True,
-                with_vectors=True,
-                query_filter=qdrant_filter,
-            ).points
+            return collection_name, get_qdrant_client().query_batch_points(
+                collection_name=collection_name, requests=requests,
+            )
         except Exception as e:
-            logger.warning("sparse_search: Qdrant query failed for ds_%d: %s", ds_id, e)
-            continue
-        logger.debug("[SPARSE] qdrant response | ds_%d | hits=%d", ds_id, len(hits))
-        _process_hits(hits, f"ds_{ds_id}")
+            logger.warning("sparse_search: Qdrant query failed for %s: %s", collection_name, e)
+            return collection_name, []
 
-    logger.debug("[SPARSE] unique candidates=%d", len(result))
-    return result
+    if collections:
+        with ThreadPoolExecutor(max_workers=min(8, len(collections))) as ex:
+            for collection_name, responses in ex.map(_query_collection, collections):
+                for qi, resp in enumerate(responses):
+                    _process_hits(resp.points, qi, collection_name)
+                logger.debug("[SPARSE] qdrant response | %s | hits=%s",
+                            collection_name, [len(r.points) for r in responses])
+
+    logger.debug("[SPARSE] unique candidates=%s", [len(r) for r in results])
+    return results
 
 
 def _parse_raw_meta(raw_meta) -> dict:
@@ -403,22 +393,48 @@ def _normalize_metadata(raw_meta, row) -> dict:
     return meta
 
 
-def _run_fts_query_with_retry(query: str, kb_ids: List[int], datastore_ids: List[int], kb_sql, ds_sql, candidates: int, doc_id_params: Optional[dict] = None):
+def _run_fts_query_with_retry(query: str, kb_ids: List[int], datastore_ids: List[int], kb_chunk_sql, kb_title_sql, ds_chunk_sql, ds_title_sql, candidates: int, doc_id_params: Optional[dict] = None):
+    """Run the four index-backed FTS queries and merge per-chunk scores.
+
+    The FTS score of a chunk is ``chunk_match + 2.0 * title_match`` — same
+    weighting as the old single-query OR form, but each side hits its own
+    FULLTEXT index (MATCH … OR MATCH across two tables cannot use either).
+    Returns a merged list of SimpleNamespace rows sorted by score desc,
+    capped at ``candidates``.
+    """
+    from types import SimpleNamespace
     from app.db.session import SessionLocal
 
-    kb_rows = []
-    ds_rows = []
     doc_id_params = doc_id_params or {}
 
     for attempt in range(3):
         fresh_db: Session | None = None
         try:
             fresh_db = SessionLocal()
+            merged: dict = {}  # chunk_id -> SimpleNamespace with combined fts_score
+
+            def _collect(sql, params: dict, weight: float):
+                for row in fresh_db.execute(sql, {"query": query, **params, **doc_id_params}).fetchall():
+                    rec = merged.get(row.chunk_id)
+                    if rec is None:
+                        rec = SimpleNamespace(
+                            chunk_text=row.chunk_text, chunk_metadata=row.chunk_metadata,
+                            kb_id=row.kb_id, document_id=row.document_id, chunk_index=row.chunk_index,
+                            file_name=row.file_name, title=row.title,
+                            file_modified_at=row.file_modified_at, file_created_at=row.file_created_at,
+                            fts_score=0.0,
+                        )
+                        merged[row.chunk_id] = rec
+                    rec.fts_score += float(row.fts_part or 0.0) * weight
+
             if kb_ids:
-                kb_rows = fresh_db.execute(kb_sql, {"query": query, "kb_ids": kb_ids, "candidates": candidates, **doc_id_params}).fetchall()
+                _collect(kb_chunk_sql, {"kb_ids": kb_ids}, 1.0)
+                _collect(kb_title_sql, {"kb_ids": kb_ids}, 2.0)
             if datastore_ids:
-                ds_rows = fresh_db.execute(ds_sql, {"query": query, "ds_ids": datastore_ids, "candidates": candidates, **doc_id_params}).fetchall()
-            return kb_rows, ds_rows
+                _collect(ds_chunk_sql, {"ds_ids": datastore_ids}, 1.0)
+                _collect(ds_title_sql, {"ds_ids": datastore_ids}, 2.0)
+
+            return sorted(merged.values(), key=lambda r: r.fts_score, reverse=True)[:candidates]
         except Exception as e:
             logger.warning("exact_search: MySQL FTS query failed (attempt %d): %s", attempt + 1, e)
             try:
@@ -494,63 +510,65 @@ def _exact_search(query: str, kb_ids: List[int], datastore_ids: List[int], db: S
         kb_binds.append(bindparam("doc_ids", expanding=True))
         ds_binds.append(bindparam("doc_ids", expanding=True))
 
-    # Query KB documents — JOIN documents for file_modified_at and title.
-    # Title matches get 2x weight: a chunk from a document whose title
-    # matches the query is more relevant than one matching only in body.
-    kb_sql = text(
-        f"""
-        SELECT dc.chunk_text, dc.chunk_metadata, dc.kb_id, dc.document_id, dc.chunk_index,
-               dc.file_name, d.title,
+    # Index-backed FTS: split the old "MATCH(chunk) OR MATCH(title)" single
+    # query into a chunk-text query and a title query per side — the OR'd
+    # cross-table MATCH could not use either FULLTEXT index (it scanned
+    # document_chunks and evaluated both MATCHes per row). Each side now
+    # hits its own index; _run_fts_query_with_retry merges the two score
+    # components per chunk (chunk + 2×title, same weighting as before).
+    _COLS = """
+        SELECT dc.id AS chunk_id, dc.chunk_text, dc.chunk_metadata, dc.kb_id,
+               dc.document_id, dc.chunk_index, dc.file_name, d.title,
                COALESCE(d.file_modified_at, d.file_created_at, d.created_at) AS file_modified_at,
                COALESCE(d.file_created_at, d.created_at) AS file_created_at,
-               (MATCH(dc.chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE)
-                + COALESCE(MATCH(d.title) AGAINST(:query IN NATURAL LANGUAGE MODE), 0) * 2.0
-               ) AS fts_score
+    """
+    kb_chunk_sql = text(
+        _COLS + f"""
+               MATCH(dc.chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE) AS fts_part
         FROM   document_chunks dc
         JOIN   documents d ON dc.document_id = d.id
-        WHERE  dc.kb_id IN :kb_ids
+        WHERE  MATCH(dc.chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE) > 0
+          AND  dc.kb_id IN :kb_ids
           AND  dc.data_store_id IS NULL{doc_id_clause}
-          AND  (MATCH(dc.chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE) > 0
-                OR MATCH(d.title) AGAINST(:query IN NATURAL LANGUAGE MODE) > 0)
-        ORDER  BY fts_score DESC
-        LIMIT  :candidates
         """
     ).bindparams(*kb_binds)
-
-    # Query DataStore documents — same title-weighted scoring
-    ds_sql = text(
-        f"""
-        SELECT dc.chunk_text, dc.chunk_metadata, dc.kb_id, dc.document_id, dc.chunk_index,
-               dc.file_name, d.title,
-               COALESCE(d.file_modified_at, d.file_created_at, d.created_at) AS file_modified_at,
-               COALESCE(d.file_created_at, d.created_at) AS file_created_at,
-               (MATCH(dc.chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE)
-                + COALESCE(MATCH(d.title) AGAINST(:query IN NATURAL LANGUAGE MODE), 0) * 2.0
-               ) AS fts_score
+    kb_title_sql = text(
+        _COLS + f"""
+               MATCH(d.title) AGAINST(:query IN NATURAL LANGUAGE MODE) AS fts_part
+        FROM   documents d
+        JOIN   document_chunks dc ON dc.document_id = d.id
+        WHERE  MATCH(d.title) AGAINST(:query IN NATURAL LANGUAGE MODE) > 0
+          AND  dc.kb_id IN :kb_ids
+          AND  dc.data_store_id IS NULL{doc_id_clause}
+        """
+    ).bindparams(*kb_binds)
+    ds_chunk_sql = text(
+        _COLS + f"""
+               MATCH(dc.chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE) AS fts_part
         FROM   document_chunks dc
         JOIN   documents d ON dc.document_id = d.id
-        WHERE  dc.data_store_id IN :ds_ids{doc_id_clause}
-          AND  (MATCH(dc.chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE) > 0
-                OR MATCH(d.title) AGAINST(:query IN NATURAL LANGUAGE MODE) > 0)
-        ORDER  BY fts_score DESC
-        LIMIT  :candidates
+        WHERE  MATCH(dc.chunk_text) AGAINST(:query IN NATURAL LANGUAGE MODE) > 0
+          AND  dc.data_store_id IN :ds_ids{doc_id_clause}
+        """
+    ).bindparams(*ds_binds)
+    ds_title_sql = text(
+        _COLS + f"""
+               MATCH(d.title) AGAINST(:query IN NATURAL LANGUAGE MODE) AS fts_part
+        FROM   documents d
+        JOIN   document_chunks dc ON dc.document_id = d.id
+        WHERE  MATCH(d.title) AGAINST(:query IN NATURAL LANGUAGE MODE) > 0
+          AND  dc.data_store_id IN :ds_ids{doc_id_clause}
         """
     ).bindparams(*ds_binds)
 
-    logger.debug("[EXACT] MySQL FTS query | query=%r | kb_ids=%s | ds_ids=%s | candidates=%d", 
+    logger.debug("[EXACT] MySQL FTS query | query=%r | kb_ids=%s | ds_ids=%s | candidates=%d",
                 query[:120], kb_ids, datastore_ids, candidates)
 
-    rows = _run_fts_query_with_retry(query, kb_ids, datastore_ids, kb_sql, ds_sql, candidates, doc_id_params)
-    if rows is None:
+    all_rows = _run_fts_query_with_retry(query, kb_ids, datastore_ids, kb_chunk_sql, kb_title_sql, ds_chunk_sql, ds_title_sql, candidates, doc_id_params)
+    if all_rows is None:
         return {}
-    kb_rows, ds_rows = rows
 
-    # Merge results and re-rank by FTS score
-    all_rows = list(kb_rows) + list(ds_rows)
-    all_rows.sort(key=lambda r: r.fts_score or 0, reverse=True)
-    all_rows = all_rows[:candidates]
-
-    logger.debug("[EXACT] MySQL FTS response | rows=%d (kb=%d, ds=%d)", len(all_rows), len(kb_rows), len(ds_rows))
+    logger.debug("[EXACT] MySQL FTS response | rows=%d", len(all_rows))
     if all_rows:
         for i, row in enumerate(all_rows[:5]):
             logger.debug("  exact[%d] fts_score=%.4f text=%r", i, row.fts_score, (row.chunk_text or "")[:80])
@@ -724,24 +742,17 @@ def sparse_search_docs(
 ) -> List[LangchainDocument]:
     """Run only the sparse leg and return its ranked candidate docs.
 
-    When extra_queries (synonyms) are provided, runs one search per query
-    and RRF-fuses the results.
+    When extra_queries (synonyms) are provided, all variants are embedded in
+    a single batched SPLADE call and each collection is queried once via
+    query_batch_points; the per-variant ranked lists are RRF-fused.
     """
     candidates = top_k or get_setting(db, "RETRIEVAL_TOP_K", org_id)
     pool = candidates * _LEG_POOL_MULTIPLIER
-    main_results = _candidates_to_docs(
-        _sparse_search(query, kb_ids, datastore_ids, db, pool, org_id, min_score=min_score, doc_ids=doc_ids), "sparse"
-    )
-    if not extra_queries:
-        return main_results
-    ranked_lists = [main_results]
-    for sq in extra_queries:
-        try:
-            ranked_lists.append(_candidates_to_docs(
-                _sparse_search(sq, kb_ids, datastore_ids, db, pool, org_id, min_score=min_score, doc_ids=doc_ids), "sparse"
-            ))
-        except Exception as exc:
-            logger.warning("[sparse_search] synonym query %r failed: %s", sq, exc)
+    queries = [query] + list(extra_queries or [])
+    per_query = _sparse_search(queries, kb_ids, datastore_ids, db, pool, org_id, min_score=min_score, doc_ids=doc_ids)
+    ranked_lists = [_candidates_to_docs(cands, "sparse") for cands in per_query]
+    if len(ranked_lists) == 1:
+        return ranked_lists[0]
     return _rrf_fuse(ranked_lists)
 
 
@@ -758,22 +769,29 @@ def exact_search_docs(
 ) -> List[LangchainDocument]:
     """Run only the exact (MySQL FTS) leg and return its ranked candidate docs.
 
-    When extra_queries (synonyms) are provided, runs one search per query
-    and RRF-fuses the results.
+    When extra_queries (synonyms) are provided, each variant runs on its own
+    thread — the leg creates a fresh DB session per query internally, so the
+    shared ``db`` session is never touched concurrently — and the per-variant
+    ranked lists are RRF-fused.
     """
     candidates = top_k or get_setting(db, "RETRIEVAL_TOP_K", org_id)
     pool = candidates * _LEG_POOL_MULTIPLIER
-    main_results = _candidates_to_docs(
-        _exact_search(query, kb_ids, datastore_ids, db, pool, org_id, min_score=min_score, doc_ids=doc_ids), "exact"
-    )
-    if not extra_queries:
-        return main_results
-    ranked_lists = [main_results]
-    for sq in extra_queries:
+    # Resolve settings on this thread — worker threads must not touch the
+    # shared SQLAlchemy session (Sessions are not thread-safe).
+    min_score = get_setting(db, "EXACT_MIN_SCORE", org_id) if min_score is None else min_score
+    queries = [query] + list(extra_queries or [])
+
+    def _run(q: str) -> List[LangchainDocument]:
         try:
-            ranked_lists.append(_candidates_to_docs(
-                _exact_search(sq, kb_ids, datastore_ids, db, pool, org_id, min_score=min_score, doc_ids=doc_ids), "exact"
-            ))
+            return _candidates_to_docs(
+                _exact_search(q, kb_ids, datastore_ids, db, pool, org_id, min_score=min_score, doc_ids=doc_ids), "exact"
+            )
         except Exception as exc:
-            logger.warning("[exact_search] synonym query %r failed: %s", sq, exc)
-    return _rrf_fuse(ranked_lists)
+            logger.warning("[exact_search] query %r failed: %s", q, exc)
+            return []
+
+    if len(queries) == 1:
+        return _run(queries[0])
+    with ThreadPoolExecutor(max_workers=min(4, len(queries))) as ex:
+        ranked_lists = list(ex.map(_run, queries))
+    return _rrf_fuse([rl for rl in ranked_lists if rl])

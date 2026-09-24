@@ -589,7 +589,7 @@ async def run_retrieval_subagent(
             _emit_timeline(id=tool_step, type="subagent_step", subagent_id=subagent_id,
                            step_type="tool", tool=name, label=label,
                            hit_count=hit_count, error=bool(obs.error),
-                           status="complete")
+                           status="complete", elapsed=result.get("elapsed"))
 
     # Extract evidence from all observations and merge with any citations
     # the sub-agent explicitly included in its final JSON.

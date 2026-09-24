@@ -210,7 +210,8 @@ async def post_process_node_v2(state, ctx) -> dict:
         history_text = history_to_text(recent)
         summary_text = state.get("compaction_summary") or ""
         resolved_q = state.get("fast_plan", {}).get("resolved_query") or query
-        is_direct = (state.get("fast_plan") or {}).get("intent") == "direct"
+        intent = (state.get("fast_plan") or {}).get("intent")
+        is_direct = intent == "direct"
 
         def _answer_prompts():
             if is_direct:
@@ -225,6 +226,25 @@ async def post_process_node_v2(state, ctx) -> dict:
                 )
                 usr_ = (
                     (f"Conversation so far:\n{history_text}\n\n" if history_text else "")
+                    + f"User: {resolved_q}"
+                )
+                return sys_, usr_
+            if intent == "answer_from_history" and not docs:
+                # Planner decided history suffices and no retrieval ran. The
+                # evidence-guardrail prompt would see an empty context and
+                # open with "documents have no data" — answer from history
+                # instead, still forbidding fabricated citations.
+                sys_ = (
+                    "You are a helpful AI assistant. The user's question refers "
+                    "to the earlier conversation — answer it from the "
+                    "conversation history. If the history does not contain "
+                    "enough information, say so instead of fabricating. "
+                    "Do not invent document citations.\n\n"
+                    f"Today's date: {datetime.now(timezone.utc).date().isoformat()}"
+                )
+                usr_ = (
+                    (f"Earlier conversation summary:\n{summary_text}\n\n" if summary_text else "")
+                    + (f"Conversation so far:\n{history_text}\n\n" if history_text else "")
                     + f"User: {resolved_q}"
                 )
                 return sys_, usr_
