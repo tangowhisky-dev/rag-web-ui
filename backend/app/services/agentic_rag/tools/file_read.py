@@ -22,7 +22,7 @@ import logging
 import time
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.chat import ChatFile
 from app.services.agentic_rag.tool_context import ToolContext, enforce_rbac, write_audit
@@ -34,6 +34,8 @@ logger = logging.getLogger(__name__)
 
 
 class FileReadInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     document_id: Optional[int] = Field(
         default=None,
         description="KB or datastore document ID. If provided, reads from the KB document.",
@@ -68,7 +70,7 @@ def _resolve_chat_file(ctx: ToolContext, file_id: Optional[int]) -> tuple[Option
         file_id = cf.id if cf else None
 
     if not file_id:
-        return None, {"ok": False, "result": {}, "error": "No file specified and no attached file found.", "tokens": 0}
+        return None, {"ok": False, "result": {}, "error": "No document_id or file_id specified and no attached file found.", "tokens": 0}
 
     rbac = enforce_rbac(ctx, file_id=file_id)
     if rbac.get("file_id") is None:
@@ -97,6 +99,25 @@ class FileReadTool(BaseAgentTool):
         "file_read: Use document_id for KB documents, file_id for attached chat files. If neither is provided, defaults to the most recent attached file.",
     ]
     args_schema: type[BaseModel] = FileReadInput
+
+    def prepare_arguments(self, args: dict) -> dict:
+        """Normalize document_id/file_id. LLMs sometimes pass the plural list
+        form used by the search tools (document_ids: ["123"]) or a stringified
+        int — map them onto the singular scalar fields before validation."""
+        for singular, plural in (("document_id", "document_ids"), ("file_id", "file_ids")):
+            val = args.get(singular)
+            if val is None:
+                val = args.pop(plural, None)
+            else:
+                args.pop(plural, None)
+            if isinstance(val, (list, tuple)):
+                val = val[0] if val else None
+            if val is not None:
+                try:
+                    args[singular] = int(val)
+                except (TypeError, ValueError):
+                    pass  # leave raw — schema validation reports the bad value
+        return args
 
     def _run(self, *args: Any, **kwargs: Any) -> Any:
         raise NotImplementedError("Use arun() for agent tools.")
