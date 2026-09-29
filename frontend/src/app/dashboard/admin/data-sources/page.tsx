@@ -745,10 +745,6 @@ export default function DataSourcesPage() {
                         <div className="space-y-1.5 min-w-[150px]">
                           {fs.running && (
                             <div className="space-y-1">
-                              <div className="flex items-center gap-1.5">
-                                <LoadingDots size="sm" />
-                                <span className="text-xs text-blue-600">Processing...</span>
-                              </div>
                               <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden flex">
                                 <div
                                   className="bg-blue-500 h-2 transition-all duration-300"
