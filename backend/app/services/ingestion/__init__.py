@@ -18,6 +18,7 @@ from .document_converter import (
 )
 from .document_qdrant import (
     _chunk_id_to_point_id as _chunk_id_to_point_id2,
+    _title_point_id,
     PreviewResult,
     UploadResult,
 )
@@ -41,6 +42,7 @@ __all__ = [
     "CTM",
     "PreviewResult",
     "UploadResult",
+    "_title_point_id",
     "clean_markdown",
     "run_ingestion_in_thread",
     "run_graph_build_in_thread",

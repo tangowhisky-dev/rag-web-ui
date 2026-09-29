@@ -113,7 +113,7 @@ async def query(
     org_id = current_user.org_id
     dense_enabled = get_setting(db, "RETRIEVAL_DENSE_ENABLED", org_id)
     sparse_enabled = get_setting(db, "RETRIEVAL_SPARSE_ENABLED", org_id)
-    exact_enabled = get_setting(db, "RETRIEVAL_EXACT_ENABLED", org_id)
+    bm25_enabled = get_setting(db, "RETRIEVAL_BM25_ENABLED", org_id)
     graph_enabled = get_setting(db, "RETRIEVAL_GRAPH_ENABLED", org_id)
 
     # Release the DB connection now that the agentic pipeline is done.
@@ -124,7 +124,7 @@ async def query(
         "legs": {
             "dense": {"status": "ok" if dense_enabled else "disabled", "count": 0},
             "sparse": {"status": "ok" if sparse_enabled else "disabled", "count": 0},
-            "exact": {"status": "ok" if exact_enabled else "disabled", "count": 0},
+            "bm25": {"status": "ok" if bm25_enabled else "disabled", "count": 0},
             "graph": {"status": "ok" if graph_enabled else "disabled", "count": 0},
         }
     }

@@ -34,34 +34,35 @@ class TestKeywordSearchTool:
         assert result["result"]["hits"] == []
         assert result["result"]["count"] == 0
 
-    @patch("app.services.agentic_rag.tools.keyword_search.sparse_search_docs")
-    @patch("app.services.agentic_rag.tools.keyword_search.exact_search_docs")
+    @patch("app.services.agentic_rag.tools.keyword_search.lexical_search_docs")
     @patch("app.services.agentic_rag.tools.keyword_search.expand_synonyms", new_callable=AsyncMock)
     @patch("app.services.agentic_rag.tools.keyword_search.enforce_rbac")
     @patch("app.services.agentic_rag.tools.keyword_search.get_effective_datastore_ids")
     @patch("app.services.agentic_rag.tools.keyword_search.get_setting")
-    def test_returns_merged_hits_with_citation_ref(self, mock_setting, mock_ds, mock_rbac, mock_syn, mock_exact, mock_sparse):
+    def test_returns_merged_hits_with_citation_ref(self, mock_setting, mock_ds, mock_rbac, mock_syn, mock_lexical):
         from langchain_core.documents import Document
         mock_setting.return_value = 0.0
         mock_ds.return_value = []
         mock_rbac.return_value = {"kb_ids": [1]}
         mock_syn.return_value = ("test", [])
-        mock_exact.return_value = [
-            Document(page_content="exact hit", metadata={
-                "document_id": 1, "chunk_index": 0, "page": 1,
-                "title": "Test Doc", "file_name": "test.pdf",
-                "content_hash": "abc123", "qdrant_point_id": "uuid-1",
-                "score": 0.9,
-            })
-        ]
-        mock_sparse.return_value = [
-            Document(page_content="sparse hit", metadata={
-                "document_id": 2, "chunk_index": 5, "page": 3,
-                "title": "Sparse Doc", "file_name": "sparse.pdf",
-                "content_hash": "def456", "qdrant_point_id": "uuid-2",
-                "score": 0.7,
-            })
-        ]
+        mock_lexical.return_value = (
+            [
+                Document(page_content="exact hit", metadata={
+                    "document_id": 1, "chunk_index": 0, "page": 1,
+                    "title": "Test Doc", "file_name": "test.pdf",
+                    "content_hash": "abc123", "qdrant_point_id": "uuid-1",
+                    "score": 0.9,
+                })
+            ],
+            [
+                Document(page_content="sparse hit", metadata={
+                    "document_id": 2, "chunk_index": 5, "page": 3,
+                    "title": "Sparse Doc", "file_name": "sparse.pdf",
+                    "content_hash": "def456", "qdrant_point_id": "uuid-2",
+                    "score": 0.7,
+                })
+            ],
+        )
         ctx = MagicMock()
         ctx.org_id = 1
         ctx.db = MagicMock()
@@ -80,31 +81,32 @@ class TestKeywordSearchTool:
             assert hit["citation_ref"]["source_tool"] == "keyword_search"
             assert hit["citation_ref"]["citation_kind"] == "chunk"
 
-    @patch("app.services.agentic_rag.tools.keyword_search.sparse_search_docs")
-    @patch("app.services.agentic_rag.tools.keyword_search.exact_search_docs")
+    @patch("app.services.agentic_rag.tools.keyword_search.lexical_search_docs")
     @patch("app.services.agentic_rag.tools.keyword_search.expand_synonyms", new_callable=AsyncMock)
     @patch("app.services.agentic_rag.tools.keyword_search.enforce_rbac")
     @patch("app.services.agentic_rag.tools.keyword_search.get_effective_datastore_ids")
     @patch("app.services.agentic_rag.tools.keyword_search.get_setting")
-    def test_dedup_by_content_hash(self, mock_setting, mock_ds, mock_rbac, mock_syn, mock_exact, mock_sparse):
+    def test_dedup_by_content_hash(self, mock_setting, mock_ds, mock_rbac, mock_syn, mock_lexical):
         """Same content_hash from both backends should appear once."""
         from langchain_core.documents import Document
         mock_setting.return_value = 0.0
         mock_ds.return_value = []
         mock_rbac.return_value = {"kb_ids": [1]}
         mock_syn.return_value = ("test", [])
-        mock_exact.return_value = [
-            Document(page_content="same content", metadata={
-                "document_id": 1, "chunk_index": 0,
-                "content_hash": "dup1", "score": 0.5,
-            })
-        ]
-        mock_sparse.return_value = [
-            Document(page_content="same content", metadata={
-                "document_id": 1, "chunk_index": 0,
-                "content_hash": "dup1", "score": 0.8,
-            })
-        ]
+        mock_lexical.return_value = (
+            [
+                Document(page_content="same content", metadata={
+                    "document_id": 1, "chunk_index": 0,
+                    "content_hash": "dup1", "score": 0.5,
+                })
+            ],
+            [
+                Document(page_content="same content", metadata={
+                    "document_id": 1, "chunk_index": 0,
+                    "content_hash": "dup1", "score": 0.8,
+                })
+            ],
+        )
         ctx = MagicMock()
         ctx.org_id = 1
         ctx.db = MagicMock()
@@ -118,26 +120,27 @@ class TestKeywordSearchTool:
         assert len(result["result"]["hits"]) == 1
         assert result["result"]["hits"][0]["score"] == 0.8
 
-    @patch("app.services.agentic_rag.tools.keyword_search.sparse_search_docs")
-    @patch("app.services.agentic_rag.tools.keyword_search.exact_search_docs")
+    @patch("app.services.agentic_rag.tools.keyword_search.lexical_search_docs")
     @patch("app.services.agentic_rag.tools.keyword_search.expand_synonyms", new_callable=AsyncMock)
     @patch("app.services.agentic_rag.tools.keyword_search.enforce_rbac")
     @patch("app.services.agentic_rag.tools.keyword_search.get_effective_datastore_ids")
     @patch("app.services.agentic_rag.tools.keyword_search.get_setting")
-    def test_partial_failure_still_returns_hits(self, mock_setting, mock_ds, mock_rbac, mock_syn, mock_exact, mock_sparse):
+    def test_partial_failure_still_returns_hits(self, mock_setting, mock_ds, mock_rbac, mock_syn, mock_lexical):
         """If one backend fails, the other backend's results still return."""
         from langchain_core.documents import Document
         mock_setting.return_value = 0.0
         mock_ds.return_value = []
         mock_rbac.return_value = {"kb_ids": [1]}
         mock_syn.return_value = ("test", [])
-        mock_exact.side_effect = Exception("MySQL FTS failed")
-        mock_sparse.return_value = [
-            Document(page_content="sparse result", metadata={
-                "document_id": 3, "chunk_index": 0,
-                "content_hash": "sparse_only", "score": 0.6,
-            })
-        ]
+        mock_lexical.return_value = (
+            [],
+            [
+                Document(page_content="sparse result", metadata={
+                    "document_id": 3, "chunk_index": 0,
+                    "content_hash": "sparse_only", "score": 0.6,
+                })
+            ],
+        )
         ctx = MagicMock()
         ctx.org_id = 1
         ctx.db = MagicMock()

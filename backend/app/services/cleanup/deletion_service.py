@@ -23,7 +23,7 @@ from app.models.knowledge import (
     KnowledgeBase,
     ProcessingTask,
 )
-from app.services.ingestion import _chunk_id_to_point_id
+from app.services.ingestion import _chunk_id_to_point_id, _title_point_id
 from app.services.graph import (
     delete_graph_for_kb,
     purge_stale_graph_data,
@@ -165,6 +165,7 @@ def _delete_qdrant_for_ds(db: Session, datastore_id: int) -> None:
         ]
         if chunk_ids:
             point_ids = [_chunk_id_to_point_id(cid) for cid in chunk_ids]
+            point_ids.extend(_title_point_id(d) for d in doc_ids)
             qdrant.delete(
                 collection_name=collection_name,
                 points_selector=PointIdsList(points=point_ids),

@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends
 from app.api.api_v1 import auth, knowledge_base, chat, query, chat_files, folders, admin
-from app.api.api_v1 import datastores, datastore_scan, datastore_recovery
+from app.api.api_v1 import datastores, datastore_scan, datastore_recovery, admin_migrations
 from app.api.api_v1 import settings as settings_router
 from app.api.api_v1 import abbreviations as abbreviations_router
 from app.api.api_v1 import search as search_router
@@ -23,6 +23,7 @@ api_router.include_router(settings_router.app_router, prefix="/admin", tags=["se
 api_router.include_router(settings_router.org_router, prefix="/admin", tags=["settings"])
 api_router.include_router(abbreviations_router.router, prefix="/admin", tags=["abbreviations"])
 api_router.include_router(datastore_recovery.router, prefix="/admin", tags=["datastores"])
+api_router.include_router(admin_migrations.router, prefix="/admin", tags=["migrations"])
 api_router.include_router(datastores.router, prefix="/admin", tags=["datastores"])
 api_router.include_router(datastore_scan.router, prefix="/admin", tags=["datastores"])
 

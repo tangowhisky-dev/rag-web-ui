@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal
 from app.models.knowledge import Document, DocumentChunk, ProcessingTask
-from app.services.ingestion import _chunk_id_to_point_id
+from app.services.ingestion import _chunk_id_to_point_id, _title_point_id
 from app.services.infrastructure import get_qdrant_client
 
 logger = logging.getLogger(__name__)
@@ -68,6 +68,7 @@ def reset_document_for_reingest(
         collection_name = f"ds_{data_store_id}" if data_store_id else f"kb_{kb_id}"
         try:
             point_ids = [_chunk_id_to_point_id(cid) for cid in chunk_ids]
+            point_ids.append(_title_point_id(document_id))
             get_qdrant_client().delete(
                 collection_name=collection_name,
                 points_selector=PointIdsList(points=point_ids),

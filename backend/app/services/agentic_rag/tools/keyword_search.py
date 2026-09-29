@@ -1,8 +1,9 @@
-"""Keyword search tool — merges MySQL FTS + SPLADE sparse vector search.
+"""Keyword search tool — merges Qdrant BM25 + SPLADE sparse vector search.
 
-Runs both backends, deduplicates by content hash, and returns the merged
-result set ranked by score. The model doesn't choose between strict and
-expanded keyword matching — it just asks for keyword matches.
+Both lexical legs run in a single query_batch_points call per collection;
+results are deduplicated by content hash and ranked by score. The model
+doesn't choose between strict and expanded keyword matching — it just asks
+for keyword matches.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from pydantic import BaseModel, Field
 from app.services.agentic_rag.tool_context import ToolContext, enforce_rbac, write_audit
 from app.services.agentic_rag.tools.base import BaseAgentTool
 from app.services.retrieval import get_effective_datastore_ids
-from app.services.retrieval.retrieval import exact_search_docs, sparse_search_docs
+from app.services.retrieval.retrieval import lexical_search_docs
 from app.services.retrieval.reranker import rerank, soft_elbow_truncate
 from app.services.settings_service import get_setting
 
@@ -35,10 +36,10 @@ class KeywordSearchInput(BaseModel):
 
 class KeywordSearchTool(BaseAgentTool):
     name: str = "keyword_search"
-    description: str = "Hybrid keyword search across chunk text. Runs strict MySQL full-text search and expanded SPLADE sparse matching, merges and deduplicates results. Best as the first search when the query contains specific technical terms, identifiers, acronyms, code, error messages, jargon, or distinctive phrases; the SPLADE expansion also captures related keyword overlaps. Prefer semantic_search only when the question is fully paraphrased or contains no specific technical terms."
+    description: str = "Hybrid keyword search across chunk text. Runs Qdrant BM25 full-text matching and expanded SPLADE sparse matching, merges and deduplicates results. Best as the first search when the query contains specific technical terms, identifiers, acronyms, code, error messages, jargon, or distinctive phrases; the SPLADE expansion also captures related keyword overlaps. Prefer semantic_search only when the question is fully paraphrased or contains no specific technical terms."
     prompt_snippet: str = "Keyword retrieval (strict + expanded, merged)"
     prompt_guidelines: list[str] = [
-        "keyword_search: Best as the first search when the query contains identifiers, acronyms, code, error messages, jargon, or distinctive terminology. It runs strict MySQL FTS plus SPLADE sparse expansion, so it also captures related keyword overlaps.",
+        "keyword_search: Best as the first search when the query contains identifiers, acronyms, code, error messages, jargon, or distinctive terminology. It runs Qdrant BM25 plus SPLADE sparse expansion, so it also captures related keyword overlaps.",
         "keyword_search: Prefer keyword_search over semantic_search when the query includes any specific technical term, even if the overall question is conceptual.",
         "keyword_search: Results are cross-encoder reranked and soft-elbow filtered before returning. No separate rerank call needed.",
         "keyword_search: For 'current/latest/in-force' questions pass filters={\"document_status\":\"active\",\"effective_as_of\":\"<today>\"} (call current_datetime first if needed). Leave unfiltered for history or version comparisons — hits carry document_status/effective-window tags so you can reason about conflicting versions.",
@@ -117,45 +118,27 @@ class KeywordSearchTool(BaseAgentTool):
         except Exception as exc:
             logger.warning("[keyword_search] abbreviation expansion failed: %s", exc)
 
-        # Run both backends
-        exact_min = get_setting(ctx.db, "EXACT_MIN_SCORE", ctx.org_id)
-        sparse_min = get_setting(ctx.db, "SPARSE_MIN_SCORE", ctx.org_id)
-
+        # Fused keyword retrieval — SPLADE + BM25 + BM25-title in ONE batched
+        # query_batch_points call per collection (a single HTTP round trip).
+        # On batch failure the call decomposes into per-leg sub-batches so a
+        # collection missing bm25 vectors (not yet migrated) doesn't kill the
+        # SPLADE leg too.
         all_docs: list = []
         errors: list[str] = []
 
-        # Run both legs concurrently on worker threads — they are synchronous
-        # (MySQL FTS, SPLADE embed, per-collection Qdrant calls) and would
-        # otherwise serialize on the event loop.
-        exact_res, sparse_res = await asyncio.gather(
-            _run_sync(lambda db: exact_search_docs(
+        try:
+            bm25_docs, sparse_docs = await _run_sync(lambda db: lexical_search_docs(
                 query=query, kb_ids=kb_ids, datastore_ids=datastore_ids, db=db,
-                org_id=ctx.org_id, top_k=input_obj.top_k, min_score=exact_min,
+                org_id=ctx.org_id, top_k=input_obj.top_k,
                 doc_ids=doc_ids, extra_queries=extra_queries,
-            )),
-            _run_sync(lambda db: sparse_search_docs(
-                query=query, kb_ids=kb_ids, datastore_ids=datastore_ids, db=db,
-                org_id=ctx.org_id, top_k=input_obj.top_k, min_score=sparse_min,
-                doc_ids=doc_ids, extra_queries=extra_queries,
-            )),
-            return_exceptions=True,
-        )
-
-        if isinstance(exact_res, Exception):
-            logger.warning("[keyword_search] exact leg failed: %s", exact_res)
-            errors.append(f"exact: {exact_res}")
-            exact_docs: list = []
-        else:
-            exact_docs = exact_res
-            all_docs.extend(exact_docs)
-
-        if isinstance(sparse_res, Exception):
-            logger.warning("[keyword_search] sparse leg failed: %s", sparse_res)
-            errors.append(f"sparse: {sparse_res}")
-            sparse_docs: list = []
-        else:
-            sparse_docs = sparse_res
+            ))
+            all_docs.extend(bm25_docs)
             all_docs.extend(sparse_docs)
+        except Exception as exc:
+            logger.warning("[keyword_search] lexical legs failed: %s", exc)
+            errors.append(f"lexical: {exc}")
+            bm25_docs = []
+            sparse_docs = []
 
         if not all_docs and errors:
             return {"ok": False, "result": {}, "error": "; ".join(errors), "tokens": 0, "terminate": False}
@@ -239,8 +222,8 @@ class KeywordSearchTool(BaseAgentTool):
         hits = await _run_sync(lambda db: enrich_hits_with_authority(hits, db))
 
         write_audit(ctx, "keyword_search", input_obj.model_dump(),
-                     {"hit_count": len(hits), "exact_count": len(exact_docs) if 'exact_docs' in dir() else 0,
-                      "sparse_count": len(sparse_docs) if 'sparse_docs' in dir() else 0},
+                     {"hit_count": len(hits), "bm25_count": len(bm25_docs),
+                      "sparse_count": len(sparse_docs)},
                      status="ok")
 
         result_payload = {

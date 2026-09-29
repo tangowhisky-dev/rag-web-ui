@@ -69,7 +69,7 @@ def _delete_qdrant_points(
     cleanup_warnings: list[str],
 ) -> None:
     """Delete chunk vectors from Qdrant for the given document."""
-    from app.services.ingestion import _chunk_id_to_point_id
+    from app.services.ingestion import _chunk_id_to_point_id, _title_point_id
     from qdrant_client.models import PointIdsList
 
     if not chunk_ids:
@@ -85,6 +85,7 @@ def _delete_qdrant_points(
             logger.debug(f"Qdrant collection {collection_name} does not exist — skipping point deletion for document {document.id}")
         else:
             point_ids = [_chunk_id_to_point_id(cid) for cid in chunk_ids]
+            point_ids.append(_title_point_id(document.id))
             qdrant.delete(
                 collection_name=collection_name,
                 points_selector=PointIdsList(points=point_ids),

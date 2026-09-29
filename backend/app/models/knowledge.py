@@ -153,7 +153,7 @@ class DocumentChunk(Base, TimestampMixin):
     data_store_id = Column(Integer, ForeignKey("data_stores.id", ondelete="CASCADE"), nullable=True, index=True)
     document_id = Column(Integer, ForeignKey("documents.id"), nullable=False, index=True)
     file_name = Column(String(255), nullable=False)
-    chunk_text = Column(LONGTEXT, nullable=False)   # the actual chunk text — FULLTEXT indexed
+    chunk_text = Column(LONGTEXT, nullable=False)   # the actual chunk text
     chunk_index = Column(Integer, nullable=True)    # position within the document (0-based)
     chunk_metadata = Column(JSON, nullable=True)    # variable source metadata (page, source path, etc.)
     hash = Column(String(64), nullable=False, index=True)  # content hash for change detection
@@ -166,7 +166,6 @@ class DocumentChunk(Base, TimestampMixin):
 
     __table_args__ = (
         sa.Index('idx_kb_file_name', 'kb_id', 'file_name'),
-        sa.Index('idx_chunk_text_fts', 'chunk_text', mysql_prefix='FULLTEXT'),
     )
 # Event listener for conditional document deletion on KB deletion
 from sqlalchemy import event

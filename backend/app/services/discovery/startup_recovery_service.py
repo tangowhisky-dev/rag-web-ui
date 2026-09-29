@@ -1003,11 +1003,12 @@ class StartupRecoveryService:
             # Qdrant cleanup (after DB commit, using captured IDs)
             try:
                 from qdrant_client import models
-                from app.services.ingestion import _chunk_id_to_point_id  # noqa: T100
+                from app.services.ingestion import _chunk_id_to_point_id, _title_point_id  # noqa: T100
                 from app.services.infrastructure import get_qdrant_client  # noqa: T100
 
                 if chunk_ids:
                     point_ids = [_chunk_id_to_point_id(cid) for cid in chunk_ids]
+                    point_ids.append(_title_point_id(doc_id))
                     get_qdrant_client().delete(
                         collection_name=f"ds_{datastore_id}",
                         points_selector=models.PointIdsList(points=point_ids),

@@ -78,7 +78,7 @@ class GraphExpandTool(BaseAgentTool):
             return {"ok": True, "result": {"hits": [], "count": 0}, "error": None, "tokens": 0, "terminate": False}
 
         from app.services.infrastructure import get_qdrant_client
-        from qdrant_client.models import Filter, FieldCondition, MatchAny
+        from qdrant_client.models import Filter, FieldCondition, MatchAny, MatchValue
 
         datastore_ids = get_effective_datastore_ids(kb_ids, ctx.org_id, ctx.db) if ctx.db else []
 
@@ -111,7 +111,13 @@ class GraphExpandTool(BaseAgentTool):
                                     key="document_id",
                                     match=MatchAny(any=seed_document_ids),
                                 )
-                            ]
+                            ],
+                            must_not=[
+                                FieldCondition(
+                                    key="_title_point",
+                                    match=MatchValue(value=True),
+                                )
+                            ],
                         ),
                         limit=100,
                         with_payload=False,

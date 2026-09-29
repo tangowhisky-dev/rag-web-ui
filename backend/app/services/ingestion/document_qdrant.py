@@ -16,10 +16,15 @@ from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.models import (
     Distance,
+    Document,
+    Modifier,
+    PayloadSchemaType,
     PointIdsList,
     PointStruct,
     SparseIndexParams,
     SparseVector,
+    SparseVectorConfig,
+    SparseVectorNameConfig,
     SparseVectorParams,
     VectorParams,
 )
@@ -58,12 +63,83 @@ def _get_qdrant_collection_name(data_store_id: Optional[int], kb_id: Optional[in
         raise ValueError("Either data_store_id or kb_id must be provided")
 
 
+_BM25_VECTOR = "bm25"         # chunk-text BM25 (server-side inference)
+_BM25_TITLE_VECTOR = "bm25_title"  # document-title BM25, on title pseudo-points
+_BM25_MODEL = "qdrant/bm25"
+_TITLE_ID_PREFIX = "title:"
+
+# Sparse vectors needed by the keyword/BM25 leg. Both carry the IDF modifier —
+# Qdrant maintains collection-level term stats and applies IDF at query time.
+_BM25_SPARSE_CONFIGS = {
+    _BM25_VECTOR: SparseVectorParams(index=SparseIndexParams(on_disk=False), modifier=Modifier.IDF),
+    _BM25_TITLE_VECTOR: SparseVectorParams(index=SparseIndexParams(on_disk=False), modifier=Modifier.IDF),
+}
+
+
+def _title_point_id(document_id: int) -> str:
+    """Point id of the document-title pseudo-point (one per document).
+
+    Title pseudo-points carry only the ``bm25_title`` vector, so they can
+    never match dense/sparse/bm25 queries — they exist purely to give title
+    terms a true per-document IDF and an expansion anchor back to the doc's
+    real chunks (see bm25_search_docs in retrieval.py).
+    """
+    return str(uuid.uuid5(uuid.NAMESPACE_OID, f"{_TITLE_ID_PREFIX}{document_id}"))
+
+
+def _ensure_bm25_vectors(client: QdrantClient, collection_name: str) -> None:
+    """Add bm25 sparse vectors to an existing collection (Qdrant ≥1.18).
+
+    PUT /collections/{name}/vectors/{vector} is a schema-level add — no
+    recreation or downtime. Already-present vectors are skipped.
+    """
+    params = client.get_collection(collection_name).config.params
+    present = set((params.sparse_vectors or {}).keys())
+    for name in (_BM25_VECTOR, _BM25_TITLE_VECTOR):
+        if name not in present:
+            try:
+                client.create_vector_name(
+                    collection_name=collection_name,
+                    vector_name=name,
+                    vector_name_config=SparseVectorNameConfig(
+                        sparse=SparseVectorConfig(modifier=Modifier.IDF)
+                    ),
+                )
+            except UnexpectedResponse as e:
+                # Race: another task added it first — harmless
+                if "already exists" in str(e).lower() or "409" in str(e):
+                    continue
+                raise
+
+
+def _ensure_payload_indexes(client: QdrantClient, collection_name: str) -> None:
+    """Create the document_id payload index if missing.
+
+    doc_ids metadata filtering (_build_doc_id_filter) and BM25 title
+    expansion (_bm25_expand_titles) both filter on document_id — without an
+    index every filter match is a payload scan over the whole collection.
+    """
+    if "document_id" in (client.get_collection(collection_name).payload_schema or {}):
+        return
+    try:
+        client.create_payload_index(
+            collection_name=collection_name,
+            field_name="document_id",
+            field_schema=PayloadSchemaType.INTEGER,
+        )
+    except Exception as e:
+        # Race or transient failure — filters still work via payload scan,
+        # so index creation is best-effort here.
+        logger.warning("payload index on document_id failed for %s: %s", collection_name, e)
+
+
 def _ensure_qdrant_collection(client: QdrantClient, collection_name: str) -> None:
     """Create a Qdrant collection if it does not exist.
 
     Handles the race condition where two concurrent ingestion tasks both
     try to create the same collection.  A 409 Conflict simply means
-    another thread already created it — that is fine.
+    another thread already created it — that is fine. Existing collections
+    are upgraded in place with any missing BM25 sparse vectors.
     """
     existing = {c.name for c in client.get_collections().collections}
     if collection_name not in existing:
@@ -79,7 +155,8 @@ def _ensure_qdrant_collection(client: QdrantClient, collection_name: str) -> Non
                 sparse_vectors_config={
                     "sparse": SparseVectorParams(
                         index=SparseIndexParams(on_disk=False)
-                    )
+                    ),
+                    **_BM25_SPARSE_CONFIGS,
                 },
             )
         except UnexpectedResponse as e:
@@ -90,6 +167,9 @@ def _ensure_qdrant_collection(client: QdrantClient, collection_name: str) -> Non
                 )
             else:
                 raise
+    else:
+        _ensure_bm25_vectors(client, collection_name)
+    _ensure_payload_indexes(client, collection_name)
 
 
 def _chunk_id_to_point_id(chunk_id: str) -> str:
@@ -227,6 +307,10 @@ def _build_qdrant_points(
                         indices=sparse_emb.indices.tolist(),
                         values=sparse_emb.values.tolist(),
                     ),
+                    # Server-side BM25 inference — clean chunk_text (not the
+                    # title-prefixed embedding text) to keep parity with the
+                    # MySQL chunk branch.
+                    "bm25": Document(text=chunk_text, model=_BM25_MODEL),
                 },
                 payload={
                     "chunk_text": chunk_text,
@@ -345,6 +429,30 @@ async def _upsert_to_qdrant(
             pt.ping()  # signal progress after each upsert batch
         # Yield the event loop so poll requests can be served between batches
         await asyncio.sleep(0)
+
+    # Title pseudo-point — one per document, only the bm25_title vector.
+    # Gives title terms a true per-document IDF (embedding the title into
+    # every chunk point would inflate document frequency by chunk count) and
+    # an expansion anchor: bm25_search_docs resolves a title hit back to all
+    # chunks of the document via payload filter.
+    doc_title = (chunk_payloads[0][2] or {}).get("title", "")
+    if doc_title and document_id:
+        title_point = PointStruct(
+            id=_title_point_id(document_id),
+            vector={_BM25_TITLE_VECTOR: Document(text=doc_title, model=_BM25_MODEL)},
+            payload={
+                "document_id": document_id,
+                "_title_point": True,
+                "title": doc_title,
+                "file_name": file_name,
+                "kb_id": kb_id,
+                "data_store_id": data_store_id,
+            },
+        )
+        await loop.run_in_executor(
+            None,
+            lambda: client.upsert(collection_name=collection_name, points=[title_point]),
+        )
 
 
 class UploadResult(BaseModel):

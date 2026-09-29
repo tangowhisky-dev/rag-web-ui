@@ -24,8 +24,7 @@ from app.models.search_history import SearchHistory
 from app.services.retrieval import (
     get_effective_datastore_ids,
     dense_search_docs,
-    sparse_search_docs,
-    exact_search_docs,
+    lexical_search_docs,
     dedup_by_content_hash,
     semantic_dedup,
     rerank,
@@ -74,20 +73,33 @@ def _run_retrieval_legs(
     db: Session,
     org_id: int,
 ) -> list[dict]:
-    """Run dense, sparse, and exact retrieval legs, returning serialised docs."""
+    """Run dense + fused keyword (BM25 + SPLADE) retrieval legs, returning
+    serialised docs."""
     all_docs: list[dict] = []
-    for leg_fn in (dense_search_docs, sparse_search_docs, exact_search_docs):
-        try:
-            docs = leg_fn(
-                query=expanded_query,
-                kb_ids=kb_ids,
-                datastore_ids=datastore_ids,
-                db=db,
-                org_id=org_id,
-            )
-            all_docs.extend(_serialise_doc(d) for d in docs)
-        except Exception as exc:
-            logger.warning("[SEARCH] %s failed: %s", leg_fn.__name__, exc)
+    try:
+        docs = dense_search_docs(
+            query=expanded_query,
+            kb_ids=kb_ids,
+            datastore_ids=datastore_ids,
+            db=db,
+            org_id=org_id,
+        )
+        all_docs.extend(_serialise_doc(d) for d in docs)
+    except Exception as exc:
+        logger.warning("[SEARCH] dense_search_docs failed: %s", exc)
+    # Fused keyword legs — one query_batch_points call per collection.
+    try:
+        bm25_docs, sparse_docs = lexical_search_docs(
+            query=expanded_query,
+            kb_ids=kb_ids,
+            datastore_ids=datastore_ids,
+            db=db,
+            org_id=org_id,
+        )
+        all_docs.extend(_serialise_doc(d) for d in bm25_docs)
+        all_docs.extend(_serialise_doc(d) for d in sparse_docs)
+    except Exception as exc:
+        logger.warning("[SEARCH] lexical_search_docs failed: %s", exc)
     return all_docs
 
 

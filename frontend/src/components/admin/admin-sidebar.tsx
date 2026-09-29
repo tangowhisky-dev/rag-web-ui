@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { useSidebarCollapse } from "@/lib/hooks";
 import {
   PanelLeftClose, PanelLeftOpen,
-  Building2, Users, Database, Settings, BookText,
+  Building2, Users, Database, Settings, BookText, DatabaseZap,
 } from 'lucide-react';
 
 interface AdminSidebarProps {
@@ -22,6 +22,7 @@ const NAV_ITEMS = [
 ];
 
 const SUPER_ADMIN_ITEMS = [
+  { label: 'Migrations', href: '/dashboard/admin/migrations', icon: DatabaseZap },
   { label: 'Settings', href: '/dashboard/admin/settings', icon: Settings },
 ];
 

@@ -31,7 +31,7 @@ from qdrant_client.http.exceptions import UnexpectedResponse
 from app.db.session import SessionLocal
 from app.models.datastore import DataStore, DataStoreFileManifest
 from app.models.knowledge import Document, ProcessingTask, DocumentChunk, KnowledgeBase
-from app.services.ingestion import _chunk_id_to_point_id
+from app.services.ingestion import _chunk_id_to_point_id, _title_point_id
 from app.services.infrastructure import get_qdrant_client
 
 logger = logging.getLogger(__name__)
@@ -50,6 +50,7 @@ class DeleteMixin:
             return
         try:
             point_ids = [_chunk_id_to_point_id(cid) for cid in chunk_ids]
+            point_ids.append(_title_point_id(doc_id))
             get_qdrant_client().delete(
                 collection_name=collection_name,
                 points_selector=PointIdsList(points=point_ids),

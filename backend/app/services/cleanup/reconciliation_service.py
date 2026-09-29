@@ -366,16 +366,23 @@ def _delete_orphan_points(
             return
 
         # Get all chunk IDs from MySQL for this collection's scope
-        query = db.query(DocumentChunk.id)
+        query = db.query(DocumentChunk.id, DocumentChunk.document_id)
         if kb_id is not None:
             query = query.filter(DocumentChunk.kb_id == kb_id)
         elif data_store_id is not None:
             query = query.filter(DocumentChunk.data_store_id == data_store_id)
 
-        mysql_chunk_ids = {str(_chunk_id_to_point_id(row[0])) for row in query.all()}
+        from app.services.ingestion import _title_point_id
+        rows = query.all()
+        expected_ids = {str(_chunk_id_to_point_id(row[0])) for row in rows}
+        # Title pseudo-points (bm25_title) are expected whenever the document
+        # still has chunks — without this they'd be swept as orphans.
+        expected_ids.update(
+            _title_point_id(did) for (_cid, did) in rows if did is not None
+        )
 
         # Orphan points: in Qdrant but not in MySQL
-        orphan_ids = [pid for pid in all_point_ids if pid not in mysql_chunk_ids]
+        orphan_ids = [pid for pid in all_point_ids if pid not in expected_ids]
         if orphan_ids:
             qdrant.delete(
                 collection_name=collection_name,

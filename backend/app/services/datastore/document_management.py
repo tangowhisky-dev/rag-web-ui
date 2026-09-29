@@ -24,7 +24,7 @@ from app.db.session import SessionLocal
 from app.models.datastore import DataStore, DataStoreFileManifest
 from app.models.knowledge import Document, DocumentChunk, ProcessingTask
 from app.services.ingestion.document_converter import SUPPORTED_EXTENSIONS, CONTENT_TYPE_MAP
-from app.services.ingestion import _chunk_id_to_point_id
+from app.services.ingestion import _chunk_id_to_point_id, _title_point_id
 from app.services.infrastructure import get_qdrant_client
 
 logger = logging.getLogger(__name__)
@@ -634,6 +634,7 @@ def delete_document_data(db: Session, document_id: int, datastore_id: int) -> di
     if chunk_ids:
         try:
             point_ids = [_chunk_id_to_point_id(cid) for cid in chunk_ids]
+            point_ids.append(_title_point_id(doc_id))
             get_qdrant_client().delete(
                 collection_name=f"ds_{datastore_id}",
                 points_selector=PointIdsList(points=point_ids),

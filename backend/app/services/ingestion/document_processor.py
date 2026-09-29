@@ -35,6 +35,7 @@ from app.services.ingestion.document_qdrant import (
     _get_qdrant_collection_name,
     _ensure_qdrant_collection,
     _chunk_id_to_point_id,
+    _title_point_id,
     _embed_texts_batch,
     _build_qdrant_points,
     _upsert_to_qdrant,
@@ -419,6 +420,7 @@ async def _process_chunks(
     old_chunk_ids = [cid[0] for cid in old_chunk_ids]
     if old_chunk_ids:
         point_ids = [_chunk_id_to_point_id(cid) for cid in old_chunk_ids]
+        point_ids.append(_title_point_id(document.id))
         try:
             get_qdrant_client().delete(
                 collection_name=collection_name,

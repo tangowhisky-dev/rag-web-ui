@@ -362,14 +362,13 @@ class TestKeywordSearchAuthority:
         ctx.message_id = 1
         return ctx
 
-    @patch("app.services.agentic_rag.tools.keyword_search.sparse_search_docs")
-    @patch("app.services.agentic_rag.tools.keyword_search.exact_search_docs")
+    @patch("app.services.agentic_rag.tools.keyword_search.lexical_search_docs")
     @patch("app.services.agentic_rag.tools.keyword_search.expand_synonyms", new_callable=AsyncMock)
     @patch("app.services.agentic_rag.tools.keyword_search.enforce_rbac")
     @patch("app.services.agentic_rag.tools.keyword_search.get_effective_datastore_ids")
     @patch("app.services.agentic_rag.tools.keyword_search.get_setting")
     def test_hits_carry_authority_fields(
-            self, mock_setting, mock_ds, mock_rbac, mock_syn, mock_exact, mock_sparse, db):
+            self, mock_setting, mock_ds, mock_rbac, mock_syn, mock_lexical, db):
         from langchain_core.documents import Document as LcDocument
         active = _make_document(db, file_name="a.pdf", document_status="active")
         sup = _make_document(db, file_name="s.pdf", document_status="superseded",
@@ -378,15 +377,17 @@ class TestKeywordSearchAuthority:
         mock_ds.return_value = []
         mock_rbac.return_value = {"kb_ids": [1]}
         mock_syn.return_value = ("test", [])
-        mock_exact.return_value = [
-            LcDocument(page_content="hit a", metadata={
-                "document_id": active.id, "chunk_index": 0, "content_hash": "ha",
-                "score": 0.9}),
-            LcDocument(page_content="hit s", metadata={
-                "document_id": sup.id, "chunk_index": 0, "content_hash": "hs",
-                "score": 0.8}),
-        ]
-        mock_sparse.return_value = []
+        mock_lexical.return_value = (
+            [
+                LcDocument(page_content="hit a", metadata={
+                    "document_id": active.id, "chunk_index": 0, "content_hash": "ha",
+                    "score": 0.9}),
+                LcDocument(page_content="hit s", metadata={
+                    "document_id": sup.id, "chunk_index": 0, "content_hash": "hs",
+                    "score": 0.8}),
+            ],
+            [],
+        )
 
         tool = KeywordSearchTool()
         tool.ctx = self._ctx(db)
@@ -398,22 +399,20 @@ class TestKeywordSearchAuthority:
         assert hits[sup.id]["document_status"] == "superseded"
         assert hits[sup.id]["effective_to"].startswith("2024-01-01")
 
-    @patch("app.services.agentic_rag.tools.keyword_search.sparse_search_docs")
-    @patch("app.services.agentic_rag.tools.keyword_search.exact_search_docs")
+    @patch("app.services.agentic_rag.tools.keyword_search.lexical_search_docs")
     @patch("app.services.agentic_rag.tools.keyword_search.expand_synonyms", new_callable=AsyncMock)
     @patch("app.services.agentic_rag.tools.keyword_search.enforce_rbac")
     @patch("app.services.agentic_rag.tools.keyword_search.get_effective_datastore_ids")
     @patch("app.services.agentic_rag.tools.keyword_search.get_setting")
     def test_status_filter_narrows_doc_ids(
-            self, mock_setting, mock_ds, mock_rbac, mock_syn, mock_exact, mock_sparse, db):
+            self, mock_setting, mock_ds, mock_rbac, mock_syn, mock_lexical, db):
         active = _make_document(db, file_name="a.pdf", document_status="active")
         _make_document(db, file_name="s.pdf", document_status="superseded")
         mock_setting.return_value = 0.0
         mock_ds.return_value = []
         mock_rbac.return_value = {"kb_ids": [1]}
         mock_syn.return_value = ("test", [])
-        mock_exact.return_value = []
-        mock_sparse.return_value = []
+        mock_lexical.return_value = ([], [])
 
         tool = KeywordSearchTool()
         tool.ctx = self._ctx(db)
@@ -424,18 +423,16 @@ class TestKeywordSearchAuthority:
 
         assert result["ok"] is True
         # The search legs were scoped to just the active document.
-        assert mock_exact.call_args.kwargs["doc_ids"] == [active.id]
-        assert mock_sparse.call_args.kwargs["doc_ids"] == [active.id]
+        assert mock_lexical.call_args.kwargs["doc_ids"] == [active.id]
         assert result["result"]["matched_documents"] == 1
 
-    @patch("app.services.agentic_rag.tools.keyword_search.sparse_search_docs")
-    @patch("app.services.agentic_rag.tools.keyword_search.exact_search_docs")
+    @patch("app.services.agentic_rag.tools.keyword_search.lexical_search_docs")
     @patch("app.services.agentic_rag.tools.keyword_search.expand_synonyms", new_callable=AsyncMock)
     @patch("app.services.agentic_rag.tools.keyword_search.enforce_rbac")
     @patch("app.services.agentic_rag.tools.keyword_search.get_effective_datastore_ids")
     @patch("app.services.agentic_rag.tools.keyword_search.get_setting")
     def test_zero_match_filter_returns_no_hits(
-            self, mock_setting, mock_ds, mock_rbac, mock_syn, mock_exact, mock_sparse, db):
+            self, mock_setting, mock_ds, mock_rbac, mock_syn, mock_lexical, db):
         _make_document(db, file_name="a.pdf", document_status="active")
         mock_setting.return_value = 0.0
         mock_ds.return_value = []
@@ -452,26 +449,23 @@ class TestKeywordSearchAuthority:
         assert result["result"]["hits"] == []
         assert result["result"]["matched_documents"] == 0
         # Search legs must not run when the filter matched nothing.
-        mock_exact.assert_not_called()
-        mock_sparse.assert_not_called()
+        mock_lexical.assert_not_called()
         mock_syn.assert_not_called()
 
-    @patch("app.services.agentic_rag.tools.keyword_search.sparse_search_docs")
-    @patch("app.services.agentic_rag.tools.keyword_search.exact_search_docs")
+    @patch("app.services.agentic_rag.tools.keyword_search.lexical_search_docs")
     @patch("app.services.agentic_rag.tools.keyword_search.expand_synonyms", new_callable=AsyncMock)
     @patch("app.services.agentic_rag.tools.keyword_search.enforce_rbac")
     @patch("app.services.agentic_rag.tools.keyword_search.get_effective_datastore_ids")
     @patch("app.services.agentic_rag.tools.keyword_search.get_setting")
     def test_document_ids_and_filters_intersect(
-            self, mock_setting, mock_ds, mock_rbac, mock_syn, mock_exact, mock_sparse, db):
+            self, mock_setting, mock_ds, mock_rbac, mock_syn, mock_lexical, db):
         a = _make_document(db, file_name="a.pdf", document_status="active")
         s = _make_document(db, file_name="s.pdf", document_status="superseded")
         mock_setting.return_value = 0.0
         mock_ds.return_value = []
         mock_rbac.return_value = {"kb_ids": [1]}
         mock_syn.return_value = ("test", [])
-        mock_exact.return_value = []
-        mock_sparse.return_value = []
+        mock_lexical.return_value = ([], [])
 
         tool = KeywordSearchTool()
         tool.ctx = self._ctx(db)
@@ -483,23 +477,21 @@ class TestKeywordSearchAuthority:
         }))
 
         assert result["ok"] is True
-        assert mock_exact.call_args.kwargs["doc_ids"] == [s.id]
+        assert mock_lexical.call_args.kwargs["doc_ids"] == [s.id]
 
-    @patch("app.services.agentic_rag.tools.keyword_search.sparse_search_docs")
-    @patch("app.services.agentic_rag.tools.keyword_search.exact_search_docs")
+    @patch("app.services.agentic_rag.tools.keyword_search.lexical_search_docs")
     @patch("app.services.agentic_rag.tools.keyword_search.expand_synonyms", new_callable=AsyncMock)
     @patch("app.services.agentic_rag.tools.keyword_search.enforce_rbac")
     @patch("app.services.agentic_rag.tools.keyword_search.get_effective_datastore_ids")
     @patch("app.services.agentic_rag.tools.keyword_search.get_setting")
     def test_unknown_filter_key_runs_unfiltered_and_reports(
-            self, mock_setting, mock_ds, mock_rbac, mock_syn, mock_exact, mock_sparse, db):
+            self, mock_setting, mock_ds, mock_rbac, mock_syn, mock_lexical, db):
         _make_document(db, file_name="a.pdf")
         mock_setting.return_value = 0.0
         mock_ds.return_value = []
         mock_rbac.return_value = {"kb_ids": [1]}
         mock_syn.return_value = ("test", [])
-        mock_exact.return_value = []
-        mock_sparse.return_value = []
+        mock_lexical.return_value = ([], [])
 
         tool = KeywordSearchTool()
         tool.ctx = self._ctx(db)
@@ -511,7 +503,7 @@ class TestKeywordSearchAuthority:
         assert result["ok"] is True
         # Unrecognized filter must not silently "succeed" — run unfiltered
         # and tell the agent which keys were ignored.
-        assert mock_exact.call_args.kwargs["doc_ids"] is None
+        assert mock_lexical.call_args.kwargs["doc_ids"] is None
         assert result["result"]["ignored_filter_keys"] == ["bogus_key"]
 
     def test_prepare_arguments_parses_stringified_filters(self):
